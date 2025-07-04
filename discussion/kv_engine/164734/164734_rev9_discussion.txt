@@ -1,0 +1,221 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-47451: Avoid FollyExecutorPool::schedule/cancel use-after-free race
+
+Scenario: A use-after-free can occur when the asynchronous task deletion
+(which runs on a NonIO thread) is executed _after_ the task has already
+been re-scheduled.
+Specifically the following sequence of calls across threads - note
+numbering indicates logical order of the 6 steps, but vertical position
+indicates when tasks _actually_ are executed temporally:
+
+  IO (futurePool) thread               CPU (NonIO) thread
+  ----------------------               ------------------
+  1. scheduleTask()
+  2. cancelTask()
+     calls resetTaskPtrViaCpuPool()
+     - enqueue work on NonIO
+       thread to reset GlobalTask
+       shared_ptr.
+  4. scheduleTask()
+  5. cancelTask()
+     (same as step 2).
+
+                                       3. <<enqueued at 2>>
+                                          call resetTaskPtrViaCpuPool
+                                          lamba
+                                          - Reset GlobalTaskShared ptr
+                                          - enqueue work on futurePool
+                                            to remove Proxy from
+                                            taskOwners.
+
+                                       6. <<enqueued at 2>>
+                                          call resetTaskPtrViaCpuPool
+                                          lamba
+                                          - Reset GlobalTaskShared ptr
+                                          - enqueue work on futurePool
+                                            to remove Proxy from
+                                            taskOwners.
+                                          *** user-after-free of Proxy
+                                          ***
+
+The use-after-free occurs during the second resetTaskPtrViaCpuPool
+lambda (6) is executing; as we are essentially re-freeing the Proxy
+which was freed at (3). This is because the code assumes that (6) will
+be executed after (4) - when a new Proxy would normally be created.
+
+Note that we don't currently see any failure at (4) - where we are
+logically re-using the same proxy (it's not yet deleted at (3) as one
+might expect) - as that is a "valid" scenario as per the changes made for
+MB-42029 which allow a TaskProxy to be re-used if a task is re-scheduled
+before the cancel cleanup is completed.
+
+The above scenario highlights that the fix for MB-42029 (and allowing
+reuse of TaskProxy objects) is flawed :(
+
+Solution:
+
+Keep the reset of GlobalTask on the CPU background thread, but erase
+(and delete) the TaskProxy from taskOwners immediately during
+cancel. This means that we don't re-use the same TaskProxy at (4) from
+(2); and hence avoid the use-after-free which previoulsy occurred at
+(6). This also means that TaskProxy objects are no longer re-used,
+which arguabely simplifies the model.
+
+One small subtlety here is that this potentially opens up a new
+variant of the above race - the GlobalTask being deleted on the
+background CPU pool could happen _after_ the Taskable has been
+unregistered; given we remove the TaskProxy immediately and hence the
+existing check in unregisterTaskable that the taskable has zero
+TaskProxy's registered is insufficient. To address this we _also_
+track the count of Tasks which are pending reset, and include that
+count when waiting for all Tasks associated with a Taskable to be
+cleaned up.
+
+See also: "MB-42029: FollyExecPool: Wait for tasks cancelled in unregisterTaskable" (c370cd5)
+
+Change-Id: I3f8401d7ddd34ed8ca96cb8a446fd6d439074027
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2021-11-08 12:00:24.000000000
+Message: 
+Uploaded patch set 9.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-11-08 12:21:06.000000000
+Message: 
+Patch Set 9: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/14628/ : FAILURE
+
+Failure of GoogleTest "Persistent/EPEnginePersistentTest.EngineInitReadOnlyDataDir/persistent_magma":
+
+<pre>
+[ RUN      ] Persistent/EPEnginePersistentTest.EngineInitReadOnlyDataDir/persistent_magma
+[2021-11-08T12:09:00.208Z] unknown file: Failure
+[2021-11-08T12:09:00.208Z] C++ exception with description "cb::io::rmrf: remove of file ep_engine_ep_unit_tests.db/Persistent_EPEnginePersistentTest_EngineInitReadOnlyDataDir_persistent_magma/stats.json.old under ep_engine_ep_unit_tests.db/Persistent_EPEnginePersistentTest_EngineInitReadOnlyDataDir_persistent_magma failed: Permission denied" thrown in SetUp().
+[2021-11-08T12:09:00.208Z] unknown file: Failure
+[2021-11-08T12:09:00.208Z] C++ exception with description "cb::io::rmrf: remove of file ep_engine_ep_unit_tests.db/Persistent_EPEnginePersistentTest_EngineInitReadOnlyDataDir_persistent_magma/stats.json.old under ep_engine_ep_unit_tests.db/Persistent_EPEnginePersistentTest_EngineInitReadOnlyDataDir_persistent_magma failed: Permission denied" thrown in TearDown().
+[2021-11-08T12:09:00.208Z] [  FAILED  ] Persistent/EPEnginePersistentTest.EngineInitReadOnlyDataDir/persistent_magma, where GetParam() = "persistent_magma" (0 ms)
+Persistent/EPEnginePersistentTest.EngineInitReadOnlyDataDir/persistent_magma
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/14628/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/35328/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/41607/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/13846/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/12648/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/3553/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/3481/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/15747/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/15463/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/23802/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/16436/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-11-08 13:13:15.000000000
+Message: 
+Patch Set 9:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/14629/ : FAILURE
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/35328/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/41607/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/13846/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/12648/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/3553/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/3481/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/15747/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/15463/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/23802/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/16436/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-11-08 13:43:23.000000000
+Message: 
+Patch Set 9:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/14630/ : FAILURE
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/35328/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/41607/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/13846/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/12648/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/3553/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/3481/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/15747/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/15463/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/23802/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/16436/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-11-09 14:19:07.000000000
+Message: 
+Patch Set 9: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/35328/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/41607/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/13846/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/12648/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/3553/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/3481/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/15747/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/15463/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/23802/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/16436/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/14686/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2021-11-10 10:18:26.000000000
+Message: 
+Patch Set 9: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------

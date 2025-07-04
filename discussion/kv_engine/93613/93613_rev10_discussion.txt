@@ -1,0 +1,175 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-29441: DCP Consumer sets correct noop-interval on pre-5.0.0 Producer
+
+In MB-19955 we decreased the noop-interval from 180 seconds to 1 second
+for DCP Producers. That change is part of versions >=5.0.0.
+Note that from MB-19955 a DCP Producer uses the noop-interval only for
+sending NOOP messages to the Consumer. That is to implement Fast Failover.
+For detecting dead connections, a post-5.0.0 Producer uses a new
+idle-timeout (default value is 360 seconds).
+
+But, on pre-5.0.0 a DCP Producer has a single noop-interval parameter
+(default value is 180 seconds), which is used for both sending NOOP
+messages to the Consumer and Dead Connection Detection.
+
+When a post-5.0.0 Consumer sets the noop-interval on a pre-5.0.0
+Producer (e.g., Online Upgrade with Swap Rebalance, CBSE-5179), it sends
+'1 second'. Then the Producer sets 1 second as noop-interval and uses it
+for Dead Connection Detection. That makes the Producer to drop all the
+connections for which a NOOP response from the Consumer has not arrived
+within 1 second.
+
+To fix, we make a Consumer to check the if the Producer is a
+pre-5.0.0 and to send the noop-interval accordingly (i.e., 180 seconds
+if it is a pre-5.0.0 Producer, 1 second otherwise).
+To check the version of the Producer, the Consumer sends a GetErrorMap
+request and checks if the command is supported (the GetErrorMap command
+is supported from versions >= 5.0.0).
+
+Change-Id: I06bc9ff4ab494a8e8a0205708534dfccbb5f3cf0
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2018-05-04 14:48:42.000000000
+Message: 
+Uploaded patch set 10.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-05-04 14:48:51.000000000
+Message: 
+Patch Set 10: Well-Formed+1
+
+Permission granted to commit: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/88906/artifact/restricted.html : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-05-04 15:06:03.000000000
+Message: 
+Patch Set 10: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-spock/940/ : FAILURE
+
+Valgrind detected one or more issues ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-spock/940/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-spock/892/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-spock/912/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/7794/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-spock/888/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-05-04 15:24:16.000000000
+Message: 
+Patch Set 10: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-spock/892/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-spock/912/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/7794/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-spock/888/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-spock/941/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2018-05-04 16:00:37.000000000
+Message: 
+Patch Set 10:
+
+Manual verification on local environment:
+
+*Without fix*
+1) Run a 4.6.* VM (I used vagrant), create a bucket (with 1 replica), load some data (I have loaded just 10 document)
+2) Run version 5.0.* locally
+3) On node 4.6, add node 5.0 to the cluster
+4) Do something so that a Consumer on 5.0 takes more than 1 seconds to send a NOOP response back to the Producer on 4.6. I have just attached LLDB to memcached and put a breakpoint at 'DcpConsumer::noop'
+5) Start the Rebalance
+6) The Rebalance fails quickly. You see the "Disconnected because the connection appears to be dead" message in memcached.log on node 4.6.
+
+*With fix*
+Repeat the same procedure, the rebalance succeeds.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-05-04 16:04:05.000000000
+Message: 
+Patch Set 10: Code-Review-1
+
+(7 comments)
+
+Can you also add a test variant where get_error_map fails (i.e. to simulate pre-5.0) - I didn't see a test for this.
+Line:25, /COMMIT_MSG -> When I discussed this with Dan, I understood it was actually 2x hoop-interval - is that incorrect?
+
+Line:672, daemon/mcbp_executors.cc -> This should be htonl() - we are performing a "host" to "network" conversion. Same with version.
+
+Line:700, daemon/mcbp_executors.cc -> Please leave these indented the same to minimise whitespace changes and possible conflicts.
+
+Line:1139, engines/ep/src/dcp/consumer.cc -> This feels like the wrong place for this - can't you hoist this up to step() where we perform all the other negotiation with the producer? 
+
+Additionally, move it into it's own function.
+
+Line:343, engines/ep/src/dcp/consumer.h -> Prefer to use an enum; at the moment you can have 4 possible states (true / false for each); whereas you need much fewer than that.
+
+Line:344, engines/ep/src/dcp/consumer.h -> While this is a correct name for the underlying mechanic; it would be clearer to the reader if this was named `producerIsVersion5` - or a similar named member function.
+
+Line:1649, engines/ep/tests/module_tests/dcp_test.cc -> You have this code repeated a few different tests. Please move into a helper function.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2018-05-07 14:20:32.000000000
+Message: 
+Patch Set 10:
+
+(7 comments)
+
+> Can you also add a test variant where get_error_map fails (i.e. to simulate pre-5.0) - I didn't see a test for this.
+
+Sure, still reviewing the test coverage for this.
+Line:25, /COMMIT_MSG -> As per DCP docs (https://github.com/couchbaselabs/dcp-documentation/blob/master/documentation/commands/no-op.md):
+- the Consumer drops the connection if it does not receive any NOOP request within 2x noop-interval
+- the Producer drops the connection if it does not receive a NOOP response within 1x noop-interval
+
+The reason of the asymmetry is that the Producer starts with sending NOOP messages only after it has not received any request from the Consumer for 1x noop-interval. So, from the Consumer's point of view, a NOOP request from the Producer could take:
+- 1x noop-interval for the Producer to decide to send the NOOP request
+- another 1x noop-interval for the NOOP request to arrive
+
+As the Consumer must respond *immediately* to a NOOP request, the Producer expects to receive the NOOP response within 1x noop-interval.
+
+Note that what I described above is true for pre-5.0.0. We changed that when we implemented Fast Failover: both Producer and Consumer drop the connection after 1x idle-timeout (new param defaulted to 360 secs) and the Producer sends a NOOP request every 1 sec.
+I'll update the DCP documentation.
+
+Line:672, daemon/mcbp_executors.cc -> Thanks for spotting.
+At first look it seems that we have many instances of the same bug in this source file. I'm reviewing all of them and creating an MB if it is the case.
+
+Line:700, daemon/mcbp_executors.cc -> Done
+
+Line:1139, engines/ep/src/dcp/consumer.cc -> Done
+
+Line:343, engines/ep/src/dcp/consumer.h -> Done
+
+Line:344, engines/ep/src/dcp/consumer.h -> Done
+
+Line:1649, engines/ep/tests/module_tests/dcp_test.cc -> Done
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-05-08 07:49:31.000000000
+MISMATCHED INLINE COMMENT
+Line:25, /COMMIT_MSG -> Thanks for the clarification - I'd forgotten about the difference in behaviour between producer and consumer!
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-05-08 07:49:31.000000000
+MISMATCHED INLINE COMMENT
+Line:672, daemon/mcbp_executors.cc -> *Functionally* they are interchangeable (it's just a byteswap of the correct length), however I find having the correct "direction" helps to document the code - is this reading data /from/ the network, or sending data /to/ the network?
+----------------------------------------------------------------------------------------------------------------------

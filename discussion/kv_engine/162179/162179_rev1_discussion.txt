@@ -1,0 +1,224 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-41403: Increase default and max NonIO threads
+
+With recent changes to allow concurrent expiry pagers (this MB) and
+concurrent eviction pagers (MB-35075), the number of potential NonIO
+tasks with a default config is increasing.
+
+<Pending perf test logs>
+Bumping the numbers arbitrarily, building a toy and getting logs/metrics
+Notes:
+* "underloaded" envs shouldn't be negatively impacted by increasing the
+  number of threads; if the tasks aren't running heavily/for long
+  other tasks (NonIO and otherwise) shouldn't see degredation or
+  improvement
+* Environments where the NonIO threads are running a task near 100% of
+  the time (e.g., bulk load + multiple replicas/other components +
+  eviction)
+** With too few NonIO threads, NonIO tasks may face high scheduling
+   delay (impacting things like DCP in-memory throughput)
+** Accordingly, increasing NonIO threads in that situation should be
+   reflected in scheduler stats as decreased scheduling delay
+** Other tasks may suffer if the number of NonIO tasks and threads is
+   excessive, but should not be starved in an absolute sense - NonIO
+   threads may contend for CPU time, but all should still get _some_ time
+   allocated by the OS.
+
+Change-Id: I71c711861ababe651406bbc41630bfecb82891ac
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: James H
+Date: 2021-09-23 12:51:29.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-09-23 12:57:47.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:165, executor/executorpool.cc -> I'd be tempted to simplify this given you're changing it anyway - IIRC we do something overly complex like start with a number of threads based on core count, then subtract out the reader / writer etc threads, then use fraction of the "leftovers" for NonIO.
+
+I think we should just simplify this to make NonIO (and AuxIO) be a function of the available core count straight up.
+
+For example, we currently do something like create frontend-threads of 0.9 * CPU_count. NonIO are the only other threads which "should" be CPU-bound, so maybe create 0.2 * CPU_count non-IO threads (so there's a bit of overlap / overcommit, but that takes into account that it's unlikely front-end and backend are 100% busy).
+
+(Note that given Reader/Writer/AuxIO "shouldn't" be CPU-bound - they should mostly be blocked on OS syscalls for syncIO, it's fine to have much more IO threads than CPU cores).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-09-23 14:08:37.000000000
+Message: 
+Patch Set 1: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/40318/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [0036/0047]: vbucket deletion doesn"t affect new data...WARNING: Logging before InitGoogleLogging() is written to STDERR
+W0923 06:14:23.505264 28076 HazptrDomain.h:670] Using the default inline executor for asynchronous reclamation may be susceptible to deadlock if the current thread happens to hold a resource needed by the deleter of a reclaimable object
+
+
+99% tests passed, 2 tests failed out of 410
+
+Total Test time (real) = 342.32 sec
+
+The following tests FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/40318/ )
+
+Failure of GoogleTest "ThreadCountTest/ExecutorPoolTestWithParam.max_threads_test_parameterized/Default_CPU8_W4_R8_A1_N2":
+
+<pre>
+[ RUN      ] ThreadCountTest/ExecutorPoolTestWithParam.max_threads_test_parameterized/Default_CPU8_W4_R8_A1_N2
+..\kv_engine\engines\ep\tests\module_tests\executorpool_test.cc(1119): error: Expected equality of these values:
+  expected.nonIO
+    Which is: 2
+  pool.getNumNonIO()
+    Which is: 4
+When maxThreads=8
+[  FAILED  ] ThreadCountTest/ExecutorPoolTestWithParam.max_threads_test_parameterized/Default_CPU8_W4_R8_A1_N2, where GetParam() = Default_CPU8_W4_R8_A1_N2 (3 ms)
+ThreadCountTest/ExecutorPoolTestWithParam.max_threads_test_parameterized/Default_CPU8_W4_R8_A1_N2
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/40318/ )
+
+Timeout of a CTest test 410/410 Test #267: ep_testsuite_basic.value_eviction.comp_passive ................................................................................} ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/40318/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/14635/ : FAILURE
+
+Failure of GoogleTest "ThreadCountTest/ExecutorPoolTestWithParam.max_threads_test_parameterized/Default_CPU8_W4_R8_A1_N2":
+
+<pre>
+[ RUN      ] ThreadCountTest/ExecutorPoolTestWithParam.max_threads_test_parameterized/Default_CPU8_W4_R8_A1_N2
+[2021-09-23T13:51:52.600Z] ../kv_engine/engines/ep/tests/module_tests/executorpool_test.cc:1119: Failure
+[2021-09-23T13:51:52.600Z] Expected equality of these values:
+[2021-09-23T13:51:52.600Z]   expected.nonIO
+[2021-09-23T13:51:52.600Z]     Which is: 2
+[2021-09-23T13:51:52.600Z]   pool.getNumNonIO()
+[2021-09-23T13:51:52.600Z]     Which is: 4
+[2021-09-23T13:51:52.600Z] When maxThreads=8
+[2021-09-23T13:51:52.600Z] [  FAILED  ] ThreadCountTest/ExecutorPoolTestWithParam.max_threads_test_parameterized/Default_CPU8_W4_R8_A1_N2, where GetParam() = Default_CPU8_W4_R8_A1_N2 (2 ms)
+ThreadCountTest/ExecutorPoolTestWithParam.max_threads_test_parameterized/Default_CPU8_W4_R8_A1_N2
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/14635/ )
+
+Timeout of a CTest test [2021-09-23T13:50:54.901Z]  27/430 Test   #5: memcached-breakpad-test-unknown_exception ...................................................................} ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/14635/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/14377/ : FAILURE
+
+Failure of GoogleTest "ThreadCountTest/ExecutorPoolTestWithParam.max_threads_test_parameterized/Default_CPU8_W4_R8_A1_N2":
+
+<pre>
+[ RUN      ] ThreadCountTest/ExecutorPoolTestWithParam.max_threads_test_parameterized/Default_CPU8_W4_R8_A1_N2
+[2021-09-23T13:53:46.548Z] ../kv_engine/engines/ep/tests/module_tests/executorpool_test.cc:1119: Failure
+[2021-09-23T13:53:46.548Z] Expected equality of these values:
+[2021-09-23T13:53:46.548Z]   expected.nonIO
+[2021-09-23T13:53:46.548Z]     Which is: 2
+[2021-09-23T13:53:46.548Z]   pool.getNumNonIO()
+[2021-09-23T13:53:46.548Z]     Which is: 4
+[2021-09-23T13:53:46.548Z] When maxThreads=8
+[2021-09-23T13:53:46.548Z] [  FAILED  ] ThreadCountTest/ExecutorPoolTestWithParam.max_threads_test_parameterized/Default_CPU8_W4_R8_A1_N2, where GetParam() = Default_CPU8_W4_R8_A1_N2 (1 ms)
+ThreadCountTest/ExecutorPoolTestWithParam.max_threads_test_parameterized/Default_CPU8_W4_R8_A1_N2
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/14377/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/2434/ : FAILURE
+
+Failure of GoogleTest "ThreadCountTest/ExecutorPoolTestWithParam.max_threads_test_parameterized/Default_CPU8_W4_R8_A1_N2":
+
+<pre>
+[ RUN      ] ThreadCountTest/ExecutorPoolTestWithParam.max_threads_test_parameterized/Default_CPU8_W4_R8_A1_N2
+[2021-09-23T13:31:47.164Z] ../kv_engine/engines/ep/tests/module_tests/executorpool_test.cc:1119: Failure
+[2021-09-23T13:31:47.164Z] Expected equality of these values:
+[2021-09-23T13:31:47.164Z]   expected.nonIO
+[2021-09-23T13:31:47.164Z]     Which is: 2
+[2021-09-23T13:31:47.164Z]   pool.getNumNonIO()
+[2021-09-23T13:31:47.164Z]     Which is: 4
+[2021-09-23T13:31:47.164Z] When maxThreads=8
+[2021-09-23T13:31:47.164Z] [  FAILED  ] ThreadCountTest/ExecutorPoolTestWithParam.max_threads_test_parameterized/Default_CPU8_W4_R8_A1_N2, where GetParam() = Default_CPU8_W4_R8_A1_N2 (1 ms)
+ThreadCountTest/ExecutorPoolTestWithParam.max_threads_test_parameterized/Default_CPU8_W4_R8_A1_N2
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/2434/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/15145/ : FAILURE
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/22645/ : FAILURE
+
+Failure of GoogleTest "ThreadCountTest/ExecutorPoolTestWithParam.max_threads_test_parameterized/Default_CPU8_W4_R8_A1_N2":
+
+<pre>
+[ RUN      ] ThreadCountTest/ExecutorPoolTestWithParam.max_threads_test_parameterized/Default_CPU8_W4_R8_A1_N2
+[2021-09-23T14:00:17.128Z] ../kv_engine/engines/ep/tests/module_tests/executorpool_test.cc:1119: Failure
+[2021-09-23T14:00:17.128Z] Expected equality of these values:
+[2021-09-23T14:00:17.128Z]   expected.nonIO
+[2021-09-23T14:00:17.128Z]     Which is: 2
+[2021-09-23T14:00:17.128Z]   pool.getNumNonIO()
+[2021-09-23T14:00:17.128Z]     Which is: 4
+[2021-09-23T14:00:17.128Z] When maxThreads=8
+[2021-09-23T14:00:17.128Z] [  FAILED  ] ThreadCountTest/ExecutorPoolTestWithParam.max_threads_test_parameterized/Default_CPU8_W4_R8_A1_N2, where GetParam() = Default_CPU8_W4_R8_A1_N2 (8 ms)
+ThreadCountTest/ExecutorPoolTestWithParam.max_threads_test_parameterized/Default_CPU8_W4_R8_A1_N2
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/22645/ )
+
+One of more core files found at the end of the build. Data for post-mortem saved to archived_core_dumps.tar.bz2 under "Build Artifacts". ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/22645/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/13520/ : FAILURE
+
+Failure of GoogleTest "ThreadCountTest/ExecutorPoolTestWithParam.max_threads_test_parameterized/Default_CPU8_W4_R8_A1_N2":
+
+<pre>
+[ RUN      ] ThreadCountTest/ExecutorPoolTestWithParam.max_threads_test_parameterized/Default_CPU8_W4_R8_A1_N2
+[2021-09-23T13:45:02.599Z] ../kv_engine/engines/ep/tests/module_tests/executorpool_test.cc:1119: Failure
+[2021-09-23T13:45:02.599Z] Expected equality of these values:
+[2021-09-23T13:45:02.599Z]   expected.nonIO
+[2021-09-23T13:45:02.599Z]     Which is: 2
+[2021-09-23T13:45:02.599Z]   pool.getNumNonIO()
+[2021-09-23T13:45:02.599Z]     Which is: 4
+[2021-09-23T13:45:02.599Z] When maxThreads=8
+[2021-09-23T13:45:02.599Z] [  FAILED  ] ThreadCountTest/ExecutorPoolTestWithParam.max_threads_test_parameterized/Default_CPU8_W4_R8_A1_N2, where GetParam() = Default_CPU8_W4_R8_A1_N2 (1 ms)
+ThreadCountTest/ExecutorPoolTestWithParam.max_threads_test_parameterized/Default_CPU8_W4_R8_A1_N2
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/13520/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/34319/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/12763/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/11553/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/2401/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2021-09-23 15:25:23.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:165, executor/executorpool.cc -> Doesn't look to be complex subtract and leftovers currently -
+
+maxGlobalThreads(maxThreads ? maxThreads : Couchbase::get_available_cpu_count())
+
+and startExecutorPool(...) provides 0 as maxThreads, so it looks like the original 0.3 here would already be higher than 0.2*CPU_Count
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-09-23 15:28:57.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:165, executor/executorpool.cc -> ok, maybe I'm thinking of the older code / some other number of threads.
+
+I note from `threadCountValues` in executorpool_test.cc, the numbers of auxIO threads are pretty low - only 2 auxIO threads with 20 cores - maybe I was thinking about that more than nonIO. 
+
+Actually looking at those numbers the nonIO counts don't look _too_ bad...
+
+----------------------------------------------------------------------------------------------------------------------

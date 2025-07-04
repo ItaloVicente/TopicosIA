@@ -1,0 +1,153 @@
+======================================================================================================================
+DESCRIPTION:
+
+Fix TextRepository blob/commit/tree addition
+Propagate RevWalk.initializeShallowCommits
+
+The TestRepository methods for adding a new blobs/commits/trees
+were failing to parse the just-inserted objects and instead
+creating new empty ones. Parse the objects after inserting them
+to make sure they are used.
+
+Fix three tests that were misconfigured:
+* RevWalkCullTest was asserting the root commit was never parsed
+  but TestRepository now parses all commits. Drop that assertion.
+* RevObjectTest was not accounting for the fact that the
+  RevWalk.PARSED flag should be set, so adjust for that.
+* RevWalkShallowTest was asserting null parents, which the
+  TestRepository bug was assuring was met by the test.
+
+RevWalk.initializeShallowCommits() is called when parsing the
+first commit. Any changes to the "shallow" file after that are
+ignored by that RevWalk, so the RevWalkShallowTest test setup
+had to be modified for the following sequence:
+1) Set up commits using the initial RevWalk
+2) Write the "shallow" file and set up a new RevWalk
+3) Reparse the objects created in #1 with the new RevWalk to
+   correctly apply the new shallow state
+4) Proceed with testing
+
+It is also the case that RevWalk was very order-of-operations
+sensitive in applying shallow state. initializeShallowCommits()
+clears out a shallow commit's parents, but it is called when
+parsing the first commit. If the shallow commits are not yet
+present in the RevWalk's object cache at initializeShallowCommits
+time, the state is never applied. This commit adds a
+RevWalk.shallowIds set that is referenced when parsing new
+commits so that shallow state is always applied.
+
+Change-Id: Id79a08aa8b97ca1a18bc6e796254263c7d3ceb42
+Signed-off-by: tparker <tparker@google.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Terry Parker
+Date: 2018-06-26 02:19:10.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-06-26 02:19:18.000000000
+Message: 
+Patch Set 2:
+
+Build Started https://ci.eclipse.org/jgit/job/jgit.gerrit/13456/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-06-26 02:40:42.000000000
+Message: 
+Patch Set 2: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/jgit.gerrit/13456/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonathan Nieder
+Date: 2018-06-26 03:46:52.000000000
+Message: 
+Patch Set 2:
+
+(2 comments)
+Line:1482, org.eclipse.jgit/src/org/eclipse/jgit/revwalk/RevWalk.java -> style nit: "{" should go on the same line as "for"
+
+Line:1484, org.eclipse.jgit/src/org/eclipse/jgit/revwalk/RevWalk.java -> Hm. In the old code, we do
+
+  lookupCommit(id)
+
+which allocates an object if one doesn't already exist and sets the parents field. Later, when parsing the commit, we notice that parents is set and don't overwrite it. So I don't think this should be needed.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonathan Nieder
+Date: 2018-06-26 03:53:49.000000000
+Message: 
+Patch Set 2:
+
+(2 comments)
+Line:10, /COMMIT_MSG -> What is the symptom? RevWalk.lookupObject is supposed to be able to return an unparsed object; the caller is responsible for calling appropriate methods (parseHeaders or parseBody) before relying on the object having all fields populated. Any getters are supposed to call that automatically if the object hasn't been parsed.
+
+Line:187, org.eclipse.jgit.test/tst/org/eclipse/jgit/revwalk/RevWalkShallowTest.java -> Should this call rw.close() first to close the old ObjectReader?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: David Pursehouse
+Date: 2018-06-26 07:04:02.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:187, org.eclipse.jgit.test/tst/org/eclipse/jgit/revwalk/RevWalkShallowTest.java -> Or can we call rw.reset() instead of creating a new one?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Terry Parker
+Date: 2018-06-26 15:48:02.000000000
+Message: 
+Patch Set 2: Code-Review-2
+
+(4 comments)
+
+> Patch Set 2:
+> 
+> (1 comment)
+Line:10, /COMMIT_MSG -> My expectation was that TestRepository.commit()/tree()/blob() would always return fully parsed objects. I can see now that I can adjust my new GcCommitSelectionTest to account for that and explicitly parse where needed. I'll revert this whole change.
+
+Line:187, org.eclipse.jgit.test/tst/org/eclipse/jgit/revwalk/RevWalkShallowTest.java -> Neither rw.close() nor rw.reset() resets the RevWalk.shallowCommitsInitialized state, so in a test environment where eager parsing of an object invokes RevWalk.initializeShallowCommits() before the "shallow" file is updated, a new RevWalk must be used. The "shallow" file may be expensive to parse and should normally be stable in any scenario where a RevWalk is reused so I think leaving RevWalk the way it is is fine.
+
+Now that I understand that the burden for full parsing should be borne by individual tests rather than the framework, I'm reverting this whole change.
+
+Line:1482, org.eclipse.jgit/src/org/eclipse/jgit/revwalk/RevWalk.java -> Done
+
+Line:1484, org.eclipse.jgit/src/org/eclipse/jgit/revwalk/RevWalk.java -> The scenario I'm fixing is when the first value parsed is a shallow commit:
+1) Client sets up a new RevWalk. RevWalk.shallowCommitsInitialized is not set. RevWalk.objects is empty.
+2) Client calls RevWalk.parseAny(id), where ID is one of the shallow commits.
+3) RevWalk.parseAny() -> RevWalk.parseNew(), which creates RevCommit "r1" and starts populating it by calling RevCommit.parseCanonical()
+4) RevCommit.parseCanonical() immediately calls this method, which calls lookupCommit(id), creating and adding a "r2" parentless version of this commit object to RevWalk.objects.
+5) lookupCommit() returns to parseCanonical(), which populates the current "r1" RevCommit with parents.
+6) parseCanonical() returns to parseNew(), which overwrites "r1" with "r2" in RevWalk.objects.
+
+My updated test setup in RevWalkShallowTest fortuitously avoids this by looking up (and not parsing) commits in the new RevWalk, assuring that RevWalk.objects is fully populated before any call to parseCanonical. Since tests still work without this change I'm going to back it out and make it a change on its own (with a test that fails before the change).
+
+To fix this situation only requires detecting whether the new commit that is generating this initialization is a shallow commit, so I can limit the scope of this change a bit more.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Terry Parker
+Date: 2018-06-26 16:13:22.000000000
+Message: 
+Abandoned
+
+Full parsing of objects should not be provided by TestRepository methods.
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonathan Nieder
+Date: 2018-06-26 16:14:11.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:187, org.eclipse.jgit.test/tst/org/eclipse/jgit/revwalk/RevWalkShallowTest.java -> Interesting. For what it's worth, I think I liked the original change that makes TestRepository more aggressively take care of parsing to make writing tests easier. I just was fishing for the symptom so I could understand the change better. In other words, there are three layers:
+
+  RevWalk
+  TestRepository
+  ... your test here ...
+
+At the RevWalk level, methods like lookupAny are allowed to return unparsed objects. Getters should probably parse on demand (so e.g. a modification to RevComment#getParents to call parseHeaders sounds to me like a good change). At the TestRepository level, we can change the API to do whatever is convenient, and more eager parsing is probably a good thing.
+
+----------------------------------------------------------------------------------------------------------------------

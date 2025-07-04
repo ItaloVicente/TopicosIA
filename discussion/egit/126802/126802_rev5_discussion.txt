@@ -1,0 +1,134 @@
+======================================================================================================================
+DESCRIPTION:
+
+Add support for multi repository selection for switching branches
+
+When multiple repositories are selected the Switch To... option
+will display only the branches that are present in all of the
+repositories. By clicking in any of them, the user will concurrently
+switch branches for all the repositories. If the list of branches is
+to be empty, a disabled menu item will be added to show that no
+matching branches were found.
+
+Change-Id: I0f850baeb94cb8cb4169d8684bb37756b5c0c372
+Signed-off-by: Luís Copetti <lhcopetti@gmail.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Thomas Wolf
+Date: 2018-08-13 21:06:43.000000000
+Message: 
+Uploaded patch set 5: Patch Set 4 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2018-08-13 21:26:25.000000000
+Message: 
+Patch Set 5:
+
+(2 comments)
+
+Looks not bad, but needs more work when several repositories are selected. I would also like to have some indication in the menu that more than one repo will be switched. Maybe change the menu text to "Switch repositories to". (Or maybe you have a better idea.)
+
+Note that I took the liberty of rebasing these two changes, so before you continue working on this, fetch them from Gerrit and then continue the work on that.
+Line:189, org.eclipse.egit.ui/src/org/eclipse/egit/ui/internal/actions/SwitchToMenu.java -> Indentation is wrong from here on.
+
+Line:298, org.eclipse.egit.ui/src/org/eclipse/egit/ui/internal/actions/SwitchToMenu.java -> This needs more work. Some precondition checks such as for running launches should be done only once but covering projects from all selected repositories.
+
+Also, behavior in error cases needs to be improved. If one repository cannot switch because of conflicts, the others are still switched. I didn't try what would happen if more than one repository would fail.
+
+So just launching a number of jobs (one per repository) is not really good.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-08-13 21:32:46.000000000
+Message: 
+Patch Set 5:
+
+Build Started https://ci.eclipse.org/egit/job/egit.gerrit/10717/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-08-13 21:58:06.000000000
+Message: 
+Patch Set 5: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/egit/job/egit.gerrit/10717/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Luís Copetti
+Date: 2018-08-15 01:22:48.000000000
+Message: 
+Patch Set 5:
+
+Thanks for the update. I'll be sure to grab the newest copy when I get to work on it again.
+
+I agree wholeheartedly with all that you said. 
+- Changing the labels as a way to indicate that the multi selection is in place is a really good idea.
+- I have to agree also that the behavior you mentioned about multiple jobs being spawned does seem a bit off whenever the checkouts don't run cleanly.
+
+With these considerations in mind, the first thing that comes to my head is the view implemented for the Pull action. The multi-repository pull operation is considered as a single job for eclipse and the results are grouped in a "Pull Result for Multiple Repositories" window, where each line represents a repository and its status. Do you think an approach similar to that would work? The only thing I might change would be to not display this result dialog if there are no conflicts, sparing one click (maybe it is indeed better do display it regardless for consistency sake, I don't know). For that to work, we may have to figure out a way to emulate a dry run on a checkout command so that the whole multicheckout operation is atomic. What do you think?
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2018-08-15 06:22:27.000000000
+Message: 
+Patch Set 5:
+
+> Do you think an approach similar to that would work?
+
+Yes, I think we would need something similar. Then we can do the "running launches" check once before, and a refresh once at the end. The project tracker
+(which takes care of handling projects appearing/disappearing due to the branch switch) is another thing to keep an eye on. Perhaps that also needs to be re-done
+such that it can create/remove projects only once for all repos.
+
+ > emulate a dry run on a checkout command
+
+JGit's DirCacheCheckout already is implemented as a two-phase algorithm that first figures out what to do, and only then does the real modifications if there are no conflicts. So this seems doable with not too much work.
+
+But I'd do this in several steps. First do the EGit-only changes (doing it in one job: pre-conditions, checking-out, refresh); if some repos couldn't be checked out, display a dialog with the repos that couldn't be switched.
+
+Then do the dry-run functionality in JGit, and then finally use it in EGit.
+
+But that's just a suggestion. If you see another way to proceed it's fine, too.
+----------------------------------------------------------------------------------------------------------------------
+Author: Luís Copetti
+Date: 2018-08-20 00:31:55.000000000
+Message: 
+Patch Set 5:
+
+That sounds fun!
+
+I started working on the first change where the label for the 'Switch To' menu should be changed to 'Switch repositories to...' as an additional visual cue to the user that he will be switching multiple repositories at the same time. I couldn't manage to find a working solution, though. The path that I followed was looking into the PushMenu.java implementation that has a label that is updated according to the currently checked out branch. However, I don't see how/where I could add submenu items.
+
+<((1)) dynamic
+      id="egit.menu.switch"
+      label="%SwitchToMenu.label"
+      icon="icons/obj16/branches_obj.png"
+      class="org.eclipse.egit.ui.internal.actions.PushMenu2">
+   <dynamic
+         class="org.eclipse.egit.ui.internal.actions.SwitchToMenu"
+         id="org.eclipse.egit.ui.switchToMenu">
+   </dynamic>
+   <visibleWhen
+         checkEnabled="false">
+      <test
+            property="GitSelection.resourcesAllInRepository">
+      </test>
+   </visibleWhen>
+</dynamic>
+
+Changing the ((1)) tag to dynamic allowed me to intercept the creation of the menu and properly update the label, however, that also disabled the nested ((2)) dynamic, or so it seems. I believe that once there is a dynamic tag, anything nested inside of it should be declared programmatically as well? I tried searching the internet and came across some old posts which mentioned AbstractContributionFactory in conjunction with IMenuService, but couldn't make sense out of it. Do you have some guidelines on I how I can achieve this? 
+
+Thanks for the help.
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2018-08-20 06:15:38.000000000
+Message: 
+Patch Set 5:
+
+> I started working on the first change where the label for the
+ > 'Switch To' menu should be changed to 'Switch repositories to...'
+
+The easiest way to achieve this is probably to have the command in the menu in plugin.xml twice, with two different labels, and <visibleWhen> clauses that enable only one of them: one is shown when the selection is all in one repository, the other when the selection covers multiple repositories.
+
+Check what I did for the org.eclipse.egit.ui.history.CheckoutCommand. If the commit has a single ref (branch), it shows "Check Out". When there are multiple branches on the commit, it shows "Check Out..." (because the user will then get a dialog asking _which_ branch should be checked out).
+----------------------------------------------------------------------------------------------------------------------

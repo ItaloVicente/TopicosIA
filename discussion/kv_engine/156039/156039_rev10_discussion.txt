@@ -1,0 +1,135 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-47092: Separate engine stats into high/low cardinality
+
+Previously, all engine stats in the empty-key/"all" were exposed in the
+low cardinality stat group as they are per-bucket.
+
+As the number of KV metrics is quite high, the space used to retain all
+KV metrics for a reasonable length of time is unacceptable.
+
+As a step towards improving this, split engine stats into high/low
+cardinality. This does not affect cbstats, but will move less critical
+stats to the high cardinality endpoint, where they will be gathered
+less frequently.
+
+Stats which are now in the high cardinality endpoint:
+
+* all config-derived metrics
+
+* subset of engine stats:
+
+    kv_ep_storage_age_seconds
+    kv_ep_storage_age_highwat_seconds
+    kv_ep_num_workers
+    kv_ep_vbucket_del_max_walltime_seconds
+    kv_ep_vbucket_del_avg_walltime_seconds
+    kv_ep_num_access_scanner_runs
+    kv_ep_num_access_scanner_skips
+    kv_ep_access_scanner_last_runtime_seconds
+    kv_ep_access_scanner_num_items
+    kv_ep_defragmenter_num_visited
+    kv_ep_defragmenter_num_moved
+    kv_ep_defragmenter_sv_num_moved
+    kv_ep_item_compressor_num_visited
+    kv_ep_item_compressor_num_compressed
+    kv_ep_cursor_dropping_lower_threshold_bytes
+    kv_ep_cursors_dropped
+    kv_ep_cursor_memory_freed_bytes
+
+This change decreased the disk used by Prometheus on an idle node
+with a single bucket after ~40h uptime by ~27% (18MB->13MB).
+
+Change-Id: I1bc2dddb200ff6c01fcdf387a5f7f6529a55762e
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: James H
+Date: 2021-08-18 09:32:08.000000000
+Message: 
+Patch Set 10: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2021-08-18 13:05:58.000000000
+Message: 
+Patch Set 10:
+
+check approval
+----------------------------------------------------------------------------------------------------------------------
+Author: Restriction Checker
+Date: 2021-08-18 13:06:05.000000000
+Message: 
+Patch Set 10: Well-Formed+1
+
+Permission granted to commit: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/256315/artifact/restricted.html : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-08-19 10:50:07.000000000
+Message: 
+Patch Set 10: Code-Review+2
+
+(9 comments)
+
+Patch looks good so far. Suggestions for some other stuff to check, but that can be a second patch.
+Line:2955, engines/ep/src/ep_engine.cc -> Possibly into diminishing returns here, but I'll point out a few which I think we can still move from low to high. If you want to do these as a follow-up that's fine (as I assume we need to verify UI etc isn't affected):
+
+Line:2958, engines/ep/src/ep_engine.cc -> This is set at bucket creation time an I don't believe can be changed later, so little-to-no value in being in low card.
+
+Line:3003, engines/ep/src/ep_engine.cc -> Watermarks rarely change (are derived from Bucket Quota). If UI doesn't need these I think we can move both low and high.
+
+Line:3016, engines/ep/src/ep_engine.cc -> I note these has the value value as ep_blob_overhead - is there a bug here (and we should be calling a different stats method)?
+
+If not, then we don't need a duplicated stat and could remove one of them.
+
+Line:3026, engines/ep/src/ep_engine.cc -> This is basically a constant and can be in high.
+
+Line:3059, engines/ep/src/ep_engine.cc -> Given we already have this in histogram format, wonder if it's actually worth having this in individual stats form in low card set?
+
+Can you check if prometheus has the histogram for this?
+
+Line:3070, engines/ep/src/ep_engine.cc -> Given we only run access scanner once per day by default (and few people change it), can probably move this to high.
+
+Line:3079, engines/ep/src/ep_engine.cc -> Similary for these; we don't really need to record the details of when it next runs every 10s
+
+Line:3102, engines/ep/src/ep_engine.cc -> This is basically a constant, can be moved to high.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2021-08-19 18:32:39.000000000
+MISMATCHED INLINE COMMENT
+Line:2958, engines/ep/src/ep_engine.cc -> Ah, this isn't actually even exposed to Prometheus as it's not numeric... will move to high card and make a note that we might want a numeric equivalent.
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2021-08-19 18:32:39.000000000
+MISMATCHED INLINE COMMENT
+Line:3003, engines/ep/src/ep_engine.cc -> UI doesn't use the ..._percent watermark stats, so they're actually kinda redundant. Will move for now, and make a note to potentially remove from Prometheus.
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2021-08-19 18:32:39.000000000
+MISMATCHED INLINE COMMENT
+Line:3016, engines/ep/src/ep_engine.cc -> Archeology suggests it's been a dupe for a long time... Will remove in a dedicated patch just in case it sets something on fire.
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2021-08-19 18:32:39.000000000
+MISMATCHED INLINE COMMENT
+Line:3026, engines/ep/src/ep_engine.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2021-08-19 18:32:39.000000000
+MISMATCHED INLINE COMMENT
+Line:3059, engines/ep/src/ep_engine.cc -> Histogram is there, but doesn't have an accurate number for the max because of the buckets. Doesn't appear in the list of UI/ns_server stats, so I'll move to high. I'm also not a big fan of it being conditional, but will change that separately.
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2021-08-19 18:32:39.000000000
+MISMATCHED INLINE COMMENT
+Line:3070, engines/ep/src/ep_engine.cc -> Woops. This is already in high, and shouldn't be here.
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2021-08-19 18:32:39.000000000
+MISMATCHED INLINE COMMENT
+Line:3079, engines/ep/src/ep_engine.cc -> same as the priority, this is not present in Prometheus as it is a string
+----------------------------------------------------------------------------------------------------------------------

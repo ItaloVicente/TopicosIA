@@ -1,0 +1,158 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-41257: Don't enable traffic if Warmup can't write vb state to disk
+
+Currently during warmup we will try and persist a new vbucket state to
+disk during Warmup::populateVBucketMap(). This is to ensure we write any
+new failover uuid to disk before we add the vbucket to vbucket map
+(allowing us to accept DCP connections). This gives us a good place to
+ensure that we can write to the files of a vbucket or not, to ensure our
+storage is in a good state. However, currently we don't take advantage
+of this. Waiting for the flusher task to persist the state to disk
+without reporting its success.
+
+To help ensure we don't try and use vbuckets that we can't reliably
+read/write to. We have modified the Warmup::populateVBucketMap() to call
+the flush of the vbucket state to disk immediately after enqueuing it in
+the checkpoint manager. Then based on the success of the flush of the
+vbucket state we will add the vbucket to the vbucket map so that it can
+be access by DCP. We will also set a flag, if the flush fails to ensure
+we don't accept any front end ops if it fails. This is to ensure we
+don't accept writes that we will be unable to persist to disk.
+
+To enable this change this patch adds a success flag to
+EPBucket::FlushResult, so that EPBucket::flushVBucket() can explicitly
+state if it failed or succeeded and Warmup::populateVBucketMap() can
+make a decision based on this. We also introduced an unlocked version
+of EPBucket::flushVBucket() so that Warmup::populateVBucketMap() can
+call the flush functionality as we take a vbucket lock before enqueuing
+the vbucket state in the checkpoint manager.
+
+Change-Id: Ibc83fa850ea08b4ab10c32953f2225c0bdfd5753
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Richard de Mellow
+Date: 2021-03-03 14:08:33.000000000
+Message: 
+Uploaded patch set 3.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-03-03 14:12:52.000000000
+Message: 
+Patch Set 3: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/33971/ : ABORTED
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/33971/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/29184/ : ABORTED
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/29184/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/8057/ : ABORTED
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/8057/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/9141/ : ABORTED
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/9141/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/9000/ : ABORTED
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/9000/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/9354/ : ABORTED
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/16902/ : ABORTED
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/16902/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/5929/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/7392/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2021-03-03 14:38:38.000000000
+MISMATCHED INLINE COMMENT
+Line:12, /COMMIT_MSG -> nit: technically it may not have been flushed before we add it to the vBucket map/allow DCP connections. Flusher will be scheduled/notified but may not have run.
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2021-03-03 15:08:25.000000000
+MISMATCHED INLINE COMMENT
+Line:12, /COMMIT_MSG -> :roger: will clarify this
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2021-03-03 14:38:38.000000000
+MISMATCHED INLINE COMMENT
+Line:275, engines/ep/src/flusher.cc -> will flushVBucket not log something already?
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2021-03-03 15:08:25.000000000
+MISMATCHED INLINE COMMENT
+Line:275, engines/ep/src/flusher.cc -> EPBucket::flushVBucket() doesn't log specifically on failure itself so up to a respective KV store. Though there are other reason the flusher might fail that are not KVStore related e.g. no valid vbucket or vbucket log.
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2021-03-08 14:36:46.000000000
+MISMATCHED INLINE COMMENT
+Line:275, engines/ep/src/flusher.cc -> :roger: will remove the log message, will be keeping the bool status as its needed for the Warmup.
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2021-03-08 09:11:32.000000000
+MISMATCHED INLINE COMMENT
+Line:275, engines/ep/src/flusher.cc -> Unsuccessful commits get logged in EPBucket::commit http://src.couchbase.org/source/xref/trunk/kv_engine/engines/ep/src/ep_bucket.cc#900-918. Unsuccessful snapshotVBucketState calls (if we only update vbstate) are not. Could you just add the logging around snapshotVBucketState and then we won't double log on commit failures. Saves adding another status bool too.
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2021-03-03 14:38:38.000000000
+MISMATCHED INLINE COMMENT
+Line:1301, engines/ep/src/warmup.cc -> manually flushing here feels simpler but considering that the warmup thread is a reader thread also feels a bit wrong to me.
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2021-03-03 15:08:25.000000000
+MISMATCHED INLINE COMMENT
+Line:1301, engines/ep/src/warmup.cc -> Spoke to DaveR about this abit, and if we were do go down the route of waiting for the flusher task to do it and block with a call back I think it would end up requiring far more plumbing than just calling it directly.
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2021-03-08 09:11:32.000000000
+MISMATCHED INLINE COMMENT
+Line:1301, engines/ep/src/warmup.cc -> Ack
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2021-03-03 14:38:38.000000000
+MISMATCHED INLINE COMMENT
+Line:1316, engines/ep/src/warmup.cc -> Failure here means not putting the vBucket in the map which means gets won't work. I don't think that's desirable as currently I believe we can come up in a sort of read only state should we be able to read from but not write to disk. Do we want to prevent that behaviour?
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2021-03-08 09:11:32.000000000
+MISMATCHED INLINE COMMENT
+Line:1316, engines/ep/src/warmup.cc -> Please correct me if I'm wrong but I don't believe that gets check if traffic is enabled at all so in this kind of scenario this would have worked in the past. I think not streaming is fine in this case but read only access could be useful.
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2021-03-08 14:36:46.000000000
+MISMATCHED INLINE COMMENT
+Line:1316, engines/ep/src/warmup.cc -> I've re-checked the code and you're correct we only check the traffic enabled status for gets if the get doesn't succeed. So we would be able to try and read keys if we had disabled enabled traffic. I'll modify comment to reflect this.
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2021-03-03 15:08:25.000000000
+MISMATCHED INLINE COMMENT
+Line:1316, engines/ep/src/warmup.cc -> As we're not enabling traffic due to the failure to prevent sets, gets won't work eatheir. Though by not adding the vbucket to the map we won't be able to stream to replica's that might be trying to reconnect. However, in the make data files read only, then memcached situation this is probably desirable as it means that if the replica persisted more mutations that were generated between the write failure and the crash that we wouldn't lose this data and could then promote it.
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2021-03-03 14:38:38.000000000
+MISMATCHED INLINE COMMENT
+Line:463, engines/ep/src/warmup.h -> needs completing
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2021-03-03 15:08:25.000000000
+MISMATCHED INLINE COMMENT
+Line:463, engines/ep/src/warmup.h -> thanks for the spot
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2021-03-08 14:36:46.000000000
+MISMATCHED INLINE COMMENT
+Line:463, engines/ep/src/warmup.h -> Done
+----------------------------------------------------------------------------------------------------------------------

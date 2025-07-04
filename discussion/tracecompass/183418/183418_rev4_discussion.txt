@@ -1,0 +1,120 @@
+======================================================================================================================
+DESCRIPTION:
+
+graph: Add an implementation of the graph on disk
+
+This implementation uses an history-tree like structure. The history
+tree classes HtIo, HTNode and HistoryTree have been copied from the
+segment store and datastore and modified to remove generics (which
+improves performances by at least 3 to 5 times) and implement specific
+methods for query in the tree.
+
+Experimentation was done to use available backends like the state system,
+but it does not support 0-length states (for vertical edges) or segment
+stores, which could have worked, but generics and query patterns made
+the performances really bad for the graph.
+
+Performance-wise, the graph construction remains slightly similar to
+what it was, with a different less than 5% sometimes, within the margin
+of errors. Building the critical path though takes a lot longer, as each
+edge to be queried on disk. Is there room for improvement in the
+queries? Probably! But this is good enough. For small traces, it remains
+within one second. But the main improvement is for larger traces, that
+used to either throw OOME or took close to the whole RAM, making Trace
+Compass close to unresponsive. Now, large traces do not OOME and the
+interface remains responsive.
+
+Benchmark results (before => after):
+
+Trace                Build graph (sec)   Build critical path (sec)
+------------------------------------------------------------------
+Trace2              1.91  =>   1.87          0.008  =>   0.047
+Multi-thread        1.58  =>   1.58          0.031  =>   1.31
+Django              2.82  =>   2.87          0.003  =>   0.034
+OSEvents            9.12  =>   8.91          0.035  =>   0.409
+Large trace 1*     30.46  =>  28.88          0.513  =>  12.62
+Large trace 2*     57.88  =>  55.42          0.127  =>   2.09
+Very large**        OOME  => 750.0            --    => 134.4
+
+* Arbitrary large traces that previously worked in Trace Compass, but when
+calculating the execution graph and critical path, used to bring the UI
+to the brink of unresponsiveness.
+
+** 7.4GB kernel trace with only required events and system call of ~15
+minutes normal developer laptop usage.
+
+Change-Id: Ib2fda449da266830c4d847d5c3f4cb11fc8bd283
+Signed-off-by: Geneviève Bastien <gbastien+lttng@versatic.net>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Genevieve Bastien
+Date: 2021-07-28 17:03:57.000000000
+Message: 
+Uploaded patch set 4.
+----------------------------------------------------------------------------------------------------------------------
+Author: Trace Compass Bot
+Date: 2021-07-28 17:04:06.000000000
+Message: 
+Patch Set 4:
+
+Build Started https://ci.eclipse.org/tracecompass/job/tracecompass-gerrit-core-only/1677/ (1/3)
+----------------------------------------------------------------------------------------------------------------------
+Author: Trace Compass Bot
+Date: 2021-07-28 17:04:07.000000000
+Message: 
+Patch Set 4:
+
+Build Started https://ci.eclipse.org/tracecompass/job/tracecompass-gerrit-long-ui-only/1701/ (2/3)
+----------------------------------------------------------------------------------------------------------------------
+Author: Trace Compass Bot
+Date: 2021-07-28 17:04:08.000000000
+Message: 
+Patch Set 4:
+
+Build Started https://ci.eclipse.org/tracecompass/job/tracecompass-gerrit-short-ui-only/1695/ (3/3)
+----------------------------------------------------------------------------------------------------------------------
+Author: Trace Compass Bot
+Date: 2021-07-28 17:30:37.000000000
+Message: 
+Patch Set 4: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/tracecompass/job/tracecompass-gerrit-core-only/1677/ : SUCCESS
+
+https://ci.eclipse.org/tracecompass/job/tracecompass-gerrit-long-ui-only/1701/ : SUCCESS
+
+https://ci.eclipse.org/tracecompass/job/tracecompass-gerrit-short-ui-only/1695/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthew Khouzam
+Date: 2021-08-24 14:26:45.000000000
+Message: 
+Patch Set 4:
+
+Reviewing the HT on disk is kinda slow, could you highlight the differences please?
+----------------------------------------------------------------------------------------------------------------------
+Author: Genevieve Bastien
+Date: 2021-08-26 01:27:55.000000000
+Message: 
+Patch Set 4:
+
+(7 comments)
+
+Thanks for the review! I think I commented everywhere that's different. Otherwise the commit message explains the reasoning and some of the javadoc too. Let me know if any information is missing, I'd rather archive it in the code (or on a git commit message) than in a gerrit comment ;-)
+Line:667, analysis/org.eclipse.tracecompass.analysis.graph.core/src/org/eclipse/tracecompass/internal/analysis/graph/core/graph/historytree/GraphHistoryTree.java -> This is probably not required for this tree
+
+Line:888, analysis/org.eclipse.tracecompass.analysis.graph.core/src/org/eclipse/tracecompass/internal/analysis/graph/core/graph/historytree/GraphHistoryTree.java -> From this point on until the toString method are the graph-specific stuff. It is only the queries in the tree. All the rest above has been copy-pasted from o.e.t.datastore
+
+Line:31, analysis/org.eclipse.tracecompass.analysis.graph.core/src/org/eclipse/tracecompass/internal/analysis/graph/core/graph/historytree/GraphTreeNode.java -> This class is the same as the OverlappingTreeNode, but we don't expect it to be extended, so there's no generic and the type of data in it is a TmfEdgeInterval.
+
+Line:42, analysis/org.eclipse.tracecompass.analysis.graph.core/src/org/eclipse/tracecompass/internal/analysis/graph/core/graph/historytree/HTNode.java -> This explains the difference with the HTNode class from datastore, there's no IHTNode interface in this case, as we don't expect any other implementation, unlike the unfortunately over-engineered datastore... (I can say it, I'm the guilty one ;-) )
+
+Line:854, analysis/org.eclipse.tracecompass.analysis.graph.core/src/org/eclipse/tracecompass/internal/analysis/graph/core/graph/historytree/HTNode.java -> Here's a big difference with the datastore and state system, the tsIsExactEnd parameter. Unlike the other backends that are usually visited per time for visualisation, a graph is visited horizontally following a path, so we get intervals either from the start time or end time. Since intervals are sorted by end time, knowing that the one we are looking has an exact end time allows for query optimization and saves a _lot_ of time when building the critical path (where the graph is visited backwards).
+
+Line:881, analysis/org.eclipse.tracecompass.analysis.graph.core/src/org/eclipse/tracecompass/internal/analysis/graph/core/graph/historytree/HTNode.java -> This method did not exist in the other backends. It's the reverse of the getStartIndexFor
+
+Line:46, analysis/org.eclipse.tracecompass.analysis.graph.core/src/org/eclipse/tracecompass/internal/analysis/graph/core/graph/historytree/HtIo.java -> This explains the difference with the other HtIo classes
+
+----------------------------------------------------------------------------------------------------------------------

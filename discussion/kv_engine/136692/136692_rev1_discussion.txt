@@ -1,0 +1,45 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-41510: Fix infinite loop due to HdrHistogram being reset
+
+Currently if a HdrHistogram has its reset() method called by one thread
+(T1) and is being read by another (T2) using an HdrHistoram::Iterator.
+There is the race that could cause the HdrHistoram::Iterator() to enter
+an infinite loop.
+
+This occurs as HdrHistogram's getNextValue() methods use HdrHistogam_c's
+hdr_iter_next() which intern uses the following function:
+static bool has_next(struct hdr_iter* iter)
+{
+        return iter->cumulative_count < iter->total_count;
+}
+Which logically checks that the total count the Iterator was
+initialize with is > than the sum of all the counts its read from the
+buckets in the histogram. The trouble is, that the reset() method
+changes the bucket counts back to 0. Thus, meaning the condition
+cumulative_count >= total_count may never be met.
+
+To fix this make the std::unique_ptr<struct hdr_histogram> as
+std::shared_ptr. When we call HdrHistogram::reset(), we should create
+a new std::shared<> and store under the histogram member. This will
+mean that new calls to the HdrHistogram obj will see that the data has
+been reset. But we can keep around the old struct hdr_histogram for use
+with the Iterator as long as we keep a std::shared_ptr<> to it within
+the HdrHistogram::Iterator. Once we've finished using the
+HdrHistogram::Iterator the shared_ptr will destroy the struct for us
+along with all its data.
+
+We also need to a cb::RWLock to guard when modifying the
+std::shared_ptr<> as its pointer value is not thread safe.
+
+Change-Id: I5d7e579d8dba638fd0d2ef1c0d1896cc3676496f
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Richard de Mellow
+Date: 2020-09-22 12:07:12.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,167 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-41730 Prune prometheus stats
+
+As prometheus stats age they should be pruned in order to save storage.
+
+For low-cardinality stats we'll increase their coarseness as they
+get older.
+
+For high-cardinality stats we'll truncate any stats older than a
+specified age.
+
+Change-Id: I227399c94e754f143f5aecd3f31140c65f61ac10
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Steve Watanabe
+Date: 2021-01-06 23:12:25.000000000
+Message: 
+Uploaded patch set 30.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-01-06 23:12:38.000000000
+Message: 
+Patch Set 30:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-test/20969/
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-01-06 23:12:51.000000000
+Message: 
+Patch Set 30:
+
+make simple-test
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-01-06 23:12:58.000000000
+Message: 
+Patch Set 30:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-simple-test/1868/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-01-06 23:17:20.000000000
+Message: 
+Patch Set 30: Well-Formed+1
+
+Permission granted to commit to restricted branch
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-01-07 00:14:21.000000000
+Message: 
+Patch Set 30: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/ns-server-simple-test/1868/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-01-08 01:30:21.000000000
+Message: 
+Patch Set 30: Verified+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2021-01-09 01:08:33.000000000
+Message: 
+Patch Set 30:
+
+(4 comments)
+
+What is the plan for cases when scrapeInterval or decimation levels change?
+Line:1092, src/prometheus_cfg.erl -> Do you think it would make sense to have a separate flag for truncation? like truncation_enabled.
+I don't know, maybe it's overkill. What do you think?
+
+Line:1209, src/prometheus_cfg.erl -> I suggest we make this configurable. Just in case. Theoretically this thing will delete enormous number of metrics. I agree with your comment that we might want to do it less frequently (at least we should be able to do so). We can call it minimum_truncation_interval and make it 0 by default.
+Do you think it makes sense?
+
+Line:1590, src/prometheus_cfg.erl -> Can we make the input a bit randomized here, so that it tests the assumption for more than 1 input.
+Something like the following:
+
+Now = floor(os:system_time(seconds) / 60) * 60 + random(0,60)
+
+Levels = [{low, random(1, 3*?SECS_IN_DAY), skip},
+          {medium, random(1, 4 * ?SECS_IN_DAY), 60*random(1,10)},
+          {large, random(1, 359 * ?SECS_IN_DAY), <PrevInt> * random(2, 100)}],
+
+LastDecimationTime = Now - random(0, 300),
+
+Then you can call it like 1000 times.
+
+Line:1653, src/prometheus_cfg.erl -> Could you add the following test:
+
+% Random scrape interval:
+ScrapeInterval = random(60)
+
+% Generate timestamps to mimic datapoints in prometheus:
+NumberOfDatapoints = 1000000
+Datapoints = [N * ScrapeInterval + random_shift || N <- lists:seq(0, NumberOfDatapoints)]
+
+Levels = [<randomized levels, {last, random(), LastInterval = random()}]
+
+% Then apply decimation intervals on Datapoints several times with random intervals between them (by increasing Now by a random value)
+
+FinishTime = <calculated based on levels> % if last level finishes in 5 days then Finish = hd(Datapoints) + 5d
+DatapointsLeft = apply_decimation(hd(Datapoints) - 1, FinishTime, Datapoints)
+
+assert(length(Datapoints) == NumberOfDatapoints div LastInterval)
+
+apply_decimation(LastDecimation, FinishTime, Datapoints) when LastDecimation > FinishTime -> Datapoints;
+apply_decimation(LastDecimation, FinishTime, Datapoints) ->
+  Now = LastDecimation + random(0, 300),
+  DeleteIntervals = decimate_stats(Levels, LastDecimation, Now, ScrapeInterval),
+  NewDatapoints = delete_intervals(Datapoints, DeleteIntervals),
+  apply_decimation(Now, FinishTime, NewDatapoints).
+
+After that make sure that number of datapoints that is left is exactly what expected (depends on the last interval in Levels). For example, if last level is {large, 3 days, 100}, then after all deletions we should have (NumberOfDatapoints div 100) endpoints left.
+
+Let me know if you have questions
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-01-11 19:09:49.000000000
+Message: 
+Patch Set 30:
+
+(4 comments)
+Line:1092, src/prometheus_cfg.erl -> I'll add it
+
+Line:1209, src/prometheus_cfg.erl -> A reasonable suggestion...I'll add.
+
+Line:1590, src/prometheus_cfg.erl -> Would it be ok to improve the tests in a subsequent patch set? That would allow getting these changes merge to get soak time.
+
+Line:1653, src/prometheus_cfg.erl -> Same question about doing this in a subsequent patch set?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2021-01-12 01:46:43.000000000
+MISMATCHED INLINE COMMENT
+Line:1092, src/prometheus_cfg.erl -> I think it makes sense to make them work independently. Right now it looks like I can't disable decimation with enabled truncation.
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-01-13 17:27:16.000000000
+MISMATCHED INLINE COMMENT
+Line:1092, src/prometheus_cfg.erl -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-01-11 21:20:40.000000000
+MISMATCHED INLINE COMMENT
+Line:1590, src/prometheus_cfg.erl -> I'll make the tests my top priority.  But it may take a couple of days so having some initial  soak time would still be useful.
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2021-01-11 20:40:42.000000000
+MISMATCHED INLINE COMMENT
+Line:1590, src/prometheus_cfg.erl -> I'm ok to make it a separate change. I don't want to wait too long for it, though, because we are forgetting the context.
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-01-11 19:18:12.000000000
+MISMATCHED INLINE COMMENT
+Line:1590, src/prometheus_cfg.erl -> Also, with random values how would the expected values be determined?
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2021-01-11 20:43:35.000000000
+MISMATCHED INLINE COMMENT
+Line:1590, src/prometheus_cfg.erl -> Expected value should always be 2 intervals and I guess you can calculate it's boundaries based on the numbers from Levels. Pls let me know if you need help with it.
+----------------------------------------------------------------------------------------------------------------------

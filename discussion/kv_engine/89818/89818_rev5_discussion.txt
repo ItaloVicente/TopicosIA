@@ -1,0 +1,134 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-27963: Interlock compaction and initScanContext
+
+Changes in MB-24292 made the file rev monotonic, it also removed some
+speculative recovery code which basically when open failed just tried
+to open any matching VBucket couch file.
+
+In the new MB a first problem occurs in that compactDB and initScan
+can race with each other, normally compactDB and say the flusher never
+run concurrently because a higher level lock (vb_mutex) ensures only
+compaction or flushing can run. However DCP backfill for example
+issues a scan without that lock, it can interleave with compaction
+allowing the scan code to read a file-rev from the dbFileRevMap then
+by the time it hits sys_open compaction has removed the file and
+changed the revision.
+
+A second problem occurs when initScanContext fails openDB in that it
+resets the dbFileRevMap entry to 1 (breaking the monoticity). This
+results in further scan failures because the code tries for x.couch.1
+rather than x.couch.20.
+
+Fixes:
+
+1. Make the dbFileRevMap an AtomicMonotonic so we can catch other
+issues violating our monotonic requirement.
+
+2. Interlock compaction and initScan using a read-write lock. The
+change actually interlocks all openDB calls ensuring that compaction
+cannot move the file in-between a read of the file-map and the call
+to sys_open. The read-write lock ensures that concurrent flushes to
+the shard are allowed, but compaction will block (the KVShard is
+blocked) just whilst the map is updated.
+
+3. The test highlighted a data-race in rocksdb-kvstore where the
+scan map can be concurrently mutated (added a mutex to fix).
+
+Change-Id: Ib7d3107726f7fa5ecc16c6c125334adebad01650
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jim Walker
+Date: 2018-02-22 11:40:59.000000000
+Message: 
+Uploaded patch set 5.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-02-22 11:44:22.000000000
+Message: 
+Patch Set 5: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-02-22 12:01:42.000000000
+Message: 
+Patch Set 5: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/5640/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/7024/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/6545/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/7217/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/7551/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master/6812/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2018-02-22 13:22:16.000000000
+Message: 
+Patch Set 5: Code-Review-1
+
+(1 comment)
+Line:2079, engines/ep/tests/module_tests/kvstore_test.cc -> The data-race you highlighted in the commit message should be caused by interleaving initScanContext and destroyScanContext in this test, which never happens under RocksDB (functions are called only by DCPBackfilllDisk and Warmup, which I believe cannot happen concurrently).
+
+rocksdb-kvstore.cc does not implement yet Manual Compaction (it will soon), but I think that RocksDB itself ensures the thread-safeness between Snapshots and Compaction, so we should not need any synchronization either.
+
+Question: I understand that you want to fix a data-race between compaction and DCPBackfill, why  do you fix at kvstore level and not at DCPBackfill level?
+
+Other question: why in this test you spawn the iniScan task twice? That is what makes TSan to detect a race condition under RocksDB.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2018-02-22 14:09:11.000000000
+Message: 
+Patch Set 5:
+
+(2 comments)
+Line:2079, engines/ep/tests/module_tests/kvstore_test.cc -> > The data-race you highlighted in the commit message should be
+ > caused by interleaving initScanContext and destroyScanContext in
+ > this test, which never happens under RocksDB (functions are called
+ > only by DCPBackfilllDisk and Warmup, which I believe cannot happen
+ > concurrently).
+
+The change in RocksDB is not a fix for the MB, it is an issue this test highlights which is legit. In the rocks kvstore you have a map to which concurrent callers may update, i.e. two DCP producers backfilling the same stream will both try and update the map, it needs a mutex for correct update.
+
+ > rocksdb-kvstore.cc does not implement yet Manual Compaction (it
+ > will soon), but I think that RocksDB itself ensures the
+ > thread-safeness between Snapshots and Compaction, so we should not
+ > need any synchronization either.
+
+I haven't added compaction sync to rocks.
+
+ > 
+ > Question: I understand that you want to fix a data-race between
+ > compaction and DCPBackfill, why  do you fix at kvstore level and
+ > not at DCPBackfill level?
+
+It's not a problem for DCP, we could add a new piece of code anywhere in KV-engine which will call initScanContext, initScanContext must provide safe changes to the scan map. 
+
+ > Other question: why in this test you spawn the iniScan task twice?
+ > That is what makes TSan to detect a race condition under RocksDB.
+
+The MB is triggered more reliably with the extra scan thread, note the MB is nothing todo with rocks
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2018-02-22 15:32:01.000000000
+Message: 
+Patch Set 5:
+
+(2 comments)
+Line:1378, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> Unfortunately the scope of this lock is too short. The snapshot is used below, we need to hold this lock until the end of this function to avoid that the snapshot is destroyed concurrently in 'destroyScanContext'.
+
+Line:2079, engines/ep/tests/module_tests/kvstore_test.cc -> > In the rocks kvstore you have a map to which concurrent callers may update, i.e. two DCP producers backfilling the same stream will both try and update the map, it needs a mutex for correct update.
+
+Got it, thanks.
+
+----------------------------------------------------------------------------------------------------------------------

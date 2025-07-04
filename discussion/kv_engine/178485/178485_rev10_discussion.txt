@@ -1,0 +1,161 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-53100: Don't register checkpoint cursors in meta only checkpoints
+
+Problem:
+In MB-53100 it was observed that the ActiveStream::curChkSeqno throws
+due to its value becoming non weakly monotonic, while it's processing
+times from the checkpoint manager. Just after vbucket became active due
+to a takeover stream.
+
+Cause:
+The reason for this is due an issue in how we register cursors when the
+checkpoint manager contains an checkpoint that only contains meta items.
+A meta only checkpoint can occur during a takeover stream, as the
+initial active node sends a snapshot with just one meta item which is a
+setVbucketState to pending.
+
+Example:
+id:2 [ e:5, cs:5, vbs:5, ce:5]
+id:3 [ e:5, cs:5, m:5, m:6 )
+
+Using the example above. The meta only checkpoint is problematic for
+CheckpointManager::registerCursorBySeqno() as it will walk through the
+meta checkpoint trying to find the seqno 5 requested for. However, if
+the requested seqno 5 was the same seqno as setVbucketState(e.g. vbs:5),
+we would end up walking though the checkpoint without ever finding an
+item with a seqno greater than 5. Thus, getting to the
+checkpoint_end (ce:5) item, who's seqno is 5. We would then return the
+registration seqno as 5 + 1 = 6. This would then set the value of
+ActiveStream::curChkSeqno to 6 from 5.
+
+When the active stream wants to process items using the cursor it will
+then receive the items from the point where the cursor currently sits,
+including the vbucket item but also importantly it will see a non-meta
+item with seqno X. This then caused curChkSeqno to from 6 to 5
+which a violation and thus we throw.
+
+Fix:
+When walking though the checkpoint to find the right item to register
+the cursor against, we need to ensure the item is not a meta item. If it
+is then we should just continue to the next item. If we don't find a
+non-meta item in the checkpoint for the seqno, then we should continue
+to the next checkpoint.
+
+In the situation we reach the end of the open checkpoint we need to
+register at the end of the checkpoint. This means we need to predict
+what the next item's seqno will be. Thus, if the last item isn't a meta
+item then we will set the 'result.seqno' to the end item's bySeqno + 1.
+If it is a meta item then it will just be set to bySeqno. As the meta
+items's seqno hasn't been made visible.
+
+Change-Id: I2fb89a81f506be71991b2a58a9f9a9144d75cad3
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Richard de Mellow
+Date: 2022-09-01 15:45:48.000000000
+Message: 
+Uploaded patch set 10.
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-09-01 15:46:24.000000000
+Message: 
+Patch Set 10:
+
+(3 comments)
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-09-01 16:43:14.000000000
+Message: 
+Patch Set 10: Code-Review-1
+
+(5 comments)
+Line:329, engines/ep/src/checkpoint_manager.cc -> Nit: can be const.
+
+Line:349, engines/ep/src/checkpoint_manager.cc -> What does Case 1 refer to here? If you want to document the different paths, perhaps give an outline at the start of the main for() loop to help people understand the different cases?
+
+Line:358, engines/ep/src/checkpoint_manager.cc -> Nit: I don't think it's necessary to move this case down from where it was before (line 339) - it just adds unnecessary changes to the diff.
+
+Line:386, engines/ep/src/checkpoint_manager.cc -> Do we need this clause any more? If the next item's seqno is greater than the requested seqno, then surely we are always safe to plant the cursor at this position?
+
+(i.e. metaItems will have the same seqno as the following "real" item, so if we find an item with a seqno which is greater than what we asked for, that means we have definitely got to the end of the meta items - I think?)
+
+Line:3411, engines/ep/tests/module_tests/checkpoint_test.cc -> Could we expand this to a situation there there's multiple Checkpoints which only contain meta-items?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-09-01 17:58:47.000000000
+Message: 
+Patch Set 10: Verified-1
+
+Build Failed 
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/22279/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( https://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/22279/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/21238/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [42/160]: file stats post warmup...../kv_engine/engines/ep/tests/ep_testsuite.cc:2308 Test failed: `" (Expected `224870" to be less than or equal to `208896" - Unexpected fileSize for vbucket)
+[2022-09-01T17:46:57.526Z] (168 ms) FAIL
+</pre>
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/21238/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/23019/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( https://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/23019/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/19186/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/19965/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-windows-master/48906/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/41114/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/21924/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/30304/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/9664/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/9764/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2022-09-02 06:54:12.000000000
+Message: 
+Patch Set 10:
+
+(1 comment)
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-09-02 09:46:10.000000000
+MISMATCHED INLINE COMMENT
+Line:329, engines/ep/src/checkpoint_manager.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-09-02 09:46:10.000000000
+MISMATCHED INLINE COMMENT
+Line:349, engines/ep/src/checkpoint_manager.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-09-02 09:46:10.000000000
+MISMATCHED INLINE COMMENT
+Line:358, engines/ep/src/checkpoint_manager.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-09-02 09:46:10.000000000
+MISMATCHED INLINE COMMENT
+Line:386, engines/ep/src/checkpoint_manager.cc -> So yes it's okay, but also in the situation you register against a meta item at seqno:5 but its a meta item. The ActiveStream::curChkSeqno would observe 5 -> 5 -> 6. Having said that ActiveStream::curChkSeqno is weakly monotonic and we only update it for non-meta items so it's find to do this. Just a little background :).
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-09-02 09:46:10.000000000
+MISMATCHED INLINE COMMENT
+Line:3411, engines/ep/tests/module_tests/checkpoint_test.cc -> Done
+----------------------------------------------------------------------------------------------------------------------

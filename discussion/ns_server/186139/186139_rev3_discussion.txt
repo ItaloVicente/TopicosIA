@@ -1,0 +1,142 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-55037: Collect cgroup cache info from sigar and ...
+
+... report it to prometheus
+
+Change-Id: Ie503ef75383c7e997f3e7cd3a609756c94c1b910
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Timofey Barmin
+Date: 2023-02-05 02:02:04.000000000
+Message: 
+Uploaded patch set 3.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2023-02-05 02:02:11.000000000
+Message: 
+Patch Set 3:
+
+Build Started https://cv.jenkins.couchbase.com/job/ns-server-test/34182/
+----------------------------------------------------------------------------------------------------------------------
+Author: Restriction Checker
+Date: 2023-02-05 02:02:18.000000000
+Message: 
+Patch Set 3: Well-Formed+1
+
+Permission granted to commit: 
+
+https://server.jenkins.couchbase.com/job/restricted-branch-check/336255/artifact/restricted.html : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2023-02-05 02:05:47.000000000
+Message: 
+Patch Set 3: Well-Formed+1
+
+Build Successful 
+
+https://cv.jenkins.couchbase.com/job/ns-server-test/34182/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2023-02-06 11:05:22.000000000
+Message: 
+Patch Set 3:
+
+(2 comments)
+Line:222, src/sigar.erl -> Is this always an accurate calculation of memory used? There is suggestion here https://facebookmicrosites.github.io/cgroup2/docs/memory-controller.html and https://unix.stackexchange.com/questions/686814/cgroup-and-process-memory-statistics-mismatch that other stats may also constitute the actual memory usage of the process (at least in cgroups v2). If that's what we want to use for alerting, then should we also include those stats in our calculation? If it's not, then should we call this something like mem_cgroup_estimate_used rather than actual?
+
+Line:222, src/sigar.erl -> nit: long line
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2023-02-06 18:29:47.000000000
+MISMATCHED INLINE COMMENT
+Line:222, src/sigar.erl -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2023-02-06 21:20:53.000000000
+MISMATCHED INLINE COMMENT
+Line:222, src/sigar.erl -> So my understanding of the issue is that we want more accurate alerting before some process gets OOM killed. A process may get OOM killed if we are at the cgroup mem max limit if no memory can be reclaimed. Memory is reclaimed from the page cache of the cgroup and so the memory that we care about with respect to OOM killing and alerting is the "unreclaimable" memory. I wonder, if we have a significant amount of dirty pages in the page cache (which I believe should be unreclaimable as they're dirty) then the alerting may not be correct.
+
+> Note:
+	Only anonymous and swap cache memory is listed as part of 'rss' stat.
+	This should not be confused with the true 'resident set size' or the
+	amount of physical memory used by the cgroup.
+	'rss + mapped_file" will give you resident set size of cgroup.
+	(Note: file and shmem may be shared among other cgroups. In that case,
+	 mapped_file is accounted only when the memory cgroup is owner of page
+	 cache.)
+https://www.kernel.org/doc/Documentation/cgroup-v1/memory.txt
+
+Cgroup mem stat has rss and mapped_file stats, which /might/ map better to a host memory metric than `mem_used - cache`, and I think we'd expect it to be about the same. Not sure how the above dirty page scenario would play out if we used this to alert.
+
+Also came across a write up from LinkedIn looking into this - https://engineering.linkedin.com/blog/2022/overcoming-challenges-with-linux-cgroups-memory-accounting. 
+
+If we have time for some experimentation then I'd suggest looking into what happens when we have substantial dirty pages and perhaps also the RSS stats. If not, I think the current method is definitely better than what we did in the past, and is perhaps good enough for 7.2.0, but I'm still not sure if we should call it mem_actual_used. I'll have a think about naming for that some more.
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2023-02-07 14:27:43.000000000
+MISMATCHED INLINE COMMENT
+Line:222, src/sigar.erl -> I understand that this is a compromise, and I'm happy to give a +2 to using mem current - mem cache for alerting in 7.2.0 provided that we create a ticket for some future release that captures the concerns that we have at the moment and possible avenues to explore. 
+
+What I'm not keen on with this change though is the name of the stat. I appreciate consistency as much as anybody else, but consistency for the sake of consistency is a poor justification in my opinion.
+
+I wanted to understand where the current MemActualUsed stat comes from so I looked into that. It's not part of /proc/meminfo - https://man7.org/linux/man-pages/man5/proc.5.html. It comes from sigar and is calculated as follows (at least on linux):
+
+mem.actual_used = MemTotal - MemFree - (Buffers + Cached).
+
+actual_used is our own (Couchbase/maybe sigar) construct, it isn't a well defined standard, and whilst your proposed calculation is roughly consistent with the existing actual_used I think that actual_used is also a poor name for that value. The word actual doesn't convey what we are attempting to measure at all. Whilst uing actual_used here would arguably be consistent with the current naming, anybody looking at the name and trying to work out what it actually measures will have to look in the source to find that out, and not only will they have to look in the sigar source for the host calculation, they'll also have to look in the ns_server source for the cgroup calculation which is subtly different.
+
+If we want to call this stat actual_used for the sake of consistency then I would recommend that we have sigar expose the "actual_used" stat rather than calculate it here, so that then we have some consistency in the API and avoid multiplying/splitting the non-standard names/calculation definitions. I'd still much prefer that we call this something more appropriate, maybe "mem_cg_unreclaimable_estimate", that allows the user to infer some notion of the calculation formula with some cgroup knowledge, but if we really want to keep the "actual_used" naming then I'd settle for the calculation being done in sigar and sigar exposing the "actual_used" value to minimize the locations in which we, in my opinion, name things poorly, and keep the definition of "actual" in one place.
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2023-02-06 21:53:23.000000000
+MISMATCHED INLINE COMMENT
+Line:222, src/sigar.erl -> Well,
+I agree in general. It is important though to stay consistent with other metrics.
+We want host and cgroup metrics to mean the same things when same name is used. Also we don't want to multiply new non standard names (like "mem_estimate", etc..).
+Also we don't want to maintain different sets of metrics for different environments (cgroup v1/v2).
+So we should understand that current implementation is a compromise. It is imperfect. We can try make it better, but that's a bigger task because most likely we would need to change all three scenarios: host metrics, cgroups v1 metrics, cgroups v2 metrics. Which means deprecation of metrics, backward compatibility, and so on. It is not a 7.2 thing. I suggest we create a ticket for it, and try addressing it in 7.5 or 7.6 time frame.
+
+In 7.2 we don't have a room for big changes. So the idea is basically to fix the bug. There is no goal to make it perfect in 7.2.
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2023-02-06 18:29:47.000000000
+MISMATCHED INLINE COMMENT
+Line:222, src/sigar.erl -> Thanks Ben,
+> Is this always an accurate calculation of memory used?
+No, it is not accurate. It is actually not clear what accurate calculation for memory used is (at least to me).
+We decided to do it this way not only because it would be a better approximation for purpose of memory alerting, but also because we wanted to be consistent with host memory metrics (which are mem_used and mem_actual_used:=mem_used - cache).
+That also explains why I called it cgroup_actual_used (basically historical reasons).
+I agree that the name is not great.
+
+If you have good understanding and specific suggestions about which memory should be counted as what type, we certainly can discuss.
+We should also keep in mind that we don't have much time for 7.2 left.
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2023-02-07 17:38:10.000000000
+MISMATCHED INLINE COMMENT
+Line:222, src/sigar.erl -> 1. We want new metric names to be consistent with old metric names, because we don't want to multiply "non-standard" metric names that mean the same thing.
+We are not renaming any existing metrics here because the ticket is about something else, and we want to keep changes in 7.2 small.
+2. Before making that change we discussed if sigar should calculate the new metric.  The team that maintains sigar preferred not to do it, and I agreed. I personally think it is a matter of taste as I see reasons for both approaches.
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2023-02-09 03:48:08.000000000
+MISMATCHED INLINE COMMENT
+Line:222, src/sigar.erl -> My 2 scents, while something like "mem_cg_unreclaimable_estimate" is more apt in description, it introduces IMO more variety of metrics that could get lost in translation and I agree with keeping the name closer to host metrics names is probably better although not entirely accurate. This brings up the need for good documentation, an initiative driven by Dave for all service metrics. 
+
+Also, IMO sigar should just supply ns_server with raw stats and ns_server can calculate/transfrorm the raw stats to useful consumable stats. Hopefully going forward we can do it this way.
+Will +1 the change as this gets the job done for 7.2. 
+
+> We can try make it better, but that's a bigger task because most likely we would need to change all three scenarios: host metrics, cgroups v1 metrics, cgroups v2 metrics. Which means deprecation of metrics, backward compatibility, and so on.
+
+Going forward I agree we need to clean this up. @Timofey could you create a ticket for the same.
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2023-02-09 21:27:27.000000000
+MISMATCHED INLINE COMMENT
+Line:222, src/sigar.erl -> Created https://issues.couchbase.com/browse/MB-55526
+----------------------------------------------------------------------------------------------------------------------

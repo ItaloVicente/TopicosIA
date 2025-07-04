@@ -1,0 +1,124 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-50868: Filter out failed nodes from bucket server config list
+
+During failover janitor cleanup, if the serverlist of a bucket is only
+currently tied to a single node at the time of failover, the janitor
+was incorrectly setting the server list to also include the node being
+failed over since it uses the active KV nodes to set the initial list,
+and Node status doesn't become inactive until janitor cleanup is done.
+This fix addresses that by setting a correct list that accounts for the
+failed node in this case.
+
+Change-Id: I8ddf4d57f004c3dbbae5ef14b46c617efb0a57de
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Navdeep S Boparai
+Date: 2022-02-14 18:09:07.000000000
+Message: 
+Uploaded patch set 2: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-02-14 18:09:15.000000000
+Message: 
+Patch Set 2: -Well-Formed
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-test/29539/
+----------------------------------------------------------------------------------------------------------------------
+Author: Navdeep S Boparai
+Date: 2022-02-14 18:11:55.000000000
+Message: 
+Patch Set 2:
+
+make simple-tests
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-02-14 18:12:02.000000000
+Message: 
+Patch Set 2:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-simple-test/3395/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-02-14 18:14:00.000000000
+Message: 
+Patch Set 2: Well-Formed+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/ns-server-test/29539/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-02-14 18:59:01.000000000
+Message: 
+Patch Set 2: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/ns-server-simple-test/3395/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Navdeep S Boparai
+Date: 2022-02-14 20:43:20.000000000
+Message: 
+Patch Set 2: Verified+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2022-02-14 21:33:36.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:423, src/ns_janitor.erl -> It would probably be better if ActiveKVNodes is filtered based on config_sync_nodes. The end result is still the same but you can see the co-relation in the code is defined better and retrieval of sync_nodes is always through config_sync_nodes func. What do you think? 
+
+%% config_sync_nodes excludes inactiveFailed nodes and future inactiveFailed nodes.
+CSN = config_sync_nodes(Options),
+ActiveKVNodes = [N || N <- ns_cluster_membership:service_active_nodes(Snapshot, kv),
+                      lists:member(N, CSN)],
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Navdeep S Boparai
+Date: 2022-02-14 23:21:41.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:423, src/ns_janitor.erl -> Hi Abhi,
+
+Thanks for the comment, I want to think this way through because it is not exactly equivalent of the original way: 
+   1) check_server_list() is used in other places where there are no Options(for example: do_handle_eject_post(), check_buckets(), failover_buckets() etc. So it would require check_server_list() to be aware of Options, although it doesn't seem right to for it to care for any options given the function name/context. That is workable regardless, it can be split to have Options vs non Options version. 
+   2) Even if we passed in Options to check_server_list() in cases where they are needed, the Options don't need to have "sync_nodes" parameter present. The parameter is only added during failover, but "checK_server_list()" can be called from other places where "sync_nodes" in not present. For example cleanup_with_membase_bucket_check_servers() with Options is called for other cases: prepare_bucket(),run_janitor_pre_rebalance(), perform_bucket_flushing_with_config() etc. In those cases by doing it here via config_sync_nodes(Options), we are unnecessarily trying to apply a filter to a list that should already be valid based on the current snapshot. Also we are always going to be going to chronicle to get the "sync_nodes" config in those cases when it is not needed since no filtering is required in those cases.   
+
+In summary, I just want to make sure we are not missing any corner case by doing it this way since here the filtering would be applied in all cases outside of the failover case. The way I see it, "check_server_list" is giving the proper list the way it is written. It is update_servers() that is not generating the correct list based on the Options given to it.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2022-02-14 23:55:51.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:423, src/ns_janitor.erl -> 1 is debatable, however, point 2 has convinced me that you are doing the right thing by keeping it simple. 
+
+I guess my thinking was that the update server code is pretty dumb, i.e., you tell it the server list and it should just set it. 
+Perhaps passing an explicit failover_nodes option(alongside sync_nodes) from failover which then percolates to check_server_list would be a better idea. So you would only read from it from the Options list as below.  
+
+check_server_list(Bucket, BucketConfig) ->
+    check_server_list(Bucket, BucketConfig, ns_config:latest(), []).
+
+check_server_list(Bucket, BucketConfig, Snapshot, Options) ->
+    Servers = ns_bucket:get_servers(BucketConfig),
+    ActiveKVNodes = ns_cluster_membership:service_active_nodes(Snapshot, kv) --
+                        proplists:get_value(failover_nodes, Options, []),
+    do_check_server_list(Bucket, Servers, ActiveKVNodes).
+
+Note: will leave it upto you as this is just a suggestion.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Navdeep S Boparai
+Date: 2022-02-15 01:16:06.000000000
+MISMATCHED INLINE COMMENT
+Line:423, src/ns_janitor.erl -> The seems good, I have updated it accordingly.
+----------------------------------------------------------------------------------------------------------------------

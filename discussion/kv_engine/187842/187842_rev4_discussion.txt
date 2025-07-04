@@ -1,0 +1,133 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-55796: MagmaKVStore: Optimize metaSlice deserialisation
+
+During performance analysis of Magma compaction, it was noticed that
+MagmaKVStore::compactionCore() decodes the same metadata slice
+multiple times - example call graph:
+
+- MagmaKVStore::compactionCore
+  - getExpiryTime
+    - getDocMeta
+  - getSeqNum
+    - getDocMeta
+  - isDeleted
+    - getDocMeta
+
+Where each (of the three) getDocMeta() calls ends up creating a
+temporary MetaData object, which involves decoding multiple LEB128
+values.
+
+Simplify by just calling getDocMeta() once; then calling the specific
+accessors of the docMeta object on the one copy.
+
+Where possible, update or remove the helper methods in magmakv to take
+a MetaData& instead of a Slice (and hence discourage similar
+inefficiencies in future).
+
+Change-Id: Iba6171a1afb02cebb237de40e820f932a1442709
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2023-03-27 13:56:37.000000000
+Message: 
+Uploaded patch set 4.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2023-03-27 14:06:39.000000000
+Message: 
+Patch Set 4: Verified-1 Code-Review-1
+
+Build Failed 
+
+https://cv.jenkins.couchbase.com/job/kv_engine-windows-master/52588/ : FAILURE
+
+Compile error at C:/Jenkins/workspace/kv_engine-windows-master/kv_engine/engines/ep/src/kvstore/magma-kvstore/magma-kvstore.cc(603): error C2679: binary "=": no operator found which takes a right-hand operand of type "overloaded-function" (or there is no acceptable conversion) ( https://cv.jenkins.couchbase.com/job/kv_engine-windows-master/52588/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/44116/ : FAILURE
+
+Compile error at /home/couchbase/jenkins/workspace/kv_engine-clang_analyzer-master/kv_engine/engines/ep/src/kvstore/magma-kvstore/magma-kvstore.cc:603:46:
+error: no viable overloaded "="
+ ( https://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/44116/ )
+
+CMake error: CMakeLists.txt:149 (MESSAGE) ( https://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/44116/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/23112/ : FAILURE
+
+clang-tidy found the following problems:
+
+<pre>
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy-master/kv_engine/engines/ep/src/kvstore/magma-kvstore/magma-kvstore.cc:603:46: error: no viable overloaded "=" [clang-diagnostic-error]
+    configuration.magmaCfg.IsValueCompressed = magmakv::isCompressed;
+                                             ^
+/opt/gcc-10.2.0/lib/gcc/x86_64-pc-linux-gnu/10.2.0/../../../../include/c++/10.2.0/bits/std_function.h:396:7: note: candidate function not viable: no known conversion from "bool (const magmakv::MetaData &)" to "const std::function<bool (const magma::Slice &)>" for 1st argument
+      operator=(const function& __x)
+      ^
+/opt/gcc-10.2.0/lib/gcc/x86_64-pc-linux-gnu/10.2.0/../../../../include/c++/10.2.0/bits/std_function.h:414:7: note: candidate function not viable: no known conversion from "bool (const magmakv::MetaData &)" to "std::function<bool (const magma::Slice &)>" for 1st argument
+      operator=(function&& __x) noexcept
+      ^
+/opt/gcc-10.2.0/lib/gcc/x86_64-pc-linux-gnu/10.2.0/../../../../include/c++/10.2.0/bits/std_function.h:428:7: note: candidate function not viable: no known conversion from "bool (const magmakv::MetaData &)" to "std::nullptr_t" (aka "nullptr_t") for 1st argument
+      operator=(nullptr_t) noexcept
+      ^
+/opt/gcc-10.2.0/lib/gcc/x86_64-pc-linux-gnu/10.2.0/../../../../include/c++/10.2.0/bits/std_function.h:457:2: note: candidate template ignored: requirement "_Callable<bool (*)(const magmakv::MetaData &), std::__invoke_result<bool (*&)(const magmakv::MetaData &), const magma::Slice &> >::value" was not satisfied [with _Functor = bool (&)(const magmakv::MetaData &)]
+        operator=(_Functor&& __f)
+        ^
+/opt/gcc-10.2.0/lib/gcc/x86_64-pc-linux-gnu/10.2.0/../../../../include/c++/10.2.0/bits/std_function.h:466:2: note: candidate template ignored: could not match "reference_wrapper<type-parameter-0-0>" against "bool (*)(const magmakv::MetaData &)"
+        operator=(reference_wrapper<_Functor> __f) noexcept
+        ^
+
+</pre> ( https://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/23112/ )
+
+Compile error at /home/couchbase/jenkins/workspace/kv_engine-clang_tidy-master/kv_engine/engines/ep/src/kvstore/magma-kvstore/magma-kvstore.cc:603:46:
+error: no viable overloaded "=" [clang-diagnostic-error]
+ ( https://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/23112/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux-debug/job/master/1921/ : FAILURE
+
+Compile error at [2023-03-27T13:59:23.698Z] /home/couchbase/jenkins/workspace/kv_engine.linux-debug_master/kv_engine/engines/ep/src/kvstore/magma-kvstore/magma-kvstore.cc:603:57:
+error: no match for ?operator=? (operand types are ?magma::Magma::IsValueCompressedFn? {aka ?std::function<bool(const magma::Slice&)>?} and ?bool(const magmakv::MetaData&)?)
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.linux-debug/job/master/1921/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/12845/ : FAILURE
+
+Compile error at [2023-03-27T13:59:13.789Z] /home/couchbase/jenkins/workspace/kv_engine.libFuzzer_master/kv_engine/engines/ep/src/kvstore/magma-kvstore/magma-kvstore.cc:603:46:
+error: no viable overloaded "="
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/12845/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/12926/ : FAILURE
+
+Compile error at [2023-03-27T14:00:09.056Z] /home/couchbase/jenkins/workspace/kv_engine.aarch64-linux_master/kv_engine/engines/ep/src/kvstore/magma-kvstore/magma-kvstore.cc:603:57:
+error: no match for ?operator=? (operand types are ?magma::Magma::IsValueCompressedFn? {aka ?std::function<bool(const magma::Slice&)>?} and ?bool(const magmakv::MetaData&)?)
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/12926/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/24772/ : FAILURE
+
+Compile error at [2023-03-27T14:01:13.624Z] /Users/couchbase/workspace/workspace/kv_engine.macos_master_2/kv_engine/engines/ep/src/kvstore/magma-kvstore/magma-kvstore.cc:603:46:
+error: no viable overloaded "="
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/24772/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/26498/ : FAILURE
+
+Compile error at [2023-03-27T14:01:55.306Z] /home/couchbase/jenkins/workspace/kv_engine.threadsanitizer_master/kv_engine/engines/ep/src/kvstore/magma-kvstore/magma-kvstore.cc:603:46:
+error: no viable overloaded "="
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/26498/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/25644/ : FAILURE
+
+Compile error at [2023-03-27T13:59:57.057Z] ../kv_engine/engines/ep/src/kvstore/magma-kvstore/magma-kvstore.cc:603:57:
+error: no match for ?operator=? (operand types are ?magma::Magma::IsValueCompressedFn? {aka ?std::function<bool(const magma::Slice&)>?} and ?bool(const magmakv::MetaData&)?)
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/25644/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/33596/ : FAILURE
+
+Compile error at [2023-03-27T14:01:35.878Z] /home/couchbase/jenkins/workspace/kv_engine.ASan-UBSan_master/kv_engine/engines/ep/src/kvstore/magma-kvstore/magma-kvstore.cc:603:46:
+error: no viable overloaded "="
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/33596/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/23412/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/25181/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

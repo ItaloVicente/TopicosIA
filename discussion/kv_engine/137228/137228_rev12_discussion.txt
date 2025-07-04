@@ -1,0 +1,92 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-41510: Fix infinite loop due to HdrHistogram being reset
+
+Currently if a HdrHistogram has its reset() method called by one thread
+(T1) and is being read by another (T2) using an HdrHistoram::Iterator.
+There is the race that could cause the HdrHistoram::Iterator() to enter
+an infinite loop.
+
+This occurs as HdrHistogram's getNextValue() methods use HdrHistogam_c's
+hdr_iter_next() which intern uses the following function:
+static bool has_next(struct hdr_iter* iter)
+{
+        return iter->cumulative_count < iter->total_count;
+}
+Which logically checks that the total count the Iterator was
+initialize with is > than the sum of all the counts its read from the
+buckets in the histogram. The trouble is, that the reset() method
+changes the bucket counts back to 0. Thus, meaning the condition
+cumulative_count >= total_count may never be met.
+
+To fix this wrap the std::unique_ptr<struct hdr_histogram> with a
+folly::Synchronized<>. This allows us to take an exclusive lock on the
+pointer when performing a reset() of the histogram and allows us to
+ensure that no iterator is reading from the histogram, as the iterator
+takes a non exclusive read lock for the lifetime of the
+HdrHistogram::Iterator struct. This also ensures that
+HdrHistogram::resize() is thread safe as we now take a write lock.
+
+Change-Id: I8cf5eeb0ac3107ce20e915463be3db245c68c8b9
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Richard de Mellow
+Date: 2020-10-01 14:28:01.000000000
+Message: 
+Uploaded patch set 12.
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2020-10-01 14:28:31.000000000
+Message: 
+Patch Set 12:
+
+(1 comment)
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-10-01 14:41:40.000000000
+Message: 
+Patch Set 12: Code-Review-1
+
+(1 comment)
+Line:97, utilities/hdrhistogram.h -> I think these constructors are going to be error-prone given they only vary on (somewhat opaque) types of log_base / valuesUnitPerBucket etc.
+
+If this all traces back to making histRLockPtr non-public; might be simpler to just change that back to public for now, but make it const (so it cannot be unlocked once initial constructed, until it is destructed)?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-10-01 15:38:00.000000000
+Message: 
+Patch Set 12: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/6349/ : ABORTED
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/14015/ : FAILURE
+
+Failure of a CTest test [2020-10-01T14:57:20.163Z] 314/392 Test  #88: ep-engine_ep_unit_tests.HdrHistogramTest ....................................................................Child aborted ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/14015/ )
+
+AddressSanitizer issue: stack-use-after-scope ../kv_engine/engines/ep/tests/module_tests/thread_gate.h:69 in ThreadGate::isComplete(std::unique_lock<std::mutex> const&) ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/14015/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/3355/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/4828/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/26625/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/30794/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/6240/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/6120/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/5200/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2020-10-01 15:39:05.000000000
+MISMATCHED INLINE COMMENT
+Line:97, utilities/hdrhistogram.h -> made histRLockPtr private but also made HdrHistogram a friend Iterator
+----------------------------------------------------------------------------------------------------------------------

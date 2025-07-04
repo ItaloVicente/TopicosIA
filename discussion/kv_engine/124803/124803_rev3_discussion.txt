@@ -1,0 +1,83 @@
+======================================================================================================================
+DESCRIPTION:
+
+DefragmenterTest: Fix crash when test run standalone
+
+If DefragmenterTest is run by itself
+(e.g. --gtest_filter=*/DefragmenterTest.*") then it crashes during
+static destruction due to blowing the stack:
+
+    ... repeats until stack is exceeded ...
+    frame #216830: 0x00007fff61351e3e libc++.1.dylib` std::__1::__throw_out_of_range(char const*)  + 34
+    frame #216831: 0x00007fff613843c0 libc++.1.dylib` std::__1::__vector_base_common<true>::__throw_out_of_range() const  + 16
+[3] frame #216832: 0x000000010974546e libplatform_so.0.1.0.dylib` std::__1::vector<...>::at(this=0x0000000109795828 size=0, __n=0)  + 62 at vector:1560
+    frame #216833: 0x0000000109743a60 libplatform_so.0.1.0.dylib` CoreStore<folly::CachelinePadded<...>::get(this=0x0000000109795828)  + 48 at corestore.h:59
+    ...
+    frame #216838: 0x0000000101956cd5 ep-engine_ep_unit_tests` ::cb_malloc(size=31)  + 21 at cb_malloc_arena.cc:46
+    frame #216839: 0x0000000101956ad5 ep-engine_ep_unit_tests` operator new(count=31)  + 21 at global_new_replacement.cc:71
+    frame #216854: 0x00007fff61351e3e libc++.1.dylib` std::__1::__throw_out_of_range(char const*)  + 34
+[2] frame #216855: 0x00007fff613843c0 libc++.1.dylib` std::__1::__vector_base_common<true>::__throw_out_of_range() const  + 16
+    frame #216856: 0x000000010974546e libplatform_so.0.1.0.dylib` std::__1::vector<folly::CachelinePadded<...> >::at(this=0x0000000109795828 size=0, __n=0)  + 62 at vector:1560
+    frame #216857: 0x0000000109743a60 libplatform_so.0.1.0.dylib` CoreStore<folly::CachelinePadded<...>::get(this=0x0000000109795828)  + 48 at corestore.h:59
+[1] frame #216858: 0x0000000109743b76 libplatform_so.0.1.0.dylib` cb::JEArenaCoreLocalTracker::memDeallocated(index='\0', size=3072)  + 70 at je_arena_corelocal_tracker.cc:132
+    ...
+    frame #216861: 0x0000000101956fad ep-engine_ep_unit_tests` cb::_ArenaMalloc<...>::sized_free(ptr=0x0000000109a4b000, size=2976)  + 29 at cb_arena_malloc.h:169
+    frame #216862: 0x0000000101956f6b ep-engine_ep_unit_tests` ::cb_sized_free(ptr=0x0000000109a4b000, size=2976)  + 43 at cb_malloc_arena.cc:71
+    frame #216863: 0x00000001097246cd libplatform_so.0.1.0.dylib` operator delete(ptr=0x0000000109a4b000, size=2976)  + 29 at global_new_replacement.cc:92
+    ...
+    frame #216872: 0x0000000109744b15 libplatform_so.0.1.0.dylib` std::__1::vector<folly::CachelinePadded<...>::~vector(this=0x0000000109795828 size=0)  + 21 at vector:550
+    frame #216873: 0x0000000109744af5 libplatform_so.0.1.0.dylib` CoreStore<...>::~CoreStore(this=0x0000000109795828)  + 21 at corestore.h:50
+    ...
+    frame #216877: 0x00007fff642cf446 libsystem_c.dylib` __cxa_finalize_ranges  + 319
+    frame #216878: 0x00007fff642cf71c libsystem_c.dylib` exit  + 55
+    frame #216879: 0x00007fff64226804 libdyld.dylib` start  + 8
+
+- Note at (1) we attempt to account freed memory to coreLocal variable
+  with index=0 (i.e. the first CPU core).
+
+- However at (2) this throws an out_of_range exception as the
+  coreAllocated vector has size=0 (i.e. it has already been
+  destructed).
+
+- In the course of throwing the exception memory needs to be
+  allocated, this results in (3) a call to memAllocated() which again
+  attempts to access the first element (index=0) of an empty vector,
+  throwing another exception. This repeats until the stack is
+  exhausted and the program crashes.
+
+Fix by ensuring that during test teardown there's a switchFromClient()
+call, mirroring the switchToClient call in the test setup. That means
+that the coreLocal index for the current thread is set to
+NoClientIndex which skips core local tracking.
+
+Change-Id: I320010abaea7718d4009b7b2b15dee75d3fe0823
+Reviewed-on: http://review.couchbase.org/c/kv_engine/+/124803
+Reviewed-by: Paolo Cocchi <paolo.cocchi@couchbase.com>
+Tested-by: Build Bot <build@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2020-04-03 09:29:40.000000000
+Message: 
+Change has been successfully cherry-picked as 9d826c49b216bc00dbf2b1286bc93b0e9b6aa78f by Dave Rigby
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-04-03 09:29:47.000000000
+Message: 
+Patch Set 3:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/3484/ (1/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-04-03 10:26:17.000000000
+Message: 
+Patch Set 3:
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv-engine-master-perf/3165/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/3484/ : SUCCESS'
+----------------------------------------------------------------------------------------------------------------------

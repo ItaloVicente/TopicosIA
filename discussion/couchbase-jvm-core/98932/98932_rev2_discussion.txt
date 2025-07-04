@@ -1,0 +1,133 @@
+======================================================================================================================
+DESCRIPTION:
+
+JVMCBC-564: Make sure kv service is only enabled if in nodes list.
+
+Motivation
+----------
+The SDK needs to iterate the nodesExt as part of the config because
+some global services (i.e. N1QL) are not to be found in the
+traditional "nodes" list of the config. With KV, this turns out
+to be a problem during rebalance-in scenarios.
+
+Especially during delta-node recovery and memcached buckets, the
+problem amplifies because nodesExt holds all nodes that are part
+of the cluster with their services, while the nodes list only
+holds the nodes that are currently active for the given bucket.
+
+If the SDK only uses nodesExt (which it does now), it tries to
+connect to kv buckets immediately as they become available, even
+if they are not active for this bucket yet. For couchbase and
+ephemeral buckets this is not a big issue because there the
+movement of vbuckets gradually moves over the load, but with
+memcache buckets as soon as the node pops up in the config
+it is part of the ketama ring and ops are dispatched to it
+right away.
+
+Modifications
+-------------
+To remedy this situation, and also to keep the change scope
+as minimal as possible, the part of the config loading where
+we iterate nodesExt now explicitly checks if a corresponding
+entry in the nodes list is available - and if not, it removes
+the KV service from the service list. This will make sure that
+only nodes that are also in the nodes list will end up in the
+ketama ring and therefore not have ops dispatched too early.
+
+The astute reader might immediately ask him/herself if the
+view service should also be disabled because it is colocated
+with kv. And the answer is - it likely should, but to keep the
+scope small this change is not made. The good news is that
+this doesn't really matter because the code somewhere else
+only dispatches the op to a view node if there is at least
+one vbucket active on that node, so views won't be affected
+by this issue (and memcached buckets do not have views
+anyways).
+
+A test config has been added from the reproduction system
+to make sure this won't surface again.
+
+Result
+------
+This changeset avoids connecting to kv nodes too early
+(both memcache and couchbase, but much more important
+for the former) which in turn prevents INVALID_ARGUMENTS
+responses, failing ops and disconnects.
+
+Change-Id: I17e6feef72bb007bf5b911ad993d295854ae7978
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Michael Nitschinger
+Date: 2018-08-29 11:44:13.000000000
+Message: 
+Uploaded patch set 2: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-08-29 11:44:21.000000000
+Message: 
+Patch Set 2:
+
+Build Started http://sdkbuilds.sc.couchbase.com/job/couchbase-jvm-core-test/502/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-08-29 11:47:10.000000000
+Message: 
+Patch Set 2: Verified+1
+
+Build Successful 
+
+http://sdkbuilds.sc.couchbase.com/job/couchbase-jvm-core-test/502/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Michael Nitschinger
+Date: 2018-08-29 11:58:44.000000000
+Message: 
+Abandoned
+----------------------------------------------------------------------------------------------------------------------
+Author: Michael Nitschinger
+Date: 2018-08-29 11:59:08.000000000
+Message: 
+Restored
+----------------------------------------------------------------------------------------------------------------------
+Author: Subhashni Balakrishnan
+Date: 2018-08-29 14:16:15.000000000
+Message: 
+Patch Set 2: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------
+Author: Graham Pople
+Date: 2018-08-29 14:18:32.000000000
+Message: 
+Patch Set 2:
+
+(2 comments)
+Line:77, src/main/java/com/couchbase/client/core/config/AbstractBucketConfig.java -> nodeInfos[i] definitely always maps to nodeExt[i]?
+
+Line:78, src/main/java/com/couchbase/client/core/config/AbstractBucketConfig.java -> Bit weird/slow to catch an exception during expected flow, no?  Couldn't we just check the size of nodeInfos?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Finlay
+Date: 2018-08-29 15:37:41.000000000
+Message: 
+Patch Set 2:
+
+(2 comments)
+Line:77, src/main/java/com/couchbase/client/core/config/AbstractBucketConfig.java -> Yes, this is guaranteed by the REST API. Implementation-wise you can see how it's done as follows in a number of our releases. 
+http://src.couchbase.org/source/search?project=4.5.1&project=spock&project=trunk&project=vulcan&q=%22NEIs+%3D+build_nodes_ext%28AllServers%22&defs=&refs=&path=&hist=&type=
+
+In each case the AllServers that's passed to the build_nodes_ext function is built by taking the list of Servers (which are the nodes on which the bucket is deployed) and then the rest of the active nodes are appended to the end of the list.
+
+Line:78, src/main/java/com/couchbase/client/core/config/AbstractBucketConfig.java -> I'm with Graham. I'd rather get the lengths ahead of entering the loop and do a length check rather than catch index out of bounds.
+
+However, Michael - you already have your +2. I'll leave it to your discretion if you want to change your patch now or do it later (or not at all. :-))
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Finlay
+Date: 2018-08-29 15:38:47.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:77, src/main/java/com/couchbase/client/core/config/AbstractBucketConfig.java -> When I say "REST API" this also includes the bucket config payload (the CCCP) that's sent to memcached of course.
+
+----------------------------------------------------------------------------------------------------------------------

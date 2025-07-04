@@ -1,0 +1,170 @@
+======================================================================================================================
+DESCRIPTION:
+
+Allow the exclusions of refs prefixes from bitmap
+
+When running a GC.repack() against a repository with over one
+thousands of refs/heads and tens of millions of ObjectIds,
+the calculation of all bitmaps associated with all the refs
+would result in an unreasonable big file that would take up to
+several hours to compute.
+
+Test scenario: repo with 2500 heads / 10M obj Intel Xeon E5-2680 2.5GHz
+Before this change: 5h
+After this change and 2300 heads excluded: 90s
+
+Having such a large bitmap file is also slow in the runtime
+processing and have negligible or even negative benefits, because
+the time lost in reading and decompressing the bitmap in memory
+would not be compensated by the time saved by using it.
+
+It is key to preserve the bitmaps for those refs that are mostly
+used in clone/fetch and give the ability to exlude some refs
+prefixes that are known to be less frequently accessed, even
+though they may actually be actively written.
+
+Example: Gerrit sandbox branches may even be actively
+used and selected automatically because its commits are very
+recent, however, they may bloat the bitmap, making it ineffective.
+
+A mono-repo with tens of thousands of developers may have
+a relatively small number of active branches where the
+CI/CD jobs are continuously fetching/cloning the code. However,
+because Gerrit allows the use of sandbox branches, the
+total number of refs/heads may be even tens to hundred
+thousands.
+
+Change-Id: I466dcde69fa008e7f7785735c977f6e150e3b644
+Signed-off-by: Luca Milanesio <luca.milanesio@gmail.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Luca Milanesio
+Date: 2023-01-12 19:54:51.000000000
+Message: 
+Patch Set 16: Patch Set 15 was rebased
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2023-01-12 19:55:03.000000000
+Message: 
+Patch Set 16:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/5930/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2023-01-12 20:06:09.000000000
+Message: 
+Patch Set 16: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/5930/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Jacek Centkowski
+Date: 2023-01-13 07:33:07.000000000
+Message: 
+Patch Set 16: Code-Review+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2023-01-17 15:38:31.000000000
+Message: 
+Patch Set 16:
+
+(8 comments)
+Line:12, /COMMIT_MSG -> what, in your experience, is a too big bitmap index file ?
+
+Line:17, /COMMIT_MSG -> which configuration did you use for pack.threads and pack.windowMemory ?
+
+Line:18, /COMMIT_MSG -> How do you identify the refs to exclude ?
+Did you measure the impact on performance of fetches from included/excluded refs ?
+How is the impact on cloning the complete repo ?
+
+Line:21, /COMMIT_MSG -> Did you profile this tradeoff ?
+
+Line:799, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/GC.java -> excludedRefs ?
+
+Line:799, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/GC.java -> nit: this line is too wide
+
+Line:1132, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/GC.java -> bitmapExcludedRefs ?
+
+Line:1277, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/GC.java -> bitmapExcludedRefs ?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2023-01-18 00:48:26.000000000
+Message: 
+Patch Set 16:
+
+(8 comments)
+Line:12, /COMMIT_MSG -> In [1] Colby makes the example of the Linux Kernel bitmap of just 10KBytes. In my personal experience, they should be max 1MByte.
+
+When running 'git gc' on the Gerrit bare repository, with the addition of 800 feature branches, the bitmap is 6.6MB. When running 'jgit gc' on the same repository (no exclusions), the bitmap is 2.7MB. Finally, when excluding stable branches, the bitmap is just 679k.
+
+Clone times with the 3 bitmaps:
+- 6.6MB bitmap : clone = 20s
+- 2.7MB bitmap : clone = 14s
+-  679k bitmap : clone = 12s
+
+Would the above suffice? Would you suggest to include this into the commit message?
+
+[1] https://docs.google.com/presentation/d/1t2qzSO4z5MbrN21Cz4RrLWz9IZ5ylJNwQassajKyPk8/htmlpresent
+
+Line:17, /COMMIT_MSG -> > which configuration did you use for pack.threads and pack.windowMemory ?
+
+None: they were the default.
+- pack.threads = number of CPUs (48)
+- pack.windowMemory = unlimited
+
+Line:18, /COMMIT_MSG -> > How do you identify the refs to exclude ?
+
+They are configured by the project owner. In my experience, the ones that are candidate to be excluded are:
+- sandbox branches
+- feature branches
+
+> Did you measure the impact on performance of fetches from included/excluded refs ?
+
+The intermediate fetches rarely make use of the bitmap, because they do need only part of the objects and not the entire pack. The current algorithm in JGit discards the bitmap altogether in that case.
+
+Bottom line: fetchign the individual refs did not make use of the bitmap before, so there is no difference.
+
+> How is the impact on cloning the complete repo ?
+
+There is a 35% performance improvement in my tests when cloning the complete repo. Bear in mind that the bitmap does not have to cover the complete set of commits. A complete bitmap would be just too big to store and process.
+
+However, selecting the commits that are more likely to be useful and locale when cloning would allow to have a much better optimisation of the space utilised of the bitmap vs. the most relevant history.
+
+Line:21, /COMMIT_MSG -> I did not write a specific Bitmap benchmark.
+Let me follow that up on master adding that.
+
+Improving the performance of the generation, loading and use of the bitmap would have a global positive effect on the overall clone / fetch.
+
+Line:799, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/GC.java -> Done
+
+Line:799, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/GC.java -> Done
+
+Line:1132, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/GC.java -> Done
+
+Line:1277, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/GC.java -> Done
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2023-01-31 15:51:31.000000000
+MISMATCHED INLINE COMMENT
+Line:12, /COMMIT_MSG -> Ack
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2023-01-29 23:51:27.000000000
+MISMATCHED INLINE COMMENT
+Line:12, /COMMIT_MSG -> By excluding the sandbox branches, on a repository that had over 22k of them, I managed to reduce the bitmap by 90%.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2023-01-23 21:53:10.000000000
+MISMATCHED INLINE COMMENT
+Line:17, /COMMIT_MSG -> pack.windowMemory can lead to OOM errors, it limits the size of DeltaWindow
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2023-01-31 15:51:31.000000000
+MISMATCHED INLINE COMMENT
+Line:21, /COMMIT_MSG -> Ack
+----------------------------------------------------------------------------------------------------------------------

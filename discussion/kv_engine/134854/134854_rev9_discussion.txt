@@ -1,0 +1,94 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-39864: Generate correct collection meta when multiple events exist
+
+It is possible for a single commit batch to contain multiple system
+events for a single collection-id. This occurs if state is lost from
+the cluster configuration and then we make forward progress. For
+example KV could end up in a single flush batch
+
+1) Create collection id:8 name:fruit
+2) mutate(key={fruit, apple})
+3) Drop collection id:8
+4) Create collection id:8 name:vegetable
+
+If that sequence of events occurred KV must generate correct collection
+meta-data. KV stores 4 'pieces' of meta-data so that we can recover the
+collection state at warm-up, these are:
+
+1) A list of open collections (id, name, TTL, start-seqno)
+2) A list of dropped collections (id, start-seqno, end-seqno)
+3) A list of open scopes (id, name, start-seqno)
+4) The highest manifest ID (of the events)
+
+So when our sequence of events occurs to the same collection:
+
+1) generate meta-data that says only collection with id:8,
+   name:vegetable is open
+2) collection with id:8 is dropped (with the start/end seqnos covering
+   its span)
+
+Without the fixes in this commit we generated meta-data that would
+cause a failure at warm-up. For example each collection create in a
+single commit batch, lead to a new (duplicate) entry in the list of
+open collections.
+
+This commit contains a number of unit tests that generate such
+conditions and validate the final meta-data.
+
+A number of issues were found that contributed to failure when running
+various create/drop cycles.
+
+1) The VB::Manifest created new checkpoints only for drop-events. This
+   is code which wrongly made the assumption that create(id:8),
+   drop(id:8) was the only sequence, so only needed to split
+   checkpoints on the drop.
+2) The Flusher was de-duplicating when multiple events occurred, this
+   meant that the code generating the collection meta-data would miss
+   any collection drops that occurred between two creates.
+3) The Collections::KVStore 'commit meta-data' used data-structures
+   that allowed us to capture multiple events and the 'encode'
+   functions blindly 'copied' those multiple events to the output.
+
+Summary of fixes:
+
+1) Every system event splits the checkpoint
+2) The flusher still de-duplicates system events when writing to the
+   KVStore, but all system-events (even de-duped ones) now 'inform'
+   the KVStore of their presence.
+3) maps are now used so we can detect if multiple events occurred to
+   the same collection/scope and the encode functions now generate
+   the correct meta-data when create/drop cycles occur.
+
+Change-Id: Ia4d8b6071b3ca15aba04ab02bd77861039beee27
+Reviewed-on: http://review.couchbase.org/c/kv_engine/+/134854
+Tested-by: Build Bot <build@couchbase.com>
+Reviewed-by: Dave Rigby <daver@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2020-09-02 14:29:03.000000000
+Message: 
+Change has been successfully cherry-picked as 952a228e910e1709646ba7441f35cfc2e9b29aa2 by Dave Rigby
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-09-02 14:44:19.000000000
+Message: 
+Patch Set 9:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/4840/ (1/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-09-02 16:11:28.000000000
+Message: 
+Patch Set 9:
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/4840/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-master-perf/3686/ : SUCCESS'
+----------------------------------------------------------------------------------------------------------------------

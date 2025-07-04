@@ -1,0 +1,156 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-34628 [2/2] SR: Avoid race during SyncWrite completion
+
+Problem
+-------
+
+If a bucket accepting SyncWrites has >1 replica configured then it is
+possible for SyncWrites to be incorrectly committed out-of-order (with
+respect to their seqnos). The consequence is that DCP_COMMIT messages
+will be rejected by the replicas:
+
+    PassiveDurabilityMonitor::completeSyncWrite: Pending resolution for 'SW ...' but received unexpected commit for ...
+
+If two (or more) replicas send a SEQNO_ACK to the active node, and the
+DCP connections for those replicas are associated with at least 2
+different front-end threads, then it is possible for
+ActiveDurabilityMonitor::seqnoAckReceived() to be called by two
+different threads at the same time.
+
+If the acknowledged seqnos result in at least one prepared SyncWrite
+to be committed for each connection, then while SyncWrites are removed
+from the DurabilityMonitor in the correct order, they can be committed
+(via VBucket::commit()) out of order.
+
+For example, consider the following scenario:
+
+    Active:   1:PRE(a) 2:PRE(b)
+    Replica1:                    SEQNO_ACK(1)
+    Replica2:                    SEQNO_ACK(2)
+
+    time ----------------------------------------->
+
+The two SEQNO_ACKs are processed concurrently, calling
+ActiveDurabilityMonitor::seqnoAckReceived() (comments removed for
+brevity):
+
+    ENGINE_ERROR_CODE ActiveDurabilityMonitor::seqnoAckReceived(
+            const std::string& replica, int64_t preparedSeqno) {
+        Container toCommit;
+        state.wlock()->processSeqnoAck(replica, preparedSeqno, toCommit);
+
+        // Commit the verified SyncWrites
+        for (const auto& sw : toCommit) {
+            commit(sw);
+        }
+
+        return ENGINE_SUCCESS;
+    }
+
+The actual processing of Seqno Acks is serialised via state.wlock() so
+there's no problem there, however consider if each thread ended up
+with 1 item in their local toCommit variable - COMMIT(a) and
+COMMIT(b). There is no serialisation on the calls to commit(), so (b)
+could be committed before (a). This breaks the in-order commit
+requirements.
+
+(Note the above only mentions Commit of SyncWrites, however exactly
+the same problem exist for Abort.)
+
+Solution
+--------
+
+At a high level we need to ensure the SyncWrites are completed
+in-order. The simplest approach would be to keep the ActiveDM::state
+locked while calling commit(), however this would introduce a
+potential deadlock (lock-order inversion between the Collections
+Manifest lock and the ActiveDM::State lock as they would be acquired
+in different orders in two different situations:
+
+Case 1: KVBucket::set():
+
+    * KVBucket:set (also add, replace...):
+      LOCK VB::Manifest
+          * VBucket::set()
+              * VBucket::checkDurabilityRequirements()
+                LOCK ActiveDM::State
+                ...
+
+Case 2: ActiveDurabilityMonitor::seqnoAckReceived():
+
+    * ActiveDurabilityMonitor::seqnoAckReceived()
+      LOCK ActiveDM::State
+          * ActiveDurabilityMonitor::commit
+            LOCK VB::Manifest
+
+As such, a slightly more complex solution is needed. This is to
+introduce a separate 'completedQueue' member of ActiveDM which holds
+in FIFO order all completed SyncWrites, and from which VB::commit /
+VB::abort() will dequeue items.
+
+This avoids the above deadlock by changing case 2 to unlock the
+ActiveDM::State lock before we call ActiveDM::commit():
+
+    * ActiveDurabilityMonitor::seqnoAckReceived()
+      LOCK ActiveDM::State
+      ... transfer completed SyncWrites to completedQueue
+      UNLOCK ActiveDM::State
+          * ActiveDurabilityMonitor::commit
+            LOCK VB::Manifest
+
+Implementation
+--------------
+
+Use folly's Unbounded, single producer/single consumer queue for the
+completedQueue. (Single producer and single consumer are required to
+ensure SyncWrites are both enqueued and dequeued in the original
+commit order).
+
+To ensure a single producer, require that enqueue()ing a completed
+SyncWrite has a non-const reference to the ActiveDM::state, which in
+turn requires that has been write (exclusively) locked.
+
+To ensure a single consumer, add a ConsumerLock to the completedQueue
+which must be locked (and passed into try_dequeue()).
+
+Change-Id: Ifbb5f74523825b82285ee22aeeaad7c239631d9f
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2019-06-26 16:30:59.000000000
+Message: 
+Uploaded patch set 7: Patch Set 6 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-06-26 16:36:22.000000000
+Message: 
+Patch Set 7: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/18427/ : ABORTED
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/18427/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/12480/ : ABORTED
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/12480/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/20698/ : ABORTED
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/20698/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/2350/ : ABORTED
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/2350/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/5284/ : ABORTED
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/5284/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/19320/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

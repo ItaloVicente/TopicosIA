@@ -1,0 +1,179 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-44022 Obfuscate sessionid in login expired event
+
+Prior to this fix the sessionid in the login expired audit event was not
+getting obfuscated. The reason is that session_expired doesn't have an
+associated request and so information is specified in Params. When the
+audit event is handled by prepare/2 the "body" is created with the
+sessionid and then appended with the Params. As a result the sessionid
+would be in the property list twice.
+
+Change-Id: I4dcdcd2cf9a87583d55fedf7bcacfbcab1e7c60f
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Steve Watanabe
+Date: 2021-03-09 21:29:20.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-03-09 21:29:36.000000000
+Message: 
+Patch Set 1: Well-Formed+1
+
+Permission granted to commit: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/227616/artifact/restricted.html : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-03-09 22:14:15.000000000
+Message: 
+Patch Set 1:
+
+make simple-test
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-03-09 22:14:23.000000000
+Message: 
+Patch Set 1:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-mad-hatter-simple-test/105/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-03-09 22:58:47.000000000
+Message: 
+Patch Set 1: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/ns-server-mad-hatter-simple-test/105/ : FAILURE
+
+ERROR: rebalance_in_with_ops (rebalance.rebalancein.RebalanceInTests)
+ ( http://cv.jenkins.couchbase.com/job/ns-server-mad-hatter-simple-test/105/ )
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2021-03-10 00:01:15.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:476, src/ns_audit.erl -> I would do it this way:
+
+Props = case Req of
+            undefined ->
+               [];
+            _ ->
+               [{user, get_identity(menelaus_auth:get_identity(Req))},
+                {token, menelaus_auth:get_token(Req)},
+                {remote, get_remote(Req)}]
+         end,
+Body = misc:update_proplist([{timestamp, now_to_iso8601(os:timestamp())},
+                             {remote, undefined},
+                             {sessionid, undefined},
+                             {real_userid, undefined}], Params + Props)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2021-03-10 00:04:32.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:476, src/ns_audit.erl -> Correction:
+
+Props = case Req of
+            undefined ->
+               [];
+            _ ->
+               [{real_userid, get_identity(menelaus_auth:get_identity(Req))},
+                {sessionid, menelaus_auth:get_token(Req)},
+                {remote, get_remote(Req)}]
+         end,
+Body = misc:update_proplist([{timestamp, now_to_iso8601(os:timestamp())},
+                             {remote, undefined},
+                             {sessionid, undefined},
+                             {real_userid, undefined}], Params + Props)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-03-10 00:13:27.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:476, src/ns_audit.erl -> If "sessionid" is in both Params and Props is it deterministic which will be used?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-03-10 00:21:42.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:476, src/ns_audit.erl -> I like your suggestion of using misc:update_proplist.  What do you think of:
+
+prepare(Req, Params) ->
+    {User, Token, Remote, Local} =
+        case Req of
+            undefined ->
+                {undefined, undefined, undefined, undefined};
+            _ ->
+                {get_identity(menelaus_auth:get_identity(Req)),
+                 menelaus_auth:get_token(Req),
+                 get_remote(Req), get_local(Req)}
+        end,
+    Body = [{timestamp, now_to_iso8601(os:timestamp())},
+            {remote, Remote},
+            {local, Local},
+            {sessionid, Token},
+            {real_userid, User}],
+
+    %% Items specified by caller take precedence.
+    Body1 = misc:update_proplist(Body, Params),
+
+    prepare_list(Body1).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2021-03-10 00:37:25.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:476, src/ns_audit.erl -> I think there's no reason to use a tuple and then convert it to the proplist, if you can start from the proplist.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2021-03-10 00:44:36.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:476, src/ns_audit.erl -> This will be the correct way that doesn't create any duplicates:
+
+IdentityProps = case Req of
+            undefined ->
+               [{real_userid, undefined},
+                {sessionid, undefined},
+                {remote, undefined}];
+            _ ->
+               [{real_userid, get_identity(menelaus_auth:get_identity(Req))},
+                {sessionid, menelaus_auth:get_token(Req)},
+                {remote, get_remote(Req)}]
+         end,
+Body = misc:update_proplist([{timestamp, now_to_iso8601(os:timestamp())} | IdentityProps], Params)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-03-10 00:46:10.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:476, src/ns_audit.erl -> That looks good...will go with it.
+
+----------------------------------------------------------------------------------------------------------------------

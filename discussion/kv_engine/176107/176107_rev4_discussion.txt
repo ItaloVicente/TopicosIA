@@ -1,0 +1,77 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-49641 Add config for Magma's memory optimised write
+
+Enable it only for serverless where it is actually needed to reduce
+memory consumption at the cost of increased flush times.
+
+In future we'll do some memory quota tuning so that it is triggered less
+often and do some enhancements to reduce the frontend write times.
+
+Change-Id: I33eb28386d72333aff2d3bf1dd6ebaf1e7c5cbe9
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Rohan Suri
+Date: 2022-06-14 10:36:56.000000000
+Message: 
+Uploaded patch set 4: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-06-15 13:17:38.000000000
+Message: 
+Patch Set 4: Code-Review+1
+
+(1 comment)
+Line:1353, engines/ep/configuration.json -> Might be useful to expand here on the cons of this (this and hence why we wouldn't want to enable always).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Rohan Suri
+Date: 2022-06-17 07:10:27.000000000
+MISMATCHED INLINE COMMENT
+Line:1353, engines/ep/configuration.json -> Have elaborated the comment, have a look.
+
+Regarding the naming, I feel anything else would be going too much into the implementation details. For example, whether the flush is sync or async, etc. The main highlight/goal is writes will optimise for memory (as in the classic space vs time tradeoff) which has to be mentioned in the name.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-06-15 15:54:57.000000000
+MISMATCHED INLINE COMMENT
+Line:1353, engines/ep/configuration.json -> Thanks.
+
+So why does this increase write latency - is that assuming there's fewer kv_engine writer threads than Magma backend threads (and hence writes will potentially take longer as they are not being parallelised across as many threads)?
+
+If so, is this a motivation to increase the number of kv_engine writer threads, and _always_ flush to disk (memtable/WAL) on the kv_engine writer thread?
+----------------------------------------------------------------------------------------------------------------------
+Author: Rohan Suri
+Date: 2022-06-15 15:45:28.000000000
+MISMATCHED INLINE COMMENT
+Line:1353, engines/ep/configuration.json -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Rohan Suri
+Date: 2022-06-15 16:28:10.000000000
+MISMATCHED INLINE COMMENT
+Line:1353, engines/ep/configuration.json -> > So why does this increase write latency 
+
+In normal operation, we write the batch to WAL and copy it into memtable. The creation of SSTables (i.e. memtable flushing) is done in the background. Hence the frontend writer latency is only dominated by the time it takes to write to WAL.
+
+If memory optimised writes is enabled and if copying a write batch into memtable will result in Magma exceeding its WriteCacheQuota, we avoid the copy. Instead 
+we write to WAL and create the SSTables on the frontend writer thread itself. So now we're doing more work than before and hence it increases write latency.
+
+> If so, is this a motivation to increase the number of kv_engine writer threads, and _always_ flush to disk (memtable/WAL) on the kv_engine writer thread?
+
+That would help in increasing write throughput, but won't reduce the write latency.
+
+We'll either have to do some WriteCacheQuota tuning and allow it more quota so that this condition is triggered less often OR do the write to WAL and SSTable creation in parallel to cut down the latency.
+
+Some more details in this commit message:
+https://github.com/couchbase/magma/commit/e2ab15c40741c279b4fe71e642aff401943b6efd
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-06-16 09:04:06.000000000
+MISMATCHED INLINE COMMENT
+Line:1353, engines/ep/configuration.json -> Thanks for the detailed explanation. I think it would be useful to expand the descriotion in config.json to explain we only perform the memtable flush in the calling thread _if_ the memory quota has been reached. I think this is significant as in steady-state we "should" not need to flush in calling thread, but if we are under memory pressure then we will (and also add backpressure back to kv-engine which is very important).
+
+Furthermore, I think renaming from "magma_optimiszed_writes" would be beneficial - "memory_optimized_writes" is pretty generic and doesn't tell one much about what this does unless you already know. Can we describe the fact writes are synchrohronous if memory limit is reached or similar?
+----------------------------------------------------------------------------------------------------------------------

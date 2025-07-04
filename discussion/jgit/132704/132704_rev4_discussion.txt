@@ -1,0 +1,103 @@
+======================================================================================================================
+DESCRIPTION:
+
+Support reading and writing cookies.
+
+The git config entries "http.cookieFile" and
+"http.saveCookies" are correctly evaluated.
+
+Bug: 488572
+Change-Id: Icfeeea95e1a5bac3fa4438849d4ac2306d7d5562
+Signed-off-by: Konrad Windszus <konrad_w@gmx.de>
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Konrad Windszus
+Date: 2018-11-20 15:05:21.000000000
+Message: 
+Uploaded patch set 4.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-11-20 15:35:01.000000000
+Message: 
+Patch Set 4:
+
+Build Started https://ci.eclipse.org/jgit/job/jgit.gerrit/14902/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-11-20 16:13:06.000000000
+Message: 
+Patch Set 4: Verified-1
+
+Build Failed 
+
+https://ci.eclipse.org/jgit/job/jgit.gerrit/14902/ : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2018-11-20 21:12:04.000000000
+Message: 
+Patch Set 4: Code-Review-1
+
+(13 comments)
+Line:295, org.eclipse.jgit/src/org/eclipse/jgit/transport/HttpConfig.java -> So if there is a http.<url> section, but it doesn't have a http.<url>.cookieFile setting, a possibly existing http.cookieFile setting is ignored. Is that correct? For the other keys the logic was that absent a URL-specific setting, an existing global setting would be taken.
+
+Line:108, org.eclipse.jgit/src/org/eclipse/jgit/transport/NetscapeCookieFile.java -> @NonNull Date
+
+Line:120, org.eclipse.jgit/src/org/eclipse/jgit/transport/NetscapeCookieFile.java -> @NonNull Date
+
+Line:153, org.eclipse.jgit/src/org/eclipse/jgit/transport/NetscapeCookieFile.java -> If creationDate is @NonNull Date, this can be removed.
+
+Line:156, org.eclipse.jgit/src/org/eclipse/jgit/transport/NetscapeCookieFile.java -> Or return null? Why load expired cookies at all?
+
+Line:185, org.eclipse.jgit/src/org/eclipse/jgit/transport/NetscapeCookieFile.java -> I think the temp file should be created in the same directory as the target file. ATOMIC_MOVE may fail if the system tmp directory and the target are on different filesystems.
+
+Maybe using JGit's LockFile mechanism is a good idea all the same, even if it doesn't prevent native git interfering, it will at least synchronize JGit instances in different threads or even different processes correctly.
+
+Line:195, org.eclipse.jgit/src/org/eclipse/jgit/transport/NetscapeCookieFile.java -> Something is wrong with the synchronization. If we have two parallel requests A and B, we may get
+
+A: read cookies
+B: read cookies
+A: update a cookie C1
+B: update another cookie C2
+A: Write temp file jgit-cookies-file-A
+B: Write temp file jgit-cookies-file-B
+A: Perform the move
+B: Perform the move: update of cookie C1 is lost.
+
+Line:224, org.eclipse.jgit/src/org/eclipse/jgit/transport/NetscapeCookieFile.java -> Why write expired cookies at all?
+
+Line:229, org.eclipse.jgit/src/org/eclipse/jgit/transport/NetscapeCookieFile.java -> The way you use these dates will mean that a read-do something-write cycle will advance the expirationdate even for untouched cookies. I don't think that's correct.
+
+Line:678, org.eclipse.jgit/src/org/eclipse/jgit/transport/TransportHttp.java -> ';' (character; single quotes; otherwise you'll need a NON-NLS again.
+
+Line:977, org.eclipse.jgit/src/org/eclipse/jgit/transport/TransportHttp.java -> This is strange. Logging the exception will usually show its stack trace and also the cause, so there's no need to add the exception to the message.
+
+Line:1056, org.eclipse.jgit/src/org/eclipse/jgit/transport/TransportHttp.java -> This will take the current Locale. While it shouldn't matter since host names should be US-ASCII, it might be safer to use Locale.ROOT here.
+
+Line:1066, org.eclipse.jgit/src/org/eclipse/jgit/transport/TransportHttp.java -> You don't really need to take a substring here. This allocates a new object and copies bytes, and is called frequently, so I think optimizing this a bit is worth the trouble. How about
+
+  return host.charAt(host.length() - cookieDomain.length() - 1) == '.';
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Konrad Windszus
+Date: 2018-11-21 13:55:25.000000000
+Message: 
+Patch Set 4:
+
+(3 comments)
+Line:185, org.eclipse.jgit/src/org/eclipse/jgit/transport/NetscapeCookieFile.java -> I will look at that in detail but to me it is not clear for how long you want to lock the cookies file? I think even with locking it is impossible to prevent a race condition like outlined in the comment below.
+
+Line:195, org.eclipse.jgit/src/org/eclipse/jgit/transport/NetscapeCookieFile.java -> This is correct but I don't have a good idea on how to prevent that. Any idea how the other processes/threads could potentially be forced to reload the cookie files once it is touched by another process/thread. I think we just have to live with it.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2018-11-21 18:14:10.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:195, org.eclipse.jgit/src/org/eclipse/jgit/transport/NetscapeCookieFile.java -> I disagree. You just need an object representing the cookie file. That can contain the FileSnapshot. It can use the LockFile mechanism to lock a file on disk and it can re-read the file after having locked it, but before writing, and merge the changes into that file if the file has changed since it was last read.
+
+In the scenario I outlined above B would notice that A has modified the file since B read it, would reload it (including A's change), merge this with its own changes, write the file, and then unlock it.
+
+----------------------------------------------------------------------------------------------------------------------

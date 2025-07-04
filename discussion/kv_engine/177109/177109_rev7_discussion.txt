@@ -1,0 +1,156 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-52675: Add PagingVisitor benchmark
+
+Add a benchmark for the PagingVisitor which measures how long
+it takes to "visit" a vBucket. This measures how long it takes to
+page out the required amount of items (memory) from the vBucket.
+The benchmarks also logs the number of evicted items.
+
+$ time ./ep_engine_benchmarks --benchmark_filter=PagingVisitor
+2022-07-06T08:12:16+01:00
+Running ./ep_engine_benchmarks
+Run on (10 X 2400 MHz CPU s)
+CPU Caches:
+  L1 Data 64 KiB (x10)
+  L1 Instruction 128 KiB (x10)
+  L2 Unified 4096 KiB (x5)
+Load Average: 1.03, 3.65, 8.50
+----------------------------------------------------------------------------------------------------------------------
+Benchmark                                                            Time             CPU   Iterations UserCounters...
+----------------------------------------------------------------------------------------------------------------------
+PagingVisitorBench/SingleVBucket/10/iterations:1/threads:1     9756249 ns      9753000 ns            1 Evicted=14.857k
+PagingVisitorBench/SingleVBucket/64/iterations:1/threads:1    71077416 ns     71075000 ns            1 Evicted=105.437k
+PagingVisitorBench/SingleVBucket/128/iterations:1/threads:1  159769792 ns    159764000 ns            1 Evicted=213.104k
+
+real	2m6.656s
+user	1m25.810s
+sys	0m26.195s
+
+Change-Id: I7c6d43f04c3af9765f5c044a24e21cb7fb46c52d
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Ben Huddleston
+Date: 2022-07-07 16:10:31.000000000
+Message: 
+Uploaded patch set 7.
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2022-07-07 16:11:11.000000000
+Message: 
+Patch Set 7:
+
+(2 comments)
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-07-07 16:33:10.000000000
+Message: 
+Patch Set 7: Code-Review-1
+
+(5 comments)
+Line:11, /COMMIT_MSG -> I suspect you might want to split this into two different benchmarks - the cost to visit an entire VBucket (but potentially not evict anything), and the cost to actually evict stuff.
+
+I say this because as per the profile from MB-52633, it appears that roughly half of the cost of pauseResumeVisit / PagingVisitor is making the decision _if_ to evict (update histograms etc), but not the actual eviction itself[1]. I suspect that might be due to one or more of:
+
+- many items are dirty so cannot ultimately be evicted
+- Only a minority of the items actually need to be evicted and so most of the time a StoredValue is visited but not evicted.
+
+[1]: https://profiler.firefox.com/public/c4zcjffxpfsek5bqvwd7acj2zt64zjthrr5kang/flame-graph/?globalTrackOrder=0&hiddenLocalTracksByPid=0-5wchwkpwtvwyhyjwB6&localTrackOrderByPid=0-0wB6&thread=0&transforms=f-combined-0w9gwj&v=6
+
+Line:29, /COMMIT_MSG -> I worry 10MB / 16MB or even 128MB of Bucket quota is too small on an M1 Pro which has (a) a super-fast memory subsystem anyway and (b) has ~20MB of L2 cache.
+
+I would suggest doing some runs on AWS Graviton 2 once you have the benchmark reasonably well setup, with a quota in the region of 256MB.
+
+Line:44, engines/ep/benchmarks/paging_visitor_bench.cc -> I think this item is too small - for a start you'll end up with lots and lots of small items which might seem desirable, but means your overall memory footprint for say 100,000 items resident is much lower than an expected real workload (and hence sitting more in cache)
+
+Additionally you're not going to see much heap fragmentation of different size objects. 
+
+The lean-kv-test were done with 1K documents of random JSON (IIRC), while that could be argued to be on the larger end of common documents I think you at least need values at least a few 100Bytes in size.
+
+Line:55, engines/ep/benchmarks/paging_visitor_bench.cc -> Given you are not perturbing the TTL / CAS of these items, you're likely to have close to identical hotness and ages for all items, which isn't very representative of real-world workloads.
+
+Line:56, engines/ep/benchmarks/paging_visitor_bench.cc -> Do we need too be flushing after every item? I suspect this will slow down the benchmark setup somewhat. 
+
+I see the desire to not bloat the CheckpointManager quota / hit "no memory" before the watermark; but I suspect flushing after N items instead of 1 should still give reasonable behaviour and be much quicker to setup.
+
+(I'd also be curious to see how much of the wall clock runtime is this populate phase vs. the actual benchmark run...)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-07-07 17:54:13.000000000
+Message: 
+Patch Set 7: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/47664/ : FAILURE
+
+Failure of GoogleTest "AllBucketTypes/ActiveDurabilityMonitorTest.SeqnoAckReceivedEqualPendingTwoChains/persistent_nexus_couchstore_magma_full_eviction":
+
+<pre>
+[ RUN      ] AllBucketTypes/ActiveDurabilityMonitorTest.SeqnoAckReceivedEqualPendingTwoChains/persistent_nexus_couchstore_magma_full_eviction
+unknown file: error: C++ exception with description "KVStoreFactory ctor: Specified dbname "ep_engine_ep_unit_tests.db/test.176501" is not a directory" thrown in SetUp().
+unknown file: error: SEH exception with code 0xc0000005 thrown in TearDown().
+[  FAILED  ] AllBucketTypes/ActiveDurabilityMonitorTest.SeqnoAckReceivedEqualPendingTwoChains/persistent_nexus_couchstore_magma_full_eviction, where GetParam() = "bucket_type=persistent:backend=nexus:nexus_primary_backend=couchstore:nexus_secondary_backend=magma:item_eviction_policy=full_eviction" (2 ms)
+AllBucketTypes/ActiveDurabilityMonitorTest.SeqnoAckReceivedEqualPendingTwoChains/persistent_nexus_couchstore_magma_full_eviction
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/47664/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/20751/ : FAILURE
+
+One of more core files found at the end of the build. Data for post-mortem saved to archived_core_dumps.tar.bz2 under "Build Artifacts". ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/20751/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/18010/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/18853/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/40038/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/19994/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/29149/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/8536/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/8633/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/21109/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/21797/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2022-07-08 13:49:49.000000000
+MISMATCHED INLINE COMMENT
+Line:11, /COMMIT_MSG -> Done. I've kept the current one, and created two that benches (the majority) of the sub-components.
+
+I've created one benchmark that evicts all of the items created via a custom HashTableVisitor that does nothing but page out the key.
+
+I've created another benchmark (PagerIteration) that runs the pager over all items, does (most of the) histogram stuff, and evicts next to nothing. To do most of the histogram stuff we need items to be eligibleForEviction (i.e. not dirty) but we also don't really want them to be evicted. To accomplish that I've dropped the eviction ratio from 1 (100%) to something very small, and tweaked the freq counter of the first item in the HashTable such that we only evict the first in each HashBucket.
+
+I've kept the current benchmark as we also have an evicted histogram update (which isn't otherwise covered) and as an extra reference point. The current benchmark should be roughly comparable to the sum of the two component benchmarks.
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2022-07-08 13:49:49.000000000
+MISMATCHED INLINE COMMENT
+Line:29, /COMMIT_MSG -> Can get this up to 256MB with a reasonable runtime with larger items.
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2022-07-08 13:49:49.000000000
+MISMATCHED INLINE COMMENT
+Line:44, engines/ep/benchmarks/paging_visitor_bench.cc -> I wasn't trying to create a real work workload here, rather just something that tests how fast the pager does stuff. That being said, I increased the item size here because it makes the benchmark run faster (load faster).
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2022-07-08 13:49:49.000000000
+MISMATCHED INLINE COMMENT
+Line:55, engines/ep/benchmarks/paging_visitor_bench.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2022-07-08 13:49:49.000000000
+MISMATCHED INLINE COMMENT
+Line:56, engines/ep/benchmarks/paging_visitor_bench.cc -> Every item, no. Saved a minute by moving the flush into the no_memory condition, and then checking it again (to ensure that most things are evictable i.e. not dirty).
+
+The vast majority of the time is spent just loading data.
+----------------------------------------------------------------------------------------------------------------------

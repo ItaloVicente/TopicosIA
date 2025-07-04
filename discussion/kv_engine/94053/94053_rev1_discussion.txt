@@ -1,0 +1,157 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-25822: Create separate mutex for pending_io
+
+The LIBEVENT_THREAD::mutex currently guards the whole state of the
+worker thread - as such it is acquired by the worker thread when it
+starts processing event(s) for a connection, and only unlocked when it
+finishes with that connection.
+
+The state guarded includes the pending_io set; which is (primarily):
+
+a) Read at the start of the event loop (to re-register connections in
+   libevent).
+
+b) Written by notify_io_complete when background threads want to
+   wakeup frontend threads.
+
+Profiling of the LIBEVENT_THREAD::mutex wait/lock times shows that
+callers of notify_io_complete (notably ConnManager and DCP
+ConnNotifier task) can end up waiting for long periods (~100ms in
+local testing) to simply add a connection to the pending set.
+
+To improve this, add a separate mutex which is only used for the
+pending_io set. This also requires a change to the data structure for
+the pending_io - we need to additionally record the pending status
+code against each connection.
+
+This is because previously this status (aiostat) was updated with
+LIBEVENT_THREAD::mutex held; therefore no worker thread could possibly
+be running. With the separate mutex this is no longer the case and we
+cannot simply write to aiostat as it may be being accessed by the
+worker. We obviously don't want to have to acquire
+LIBEVENT_THREAD::mutex to update it as that introduces the same
+problem. Instead we record the pending status with the connection in
+pending_io; and when we come to process pending_io in the worker
+thread (which already holds LIBEVENT_THREAD::mutex) we update aiostat
+with the pending status before running it's event loop).
+
+Change-Id: I89104af841c9e9c002315a5be954150b8867c3bd
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2018-05-11 10:34:21.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-05-11 14:12:14.000000000
+Message: 
+Patch Set 1: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-undefinedsanitizer-vulcan/303/ : FAILURE
+
+Timeout of a CTest test 143/143 Test  #70: memcached_testapp.default.WorkerConcurrencyTest ..............................} ( http://cv.jenkins.couchbase.com/job/kv_engine-undefinedsanitizer-vulcan/303/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-vulcan/285/ : FAILURE
+
+Compile error at /home/couchbase/jenkins/workspace/kv_engine-linux-vulcan/kv_engine/engines/ep/src/connmap.cc:223:5:
+error: "TRACE_LOCKGUARD_TIMED" was not declared in this scope
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-vulcan/285/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/7893/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-vulcan/334/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-vulcan/266/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-vulcan/358/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-vulcan/274/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Tim Bradgate
+Date: 2018-05-11 14:36:13.000000000
+Message: 
+Patch Set 1: Code-Review+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Tim Bradgate
+Date: 2018-05-11 14:37:01.000000000
+Message: 
+Patch Set 1:
+
+Code LGTM, but there is the linux compiler error: Compile error at /home/couchbase/jenkins/workspace/kv_engine-linux-vulcan/kv_engine/engines/ep/src/connmap.cc:223:5: error: 'TRACE_LOCKGUARD_TIMED' was not declared in this scope
+----------------------------------------------------------------------------------------------------------------------
+Author: Daniel Owen
+Date: 2018-05-11 14:37:30.000000000
+Message: 
+Patch Set 1: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-05-11 14:38:56.000000000
+Message: 
+Patch Set 1:
+
+> Code LGTM, but there is the linux compiler error: Compile error at
+ > /home/couchbase/jenkins/workspace/kv_engine-linux-vulcan/kv_engine/engines/ep/src/connmap.cc:223:5:
+ > error: 'TRACE_LOCKGUARD_TIMED' was not declared in this scope
+
+Yeah I know - it's due to the first build starting before a dependant change in phosphor had been merged. You'll note all the other CV builds are ok (hence asking people to review) :)
+
+Job has been retried now...
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2018-05-11 14:53:48.000000000
+Message: 
+Patch Set 1: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-05-11 16:03:29.000000000
+Message: 
+Patch Set 1:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-vulcan/291/ : FAILURE
+
+Compile error at /home/couchbase/jenkins/workspace/kv_engine-linux-vulcan/kv_engine/engines/ep/src/connmap.cc:223:5:
+error: "TRACE_LOCKGUARD_TIMED" was not declared in this scope
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-vulcan/291/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/7893/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-vulcan/334/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-vulcan/266/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-vulcan/358/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-vulcan/274/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-undefinedsanitizer-vulcan/311/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-05-11 17:51:08.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/7893/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-vulcan/334/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-vulcan/266/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-vulcan/358/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-vulcan/274/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-undefinedsanitizer-vulcan/311/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-vulcan/297/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

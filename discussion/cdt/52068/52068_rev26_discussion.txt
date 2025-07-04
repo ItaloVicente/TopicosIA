@@ -1,0 +1,163 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 472765: Use gdb's "set substitute-path from to"
+
+Add support for gdb's "set substitute-path from to" by adding a new
+service called GDBSourceLookup that uses GDB to perform the path
+mapping.
+
+The new GDBSourceLookup service uses the new GdbSourceLookupDirector to
+get the set of paths that need mapping using GDB's "set
+substitute-path" and the director resolves compilation path differently
+so as to leave the GDB backend to handle the local path to compile path
+resolution.
+
+The MappingSourceContainer has been enhanced to allow a per mapping
+container override of the new behaviour. This is a fallback as the
+default behaviour when using GDB is to use "set substitute-path".
+
+The MappingSourceContainerDialog exposes the new option in
+MappingSourceContainer as a checkbox at the bottom of the path mapping
+dialog in a backend agnostic way.
+
+The new code is tested in methods called "sourceSubstitute*" and
+mirror the same tests for the now non-backend handled version
+which are "sourceMapping*". Note that
+doMappingAndLaunch/doSubstituteAndLaunch have been updated to explicitly
+check or uncheck the setIsMappingWithBackendEnabled setting
+
+Change-Id: I122d7c597cd461d8e38c4f82522ccfdf9e51a5ba
+Signed-off-by: Jonah Graham <jonah@kichwacoders.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jonah Graham
+Date: 2016-03-15 00:37:07.000000000
+Message: 
+Uploaded patch set 26: Patch Set 25 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2016-03-15 00:37:13.000000000
+Message: 
+Patch Set 26:
+
+Build Started https://hudson.eclipse.org/cdt/job/cdt-verify/4615/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2016-03-15 01:21:12.000000000
+Message: 
+Patch Set 26: Verified+1
+
+Build Successful 
+
+https://hudson.eclipse.org/cdt/job/cdt-verify/4615/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonah Graham
+Date: 2016-03-15 13:26:21.000000000
+Message: 
+Patch Set 26: Code-Review-1
+
+There are a few review items outstanding. I will try and get to them today.
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc Khouzam
+Date: 2016-03-15 15:19:49.000000000
+Message: 
+Patch Set 26:
+
+(1 comment)
+Line:711, dsf-gdb/org.eclipse.cdt.tests.dsf.gdb/src/org/eclipse/cdt/tests/dsf/gdb/tests/SourceLookupTest.java -> Parameter should be true here, no?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc Khouzam
+Date: 2016-03-15 18:02:30.000000000
+Message: 
+Patch Set 26:
+
+(5 comments)
+Line:125, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/launching/GdbSourceLookupDirector.java -> I think we still need to check if this mapping applies to 'sourceName'.
+For example if the mapping is /home/marc/src -> /home/marc/bin
+but that sourceName is /lib/myLib.c
+then this mapping does not apply and we need to look to the next container.
+
+How about:
+			if (container instanceof IMappingSourceContainer) {
+				IPath mappedPath = ((IMappingSourceContainer) container).getCompilationPath(sourceName);
+
+				if (mappedPath != null) {
+				    // The path mapping is applicable to sourceName
+				    // First check if the backend is handling those mappings automatically
+				    if (container instanceof MappingSourceContainer
+						&& ((MappingSourceContainer) container).isMappingWithBackendEnabled()) {
+    					/*
+					     * This mapping has been handled by GDB backend (i.e. it was
+					     * collected by collectSubstitutionsPaths to pass to gdb's
+					     * "set substitute-path").
+					     * 
+					     * As the containers themselves do not know whether the
+					     * director requesting the compilation path supports backend
+					     * mapping we cannot rely on the call to getCompilationPath
+					     * but need to force a null here.
+					     */
+					    return new Path(sourceName);
+					}
+				    return mappedPath;
+				}
+			}
+
+Line:135, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/launching/GdbSourceLookupDirector.java -> I had missed the fact that those mappings can be used by a different director.
+Good that you thought about it.
+
+Line:136, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/launching/GdbSourceLookupDirector.java -> The more I look at this, the more I think it is clearer to return sourceName instead of null.
+Null means no mapping was applicable, which is not our case.  What do you think?	
+I'm also worried about returning null because we call this method recursively below
+and don't consider null as a valid result.
+
+Line:139, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/launching/GdbSourceLookupDirector.java -> We can't return here without checking for null first.  If null we need to go to the next container.
+
+Line:140, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/launching/GdbSourceLookupDirector.java -> Since you can't always return right above, you will need the else below
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonah Graham
+Date: 2016-03-15 21:25:53.000000000
+Message: 
+Patch Set 26:
+
+(4 comments)
+
+Patch 27 addresses the bug identified in GdbSourceLookupDirector. 
+
+A couple more of your review items to address in GdbSourceLookup.
+Line:125, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/launching/GdbSourceLookupDirector.java -> You are correct of course! there is a bug here, I will address that with a test that exposes it too.  The mistake is that it should be a continue, not a return null. The container handled by the backend should be ignored by getCompilationPath, not stop looking!
+
+Line:136, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/launching/GdbSourceLookupDirector.java -> To do so should really have an API change. At the moment getCompilationPath returns a IPath, but the only caller of getCompilationPath in CDT immediately converts to a string if not-null. See org.eclipse.cdt.dsf.mi.service.CSourceLookup.getDebuggerPath(...).new Job() {...}.run(IProgressMonitor)
+
+Line:139, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/launching/GdbSourceLookupDirector.java -> Done
+
+Line:140, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/launching/GdbSourceLookupDirector.java -> Done
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonah Graham
+Date: 2016-03-15 21:29:37.000000000
+Message: 
+Patch Set 26:
+
+(1 comment)
+Line:711, dsf-gdb/org.eclipse.cdt.tests.dsf.gdb/src/org/eclipse/cdt/tests/dsf/gdb/tests/SourceLookupTest.java -> Done
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc Khouzam
+Date: 2016-03-16 03:48:02.000000000
+Message: 
+Patch Set 26:
+
+(1 comment)
+Line:136, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/launching/GdbSourceLookupDirector.java -> Sorry, I didn't realize you had to return an IPath.  So, let's return new Path(sourceName); instead of null
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Gerrit Code Review
+Date: 2016-03-17 02:30:54.000000000
+Message: 
+Change has been successfully rebased as 628389071558c43c52b666995e1eaa5c4aa67a8f by Marc Khouzam
+----------------------------------------------------------------------------------------------------------------------

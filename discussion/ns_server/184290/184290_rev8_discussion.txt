@@ -1,0 +1,146 @@
+======================================================================================================================
+DESCRIPTION:
+
+api_tests: Safely kill nodes and remove cluster dirs on exit
+
+Otherwise the directory removal can sometimes fail.
+
+We now call /diag/eval/ ale:sync_all_sinks() to ensure errors are all
+logged, then kill the nodes if we created them, then remove the
+directories.
+
+Change-Id: Ifa2f47add19c9a90d074c7555f37d4775a9903c8
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Peter Searby
+Date: 2023-02-27 12:05:14.000000000
+Message: 
+Uploaded patch set 8.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2023-02-27 12:05:28.000000000
+Message: 
+Patch Set 8:
+
+Build Started https://cv.jenkins.couchbase.com/job/ns-server-test/34758/ (1/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2023-02-27 12:05:29.000000000
+Message: 
+Patch Set 8:
+
+Build Started https://cv.jenkins.couchbase.com/job/ns-server-ns-test/2190/ (2/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2023-02-27 12:23:14.000000000
+Message: 
+Patch Set 8: Well-Formed+1
+
+Build Successful 
+
+https://cv.jenkins.couchbase.com/job/ns-server-test/34758/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/ns-server-ns-test/2190/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Peter Searby
+Date: 2023-02-27 13:35:58.000000000
+Message: 
+Patch Set 8: Verified+1
+
+(2 comments)
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2023-02-27 19:34:16.000000000
+Message: 
+Patch Set 8: Code-Review-1
+
+(1 comment)
+Line:152, api_tests/run.py -> Do I understand correctly that it will attempt to remove directories of existing cluster?
+If so I don't think we should do that.
+If the point is only to loggers sync, I don't see why you need to do anything else but add sync_loggers(c.urls, c.auth) in old implementation of kill_nodes. We probably don't need to sync anything for the case of existing cluster.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Peter Searby
+Date: 2023-03-03 17:09:03.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:152, api_tests/run.py -> It won't attempt to remove directories of existing cluster, only the ones called test_cluster_data-test-X in the api_tests directories, which there should be none of when using an existing cluster.
+>  I don't see why you need to do anything else but add sync_loggers(c.urls, c.auth) in old implementation of kill_nodes
+I'm not sure what you mean. I suppose I could move the sync_loggers into the `if not use_existing_server`. Or do you mean that I can remove that if statement since c.processes=[] when using an existing server?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2023-03-03 20:42:39.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:152, api_tests/run.py -> So if I have some logs/data from previous runs, and then I run tests against existing cluster it will remove logs/data from previous runs? That would be unexpected. We should not attempt removing anything in case when running against existing cluster.
+
+To be honest I don't understand why we need to remove directories at exit at all?  We clean them on start, why isn't it not enough? It seems much easier: after every run you have logs. You can make sure that "make clean" removes them - that would make sense I think, but we don't need to remove them after each run. At least we need a reason for that.
+
+> I'm not sure what you mean.
+
+I mean that it seems like you don't need to modify the original code that much actually. The only thing you need to add is sync_loggers(c.urls, c.auth) in the original kill_nodes(). So it is a one line change (not counting the function implementation).
+If we are killing nodes, we need to sync. If we are not killing anything, we don't need to sync, right?
+Maybe I simply don't understand all the reasons why are you doing all of that though. Please clarify the following things then:
+Why we need to make node killing safer? What is the danger?
+Why directory removal can sometimes fail?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Peter Searby
+Date: 2023-03-10 11:49:16.000000000
+MISMATCHED INLINE COMMENT
+Line:152, api_tests/run.py -> Directory removal can fail if we remove dirs before killing the nodes:
+
+```
+Traceback (most recent call last):
+  File "/Users/petersearby/Dev/server/master/ns_server/./api_tests/run.py", line 362, in <module>
+    main()
+  File "/Users/petersearby/Dev/server/master/ns_server/./api_tests/run.py", line 198, in main
+    shutil.rmtree(dir)
+  File "/Library/Frameworks/Python.framework/Versions/3.9/lib/python3.9/shutil.py", line 734, in rmtree
+    _rmtree_safe_fd(fd, path, onerror)
+  File "/Library/Frameworks/Python.framework/Versions/3.9/lib/python3.9/shutil.py", line 667, in _rmtree_safe_fd
+    _rmtree_safe_fd(dirfd, fullname, onerror)
+  File "/Library/Frameworks/Python.framework/Versions/3.9/lib/python3.9/shutil.py", line 673, in _rmtree_safe_fd
+    onerror(os.rmdir, fullname, sys.exc_info())
+  File "/Library/Frameworks/Python.framework/Versions/3.9/lib/python3.9/shutil.py", line 671, in _rmtree_safe_fd
+    os.rmdir(entry.name, dir_fd=topfd)
+OSError: [Errno 66] Directory not empty: 'n_0'
+Closing 4
+```
+
+I'm guessing this is because it empties the directory before deleting the directory, but if something gets added back to the directory then it will fail.
+I'll separate this into a another patch, since these are separate issues
+----------------------------------------------------------------------------------------------------------------------
+Author: Peter Searby
+Date: 2023-03-06 16:15:17.000000000
+MISMATCHED INLINE COMMENT
+Line:152, api_tests/run.py -> > If we are killing nodes, we need to sync. If we are not killing anything, we don't need to sync, right?
+Correct
+
+> Why we need to make node killing safer? What is the danger?
+The danger is killing the nodes before the logs are synced.
+
+> Why directory removal can sometimes fail?
+If we only remove logs before running the tests then it would be enough to only add sync_loggers.
+I don't know the exact reason, but I encountered a failed directory removal which I guessed was due to the cluster still writing to the logs. If that's not actually possible then we can leave the directory removal before killing the nodes.
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2023-03-10 18:32:12.000000000
+MISMATCHED INLINE COMMENT
+Line:152, api_tests/run.py -> When test is started it assumes that there are no other tests running in parallel that use the same cluster nodes.
+I think that's correct assumption, so I guess the problem is in the previous test not always killing nodes, right? Or maybe previous test does it asynchronously.
+Let's discuss in another patch.
+----------------------------------------------------------------------------------------------------------------------
+Author: Peter Searby
+Date: 2023-03-10 19:12:11.000000000
+MISMATCHED INLINE COMMENT
+Line:152, api_tests/run.py -> The issue was with deleting the directory before killing the nodes, after all tests have completed.
+I've moved the fix to https://review.couchbase.org/c/ns_server/+/188025 where we can discuss it further
+----------------------------------------------------------------------------------------------------------------------

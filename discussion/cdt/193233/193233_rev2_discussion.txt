@@ -1,0 +1,165 @@
+======================================================================================================================
+DESCRIPTION:
+
+[WIP] Bug 579844 - CME in AbstractLanguageSettingsOutputScanner
+
+This change synchronizes cache access in
+AbstractLanguageSettingsOutputScanner. In particular, only map accesses
+are synchronized. Computation of values added to caches are not done
+with extra locks.
+
+TODO: reproduce the race condition without the change and ensure the
+change fixes the race condition (and not just the
+ConcurrentModificationException).
+
+Change-Id: If7d8cef599037ca526ddb9e6b5e4dad717aab465
+Signed-off-by: Simeon Andreev <simeon.danailov.andreev@gmail.com>
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Simeon Andreev
+Date: 2022-05-09 10:49:36.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: Simeon Andreev
+Date: 2022-05-09 10:54:04.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:1427, build/org.eclipse.cdt.managedbuilder.core/src/org/eclipse/cdt/managedbuilder/language/settings/providers/AbstractLanguageSettingsOutputScanner.java -> We check twice in case some other thread already modified the map. Main point is to avoid locking the value computation (e.g. find some element in the entire workspace, possibly under a workspace lock).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Simeon Andreev
+Date: 2022-05-09 10:57:09.000000000
+Message: 
+Patch Set 2: Code-Review-1
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> As written in the commit message, I still have to find out when the race condition occurs and test the change in the race condition state.
+
+Might be simpler (and more beneficial) to write a test that stresses the computations and caching with several threads.
+
+I'll take a look when I find time. If anyone wants to take over, feel free.
+----------------------------------------------------------------------------------------------------------------------
+Author: CDT Bot
+Date: 2022-05-09 11:20:01.000000000
+Message: 
+Patch Set 2: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-ui-only-pipeline/3960/ : SUCCESS
+
+https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-other-pipeline/4205/ : SUCCESS. p2 repository available on https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-other-pipeline/4205/artifact/releng/org.eclipse.cdt.repo/target/repository/ - please mark build as "Keep this build forever" if the p2 repo is needed for testing. Otherwise it will be deleted shortly.
+
+https://ci.eclipse.org/cdt/job/cdt-verify-code-cleanliness-pipeline/3782/ : SUCCESS. Formatting, whitespace, version numbers and other checks appear to be correct. See https://github.com/eclipse-cdt/cdt-infra/tree/master/jenkins/pipelines/cdt/verify#cdt-verify-code-cleanliness for documentation on what is checked.
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonah Graham
+Date: 2022-05-09 14:22:55.000000000
+Message: 
+Patch Set 2:
+
+(2 comments)
+File Comment: /PATCHSET_LEVEL -> Thanks @Simeon for the patch. Obviously I would rather not apply synchronization unnecessarily for performance reasons, but I imagine even with synchronization this code is much faster than what was there before these caches were implemented I would be happy to merge this in case you don't have time to come back to do more.
+
+One question, can we do the synchronization using Collections.synchronizedMap rather than relying on synchronized blocks in this code, something like below in combination with the cacheValue method?
+
+    $ git diff build/org.eclipse.cdt.managedbuilder.core/src/org/eclipse/cdt/managedbuilder/language/settings/providers/AbstractLanguageSettingsOutputScanner.java
+    diff --git a/build/org.eclipse.cdt.managedbuilder.core/src/org/eclipse/cdt/managedbuilder/language/settings/providers/AbstractLanguageSettingsOutputScanner.java b/build/org.eclipse.cdt.managedbuilder.core/src/org/eclipse/cdt/managedbuilder/language/settings/providers/AbstractLanguageSettingsOutputScanner.java
+    index ac877d93eb..58944740b7 100644
+    --- a/build/org.eclipse.cdt.managedbuilder.core/src/org/eclipse/cdt/managedbuilder/language/settings/providers/AbstractLanguageSettingsOutputScanner.java
+    +++ b/build/org.eclipse.cdt.managedbuilder.core/src/org/eclipse/cdt/managedbuilder/language/settings/providers/AbstractLanguageSettingsOutputScanner.java
+    @@ -19,6 +19,7 @@ import java.net.URI;
+    import java.net.URISyntaxException;
+    import java.util.ArrayList;
+    import java.util.Arrays;
+    +import java.util.Collections;
+    import java.util.HashMap;
+    import java.util.HashSet;
+    import java.util.LinkedHashSet;
+    @@ -94,11 +95,12 @@ public abstract class AbstractLanguageSettingsOutputScanner extends LanguageSett
+    
+            private static final int FIND_RESOURCES_CACHE_SIZE = 100;
+    
+    -       private LRUCache<URI, IResource[]> workspaceRootFindContainersForLocationURICache = new LRUCache<>(
+    -                       FIND_RESOURCES_CACHE_SIZE);
+    -       private LRUCache<URI, IResource[]> workspaceRootFindFilesForLocationURICache = new LRUCache<>(
+    -                       FIND_RESOURCES_CACHE_SIZE);
+    -       private HashMap<IProject, LRUCache<IPath, List<IResource>>> findPathInProjectCache = new HashMap<>();
+    +       private Map<URI, IResource[]> workspaceRootFindContainersForLocationURICache = Collections
+    +                       .synchronizedMap(new LRUCache<>(FIND_RESOURCES_CACHE_SIZE));
+    +       private Map<URI, IResource[]> workspaceRootFindFilesForLocationURICache = Collections
+    +                       .synchronizedMap(new LRUCache<>(FIND_RESOURCES_CACHE_SIZE));
+    +       private Map<IProject, LRUCache<IPath, List<IResource>>> findPathInProjectCache = Collections
+    +                       .synchronizedMap(new HashMap<>());
+    
+            //String pathStr, URI baseURI -> URI
+            private static class MappedURIKey {
+    @@ -144,11 +146,14 @@ public abstract class AbstractLanguageSettingsOutputScanner extends LanguageSett
+            }
+    
+            // Caches the result of determineMappedURI
+    -       private LRUCache<MappedURIKey, URI> mappedURICache = new LRUCache<>(FIND_RESOURCES_CACHE_SIZE);
+    +       private Map<MappedURIKey, URI> mappedURICache = Collections
+    +                       .synchronizedMap(new LRUCache<>(FIND_RESOURCES_CACHE_SIZE));
+            // Caches the result of getFilesystemLocation
+    -       private LRUCache<URI, IPath> fileSystemLocationCache = new LRUCache<>(FIND_RESOURCES_CACHE_SIZE);
+    +       private Map<URI, IPath> fileSystemLocationCache = Collections
+    +                       .synchronizedMap(new LRUCache<>(FIND_RESOURCES_CACHE_SIZE));
+            // Caches the result of new File(pathname).exists()
+    -       private LRUCache<IPath, Boolean> pathExistsCache = new LRUCache<>(FIND_RESOURCES_CACHE_SIZE);
+    +       private Map<IPath, Boolean> pathExistsCache = Collections
+    +                       .synchronizedMap(new LRUCache<>(FIND_RESOURCES_CACHE_SIZE));
+    
+            /** @since 8.2 */
+            protected EFSExtensionProvider efsProvider = null;
+Line:1427, build/org.eclipse.cdt.managedbuilder.core/src/org/eclipse/cdt/managedbuilder/language/settings/providers/AbstractLanguageSettingsOutputScanner.java -> At first I didn't see why this would be needed - just doing cache.put always without a get would be fine. But the findPathInProjectCache cache the values are not immutable, so that would be problematic.
+
+Either way, I think the code in second synchronized can just be computeIfAbsent:
+
+  V value;
+  synchronized (cache) {
+    value = cache.get(key);
+    if (value != null) return value;
+  }
+  value = supplier.apply(key);
+  synchronized(cache) {
+    return cache.computeIfAbsent(key, k -> value);
+  }
+  
+of if you agree that Collections.synchronizeMap can be used:
+
+  V value = cache.get(key);
+  if (value != null) return value;
+  // calculate the value outside of the synchronized code to avoid
+  // unnecessarily long locking of the cache.
+  value = supplier.apply(key);
+  return cache.computeIfAbsent(key, k -> value);
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Simeon Andreev
+Date: 2022-05-09 14:58:48.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:1427, build/org.eclipse.cdt.managedbuilder.core/src/org/eclipse/cdt/managedbuilder/language/settings/providers/AbstractLanguageSettingsOutputScanner.java -> I think if we put computeIfAbsent in a synchronized block (e.g. a synchronized map), a lock will be held while computing the value. This is what I'm trying to avoid with the code here - its possible the operation takes a while to finish (since the value is cached, it must be expensive to compute it). Also maybe locks are taken while computing the value, so adding new locks on top might result in deadlocks.
+
+From my POV the current proposal should be as safe as possible, even if its slightly more code. The locks are around only map operations, those don't hold locks and should be "fast".
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonah Graham
+Date: 2022-05-09 15:10:17.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:1427, build/org.eclipse.cdt.managedbuilder.core/src/org/eclipse/cdt/managedbuilder/language/settings/providers/AbstractLanguageSettingsOutputScanner.java -> OK, however the supplier.apply(key) is done outside of computeIfAbsent in my snippet, so the lock isn't held while doing that computation. I only use computeIfAbsent to avoid extra if/else blocks.
+
+My main issue if that by using manual locking it means that further edits to this code can break synchronization accidentally, but if we use synchronizedMap then the maps are (mostly) safe - and the declaration of the map shows that the map is syncrhonized.
+
+Thanks for the reply - I will give it to the CDT call and we can resolve after that.
+
+----------------------------------------------------------------------------------------------------------------------

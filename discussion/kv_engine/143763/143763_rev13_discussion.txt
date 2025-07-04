@@ -1,0 +1,178 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-43550 Get specific stats in bulk from KVBucket, KVStore
+
+Currently we gather kvstore stats for engine stats reporting by calling
+KVStore individually for each stat. This is inefficient for MagmaKVStore
+since for every such call, it fetches all its stats and only returns the
+one asked for. It has to do this because Magma only supports getting all
+stats at once and has no provision to get individual stats.
+
+To help with such cases, this change adds a method to KVBucket and
+KVStore to get specific stats in bulk.
+
+Change-Id: I1c17f672bbf1ac45959354cb1e970cce65953f61
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Rohan Suri
+Date: 2021-01-28 05:46:19.000000000
+Message: 
+Uploaded patch set 13.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-01-28 09:16:48.000000000
+Message: 
+Patch Set 13: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/5315/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/6779/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/33213/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/28576/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/7400/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/8442/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/8314/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/16248/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/8699/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Rohan Suri
+Date: 2021-01-28 10:39:17.000000000
+Message: 
+Patch Set 13:
+
+Dave/Jim, could you take another look? Thanks
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-01-28 11:00:12.000000000
+Message: 
+Patch Set 13:
+
+(3 comments)
+Line:2872, engines/ep/src/ep_engine.cc -> Perf: A previous, you don't need std::string here as the keys are never modified. 
+
+I'd also argue std::unordered_set is overkill (say compared to say array<>) - unordered_set is a hash table with chaining, so essentially forces multiple heap allocations (1 per element), whereas array needs zero heap allocation t runtime
+
+It's true it would be unnecessary to request the same stat twice (and hence logically a set is reasonable), but I'm not sure it's worth the price paid here.
+
+(For some context, stats can end up costing a non-trivial amount of runtime once we start to increase to large numbers of buckets (max 30), as this information is requested by ns_server via Prometheus every 10s. Add in the various string formatting / heap alloc free and we have seen is cost a small but not insignificant amount of CPU.)
+
+Line:2445, engines/ep/src/kv_bucket.cc -> Along the lines of my previous comment, you're forcing a heap-allocation here to create the std::unordered_set of std::strings - in fact probably at least 3 heap allocations; at _least_ one for std::unordered_set, then one for the std::unordred_set element and a third for the std::string (if string length exceeds SSO limit - 16 with libstdc++).
+
+Changing to a span is probably a better choice. It's non-owning so doesn't force any particular object construction etc, but given the keys are not modified that is fine. 
+
+We aren't on C++20 yet so don't have std::span, but we do have gsl::span so you can use gsl::span<std::string_view> and avoid any heap allocations 😊
+
+Line:20, engines/ep/src/kvstore_fwd.h -> Both optional and string_view are not used here currently (but string_view certainly should be 😊
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-01-28 11:00:26.000000000
+Message: 
+Patch Set 13: Code-Review-1
+----------------------------------------------------------------------------------------------------------------------
+Author: Rohan Suri
+Date: 2021-01-28 13:32:04.000000000
+Message: 
+Patch Set 13:
+
+(3 comments)
+Line:2872, engines/ep/src/ep_engine.cc -> Ack
+
+Line:2445, engines/ep/src/kv_bucket.cc -> Good learning here 😊 Thanks Dave. Will refactor.
+
+Line:20, engines/ep/src/kvstore_fwd.h -> Ack. Will remove optional.
+
+Since GetStatsMap is now a return parameter, would it be safe to use string_view in the return value (copy of input string_view)? We could, but that'll require an assumption that the caller keeps the input keys alive as long as it uses the map.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-01-28 13:48:23.000000000
+Message: 
+Patch Set 13:
+
+(1 comment)
+Line:20, engines/ep/src/kvstore_fwd.h -> Good question. 
+
+The input keys _have_ to be alive across the call to getStats() already, so technically they will be alive for when getStats immediately returns. However, as you say it also requires they stay in scope for the lifetime of the GetStatsMap result; which is _potentially_ problematic if the underlying string was no longer alive. 
+
+However, I think here that's unlikely - we are really using string_view as a slightly more C++ version of a classic C string literal, and so the string is unlikely to be out of scope. It also avoids allocating extra heap space for a std::string's value; although of course we still need heap allocation for the unordered_map itself.
+
+I think it's arguable either way, but I'd probably use std::string_view for they key of the return value; and highlight that in the documentation of the getStats method.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Rohan Suri
+Date: 2021-01-28 19:49:50.000000000
+Message: 
+Patch Set 13:
+
+(1 comment)
+Line:20, engines/ep/src/kvstore_fwd.h -> Sure, let's go ahead while adding the documentation.
+
+As for further reducing dynamic allocations, currently for each shard we're allocating a map in magma-kvstore and then combining it on kvbucket level. The per shard map allocation can be avoided if we push the stat aggregation down to kvstore itself.
+
+We could have an API on kvstore:
+// @param [in, out] mergeInto merge requested stats with existing accumulated value.
+ void mergeStats(gsl::span<std::string_view> keys, StatsMap& mergeInto)
+
+Implementation somewhat:
+ if (key in keys):
+   auto [itr, emplaced] = mergeInto.try_emplace(key, value)
+   if (!emplaced):
+      itr->second += value
+
+Since the keys across shards will be the same, no new allocations will happen after the first shard puts its keys into the map.
+
+KVBucket::getKVStoreStats then becomes:
+ StatsMap stats
+ foreach shard in shards:
+   shard.mergeInto(keys, stats);
+
+Also moving aggregation of kvstore stats into kvstore itself makes more semantic sense, since it knows better how to aggregate its own stats.
+
+Let me know what you think.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-01-29 10:15:17.000000000
+Message: 
+Patch Set 13:
+
+(1 comment)
+Line:20, engines/ep/src/kvstore_fwd.h -> > Also moving aggregation of kvstore stats into kvstore itself makes more semantic sense, since it knows better how to aggregate its own stats.
+
+Not sure I agree with this - Each KVStore instance is concerned with a single shard - aggregation makes sense to happen at the higher level. 
+
+Additionally, that would impact the other KVStores (CouchKVStore in particular). While Magma is still in a significant development phase; for the rest of KV-Engine we are focusing on Major and Critical bugs for CC release and want to avoid any unnecessary refactoring of existing code which has the potential for introducing bugs at this late stage.
+
+(The patch thus far has only touched Magma to any significant degree; CouchKVStore change is addition of a const or two, hence there's been no problem in you making relatively large changes)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Rohan Suri
+Date: 2021-01-29 16:27:47.000000000
+MISMATCHED INLINE COMMENT
+Line:2872, engines/ep/src/ep_engine.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Rohan Suri
+Date: 2021-01-29 16:27:47.000000000
+MISMATCHED INLINE COMMENT
+Line:2445, engines/ep/src/kv_bucket.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Rohan Suri
+Date: 2021-01-29 16:27:47.000000000
+MISMATCHED INLINE COMMENT
+Line:20, engines/ep/src/kvstore_fwd.h -> Sure let's not do it then.
+
+Removed <optional>
+----------------------------------------------------------------------------------------------------------------------

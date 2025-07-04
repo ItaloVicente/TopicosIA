@@ -1,0 +1,170 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-47267 / MB-52383: Make backfill during warmup a PauseResume task
+
+(Note: this is a cherry-pick / backport of 423ad543e and 564986e3d from the
+ cheshire-cat branch to mad-hatter.)
+
+MB-47267 demonstrated that during warmup of a node in a cluster which
+has multiple buckets of different sizes, smaller buckets could become
+stuck behind larger buckets causing their warmup time to be much longer
+than it need be. This can causes problems during delta node recovery as
+NS_Server starts requesting vbucket stats to check vbucket state and
+if this is not responded to promptly this will cause the rebalance to
+timeout. Which may happen as EP-Engine does not service any vbucket
+stats requests till we've completed 'PopulateVBucketMap' state of
+warmup, which requires  one + five x the number of shards reader tasks
+to have been run and completed. Though these tasks are relatively quick
+to run, they can become stuck behind other bucket's warmup backfilling
+tasks which can take upwards of minutes to run depending on the size of
+the bucket. As they share the same reader thread task pool.
+
+To fix this, this patch modifies the backfilling functionality during
+warmup so that backfill may now be paused after a time deadline has
+been met and store the seqno we've reached so that we can start
+backfilling again when the tasks is rescheduled. Which in turn allows
+the faster initial phases of warmup to have a chance of being run
+between each run of backfill.  This patch unifies the functionality
+of the backfilling stages of warmup so that the same code is used for
+'KeyDump', 'LoadingKVPairs' and 'LoadingData' stages of warmup.
+
+This patch also adds a test to ensure that, if we create a larger
+bucket, and start warmup it up before a smaller one. With only one
+reader thread that the smaller bucket is able to warmup before that
+the larger one has finished warming up.
+
+A ep_perfsuite test has been added to test warmup latency to help with
+tuning of the maxDuration time for that a backfill can take before it's
+paused.
+
+MB-52383 highlighted an issue in the original patch for MB-47267;
+WarmupVbucketVisitor::visit() was not yielding as expected as the
+deadline was incorrectly not updated. That fix is included in this
+patch.
+
+Change-Id: Ifc48055db5060ef9f13464a6d8c259cfe5d3b4d7
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2022-07-15 13:11:16.000000000
+Message: 
+Uploaded patch set 6: Patch Set 5 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Restriction Checker
+Date: 2022-07-15 13:11:28.000000000
+Message: 
+Patch Set 6: Well-Formed-1
+
+Branch restricted. PLEASE READ this URL: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/306849/artifact/restricted.html : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-07-15 13:30:43.000000000
+Message: 
+Patch Set 6: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/1983/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/2222/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/26596/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/mad-hatter/136/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/mad-hatter/1432/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/2084/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/2084/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/2065/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/1863/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-07-18 08:19:00.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> check approval
+----------------------------------------------------------------------------------------------------------------------
+Author: Restriction Checker
+Date: 2022-07-18 08:19:15.000000000
+Message: 
+Patch Set 6: Well-Formed+1
+
+Permission granted to commit: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/307006/artifact/restricted.html : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-07-18 17:15:05.000000000
+Message: 
+Patch Set 6: Code-Review-1
+
+(3 comments)
+Line:933, engines/ep/src/warmup.cc -> nit: feels like the local ref's name should be updated, as it's not designed to hang the thread anymore.
+
+Line:8243, engines/ep/tests/ep_testsuite.cc -> paranoid: Might be worth adding a check be that things have changed and we're running with 1 thread.
+
+Line:8244, engines/ep/tests/ep_testsuite.cc -> Nit: not really sure why this is in it's own scope?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-07-18 19:04:26.000000000
+MISMATCHED INLINE COMMENT
+Line:933, engines/ep/src/warmup.cc -> Ack
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-07-19 11:32:38.000000000
+MISMATCHED INLINE COMMENT
+Line:8243, engines/ep/tests/ep_testsuite.cc -> ACK based on this happy to +2
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-07-19 11:04:15.000000000
+MISMATCHED INLINE COMMENT
+Line:8243, engines/ep/tests/ep_testsuite.cc -> Ideally, yes. Problem is there's no API to get this at the EnginIface API level - this is why I had to change this in the first place (there's separate ep.so and ep_testsuite.so shared objects in mad-hatter).
+
+Given this is a backport onto a stable branch (and hence we would not expect any changes like the FollyExecutorPool to occur) which would affect how thread counts are calculated, I'm confortable to trust the testing which was done during development - i.e. prior to the fix being applied, this test highlights the issue.
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-07-19 11:32:38.000000000
+MISMATCHED INLINE COMMENT
+Line:8244, engines/ep/tests/ep_testsuite.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-07-18 19:04:26.000000000
+MISMATCHED INLINE COMMENT
+Line:8244, engines/ep/tests/ep_testsuite.cc -> Because the original test was ;)
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-07-19 08:32:44.000000000
+MISMATCHED INLINE COMMENT
+Line:8244, engines/ep/tests/ep_testsuite.cc -> :badpokerface:
+----------------------------------------------------------------------------------------------------------------------
+Author: Vesko Karaganev
+Date: 2022-07-19 09:21:18.000000000
+MISMATCHED INLINE COMMENT
+Line:45, engines/ep/tests/module_tests/thread_gate.h -> Would this not attempt to lock the mutex a second time from the owner thread in the case of a spurious wakeup? If so, I think it is UB. I don't think there is a need for a lock in isComplete.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-07-19 09:28:33.000000000
+MISMATCHED INLINE COMMENT
+Line:45, engines/ep/tests/module_tests/thread_gate.h -> Good question!
+
+No, because the isComplete(std::unique_lock<>) overload (line 68) is called, so there's no second lock occurring. 
+
+See https://en.cppreference.com/w/cpp/thread/condition_variable/wait - we must acquire the mutex before calling wait() - as we do at line 43; other than that wait() handles the unlock / relock for spurious wakeups.
+----------------------------------------------------------------------------------------------------------------------
+Author: Vesko Karaganev
+Date: 2022-07-19 09:33:26.000000000
+MISMATCHED INLINE COMMENT
+Line:45, engines/ep/tests/module_tests/thread_gate.h -> I know it relocks to allow other threads to proceed, but I thought the lock was held during the check, because why would it not be -- the lambda is supposed to contain a condition on the shared state. I don't see an example where a lock is used inside the lambda, but I will read a bit more. Thanks.
+----------------------------------------------------------------------------------------------------------------------

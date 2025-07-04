@@ -1,0 +1,108 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-51958: Re-enable ReplicaEvictedBeforeActive with fix
+
+ReplicaEvictedBeforeActive was seen to intermittently fail by
+mistakenly evicting from the active vBuckets.
+
+---- Root Cause Analysis ----
+
+Because:
+1. The ItemPager evicts from PreciseTotalMemoryUsed down to
+the low watermark;
+2. We populate the replica vBuckets until their total
+pageableMemory > (high_watermark - low_watermark);
+3. We populate the active vBuckets until
+PreciseTotalMemoryUsed > high_watermark.
+
+Since we insert items with a fixed size of 5k bytes, we will
+always 'overshoot' the population in (2) and (3) by at least 1
+byte, and up to 5k bytes.
+
+With small variations in starting memory usage, and an always
+unequal number of replica vs active items, we will occasionally
+'overshoot' (3) more.
+In other words, we will have:
+
+    PreciseTotalMemoryUsed > replicaPageableMem > high_watermark
+
+Therefore, the ItemPager will be forced to evict
+(PreciseTotalMemoryUsed - high_watermark) bytes from the
+active vBuckets to reach the low_watermark.
+
+---- Fix ----
+
+To prevent this, after populating up to the high watermark,
+re-set the low watermark, taking into account how far we may
+have 'overshot' the high watermark.
+
+---- Additional Changes ----
+
+Since populateVbsUntil flushes and expels during population, we
+no longer require explicit flushAndRemoveCheckpoints calls or
+'topping up' again to the high watermark after them. Remove them.
+
+The quotas were increased by a significant amount (2,500,000
+bytes) likely to try to avoid the identified failure.
+However, this only made it less likely to occur: a larger quota
+leads to a larger watermarkDiff, reducing the chance of a bad
+'overshoot'. A larger quota significantly increases the runtime,
+revert this.
+
+==== Fix for possible CheckedExecutor failures ====
+
+With MFUs set probabilistically another failure is possible: the
+replica items may not be evicted in one pass. This would cause
+runNextTask to throw a runtime_error when we attempt to run
+"Item pager no vbucket assigned" when instead the item pager
+needs to run again.
+
+By setting all items' MFU value to zero, we force 0% or 100%
+eviction of a vBucket if at least one item needs to be evicted,
+avoiding this failure point. The test must be tweaked slightly
+to account for this.
+
+No other current callers of populateVbsUntil rely on this MFU
+distribution, and so do not need to be changed.
+
+==== Additional notes ====
+
+---- More active items evicted than expected ----
+
+With the given explanation we may expect only one active item to
+be evicted during failures since we can only overshoot by - at
+most - the size of one item. However, this is not the case: ~15
+items were evicted from active vBuckets in all seen test failures.
+
+This is due to setting items' MFU values probabilistically: with
+a given distribution it is almost certain we evict more actives
+than strictly needed to reach the low watermark.
+
+---- Over-over-population ----
+
+Because:
+1. populateVbsUntil inserts an item before testing the predicate;
+2. We call populateVbsUntil on active vBuckets twice, the second
+time to 'top up' to the high watermark, attempting to account
+for memory freed by flushing and removing checkpoints;
+3. populateVbsUntil was at some point changed to flush and expel
+on every mutation, i.e., there is no memory freed by flushing
+
+Then we actually overshoot populating the active vBuckets by at
+least two items.
+This should cause the test to always fail, but is masked by a
+similar logic error: over-population of the replica vBuckets.
+We populate until 'pageableMem > watermarkDiff + 10000'; which
+is exactly the size of two items.
+
+Change-Id: Ia4f71e9df1c6e2a2844a626aab86b9561d23d73a
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Douglas
+Date: 2022-08-25 11:16:02.000000000
+Message: 
+Patch Set 3: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------

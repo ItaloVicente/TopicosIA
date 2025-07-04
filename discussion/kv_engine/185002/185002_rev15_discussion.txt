@@ -1,0 +1,158 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-54729: DCP disk backfill a CDC stream
+
+Backfill of a CDC stream has 4 possible outcomes.
+
+1) No History.
+
+If no history is retained by the KVStore, the backfill behaves no
+differently than it would on 7.1. ByID or BySeqno backfilling will
+produce a single snapshot (normal or OSO) for start to end of the
+disk range.
+
+2) History Available.
+
+If the KVStore indicates that history is available the following 3
+outcomes are possible.
+
+2.1) start >= ScanContext::historyStartSeqno => single snapshot marker
+
+Note this case cannot be encountered with OSO. OSO requires a start
+of 0.
+
+This case occurs because the start seqno is within the retained history.
+A single snapshot is produced that includes all seqnos from start to the
+end of the seqno index. This will be "scanAllVersions" scan and the
+snapshot gets tagged with the "History" flag and tagged that it "may
+contain duplicates".
+
+2.2) start < ScanContext::historyStartSeqno => two snapshots
+
+Note that this case has two outcomes. If an OSO snapshot is possible.
+An OSO snapshot is followed by a regular snapshot (tagged as History).
+If OSO is not possible, two regular snapshots occur (differentiated by
+flags).
+
+When the backfill starts below the retained history, DCP will backfill
+all of the available sequence data, non-history followed by history.
+This requires two DCP snapshots produced from the same disk snapshot.
+
+The first DCP snapshot is the non-history range, a KVStore::scan from
+the requested start up to, but not including
+ScanContext::historyStartSeqno. Or this will be an OSO snapshot of the
+requested collection - the entire collection ByID range.
+
+The second DCP snapshot is the history range, a
+KVStore::scanAllVersions from ScanContext::historyStartSeqno to the end
+of the disk snapshots sequence index. This snapshot is tagged to
+indicate that it's History and that it "may contain duplicates".
+
+Note that in the case when two DCP snapshots are generated (no OSO),
+both markers represent full disk range, including the MVS/HCS. The
+intention of this is to ensure that a failure before reaching the end
+of the disk snapshot, the client knows it's somewhere in the middle of
+the full disk range and can correctly resume DCP with the correct start
+and snapshot range.
+
+For example:
+
+The disk snapshot has a range of sequence numbers from 1 to 20. This is
+split into two sub-ranges. Non-history (nh) and history (h).
+
+    nh{1,10} h{11, 20}
+
+If a full backfill occurs of this disk snapshot (DCP stream start is 0)
+two markers will prefix the transmission of the ranges.
+
+snapshot marker 1:
+    snapshot-range{0, 20}
+    mvs = 20, hcs = 20
+    flags = disk | checkpoint
+
+mutations 0 to 10
+
+snapshot marker 2:
+    snapshot range{0, 20}
+    mvs = 20, hcs = 20
+    flags = disk | checkpoint | history | may_contain_duplicates
+
+mutations 11 to 20
+
+If the client disconnected after mutation 10, they would resume with
+start=10, range={0,20}, indicating they have a partial snapshot.
+
+Implementation Notes:
+
+The implementation of the "history" range adds a new optional phase to
+the DCP backfill state machine. When the backfill transitions into
+backfill_state_scanning the variations of the backfill are checked for.
+
+From here the following paths exist.
+
+1) No History.
+
+    backfill_state_scanning -> backfill_state_complete
+
+In this case the full snapshot is delivered from backfill_state_scanning
+phase.
+
+2.1) Only history.
+    backfill_state_scanning -> backfill_state_scanning_history_snapshot
+
+In this case the full snapshot is delivered from
+backfill_state_scanning_history_snapshot phase. The
+
+The backfill_state_scanning phase has only inspected the ScanContext
+and skipped to history.
+
+2.2) Two snapshots (OSO and regular).
+    backfill_state_scanning -> backfill_state_scanning_history_snapshot
+
+In this case both backfill phases are delivering "snapshots" from the
+same magma disk snapshot.
+
+Change-Id: I5a6df7ed929d99187a74a071c1d523d904cd6f7e
+Reviewed-on: https://review.couchbase.org/c/kv_engine/+/185002
+Well-Formed: Restriction Checker
+Tested-by: Jim Walker <jim@couchbase.com>
+Reviewed-by: Paolo Cocchi <paolo.cocchi@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jim Walker
+Date: 2023-01-20 15:40:28.000000000
+Message: 
+Change has been successfully cherry-picked as 108151d6f8c109b243cfceeab416df32e1a880fe
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2023-01-20 15:40:37.000000000
+Message: 
+Patch Set 15:
+
+Build Started https://cv.jenkins.couchbase.com/job/kv_engine-post-commit-TSan-neo/545/ (1/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2023-01-20 16:02:22.000000000
+Message: 
+Patch Set 15:
+
+Build Started https://cv.jenkins.couchbase.com/job/kv_engine-post-commit-neo/943/ (2/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2023-01-20 16:04:35.000000000
+Message: 
+Patch Set 15:
+
+Build Failed 
+
+https://cv.jenkins.couchbase.com/job/kv_engine-post-commit-neo/943/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( https://cv.jenkins.couchbase.com/job/kv_engine-post-commit-neo/943/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine-post-commit-TSan-neo/545/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( https://cv.jenkins.couchbase.com/job/kv_engine-post-commit-TSan-neo/545/ )
+----------------------------------------------------------------------------------------------------------------------

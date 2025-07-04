@@ -1,0 +1,100 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-50389: Replace compaction_write_queue_cap with compaction_max_concurrent_ratio
+
+Introduce a new configuration setting 'compaction_max_concurrent_ratio':
+
+    Maximum number of CompactVBucketTask tasks which can run
+    concurrently, as a fraction of the possible Writer task
+    concurrency. Note that a minimum of 1, and a maximum of N-1
+    CompactVBucketTasks will be run (where N is the possible Writer
+    task concurrency), to ensure both forward progress for Compaction
+    and Flushing.
+
+Previously the compaction tasl concurrency was limited to 50% (fixed
+fraction) of possible Writer tasks, _if_ the disk queue size exceeded
+compaction_write_queue_cap:
+
+    Disk write queue threshold after which compaction tasks will be
+    made to snooze, if there are already pending compaction tasks.
+    Default: 10,000.
+
+The intent of compaction_write_queue_cap is that if a Bucket has
+sufficient outstanding disk writes, then we should limit the number of
+compaction tasks to avoid consuming all Writer threads, leaving too
+little capacity for Flusher tasks.
+
+Conceptually this reasonable, however this code dates back a long way
+- before SyncWrites, and before we were as focused on the latency of
+accessing documents on disk.
+
+Looking at compaction_write_queue_cap from the pov of the current
+state of KV-Engine, there are a couple of flaws:
+
+ (a) While we check the outstanding writes when compaction starts,
+     more writes could come in during compaction but will be blocked /
+     will be contending for disk IO with already running compaction.
+
+ (b) Even if the queue size is very small (1 even), compactor tasks
+     consuming all Writer threads means SyncWrites could be blocked
+     from being flushed at all - significantly impacting SyncWrite
+     latency.
+
+While it would be "nice" to be able to utilise all Writer threads for
+Compaction if they are not needed for Flusher tasks, ultimately it is
+_never_ safe to use "too many" Writer threads for compaction, as
+mutations (SyncWrites) either in progress or yet to start could be
+blocked from progressing.
+
+As such, remove compaction_write_queue_cap from the calculation of
+when to pause additional Compactor tasks, and always limit to some
+fraction of the possible Writer tasks. This fraction is controlled by
+the new param compaction_max_concurrent_ratio which defaults to 0.5 -
+i.e. the same fraction as we limited previously.
+
+Change-Id: I02ef39c2be6597f5ca71c932804b5172d432a428
+Reviewed-on: https://review.couchbase.org/c/kv_engine/+/169227
+Tested-by: Dave Rigby <daver@couchbase.com>
+Reviewed-by: James H <james.harrison@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2022-01-26 17:39:31.000000000
+Message: 
+Change has been successfully cherry-picked as 949105b6e0134da602f13ae1003e8fe0f958e3ae by Dave Rigby
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2022-01-26 17:39:47.000000000
+Message: 
+Patch Set 5:
+
+(1 comment)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-01-26 17:42:10.000000000
+Message: 
+Patch Set 5:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-TSan-master/6697/ (1/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-01-26 17:43:55.000000000
+Message: 
+Patch Set 5:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-master/10134/ (2/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-01-26 18:20:28.000000000
+Message: 
+Patch Set 5:
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-TSan-master/6697/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-master/10134/ : SUCCESS'
+----------------------------------------------------------------------------------------------------------------------

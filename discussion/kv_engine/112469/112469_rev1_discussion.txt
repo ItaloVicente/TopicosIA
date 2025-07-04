@@ -1,0 +1,117 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-35245: Send items from Disk checkpoint as Disk snapshot
+
+If a replica receives a Disk snapshot from an active then is
+promoted it may then stream de-duped items from the
+CheckpointManager. This is problematic as these items are sent by
+ActiveStream as a Memory snapshot. This causes the replica to make
+all sanity checks possible for durable writes that cannot be
+satisfied if the original source of the items is disk. All of these
+items are written into Disk checkpoints on the new active so we can
+instead send Disk checkpoints as Disk snapshots to the replica which
+can then make the appropriate sanity checks.
+
+Currently, ActiveStream will attempt to fetch all items possible from
+the CheckpointManager. Instead of doing this, modify CheckpointManager
+to only return items from contiguous Checkpoints of the same type. In
+the general case this will be functionally no different, but if a
+newly promoted active has a Disk checkpoint then it will only fetch
+items from Disk checkpoints. The next run of the
+ActiveCheckpointProcessorTask will move the cursor into a Memory
+checkpoint and fetch all items from Memory checkpoints. Also, when
+receiving a new item as an active node, if the current checkpoint is
+Disk then the new active should put this item in a new Memory
+checkpoint to ensure that all sanity checks are made. One thing to note
+is that the set_vbucket_state operation to turn the replica to an
+active will be in the Disk checkpoint.
+
+Change-Id: I853eda21f77972d81257e52a8766f486d0be808f
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Ben Huddleston
+Date: 2019-07-25 10:39:46.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-07-25 12:07:41.000000000
+Message: 
+Patch Set 1: Code-Review-1
+
+(4 comments)
+File Comment: /COMMIT_MSG -> I think it's worth splitting this patch into two :-
+
+a) Only fetch items from the same Checkpoint type in each call to getAllItemsForCursor() - and maybe rename that to getNextItemsForCursor or similar?
+
+b) Actually use the new checkpoint type flag
+Line:694, engines/ep/src/checkpoint_manager.cc -> Is this necessary? Seems to complicate an already-complex condition.
+
+Line:852, engines/ep/src/checkpoint_manager.cc -> I don't think we need to complicate this by checking the cursor type. I think it's fine to just split persisted items also on different checkpoint types (and indeed we might have some odd consistency issues if we _do_ merge them).
+
+Line:1017, engines/ep/src/checkpoint_manager.cc -> I don't understand why this is necessary. As and when the replica receives the next  snapshot_marker flagged as CHK we'll create a new Checkpoint then.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-07-25 12:10:50.000000000
+Message: 
+Patch Set 1: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/22117/ : ABORTED
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/22117/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/19933/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/12267/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/18960/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/13123/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/21298/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/2950/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/5861/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-07-25 12:34:02.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:694, engines/ep/src/checkpoint_manager.cc -> In which case I think it's better to make the check more specific - i.e. when changing state from replica to active, explicitly create a new memory snapshot. Maybe re-purpose / rename resetSnapshotRange() to do this.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2019-07-25 13:22:16.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+
+back to 1 patch re slack comments
+Line:694, engines/ep/src/checkpoint_manager.cc -> Done. createNewCheckpoint sets snap start and snap end for us in the same way that resetSnapshotRange did but on the next checkpoint
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2019-07-25 12:31:10.000000000
+MISMATCHED INLINE COMMENT
+Line:694, engines/ep/src/checkpoint_manager.cc -> It's not strictly necessary, but I believe if we transition from replica to active then we do not create a new checkpoint (may be my test skipping the pending state though).  If the replica has only received a disk snapshot then I believe it will stay in a disk checkpoint until it HAS to create a new checkpoint. Don't want to skip sanity checks  if we then do a new sync write as we should be able to make them.
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2019-07-25 12:31:10.000000000
+MISMATCHED INLINE COMMENT
+Line:852, engines/ep/src/checkpoint_manager.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2019-07-25 12:31:10.000000000
+MISMATCHED INLINE COMMENT
+Line:1017, engines/ep/src/checkpoint_manager.cc -> See first comment in this file, the first condition is simply to ensure it makes it into this function. We only execute this code on the active
+----------------------------------------------------------------------------------------------------------------------

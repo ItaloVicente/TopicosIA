@@ -1,0 +1,108 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-36146 Fix a race condition in CheckpointManager
+
+Fix a race condition in the CheckpointManager when the following
+sequence of events occur:
+
+T1-1. An active stream needs to be moved to the dead state so we can
+call the destructor ActiveStream::~ActiveStream()
+
+T1-2. This then in turn calls ActiveStream::removeCheckpointCursor()
+which gets a shared pointer to the checkpoint cursor
+
+T1-3. The removeCheckpointCursor() method then gets a lock on the
+queueLock
+
+    T2-a. ActiveStream::getItemsRemaining() is called and gets hold of
+    a shared pointer to the same cursor as removeCheckpointCursor()
+    has
+
+    T2-b. CheckpointManager::getNumItemsForCursor() is then called
+    with the raw pointer to the cursor but has to wait till
+    removeCheckpointCursor() has finished executing as queueLock is
+    locked
+
+T1-4. removeCursor_UNLOCKED() is called by removeCheckpointCursor()
+which decrements the number of cursors on checkpoint
+
+        T3-I. The checkpoint remover task then runs removing the
+        checkpoint that the cursor points to as its cursor count is
+        now 0 and its closed.
+
+T1-5. removeCheckpointCursor() then frees the queueLock so
+getNumItemsForCursor() can call getNumItemsForCursor_UNLOCKED()
+
+    T2-c. getNumItemsForCursor_UNLOCKED() then tries to access the
+    member CheckpointList::iterator currentCheckpoint which points
+    to the freed Checkpoint and then when trying to access it we crash.
+
+The fix for this is to set CheckpointCursor::currentCheckpoint to the
+checkpointList.end() when we are deleting the current courser. Then
+check before we dereference a given currentCheckpoint that we make sure
+its not null and is not equal to checkpointList.end().
+
+Change-Id: I4e9ed18188fe4b182e87d1a8d5320a094df64e8d
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Richard de Mellow
+Date: 2019-10-04 11:22:20.000000000
+Message: 
+Patch Set 11: Patch Set 10 was rebased
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-10-04 12:09:57.000000000
+Message: 
+Patch Set 11: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/23842/ : FAILURE
+
+Link error: fatal error LNK1104: cannot open file "kv_engine\engine_utilities.dll" ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/23842/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/20353/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/21437/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/14810/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/13622/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/22825/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/4497/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/7463/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-10-04 13:49:39.000000000
+Message: 
+Patch Set 11: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/20353/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/21437/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/14810/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/13622/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/22825/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/4497/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/7463/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/23846/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-10-07 10:10:35.000000000
+Message: 
+Patch Set 11: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,160 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-53052: Update frequencies for all Buckets when sharing HT quota
+
+We want the frequency counters of items in buckets sharing quota to
+relate to one another such that we can make eviction decisions across
+buckets.
+
+This change adds a new ItemFreqDecayerTaskManager which orchestrates
+the execution of the per-item ItemFreqDecayerTask for all buckets
+sharing memory. By running the ItemFreqDecayerTask the same number of
+times for buckets sharing HT quota, the resulting frequency counters
+will have been decremented the same number of times, which will make
+cross-bucket frequency counter comparisons make sense.
+
+Change-Id: Id3bd46bc1f9616986e5d03288e496a0913011ce5
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Vesko Karaganev
+Date: 2022-11-08 16:34:43.000000000
+Message: 
+Uploaded patch set 7.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-11-08 17:57:39.000000000
+Message: 
+Patch Set 7: Verified+1
+
+Build Successful 
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/21051/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/42821/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/21764/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-windows-master/51019/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/11581/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux-debug/job/master/514/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/11490/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/24215/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/23806/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/23247/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/25042/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/32228/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-11-15 10:00:36.000000000
+Message: 
+Patch Set 7: Code-Review-1
+
+(10 comments)
+Line:32, engines/ep/src/item_freq_decayer.cc -> How often to we expect to call the create() method? I ask because calling methods on Configuration is expensive as it requires acquiring a single mutex on the Configuration class and walking an unordered_map to lookup the config key being requested.
+
+If it's (potentially) very frequent, I would suggest caching the value of isCrossBucketHtQuotaSharing() in the ItemFreqDecayerTaskManager; and adding a listener to the config to propagate any changes.
+
+Line:89, engines/ep/src/item_freq_decayer.cc -> How do we deal with scheduling skew here - i.e. task->wakeup() is a no-op if the task has already been woken up, but has not yet been executed. As such, for multiple buckets if you try to wake ItemFrequencyDecayer tasks for all, there's no guarantee when each Buckets' task will be executed, and I believe you could end up with unequal number of runs for each bucket (if say one was slow to be executed and then essentially "missed" a wakeup)...?
+
+Line:19, engines/ep/src/item_freq_decayer.h -> We don't appear to use WeakPtrBag in any class definitions etc - only as a return type for one of the methods. That means we should be able to forward-declare this class.
+
+Line:39, engines/ep/src/item_freq_decayer.h -> This doesn't need to be inline - please move to .cc 
+
+(it'll involve generating code which does double-checked locking for "magic statics", so it's more code than it may initially appear to be...)
+
+Line:43, engines/ep/src/item_freq_decayer.h -> If this should only be constructed via the static get() method, suggest the ctor is made private.
+
+Line:58, engines/ep/src/item_freq_decayer.h -> Please document the percentage parameter.
+
+Line:60, engines/ep/src/item_freq_decayer.h -> Style: This is probably the second-most important method of the class (after get()); suggest ordering the class so this appears say after the get() method.
+
+Line:101, engines/ep/src/item_freq_decayer.h -> What's the ownership model of ItemFreqDecayerTask here? If we only have a non-owning pointer; then what happens if the task runs to completion and ExecutorPool attempts to delete it?
+
+Line:2226, engines/ep/src/kv_bucket.cc -> As previous comment, we probably want to cache this config variable.
+
+Line:14, tests/testapp_cluster/CMakeLists.txt -> Nit: whitespace, and not in alphabetical order.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Vesko Karaganev
+Date: 2022-11-15 11:57:25.000000000
+MISMATCHED INLINE COMMENT
+Line:32, engines/ep/src/item_freq_decayer.cc -> This is only called once per ep-engine instance, from the engine's constructor.
+----------------------------------------------------------------------------------------------------------------------
+Author: Vesko Karaganev
+Date: 2022-11-15 11:57:25.000000000
+MISMATCHED INLINE COMMENT
+Line:89, engines/ep/src/item_freq_decayer.cc -> Because of the notified guard, which we reset only when all tasks are done, I don't believe we can lose a wakeup here. I've added an extra debug-only assertion.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-11-18 15:31:26.000000000
+MISMATCHED INLINE COMMENT
+Line:19, engines/ep/src/item_freq_decayer.h -> We are still including <weak_ptr_bag.h> ;)
+----------------------------------------------------------------------------------------------------------------------
+Author: Vesko Karaganev
+Date: 2022-11-23 10:45:16.000000000
+MISMATCHED INLINE COMMENT
+Line:19, engines/ep/src/item_freq_decayer.h -> Ah, sorry. We're using WeakPtrBag in on line 76, so I cannot remove the header.
+
+The previous patch added a forward decl, but didn't remove the header, and I didn't realise we are using the template until now.
+----------------------------------------------------------------------------------------------------------------------
+Author: Vesko Karaganev
+Date: 2022-11-15 11:57:25.000000000
+MISMATCHED INLINE COMMENT
+Line:19, engines/ep/src/item_freq_decayer.h -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Vesko Karaganev
+Date: 2022-11-15 11:57:25.000000000
+MISMATCHED INLINE COMMENT
+Line:39, engines/ep/src/item_freq_decayer.h -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Vesko Karaganev
+Date: 2022-11-15 11:57:25.000000000
+MISMATCHED INLINE COMMENT
+Line:43, engines/ep/src/item_freq_decayer.h -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Vesko Karaganev
+Date: 2022-11-15 11:57:25.000000000
+MISMATCHED INLINE COMMENT
+Line:58, engines/ep/src/item_freq_decayer.h -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Vesko Karaganev
+Date: 2022-11-15 11:57:25.000000000
+MISMATCHED INLINE COMMENT
+Line:60, engines/ep/src/item_freq_decayer.h -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Vesko Karaganev
+Date: 2022-11-23 10:45:16.000000000
+MISMATCHED INLINE COMMENT
+Line:101, engines/ep/src/item_freq_decayer.h -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-11-18 15:31:26.000000000
+MISMATCHED INLINE COMMENT
+Line:101, engines/ep/src/item_freq_decayer.h -> Nod. I think it's worth documenting that here to aid the future reader.
+----------------------------------------------------------------------------------------------------------------------
+Author: Vesko Karaganev
+Date: 2022-11-15 11:57:25.000000000
+MISMATCHED INLINE COMMENT
+Line:101, engines/ep/src/item_freq_decayer.h -> The task object is destroyed. The task will be created as an ItemFreqDecayerTaskWithCallback. ~ItemFreqDecayerTaskWithCallback() will signalCompleted() and the task will be removed from this set.
+----------------------------------------------------------------------------------------------------------------------
+Author: Vesko Karaganev
+Date: 2022-11-15 11:57:25.000000000
+MISMATCHED INLINE COMMENT
+Line:2226, engines/ep/src/kv_bucket.cc -> Done. I don't think we need a change listener as this is not a dynamic config parameter.
+----------------------------------------------------------------------------------------------------------------------
+Author: Vesko Karaganev
+Date: 2022-11-15 11:57:25.000000000
+MISMATCHED INLINE COMMENT
+Line:14, tests/testapp_cluster/CMakeLists.txt -> Done
+----------------------------------------------------------------------------------------------------------------------

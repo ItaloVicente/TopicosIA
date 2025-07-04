@@ -1,0 +1,124 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-37520: Use dynamic_bitset for VBReadyQueue
+
+VBReadyQueue currently uses a std::unordered_set<uint16_t> to track
+which vBuckets are ready (and so we don't have two copies of the same
+vbucket in the queue). This requires dynamic memory allocation /
+freeing, and hence shows up relatively hot - ~11% of DcpProducer::step is spent in VBReadyQueue:
+
+    Weight  Self Weight     Symbol Name
+     18.93 s  100.0% 280.00 ms       DcpProducer::step(DcpMessageProducersIface&)
+      8.59 s   45.3%  55.00 ms         DcpProducer::getNextItem()
+      5.28 s   27.8%  15.00 ms          ActiveStream::next()
+      1.21 s    6.3%  50.00 ms          VBReadyQueue::popFront(Vbid&)
+      1.04 s    5.4%  15.00 ms          VBReadyQueue::pushUnique(Vbid)
+
+By replacing the unordered_set with boost::dynamic_bitset<> we no
+longer require any dynamic memory allocaition (it's esssentially a
+vector of bits) and also reduce the memory footprint -
+boost::dynamic_bitset of capacity 1024 requires 128 Bytes.
+
+This reduces the cost of VBReadyQueue::popFront / pushUnique: to 4% of step:
+
+    Weight  Self Weight     Symbol Name
+     17.34 s  100.0% 250.00 ms       DcpProducer::step(DcpMessageProducersIface&)
+      5.97 s   34.4%  35.00 ms         DcpProducer::getNextItem()
+      4.30 s   24.8%  25.00 ms          ActiveStream::next()
+    400.00 ms   2.3%  35.00 ms          VBReadyQueue::pushUnique(Vbid)
+    295.00 ms   1.7%  30.00 ms          VBReadyQueue::popFront(Vbid&)
+
+Change-Id: I86f23e71c78f41db45d173eaec61902d01ff1b73
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2021-03-09 09:57:30.000000000
+Message: 
+Patch Set 3: Patch Set 2 was rebased
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-03-09 10:51:24.000000000
+Message: 
+Patch Set 3: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/6053/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/7515/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/34117/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/29307/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/17031/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/9130/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/9271/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/9484/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/8187/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2021-03-09 12:29:46.000000000
+Message: 
+Patch Set 3: Code-Review-1
+
+(2 comments)
+
+I can't remember if this works but I made a benchmark for this ages ago - http://review.couchbase.org/c/kv_engine/+/120078, you may be interested.
+
+Code looks fine to me but a couple of questions
+Line:55, engines/ep/src/vb_ready_queue.cc -> is the time complexity of this constant?
+
+Line:98, engines/ep/src/vb_ready_queue.h -> why boost and not std::bitset?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-03-09 12:30:43.000000000
+Message: 
+Patch Set 3:
+
+> Patch Set 3: Code-Review-1
+> 
+> (2 comments)
+> 
+> I can't remember if this works but I made a benchmark for this ages ago - http://review.couchbase.org/c/kv_engine/+/120078, you may be interested.
+> 
+> Code looks fine to me but a couple of questions
+
+Ah cool, I'll see if I can pull it into this patch.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-03-09 12:33:41.000000000
+Message: 
+Patch Set 3:
+
+(2 comments)
+Line:55, engines/ep/src/vb_ready_queue.cc -> It is not - it scans the entire bitset.
+
+_However_, that boils down to just reading 128B (2 cachelines) for 1024 vBuckets, so I suspect the runtime will be low. I'll check with your benchmark...
+
+Line:98, engines/ep/src/vb_ready_queue.h -> std::bitset's size is a compile-time constant (a la std::array), whereas boost::dynamic_bitset it set at construction time.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-03-09 12:37:37.000000000
+MISMATCHED INLINE COMMENT
+Line:55, engines/ep/src/vb_ready_queue.cc -> :thumbsup:
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2021-03-09 12:36:39.000000000
+MISMATCHED INLINE COMMENT
+Line:55, engines/ep/src/vb_ready_queue.cc -> could replace with readyQueue.empty() and keep it constant
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2021-03-09 12:36:39.000000000
+MISMATCHED INLINE COMMENT
+Line:98, engines/ep/src/vb_ready_queue.h -> too used to 1024 vBuckets
+----------------------------------------------------------------------------------------------------------------------

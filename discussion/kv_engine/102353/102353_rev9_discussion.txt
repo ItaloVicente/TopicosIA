@@ -1,0 +1,154 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-32117: Track when pending SyncWrites should be committed
+
+This is the first real implementation of Durability Requirement (DR)
+verification in the DurabilityMonitor.
+In its first implememtation, the DurabilityMonitor has very simple
+internal structures that support only 1 replica. That makes the DR
+verification very simple.
+That is why this patch follows the change where I prepare the internal
+structures for multiple replicas.
+Note that multiple-replicas as DurabilityMonitor feature remains
+unsupported though.
+
+Change-Id: Ia8559cba0661c3d10ebe7089a6308c0cb01ed24c
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2018-12-05 10:51:35.000000000
+Message: 
+Uploaded patch set 9.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2018-12-05 10:59:08.000000000
+Message: 
+Patch Set 9:
+
+(1 comment)
+Line:258, engines/ep/src/durability_monitor.cc -> Fixing, when visualized in a text editor this has to be:
+
+x    1    2    3    4    5    6    7    8    9
+^          ^                ^           ^
+C        R1              R2        R3
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-12-05 11:05:42.000000000
+Message: 
+Patch Set 9: Code-Review-1
+
+(3 comments)
+Line:227, engines/ep/src/durability_monitor.cc -> consider emplace_back for maximum performance.
+
+Line:236, engines/ep/src/durability_monitor.cc -> Consider using a heap / std::priority_queue instead as you can build it in-order.
+
+Line:149, engines/ep/src/durability_monitor.h -> Not sure I understand the need for this. Note there cannot in the general case be a single committed iterator; as different durability levels can result in pending SyncWrites committing in a different order to what they were added in (i.e. not necessarily in seqno order).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-12-05 11:40:32.000000000
+Message: 
+Patch Set 9: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/14185/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/14185/ )
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/6335/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/14760/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/6181/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/3889/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/13152/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/12809/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-12-05 12:55:44.000000000
+Message: 
+Patch Set 9: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/6335/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/14760/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/6181/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/3889/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/13152/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/12809/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/14230/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2018-12-06 16:41:59.000000000
+Message: 
+Patch Set 9:
+
+(3 comments)
+Line:227, engines/ep/src/durability_monitor.cc -> Done
+
+Line:236, engines/ep/src/durability_monitor.cc -> Done
+
+Line:149, engines/ep/src/durability_monitor.h -> There is only 1 commit iterator here, I'll add the second for tracking the committed disk seqno.
+
+But why tracking commits with an iterator?
+That's because the DurabilityMonitor stores SyncWrites in a Container, and I'm not yet sure if removing items from the Container can be done synchronously with 'commit' for performance reason.
+So I'm considering the following general case:
+
+C = iterator tracking 
+Ri = iterator tracking Replica i
+
+Container:    1    2    3    4    5    6    7    8    9
+                        ^         ^         ^         ^
+                        C         R1        R2        R3
+
+If we consider a BGTask doing the item-removal, then in general items in [Container::begin, C] are eligible for removing.
+
+In the presence of both Cm (memory) and Cd (disk), the items eligible for removing are in [Container::begin, Cd] (as min(Cm, Cd) should always return Cd by design).
+
+Also, currently I have implemented a logic where the items eligible for commit are in [C+1, R*], with R* determined by the DurabilityRequirement.
+
+If we consider the case of a synchronous items removal (i.e., we remove items as soon as we commit them), then the items eligible for commit will be always in [Container::begin, R*], so we don't need to track commits.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-12-10 09:39:39.000000000
+Message: 
+Patch Set 9:
+
+(1 comment)
+Line:149, engines/ep/src/durability_monitor.h -> I'd suggest doing it "synchronously" for now (note that actually that's probably going to be a non-frontend thread anyway as I think that processing dcp_seqno_ack / calling VBucket::commit() should be done on a background thread anyways.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2018-12-10 10:48:10.000000000
+Message: 
+Patch Set 9:
+
+(1 comment)
+Line:149, engines/ep/src/durability_monitor.h -> My model requires to track commits anyway (in some way, whether it is an iterator or anything else) when I introduce support for PersistTo (WIP patch at http://review.couchbase.org/#/c/102588)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2018-12-11 17:30:42.000000000
+MISMATCHED INLINE COMMENT
+Line:149, engines/ep/src/durability_monitor.h -> As agreed, deferring the following to follow-up patches:
+
+1) Extending and validating the current model by adding support for PersistTo and multiple Replication Chain. Note that for the latter I am in an open discussion with ns_server for understanding what are the legal Replication Chain updates.
+
+2) Commited SyncSwrite removal
+----------------------------------------------------------------------------------------------------------------------

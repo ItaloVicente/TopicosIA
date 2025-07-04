@@ -1,0 +1,113 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-39993: [Ephemeral] Handle delete_time < server startup time
+
+There's a bug in how we handle replicating an item's deletion time
+over DCP, if the item was deleted before destination node started. The
+effect of this is that the deletion time of the item on the replica is
+set to memcached uptime + 1, and hence won't be subject to metadata
+purging until the entire purge interval has passed, even if the actual
+item was deleted a long time ago.
+
+The consequence of this is that on Ephemeral buckets, deletions
+earlier than server startup received by a replica vBucket will not be
+purged at the correct time. Instead their purge is delayed until
+server_startup + metadata purge interval.
+
+This occurs because the delete_time in StoredValue is represented as
+rel_time_t - i.e. seconds since server started. As such, it is not
+possible to represent delete times earlier than the server startup
+time. If such a rel_time_t is attempted to be created, then
+mc_time_convert_to_real_time() returns a value of "1" (since server
+startup):
+
+   /* if item expiration is at/before the server started, give it an
+      expiration time of 1 second after the server started.
+      (because 0 means don't expire).  without this, we'd
+      underflow and wrap around to some large value way in the
+      future, effectively making items expiring in the past
+      really expiring never */
+   if (t <= epoch) {
+       rv = (rel_time_t)1;
+   }
+
+To address this, StoredValue::delete_time is changed from rel_time_t,
+to a 32bit time_t (seconds since Unix epoch) - the same as is used for
+expiry time. This allows delete times before the server startup to be
+represented, and hence correctly purged.
+
+Implementation Note:
+
+Using rel_time_t and (uint32_t) time_t is error-prone, as they are
+typically just typedefs to the same underlying type (uint32_t) and
+hence the compiler won't help you if you directly assign one to the
+other. When this is merged to master I plan to introduce
+strongly-typed clocks for each which _will_ prevent any such
+accidental conversion, however that would significantly incease the
+scope of this fix so not doing that here.
+
+Change-Id: I45b62286f422785462b52eabcf93fdcde73bfa9e
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2020-06-18 11:48:35.000000000
+Message: 
+Uploaded patch set 6.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-06-18 11:48:50.000000000
+Message: 
+Patch Set 6:
+
+Branch restricted. PLEASE READ this URL: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/188424/artifact/restricted.html : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-06-18 12:04:46.000000000
+Message: 
+Patch Set 6: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/1272/ : FAILURE
+
+Compile error at /home/couchbase/jenkins/workspace/kv_engine-clang_analyzer-mad-hatter/kv_engine/engines/ep/tests/module_tests/evp_store_single_threaded_test.cc:2226:80:
+error: extraneous ")" before ";"
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/1272/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/1407/ : FAILURE
+
+Compile error at ..\kv_engine\engines\ep\tests\module_tests\evp_store_single_threaded_test.cc(2226): error C2059: syntax error: ")" ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/1407/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/1407/ : FAILURE
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/1185/ : FAILURE
+
+Compile error at [2020-06-18T11:51:35.492Z] ../kv_engine/engines/ep/tests/module_tests/evp_store_single_threaded_test.cc:2226:80:
+error: expected ?;? before ?)? token
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/1185/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/1390/ : FAILURE
+
+Compile error at [2020-06-18T11:51:15.727Z] ../kv_engine/engines/ep/tests/module_tests/evp_store_single_threaded_test.cc:2226:80:
+error: expected ?;? before ?)? token
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/1390/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/1401/ : FAILURE
+
+Compile error at [2020-06-18T11:54:55.009Z] ../kv_engine/engines/ep/tests/module_tests/evp_store_single_threaded_test.cc:2226:80:
+error: expected ?;? before ?)? token
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/1401/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/mad-hatter/743/ : FAILURE
+
+Compile error at [2020-06-18T11:52:07.502Z] ../kv_engine/engines/ep/tests/module_tests/evp_store_single_threaded_test.cc:2226:80:
+error: extraneous ")" before ";"
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/mad-hatter/743/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/25869/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

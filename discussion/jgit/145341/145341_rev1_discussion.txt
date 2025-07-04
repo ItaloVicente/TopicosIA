@@ -1,0 +1,109 @@
+======================================================================================================================
+DESCRIPTION:
+
+RefDirectory: improve scanning performance
+
+RefDirectory is now using a shared timestamp resolution cache for the
+creation of per-ref FileSnapshots. This saves redundant, expensive calls
+to FS.getFsTimerResolution().
+
+Experimental results: on Windows, for 10K loose refs, this saves roughly
+90% of overall processing time for RefDirectory.getRefs().
+
+Change-Id: I51bd7d5e987064416badd6a9cb1e217d580fea52
+Signed-off-by: Marc Strapetz <marc.strapetz@syntevo.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Marc Strapetz
+Date: 2019-07-02 21:13:17.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2019-07-02 21:13:23.000000000
+Message: 
+Patch Set 1:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit/16638/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2019-07-02 21:13:48.000000000
+Message: 
+Patch Set 1: Verified-1
+
+Build Failed 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit/16638/ : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Halstrick
+Date: 2019-07-02 21:36:20.000000000
+Message: 
+Patch Set 1:
+
+FS.getFsTimerResolution() is already using a cache to improve performance. That cache caches the resolution per FileStore. Now you are introducing another cache one level above again for filesystem timer resolution. That cache seems to bring alot of performance. Have you found out why caching in FS.getFsTimerResolution() was not helping? I would prefer to have only one cache for timer resolution.
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc Strapetz
+Date: 2019-07-02 21:46:41.000000000
+Message: 
+Patch Set 1:
+
+The current FileStoreAttributeCache is actually just per FileStore and caches the results of the *very* expensive file system probing. The cache suggested by this patch works around the *fairly* expensive Files.getFileStore()-call which becomes a significant performance problem when calling many (thousand) times per operation.
+
+Btw, my first idea was to simply cache the per-directory results in the FS, however one can think of cases where e.g. symlinks will be changed during runtime, making the same Path effectively pointing to a different FileStore. Hence, this more elaborate patch which is only using a short-lived, local cache and only addresses scanning of many refs (which is the only use case I found so far for which there are real performance problems).
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2019-07-02 22:06:04.000000000
+Message: 
+Patch Set 1: Code-Review-1
+
+(1 comment)
+
+- did you profile which call is causing the slowness you observed ?
+- did you consider to pack loose refs using git gc ?
+- I think caching timestamp resolution per individual path could eat a lot of memory if there are many loose refs. Maybe it would be a reasonable assumption that a given repository is stored on a single file system,  then we could cache the resolution as a single value per FileRepository
+- I am working on a series of fixes regarding timer resolution etc on stable-5.1, hence push such improvements on top of that series (https://git.eclipse.org/r/#/c/145126/). As soon as the series passed code review I will merge it to all the higher versions
+Line:2, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/FileSnapshotTimestampResolutions.java -> this copyright and year seem to be wrong
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc Strapetz
+Date: 2019-07-02 22:44:14.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+
+> did you profile which call is causing the slowness you observed ?
+
+Yes, it's:
+
+    FileStore s = Files.getFileStore(dir);
+
+I'm testing on NTFS.
+
+> did you consider to pack loose refs using git gc ?
+
+Yes, we are even suggesting this to the user. I admit that testing with 10K loose refs is an edge case. On the other with only 100 loose refs, this patch reduces processing time of FileRepository.getRefs() from an average of 60ms to 15ms. We are using a handful of such jgit queries to incrementally update the repository state (which is stored in memory) and FileRepository.getRefs() is currently the most expensive call.
+
+> I think caching timestamp resolution per individual path could eat a lot of memory if there are many loose refs. Maybe it would be a reasonable assumption that a given repository is stored on a single file system, then we could cache the resolution as a single value per FileRepository
+
+With this patch, we are currently caching one timestamp resolution per refs sub-irectory. Either way, I completely agree that one timestamp resolution per repository should be sufficient. In this case, I think we can also assume that the underlying FileStore won't change during the lifetime of a FileRepository? That would make the change even simpler, FileSnapshot could probably be initialized with a mandatory, constant timestamp resolution parameter and we can get rid of this tricky static access to FS.getFsTimerResolution().
+
+> I am working on a series of fixes regarding timer resolution etc on stable-5.1, hence push such improvements on top of that series (https://git.eclipse.org/r/#/c/145126/). As soon as the series passed code review I will merge it to all the higher versions
+
+OK, will do once we have agreed on the granularity/scope of the cache (3. point).
+Line:2, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/FileSnapshotTimestampResolutions.java -> Done
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc Strapetz
+Date: 2019-07-02 22:54:20.000000000
+Message: 
+Patch Set 1:
+
+> Ok, got that. But instead of two caches both caching filesystem timer resolutions wouldn't it be better to introduce a second cache which caches what you found to be a performance problem: the Files.getFileStore() call. If we would introduce then a FS.getFsTimestampResolution(FileStore fs) call we could make use of that second cache.
+
+I was actually considering such a cache in FS (I guess you would expect it there, too)? But such a static cache would be long-lived and would theoretically allow underlying FileStore changes which invalidate the cached results.
+
+From the discussion with Matthias I now think that having one constant timestamp resolution per FileRepository would be preferable and would make the code only slightly more complex.
+----------------------------------------------------------------------------------------------------------------------

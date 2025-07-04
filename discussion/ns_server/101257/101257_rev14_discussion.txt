@@ -1,0 +1,143 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-28525: Promote replica which is most ahead.
+
+Steps:
+1. In order to promote max replica we need to get a consistant view of
+all the replicas, hence we teardown the replication streams whose
+producers are the nodes being failed over.
+
+2. Promote max replica i.e, make replica that is most ahead as active,
+as given by,
+
+2.a. Get all the nodes that should be considered for promote max
+replica, note these nodes do not include the nodes with recovery_type
+set to delta. The details of this step is given by 2.a.i and 2.a.ii.
+
+2.a.i. Get latest uuid of history from all replica histories. A node’s
+history is deemed to superseed all replica node histories if the
+latest uuid of all replica node history is part of the node's history.
+Return the latest uuid of node’s history that superseeds.
+
+2.a.ii. Determine which nodes have the same latest uuids as those got
+from step 2.a.i, these are nodes that need to be considered for
+promote max replica.
+
+2b. From the nodes in step 2a determine, the max replica, replica with
+max highest_prepared_seqno. If equal highest_prepared_seqno are
+encountered use the node with max high_seqno. If still equal any of
+the 2 nodes being compared can be used.
+
+Change-Id: I5a9a10a0ed19f7f1e829dfa8186521989e40003b
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Abhijeeth Nuthan
+Date: 2019-04-22 23:07:52.000000000
+Message: 
+Uploaded patch set 14: Patch Set 13 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-04-22 23:08:11.000000000
+Message: 
+Patch Set 14: -Well-Formed
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-test/11124/
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2019-04-22 23:09:06.000000000
+Message: 
+Patch Set 14: Verified+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-04-22 23:13:25.000000000
+Message: 
+Patch Set 14: Well-Formed+1
+
+Permission granted to commit to restricted branch
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Artamonau
+Date: 2019-04-23 06:48:30.000000000
+Message: 
+Patch Set 14:
+
+(4 comments)
+
+Haven't finished looking yet. But some initial comments can be found inline.
+Line:325, src/ns_rebalancer.erl -> Please use variable names that can be understood by somebody who knows nothing about the feature and is looking at this code for the first time.
+
+Line:355, src/ns_rebalancer.erl -> Doing this vbucket by vbucket is potentially extremely inefficient. You need a network round-trip for each vbucket. With a timeout of 10 seconds per call, we are potentially talking about delays on the order of tens of minutes. All this time the orchestrator is going to be blocked. And there's no way for the user to do anything: failover can't be canceled as of today. We can of course fix the latter, but that's a significant amount of work. I would want the length of entire promote max replica failover to be bounded by some reasonably small constant so we don't have to deal with cancelability and visibility of failover given our current time pressure.
+
+Ideally, you can do everything that needs to be done here (including tearing down the replications) in a single call to each of the involved replica nodes.
+
+Line:377, src/ns_rebalancer.erl -> Forgetting about synchronous writes for a moment. I could see a customer having "promote max replica" enabled for better (for some definition of better) failover. Assuming we indeed decide it's a valid use case, then we should probably still attempt to find a "better" replica among delta recovery nodes.
+
+Then there's another issue. If nodes are marked for delta recovery, rebalance started and then interrupted before the recovery_type is cleared, the janitor will eventually create replications to these nodes and the clients will be able submit sync-writes and get them acknowledged. So it's unsafe forgo the "max replica" logic here.
+
+Line:446, src/ns_rebalancer.erl -> Can you please add brief comments about what each of the functions does and add tests for the first to (in addition to the tests you already have for get_latest_uuid).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2019-04-23 19:49:42.000000000
+Message: 
+Patch Set 14: -Verified
+
+(4 comments)
+Line:325, src/ns_rebalancer.erl -> ok
+
+Line:355, src/ns_rebalancer.erl -> I can do the ideal case, everything being done in get_failover_info, for all vbuckets, but will have to revert the previous changesets, http://review.couchbase.org/#/c/107749/ and http://review.couchbase.org/#/c/101255/ . If you prefer I not revert and make changes on top it I can do so. 
+
+Do let me know.
+
+Line:377, src/ns_rebalancer.erl -> Skipping Delta recovery nodes was done as it is the most common cause of history divergence. If we do not skip it then we might fail with no_common_history further down.
+
+I suppose that is ok? That is, if failover doesn't succeed till the failover log of delta nodes is equal to that of the active node for vbucket?
+
+Line:446, src/ns_rebalancer.erl -> ok
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Artamonau
+Date: 2019-04-23 20:29:21.000000000
+Message: 
+Patch Set 14:
+
+(1 comment)
+Line:377, src/ns_rebalancer.erl -> Actually, the second part of my analysis is not correct. The recovery_type is set to none more or less at the same time when bucket configs are updated to include replicas on nodes being delta recovered. But at the same time, it also means that the check for the recovery_type is almost useless in what it's trying to achieve: the corresponding nodes will not be in the vbucket map when the recovery_type is still set to delta.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Artamonau
+Date: 2019-04-23 20:30:48.000000000
+Message: 
+Removed reviewer Amit Krishnan.
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Artamonau
+Date: 2019-04-24 23:20:06.000000000
+Message: 
+Patch Set 14:
+
+(1 comment)
+Line:377, src/ns_rebalancer.erl -> Taking this back again. My first comment was correct, the last one -- not. So you can try using the recovery_type do skip delta recovery nodes. But something will have to be done to address at least the second issue I outlined in the first comment.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2019-04-24 00:05:23.000000000
+MISMATCHED INLINE COMMENT
+Line:325, src/ns_rebalancer.erl -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2019-04-24 00:05:23.000000000
+MISMATCHED INLINE COMMENT
+Line:355, src/ns_rebalancer.erl -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2019-04-24 00:05:23.000000000
+MISMATCHED INLINE COMMENT
+Line:377, src/ns_rebalancer.erl -> Removed the code which excludes delta recovery nodes from promote max replica.
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2019-04-24 00:05:23.000000000
+MISMATCHED INLINE COMMENT
+Line:446, src/ns_rebalancer.erl -> Done
+----------------------------------------------------------------------------------------------------------------------

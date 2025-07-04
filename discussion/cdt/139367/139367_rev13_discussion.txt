@@ -1,0 +1,159 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 343274 - Added checker for const and static methods check
+
+Change-Id: I83b83f695b1b275476418b278a205b78c1b0a8f9
+Signed-off-by: Marco Stornelli <marco.stornelli@gmail.com>
+Signed-off-by: Anton Gorenkov <xgsa@yandex.ru>
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Marco Stornelli
+Date: 2019-08-11 08:06:27.000000000
+Message: 
+Uploaded patch set 13.
+----------------------------------------------------------------------------------------------------------------------
+Author: CDT Bot
+Date: 2019-08-11 08:06:33.000000000
+Message: 
+Patch Set 13:
+
+Build Started https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-other-pipeline/698/ (1/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: CDT Bot
+Date: 2019-08-11 08:06:34.000000000
+Message: 
+Patch Set 13:
+
+Build Started https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-ui-only-pipeline/671/ (2/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Marco Stornelli
+Date: 2019-08-11 08:13:20.000000000
+Message: 
+Patch Set 13:
+
+I posted an update covering the first three cases you posted. About the latest two there are two solutions:
+1) Use READ | WRITE if the variable is RHS but we are assigning to a reference like int& r;
+2) Track every possible assignment of the variable and check if we are writing on it. This should be recursive because we could assign the reference to another reference and so on.
+
+Honestly I don't like 1). About 2): I think it would a really big change.
+This covers even what you said about the no-const pointer. I could add a check, but we could write code in order to call the pointer in "indirect" way.
+So in summary: I think we are in a dead-corner :) If you have an idea to solve it in a simple way I could try, otherwise I should stop it here because it goes beyond my current skills.
+----------------------------------------------------------------------------------------------------------------------
+Author: Nathan Ridge
+Date: 2019-08-11 16:26:14.000000000
+Message: 
+Patch Set 13:
+
+(1 comment)
+Line:297, codan/org.eclipse.cdt.codan.checkers/src/org/eclipse/cdt/codan/internal/checkers/ClassMembersConstChecker.java -> Why set classMembersAreWritten if it's CAST_WRITE?
+
+In a case like this:
+
+  void bar(int&);
+  
+  struct A {
+    int field;
+
+    void method() {
+      bar(const_cast<int&>(field));
+    }
+  };
+
+I think it would be reasonable to issue the warning "method should be const". After all, if it's not const, you don't need the const_cast.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Marco Stornelli
+Date: 2019-08-11 16:37:33.000000000
+Message: 
+Patch Set 13:
+
+it was just a way to fix original problem without have the method should be const. Ok, I can change it. Do you feedbacks about the other points?
+----------------------------------------------------------------------------------------------------------------------
+Author: Nathan Ridge
+Date: 2019-08-11 16:44:59.000000000
+Message: 
+Patch Set 13:
+
+As for tracking the flow of code... here are some thoughts on that.
+
+First, observe that the following does not compile:
+
+  struct A {
+    int arr[10];
+
+    void foo() const {
+      int& x = arr[0];
+      // we never assign to x
+    }
+  };
+
+That is, the const-correctness violation occurs as soon as you take a non-const reference to a member. It doesn't require assigning to it. So, in cases like this, there is no need to track "flow".
+
+However, we _can_ devise a testcase where the const-correctness violation is "far away" from the member access:
+
+  struct A {
+    int arr[10];
+
+    void foo() const {
+      auto&& x = arr[0];
+      int& y = x;
+    }
+  };
+
+Here, the deduced type of "x" is "reference to const int", and it's on the next line that we get an error about trying to convert it to "reference to int".
+
+This last example suggests that trying to check const-correctness by only looking at member accesses will not work in general. We need to check other things, like type-checking the initialization of variables, throughout the function body.
+
+It also suggests that for the "Method should be constant" check, to catch all cases we'd need an implementation strategy similar to this:
+
+* Assume we have a procedure to fully type-check a function body (that is, run checks that would diagnose existing "Class member cannot be written" errors as well as cases like the above where an initialization fails).
+* First, run the procedure on the method as written (non-const). If it gives an error, bail. (We are approximating this today with the "hasProblems".)
+* Then, temporarily change the method to be const, and run the procedure to type-check it again. If that doesn't produce any errors, we know it's safe to issue the "Method should be constant" warning.
+----------------------------------------------------------------------------------------------------------------------
+Author: Nathan Ridge
+Date: 2019-08-11 16:52:59.000000000
+Message: 
+Patch Set 13:
+
+By the way, in case it's not clear, it's not just initialization. Adding or removing a "const" can potentially cause just about any category of error to appear. It doesn't even have to be an error directly in the function body - it could be in a template instantiation triggered by the function body.
+
+For example:
+
+    void foo(int&);
+    
+    template <typename T>
+    void bar(T& t) {
+	foo(t);
+    }
+    
+    struct A {
+	int field[10];
+	
+	void method() {
+	    auto&& x = field[0];
+	    bar(x);
+	}
+    };
+
+Here, making method() const (as the checker suggests) introduces a compiler error, but it's inside the instantiation of bar().
+----------------------------------------------------------------------------------------------------------------------
+Author: CDT Bot
+Date: 2019-08-12 07:59:08.000000000
+Message: 
+Patch Set 13: Verified-1
+
+Build Unstable 
+
+https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-other-pipeline/698/ : UNSTABLE
+
+https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-ui-only-pipeline/671/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Marco Stornelli
+Date: 2019-09-22 10:40:04.000000000
+Message: 
+Abandoned
+
+Complete implementation requires greater effort after the comments in this review so I freeze it until we have time to create a more complete solution.
+----------------------------------------------------------------------------------------------------------------------

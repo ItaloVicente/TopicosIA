@@ -1,0 +1,130 @@
+======================================================================================================================
+DESCRIPTION:
+
+Improve memory accounting of Checkpoint
+
+Previously the getMemConsumption method returned only the size of memory
+that was used by the items held in the queue, i.e. their key, metadata
+and blob.  It did not include any of the overhead associated with
+maintaining the checkpoint, for example the memory used to maintain the
+keyIndex / metaKeyIndex.
+
+The intention of the method is to return the total memory used by the
+checkpoint and therefore it has been modified to also include the
+overhead.
+
+In addition the manual memory accounting has been reverted to the
+approach used prior to commit f7eff02dc7f208cb2619e39a55d4827aacaa7ad6
+(http://review.couchbase.org/#/c/103342/) which uses an approximate for
+the overhead of the queue, as opposed to using the memory tracker.  This
+is because in a future patch we will introduce the ability to expel
+items from a checkpoint, and want the ability to release the underlying
+memory associated with these items whilst the queueLock is NOT held.
+This means we can end-up increasing memory usage as we add items to the
+Checkpoint (in queueDirty), at the same time freeing memory. This means
+we can't use the memory tracker functionality when doing manual memory
+accounting. Note: manual memory accounting is not used in production.
+
+The getMemoryOverhead method is modified to include the overhead of
+the Checkpoint object.
+
+The incrementMemConsumption and decrementMemConsumption methods have
+also been removed.  This was for two reasons; (1) the names were
+misleading (2) the methods are no longer invoked by CheckpointManager
+and therefore the underlying member variable can be updated directly.
+
+Change-Id: I42cbcf0736589faf2bc9d8beb46ecc16a5360a41
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Daniel Owen
+Date: 2019-02-27 11:42:38.000000000
+Message: 
+Uploaded patch set 18.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-02-27 12:43:54.000000000
+Message: 
+Patch Set 18: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/15259/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/8626/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/15778/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/8975/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/17838/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/17191/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/1653/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-02-27 13:41:01.000000000
+Message: 
+Patch Set 18: Code-Review-1
+
+(5 comments)
+Line:121, engines/ep/src/checkpoint.cc -> This is asymmetric with the constructor - isn't this going to result in coreLocal.memOverhead going down every time we delete a Checkpoint?
+
+Line:273, engines/ep/src/checkpoint.cc -> You could just remove this and use a memoryTrackingAllocator for the keyIndex object - then it'll be automatically tracked as the keyIndex has items added / removed.
+
+Line:426, engines/ep/src/checkpoint.h -> Might be worth either clarifying this clause, or just removing it - given the previous pointes enumerated specifically what was included.
+
+Line:468, engines/ep/src/checkpoint.h -> nit: prefer "element" given that item has a specific meaning in the context of Checkpoint.
+
+Line:469, engines/ep/src/checkpoint.h -> Maybe rename to `keyIndexMemUsage` given it's essentially the total memory of the index and not just the overhead?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Daniel Owen
+Date: 2019-02-27 14:18:35.000000000
+Message: 
+Patch Set 18:
+
+(5 comments)
+Line:121, engines/ep/src/checkpoint.cc -> If no entries are added to the queue then it will comprise of just sizeof(Checkpoint).
+If there are entries then need to subtract the keyIndexMemOverhead and sizeof(queued_items) for the number of items we add to the checkpoint.
+
+Have made more explicit by changing queueMemOverhead to
+sizeof(queue_item) * toWrite.size()
+
+Line:273, engines/ep/src/checkpoint.cc -> Will look into extending the memoryTrackingAllocator to cover the keyIndex in a furure patch.
+
+However will still need this code for the manual accounting method.  As we need to subtract this total when the checkpoint is destructed.
+
+Line:426, engines/ep/src/checkpoint.h -> Done
+
+Line:468, engines/ep/src/checkpoint.h -> I believe its correct to use item's key size - because it is the key associated with the item.
+
+The item's key is also referred below (see line 471).
+
+Line:469, engines/ep/src/checkpoint.h -> Done
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-02-27 14:31:35.000000000
+Message: 
+Patch Set 18:
+
+(2 comments)
+Line:273, engines/ep/src/checkpoint.cc -> Why? Surely if we use a MemoryTrackingAllocatoer object for the std::map used for keyIndex, it'll do all the tracking for us automatically?
+
+Line:468, engines/ep/src/checkpoint.h -> Hmm, ok - I guess they are the same so they are logically equivalent - I was more thinking that it's the key of the unordered_map and hence `element` was more obvious. But what you have is fine.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Daniel Owen
+Date: 2019-02-28 14:19:38.000000000
+Message: 
+Patch Set 18:
+
+(2 comments)
+Line:273, engines/ep/src/checkpoint.cc -> Changed to use the memoryTrackingAllocator for the keyIndex and metaKeyIndex maps.
+
+Line:468, engines/ep/src/checkpoint.h -> thanks
+
+----------------------------------------------------------------------------------------------------------------------

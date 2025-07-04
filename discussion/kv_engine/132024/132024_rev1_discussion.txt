@@ -1,0 +1,165 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-40258: Update AtomicMontonic so we can resize containers
+
+A vector<AtomicMontonic> cannot be 'resized' because an AtomicMononic
+has a deleted copy constructor.
+
+Patch adds the copy constructor (which uses reset on the copy) and
+changes CouchKVStore to use resize for dbFileRevMap creation.
+
+Change-Id: Ia580d3d8b732862ca0ee75a231f695affa9531a6
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jim Walker
+Date: 2020-07-07 14:07:47.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2020-07-07 14:09:50.000000000
+Message: 
+Patch Set 1:
+
+as per parent patch, re-factoring being tinkered - this one ready for comments
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-07-07 14:27:03.000000000
+Message: 
+Patch Set 1: Code-Review-1
+
+I think we are missing something here. According to cppreference.com, vector::resize()[1] performs default-insertion of the type. DefaultInsertable[2] seems to boil down to just calling placement-new on the type - i.e.
+
+ ::new((void*)p) T()
+
+which I would have _thought_ AtomicMonotonic supported already?
+
+
+
+[1]: https://en.cppreference.com/w/cpp/container/vector/resize
+[2]: https://en.cppreference.com/w/cpp/named_req/DefaultInsertable
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-07-07 14:44:28.000000000
+Message: 
+Patch Set 1:
+
+Isn't it required to be MoveInsertable as well as DefaultInsertable in case resize() needs to reallocate and move some existing values?
+
+https://en.cppreference.com/w/cpp/container/vector/resize
+
+> void resize( size_type count ); (1)
+> void resize( size_type count, const value_type& value ); (2)
+
+> T must meet the requirements of MoveInsertable and DefaultInsertable in order to use overload (1). 
+> T must meet the requirements of CopyInsertable in order to use overload (2). 
+
+Whereas in the second case the given value needs to be copied in (so the type doesn't need to be default constructed), and being CopyInsertable implies the type is also MoveInsertable
+
+> The type T is CopyInsertable into the container X whose value_type is identical to T if T is MoveInsertable into X, and, given...
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-07-07 14:58:46.000000000
+Message: 
+Patch Set 1:
+
+OOI, are they accessed outside the folly synchronized lock? Like, are iterators/references held to the atomic and used after the lock is dropped?
+
+If not, couldn't they be non-atomic Monotonics? If the lock need always be held to read/write them?
+If _so_, would't resize invalidate said references/iterators if it reallocated? (so I'm guessing they aren't used like this, for that reason?)
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-07-07 15:05:58.000000000
+Message: 
+Patch Set 1:
+
+Though if resize is only used at creation time then the branch B of that isn't relevant re: iterators/references
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-07-07 15:13:00.000000000
+Message: 
+Patch Set 1: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/3712/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [0042/0099]: test dcp cursor dropping backfill...../kv_engine/engines/ep/tests/ep_testsuite_dcp.cc:1090 Test failed: `" (Expected `19" to be greater than or equal to `51" - Incorrect snap start seqno)
+[2020-07-07T14:18:21.502Z] (2585 ms) FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/3712/ )
+
+Failure of a CTest test [2020-07-07T14:18:21.502Z]   6/409 Test #255: ep_testsuite_dcp.ephemeral.comp_active ...................................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/3712/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/1757/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/25074/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/29056/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/3250/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/4601/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/4676/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/12496/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/4779/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-07-07 15:59:37.000000000
+Message: 
+Patch Set 1:
+
+> Patch Set 1:
+> 
+> OOI, are they accessed outside the folly synchronized lock? Like, are iterators/references held to the atomic and used after the lock is dropped?
+> 
+> If not, couldn't they be non-atomic Monotonics? If the lock need always be held to read/write them?
+> If _so_, would't resize invalidate said references/iterators if it reallocated? (so I'm guessing they aren't used like this, for that reason?)
+
+Good point - might be simpler to just use Monotonic<> ?
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2020-07-08 08:58:48.000000000
+Message: 
+Patch Set 1:
+
+> Patch Set 1:
+> 
+> > Patch Set 1:
+> > 
+> > OOI, are they accessed outside the folly synchronized lock? Like, are iterators/references held to the atomic and used after the lock is dropped?
+> > 
+> > If not, couldn't they be non-atomic Monotonics? If the lock need always be held to read/write them?
+> > If _so_, would't resize invalidate said references/iterators if it reallocated? (so I'm guessing they aren't used like this, for that reason?)
+> 
+> Good point - might be simpler to just use Monotonic<> ?
+
+True now we have locked access always, can be Monotonic
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2020-07-08 08:59:38.000000000
+Message: 
+Patch Set 1:
+
+> Patch Set 1:
+> 
+> Though if resize is only used at creation time then the branch B of that isn't relevant re: iterators/references
+
+resize is a one off, previously we constructed the vector as the correct size, but folly::Sync doesn't allow for non-default consrtuction 😞
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2020-07-08 09:00:02.000000000
+Message: 
+Patch Set 1:
+
+Will update so this switches from AtomicMono to Mono
+----------------------------------------------------------------------------------------------------------------------

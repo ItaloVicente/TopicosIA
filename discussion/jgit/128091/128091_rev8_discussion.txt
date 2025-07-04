@@ -1,0 +1,114 @@
+======================================================================================================================
+DESCRIPTION:
+
+Fix atomic lock file creation on NFS
+
+FS_POSIX.createNewFile(File) failed to properly implement atomic file
+creation on NFS using the algorithm [1]:
+- name of the hard link must be unique to prevent that two processes
+  using different NFS clients try to create the same link. This would
+  render nlink useless to detect if there was a race.
+- the hard link must be retained for the lifetime of the file since we
+  don't know when the state of the involved NFS clients will be
+  synchronized. This depends on NFS configuration options.
+
+To fix these issues we need to change the signature of createNewFile
+which would break API. Hence deprecate the old method
+FS.createNewFile(File) and add a new method createNewFileAtomic(File).
+
+The new method returns a LockToken which needs to be retained by the
+caller (LockFile) until all involved NFS clients synchronized their
+state. Since we don't know when the NFS caches are synchronized we need
+to retain the token until the corresponding file is no longer needed.
+The LockToken must be closed after the LockFile using it has been
+committed or unlocked. On Posix, if core.supportsAtomicCreateNewFile =
+false this will delete the hard link which guarded the atomic creation
+of the file. When acquiring the lock fails ensure that the hard link is
+removed.
+
+[1] https://www.time-travellers.org/shane/papers/NFS_considered_harmful.html
+also see file creation flag O_EXCL in
+http://man7.org/linux/man-pages/man2/open.2.html
+
+Change-Id: I84fcb16143a5f877e9b08c6ee0ff8fa4ea68a90d
+Signed-off-by: Matthias Sohn <matthias.sohn@sap.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Matthias Sohn
+Date: 2018-09-07 10:14:23.000000000
+Message: 
+Uploaded patch set 8: Patch Set 7 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2018-09-07 10:17:17.000000000
+Message: 
+Patch Set 8: -Code-Review
+
+(3 comments)
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-09-07 10:35:07.000000000
+Message: 
+Patch Set 8:
+
+Build Started https://ci.eclipse.org/jgit/job/jgit.gerrit/13968/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-09-07 10:49:31.000000000
+Message: 
+Patch Set 8: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/jgit.gerrit/13968/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2018-09-07 11:29:36.000000000
+Message: 
+Patch Set 8: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Halstrick
+Date: 2018-09-07 11:45:11.000000000
+Message: 
+Patch Set 8: Code-Review+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2018-09-07 11:54:53.000000000
+Message: 
+Change has been successfully merged by Matthias Sohn
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2018-09-12 04:59:35.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:449, org.eclipse.jgit/src/org/eclipse/jgit/util/FS_POSIX.java -> Been thinking more about this. What prevents the following scenario:
+
+  A : createNewFile(foo.lock) -> true
+  B : createNewFile(foo.lock) -> true
+  A : createLink(foo.lock.UUID_A);
+  B : createLink(foo.lock.UUID_B);
+  A : nlink: 3
+  B : nlink: 3
+
+When that happens, both A and B will return a token with FALSE, and will subsequently remove their hard links, but the lock file will have been created. Any subsequent attempt to lock "foo" will fail because we leave a stale lock file behind. How do we prevent this? Remove the link and re-try a few times with random delays? If createNewFile() returned true, we must ensure that there are one of two outcomes:
+
+- exactly one process decides it has the lock, and all others remove their hard links.
+- or if all processes decide they don't have the lock the lock file is removed. But ideally we shouldn't get into this case at all.
+
+Furthermore, what happens if the getAttribute call raises an IOException after the link has been created?
+
+The canonical implementation of NFS-safe locking on Linux is liblockfile.[1][2] It handles stale locks by requiring that lock files be regularly touched. It also uses a different method not relying on nlink: it creates a temp file and then creates the lock file as a hard link to that and checks then that both really point to the same inodes. Upon success it then unlinks the temp file. There's a comment in lockfile.c stating that nlink itself might be cached.[3]
+
+Comments? Is this a real problem, or am I imagining things?
+
+I also wonder whether java.nio.channels.FileLock might help... but it's unclear to me whether it would work for files on NFS mounts.
+
+[1] https://github.com/miquels/liblockfile
+[2] https://linux.die.net/man/3/lockfile_create
+[3] https://github.com/miquels/liblockfile/blob/v1.14/lockfile.c#L324
+
+----------------------------------------------------------------------------------------------------------------------

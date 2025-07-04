@@ -1,0 +1,196 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-51958: Re-enable ReplicaEvictedBeforeActive with fix
+
+ReplicaEvictedBeforeActive was seen to intermittently fail by
+mistakenly evicting from the active vBuckets.
+
+---- Root Cause Analysis ----
+
+Because:
+1. The ItemPager evicts from PreciseTotalMemoryUsed down to
+the low watermark;
+2. We populate the replica vBuckets until their total
+pageableMemory > (high_watermark - low_watermark);
+3. We populate the active vBuckets until
+PreciseTotalMemoryUsed > high_watermark.
+
+Since we insert items with a fixed size of 5k bytes, we will
+always 'overshoot' the population in (2) and (3) by at least 1
+byte, and up to 5k bytes.
+
+With small variations in starting memory usage, and an always
+unequal number of replica vs active items, we will occasionally
+'overshoot' (3) more.
+In other words, we will have:
+
+    PreciseTotalMemoryUsed > replicaPageableMem > high_watermark
+
+Therefore, the ItemPager will be forced to evict
+(PreciseTotalMemoryUsed - high_watermark) bytes from the
+active vBuckets to reach the low_watermark.
+
+Additionally, setting the replica vBuckets to replica state my
+change the memory used, possibly invalidating the assumed memory
+preconditions.
+
+---- Fix ----
+
+To prevent this, after populating up to the high watermark,
+re-set the low watermark, taking into account how far we may
+have 'overshot' the high watermark.
+
+---- Additional Changes ----
+
+Since populateVbsUntil flushes and expels during population, we
+no longer require explicit flushAndRemoveCheckpoints calls or
+'topping up' again to the high watermark after them. Remove them.
+
+The quotas were increased by a significant amount (2,500,000
+bytes) likely to try to avoid the identified failure.
+However, this only made it less likely to occur: a larger quota
+leads to a larger watermarkDiff, reducing the chance of a bad
+'overshoot'. A larger quota significantly increases the runtime,
+revert this.
+
+==== Fix for possible CheckedExecutor failures ====
+
+With MFUs set probabilistically another failure is possible: the
+replica items may not be evicted in one pass. This would cause
+runNextTask to throw a runtime_error when we attempt to run
+"Item pager no vbucket assigned" when instead the item pager
+needs to run again.
+
+By setting all items' MFU value to zero, we force 0% or 100%
+eviction of a vBucket if at least one item needs to be evicted,
+avoiding this failure point. The test must be tweaked slightly
+to account for this.
+
+No other current callers of populateVbsUntil rely on this MFU
+distribution, and so do not need to be changed.
+
+==== Additional notes ====
+
+---- More active items evicted than expected ----
+
+With the given explanation we may expect only one active item to
+be evicted during failures since we can only overshoot by - at
+most - the size of one item. However, this is not the case: ~15
+items were evicted from active vBuckets in all seen test failures.
+
+This is due to setting items' MFU values probabilistically: with
+a given distribution it is almost certain we evict more actives
+than strictly needed to reach the low watermark.
+
+---- Over-over-population ----
+
+Because:
+1. populateVbsUntil inserts an item before testing the predicate;
+2. We call populateVbsUntil on active vBuckets twice, the second
+time to 'top up' to the high watermark, attempting to account
+for memory freed by flushing and removing checkpoints;
+3. populateVbsUntil was at some point changed to flush and expel
+on every mutation, i.e., there is no memory freed by flushing
+
+Then we actually overshoot populating the active vBuckets by at
+least two items.
+This should cause the test to always fail, but is masked by a
+similar logic error: over-population of the replica vBuckets.
+We populate until 'pageableMem > watermarkDiff + 10000'; which
+is exactly the size of two items.
+
+Change-Id: Ia4f71e9df1c6e2a2844a626aab86b9561d23d73a
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Douglas
+Date: 2022-08-25 13:15:29.000000000
+Message: 
+Uploaded patch set 5.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-08-25 13:36:11.000000000
+Message: 
+Patch Set 5: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/48638/ : FAILURE
+
+Failure of GoogleTest "FullAndValueEvictionOnReplicaAndPending/RollbackDcpTest.RollbackSyncWrite/persistent_nexus_couchstore_magma_value_only_pending":
+
+<pre>
+[ RUN      ] FullAndValueEvictionOnReplicaAndPending/RollbackDcpTest.RollbackSyncWrite/persistent_nexus_couchstore_magma_value_only_pending
+unknown file: error: C++ exception with description "KVStoreFactory ctor: Specified dbname "ep_engine_ep_unit_tests.db/test.002002" is not a directory" thrown in SetUp().
+unknown file: error: SEH exception with code 0xc0000005 thrown in TearDown().
+[  FAILED  ] FullAndValueEvictionOnReplicaAndPending/RollbackDcpTest.RollbackSyncWrite/persistent_nexus_couchstore_magma_value_only_pending, where GetParam() = ("persistent_nexus_couchstore_magma", "value_only", "pending") (3 ms)
+FullAndValueEvictionOnReplicaAndPending/RollbackDcpTest.RollbackSyncWrite/persistent_nexus_couchstore_magma_value_only_pending
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/48638/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/20940/ : FAILURE
+
+Failure of GoogleTest "EphemeralOrPersistent/STItemPagerTest.ActiveEvictedIfReplicaEvictionInsufficient/persistent_couchstore_value_only":
+
+<pre>
+[ RUN      ] EphemeralOrPersistent/STItemPagerTest.ActiveEvictedIfReplicaEvictionInsufficient/persistent_couchstore_value_only
+[2022-08-25T13:29:03.686Z] /Users/couchbase/workspace/workspace/kv_engine.macos_master/kv_engine/engines/ep/tests/module_tests/item_pager_test.cc:1304: Failure
+[2022-08-25T13:29:03.686Z] Expected: (activeRR) > (60), actual: 0 vs 60
+[2022-08-25T13:29:03.686Z] [  FAILED  ] EphemeralOrPersistent/STItemPagerTest.ActiveEvictedIfReplicaEvictionInsufficient/persistent_couchstore_value_only, where GetParam() = "bucket_type=persistent:backend=couchstore:item_eviction_policy=value_only" (2326 ms)
+EphemeralOrPersistent/STItemPagerTest.ActiveEvictedIfReplicaEvictionInsufficient/persistent_couchstore_value_only
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/20940/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/9508/ : FAILURE
+
+Failure of GoogleTest "EphemeralOrPersistent/STItemPagerTest.ActiveEvictedIfReplicaEvictionInsufficient/persistent_couchstore_value_only":
+
+<pre>
+[ RUN      ] EphemeralOrPersistent/STItemPagerTest.ActiveEvictedIfReplicaEvictionInsufficient/persistent_couchstore_value_only
+[2022-08-25T13:28:09.434Z] ../kv_engine/engines/ep/tests/module_tests/item_pager_test.cc:1304: Failure
+[2022-08-25T13:28:09.434Z] Expected: (activeRR) > (60), actual: 0 vs 60
+[2022-08-25T13:28:09.434Z] [  FAILED  ] EphemeralOrPersistent/STItemPagerTest.ActiveEvictedIfReplicaEvictionInsufficient/persistent_couchstore_value_only, where GetParam() = "bucket_type=persistent:backend=couchstore:item_eviction_policy=value_only" (1388 ms)
+EphemeralOrPersistent/STItemPagerTest.ActiveEvictedIfReplicaEvictionInsufficient/persistent_couchstore_value_only
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/9508/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/21660/ : FAILURE
+
+Failure of GoogleTest "EphemeralOrPersistent/STItemPagerTest.ActiveEvictedIfReplicaEvictionInsufficient/persistent_couchstore_value_only":
+
+<pre>
+[ RUN      ] EphemeralOrPersistent/STItemPagerTest.ActiveEvictedIfReplicaEvictionInsufficient/persistent_couchstore_value_only
+[2022-08-25T13:22:53.766Z] ../kv_engine/engines/ep/tests/module_tests/item_pager_test.cc:1304: Failure
+[2022-08-25T13:22:53.766Z] Expected: (activeRR) > (60), actual: 0 vs 60
+[2022-08-25T13:22:53.766Z] [  FAILED  ] EphemeralOrPersistent/STItemPagerTest.ActiveEvictedIfReplicaEvictionInsufficient/persistent_couchstore_value_only, where GetParam() = "bucket_type=persistent:backend=couchstore:item_eviction_policy=value_only" (3592 ms)
+EphemeralOrPersistent/STItemPagerTest.ActiveEvictedIfReplicaEvictionInsufficient/persistent_couchstore_value_only
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/21660/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/22016/ : FAILURE
+
+Failure of GoogleTest "EphemeralOrPersistent/STItemPagerTest.ActiveEvictedIfReplicaEvictionInsufficient/persistent_couchstore_value_only":
+
+<pre>
+[ RUN      ] EphemeralOrPersistent/STItemPagerTest.ActiveEvictedIfReplicaEvictionInsufficient/persistent_couchstore_value_only
+[2022-08-25T13:21:10.873Z] ../kv_engine/engines/ep/tests/module_tests/item_pager_test.cc:1304: Failure
+[2022-08-25T13:21:10.873Z] Expected: (activeRR) > (60), actual: 0 vs 60
+[2022-08-25T13:21:10.873Z] [  FAILED  ] EphemeralOrPersistent/STItemPagerTest.ActiveEvictedIfReplicaEvictionInsufficient/persistent_couchstore_value_only, where GetParam() = "bucket_type=persistent:backend=couchstore:item_eviction_policy=value_only" (2988 ms)
+EphemeralOrPersistent/STItemPagerTest.ActiveEvictedIfReplicaEvictionInsufficient/persistent_couchstore_value_only
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/22016/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/18937/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/19716/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/40881/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/9409/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/30042/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/22747/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

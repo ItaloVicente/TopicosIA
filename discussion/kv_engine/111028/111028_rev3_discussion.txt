@@ -1,0 +1,90 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-34628: WIP Fix for data race during commit
+
+Note that unit test doesn't fail in same way as reported bug yet - it fails with:
+
+[ RUN      ] AllBucketTypes/ActiveDurabilityMonitorTest.SeqnoAckReceivedConcurrentDataRace/ephemeral_auto_delete
+libc++abi.dylib: terminating with uncaught exception of type std::logic_error: Monotonic<x> invariant failed: new value (1) breaks invariant on current value (2)
+
+TSan issue - lock-order inversion involving Collections manifest and new completedSWQueue...:
+
+[ RUN      ] AllBucketTypes/ActiveDurabilityMonitorTest.SeqnoAckReceivedSmallerThanLastAcked/ephemeral_auto_delete
+==================
+WARNING: ThreadSanitizer: lock-order-inversion (potential deadlock) (pid=13219)
+  Cycle in lock order graph: M2688377 (0x7b3000011488) => M2688419 (0x7b1c00079600) => M2688377
+
+  M2688377 = Collections::VB::Manifest::lock
+  M2688419 = ActiveDM::completedQueue
+
+Case 1: ActiveDM::checkForCommit():
+
+  Mutex M2688419 acquired here while holding mutex M2688377 in main thread:
+    ...
+    #10 withWLock<ActiveDurabilityMonitor::checkForCommit()::<lambda(auto:31&)> > folly/Synchronized.h:205 (ep-engine_ep_unit_tests+0x000000de6cc8)
+    #11 ActiveDurabilityMonitor::checkForCommit() kv_engine/engines/ep/src/durability/active_durability_monitor.cc:1199 (ep-engine_ep_unit_tests+0x000000de6cc8)
+    #12 VBucket::set(...) kv_engine/engines/ep/src/vbucket.cc:1576 (ep-engine_ep_unit_tests+0x000000ee1a2f)
+    #13 DurabilityMonitorTest::set(Item&) kv_engine/engines/ep/tests/module_tests/durability_monitor_test.cc:175 (ep-engine_ep_unit_tests+0x0000008062a6)
+
+  Mutex M2688377 previously acquired by the same thread here:
+    ...
+    #9 VBucket::lockCollections(DocKey const&, bool) const kv_engine/engines/ep/src/vbucket.h:778 (ep-engine_ep_unit_tests+0x000000806073)
+    #10 DurabilityMonitorTest::set(Item&) kv_engine/engines/ep/tests/module_tests/durability_monitor_test.cc:174 (ep-engine_ep_unit_tests+0x000000806073)
+
+Case 2: ActiveDurabilityMonitor::seqnoAckReceived
+
+  Mutex M2688377 acquired here while holding mutex M2688419 in main thread:
+    ...
+    #9 VBucket::lockCollections(DocKey const&, bool) const kv_engine/engines/ep/src/vbucket.h:778 (ep-engine_ep_unit_tests+0x000000de58e6)
+    #10 ActiveDurabilityMonitor::commit(DurabilityMonitor::SyncWrite const&) kv_engine/engines/ep/src/durability/active_durability_monitor.cc:786 (ep-engine_ep_unit_tests+0x000000de58e6)
+    #11 operator()<std::__cxx11::list<DurabilityMonitor::SyncWrite> > kv_engine/engines/ep/src/durability/active_durability_monitor.cc:502 (ep-engine_ep_unit_tests+0x000000de63c3)
+    #12 withWLock<ActiveDurabilityMonitor::processCompletedSyncWriteQueue()::<lambda(auto:30&)> > folly/Synchronized.h:205 (ep-engine_ep_unit_tests+0x000000de63c3)
+    #13 ActiveDurabilityMonitor::processCompletedSyncWriteQueue() kv_engine/engines/ep/src/durability/active_durability_monitor.cc:499 (ep-engine_ep_unit_tests+0x000000de63c3)
+    #14 ActiveDurabilityMonitor::seqnoAckReceived(...) kv_engine/engines/ep/src/durability/active_durability_monitor.cc:394 (ep-engine_ep_unit_tests+0x000000de68b8)
+
+  Mutex M2688419 previously acquired by the same thread here:
+    ...
+    #10 withWLock<ActiveDurabilityMonitor::processCompletedSyncWriteQueue()::<lambda(auto:30&)> > folly/Synchronized.h:205 (ep-engine_ep_unit_tests+0x000000de6394)
+    #11 ActiveDurabilityMonitor::processCompletedSyncWriteQueue() kv_engine/engines/ep/src/durability/active_durability_monitor.cc:499 (ep-engine_ep_unit_tests+0x000000de6394)
+    #12 ActiveDurabilityMonitor::seqnoAckReceived(...) kv_engine/engines/ep/src/durability/active_durability_monitor.cc:394 (ep-engine_ep_unit_tests+0x000000de68b8)
+
+Change-Id: Ifbb5f74523825b82285ee22aeeaad7c239631d9f
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2019-06-25 13:54:04.000000000
+Message: 
+Uploaded patch set 3: Patch Set 2 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-06-25 17:59:10.000000000
+Message: 
+Patch Set 3: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/12427/ : FAILURE
+
+Failure of a CTest test  30/178 Test  #23: ep-engine_ep_unit_tests ...................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/12427/ )
+
+Failure of a GoogleTest test:
+
+CheckpointRemoverEPTest.CursorDropMemoryFreed (4256 ms) ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/12427/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/19270/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/11687/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/18377/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/21436/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/20644/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/2296/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/5215/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

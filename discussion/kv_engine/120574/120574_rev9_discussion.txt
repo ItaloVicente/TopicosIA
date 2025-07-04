@@ -1,0 +1,375 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-37529: Ephemeral - Permit multiple range reads
+
+Backfilling from the seqList requires a range of items to be
+"protected" from being updated and moved during the lifetime of the
+backfill. This is to ensure the resulting set of items is consistent at
+the end of the backfill.
+
+To do this, backfills take a range read marking seqnos X to Y, and
+front end ops will not relocate items from inside this range. Instead,
+a new item will be appended, and the old one marked as stale, to be
+cleaned up later after the backfill has completed.
+
+However, previously only a single range read was allowed at a given
+time. This means that an ephemeral vbucket can only serve a single
+backfill at a time, all others will be delayed. This can have a
+significant impact, given that a vbucket might need to backfill for 3
+replicas, indexer nodes, the projector for XCDR etc. all at the same
+time. This is made more likely under high memory usage, if cursor
+dropping is triggered (as in-memory streams will be forced back to
+backfill).
+
+This patch allows concurrent read-only access to ranges of the seqList,
+allowing concurrent backfills.
+
+There is also specific support for exclusive write access to a range of
+the seqList, as this is required for tombstone purging. NB:
+"exclusive" access here does prevent backfills starting, but as before
+does not block front end ops; they will append items as noted earlier.
+
+The "locking" is read-preferring, and as long as a single backfill is
+in progress, the tombstone purger will not be able to run. As constant
+backfills are not normally expected, read-preference is acceptable for
+now. However, given the importance of purging tombstones/stale items in
+terms of managing memory usage (as noted briefly in MB-25218)
+write-preference in this situation may be worth assessing.
+
+Change-Id: I3b19e23b90692b36985171c4837ef428cc1c5075
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: James H
+Date: 2020-01-17 12:30:49.000000000
+Message: 
+Uploaded patch set 9.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-01-17 13:37:02.000000000
+Message: 
+Patch Set 9: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/25555/ : FAILURE
+
+Failure of a GoogleTest test:
+
+EphemeralOrPersistent/STItemPagerTest.ServerQuotaReached/ephemeral_auto_delete, where GetParam() = ("ephemeral", "auto_delete") (309 ms) ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/25555/ )
+
+Failure of a CTest test  33/199 Test  #23: ep-engine_ep_unit_tests ...................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/25555/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/23754/ : FAILURE
+
+<p>clang-format suggested the following changes:
+
+<pre>
+cat <<"EOF" | patch -p1
+diff --git a/engines/ep/src/range_read.cc b/engines/ep/src/range_read.cc
+index 150f009..e7af4ca 100644
+--- a/engines/ep/src/range_read.cc
++++ b/engines/ep/src/range_read.cc
+@@ -31,10 +31,13 @@ void RangeGuard::reset() {
+ }
+ 
+ SeqRange upperLowerBoundsOf(const SeqRange&amp; a, const SeqRange&amp; b) {
+-    return {std::min(a.getBegin(), b.getBegin()), std::max(a.getEnd(), b.getEnd())};
++    return {std::min(a.getBegin(), b.getBegin()),
++            std::max(a.getEnd(), b.getEnd())};
+ }
+ 
+-RangeGuard ReadRangeManager::lockRange(seqno_t start, seqno_t end, bool exclusiveNeeded) {
++RangeGuard ReadRangeManager::lockRange(seqno_t start,
++                                       seqno_t end,
++                                       bool exclusiveNeeded) {
+     auto r = ranges.lock();
+ 
+     if (!r-&gt;all.empty() &amp;&amp; (exclusiveNeeded || r-&gt;currentUseIsExclusive)) {
+@@ -76,7 +79,8 @@ void ReadRangeManager::release(const RangeGuard::ItrType&amp; itrToRange) {
+     r-&gt;updateCombinedRange();
+ }
+ 
+-void ReadRangeManager::updateRangeStart(const RangeGuard::ItrType&amp; itrToStart, seqno_t newStart) {
++void ReadRangeManager::updateRangeStart(const RangeGuard::ItrType&amp; itrToStart,
++                                        seqno_t newStart) {
+     auto r = ranges.lock();
+ 
+     itrToStart-&gt;setBegin(newStart);
+diff --git a/engines/ep/src/range_read.h b/engines/ep/src/range_read.h
+index 741d66f..560607e 100644
+--- a/engines/ep/src/range_read.h
++++ b/engines/ep/src/range_read.h
+@@ -207,8 +207,8 @@ public:
+      *
+      * If `exclusiveNeeded == true`, the requested lock requires that no other
+      * read ranges are present, and prevents any new ones being created while
+-     * exclusive access is required. If a read range is already present, immediately
+-     * returns an invalid RangeGuard without blocking.
++     * exclusive access is required. If a read range is already present,
++     * immediately returns an invalid RangeGuard without blocking.
+      *
+      * @param start First seqno which must be protected from modification
+      * (inclusive)
+@@ -217,8 +217,9 @@ public:
+      * @return an object which will release the range read upon destruction, if
+      * valid.
+      */
+-    RangeGuard lockRange(seqno_t start, seqno_t end, bool exclusiveNeeded=false);
+-
++    RangeGuard lockRange(seqno_t start,
++                         seqno_t end,
++                         bool exclusiveNeeded = false);
+ 
+     SeqRange getCurrentRange() const {
+         return ranges.lock()-&gt;combined;
+@@ -227,31 +228,32 @@ public:
+ protected:
+     void release(const RangeGuard::ItrType&amp; range);
+ 
+-    void updateRangeStart(const RangeGuard::ItrType&amp; itrToStart, seqno_t newStart);
+-
++    void updateRangeStart(const RangeGuard::ItrType&amp; itrToStart,
++                          seqno_t newStart);
+ 
+     struct ReadRanges {
+-
+         void updateCombinedRange();
+         /**
+          * Used to mark of the range where point-in-time snapshot is happening.
+-         * To get a valid point-in-time snapshot and for correct list iteration we
+-         * must not de-duplicate an item in the list in this range.
++         * To get a valid point-in-time snapshot and for correct list iteration
++         * we must not de-duplicate an item in the list in this range.
+          */
+-        SeqRange combined{0,0};
++        SeqRange combined{0, 0};
+         /**
+          * List of currently held read ranges.
+          *
+-         * For simplicity (and front end performance) when multiple concurrent read ranges
+-         * are required, it is treated as if there is a single read range spanning over all
+-         * required seqnos - i.e., an effective read range from the lowest range start to
+-         * the highest range end. This means if the range reads are disjoint, some items
+-         * will be included that don&#39;t strictly need to be - this may lead to more stale
+-         * items than necessary, but means that front end ops only need to check existing
+-         * seqlist items against a single range, rather than many.
++         * For simplicity (and front end performance) when multiple concurrent
++         * read ranges are required, it is treated as if there is a single read
++         * range spanning over all required seqnos - i.e., an effective read
++         * range from the lowest range start to the highest range end. This
++         * means if the range reads are disjoint, some items will be included
++         * that don&#39;t strictly need to be - this may lead to more stale items
++         * than necessary, but means that front end ops only need to check
++         * existing seqlist items against a single range, rather than many.
+          *
+-         * In general it is not expected that there will be many concurrent range reads (largely
+-         * limited by the max number of replicas), and they are unlikely to be disjoint anyway.
++         * In general it is not expected that there will be many concurrent
++         * range reads (largely limited by the max number of replicas), and they
++         * are unlikely to be disjoint anyway.
+          */
+         std::list&lt;SeqRange&gt; all{};
+ 
+diff --git a/engines/ep/tests/module_tests/basic_ll_test.cc b/engines/ep/tests/module_tests/basic_ll_test.cc
+index ae97e4e..56fb3d5 100644
+--- a/engines/ep/tests/module_tests/basic_ll_test.cc
++++ b/engines/ep/tests/module_tests/basic_ll_test.cc
+@@ -737,7 +737,7 @@ TEST_F(BasicLinkedListTest, ConcurrentRangeIterators) {
+     std::vector&lt;seqno_t&gt; seqnos2;
+ 
+     /* Read all the items with the iterators */
+-    for (int i = 0; i&lt;3; i++) {
++    for (int i = 0; i &lt; 3; i++) {
+         seqnos1.push_back(itr1-&gt;getBySeqno());
+         seqnos2.push_back(itr2-&gt;getBySeqno());
+         ++itr1;
+
+EOF
+</pre> ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/23754/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/1158/ : FAILURE
+
+Failure of a CTest test [2020-01-17T12:59:56.683Z]  29/205 Test  #26: ep-engine_ep_unit_tests ...................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/1158/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/355/ : FAILURE
+
+Failure of a CTest test [2020-01-17T12:45:19.585Z]  24/212 Test  #23: ep-engine_ep_unit_tests ...................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/355/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/1186/ : FAILURE
+
+Failure of a CTest test [2020-01-17T13:05:42.253Z]  29/215 Test  #26: ep-engine_ep_unit_tests ...................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/1186/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/21793/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/14955/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/1248/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/9078/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-01-20 11:10:44.000000000
+Message: 
+Patch Set 9:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/25571/ : FAILURE
+
+Failure of a GoogleTest test:
+
+EphemeralOrPersistent/STItemPagerTest.ServerQuotaReached/ephemeral_auto_delete, where GetParam() = ("ephemeral", "auto_delete") (28 ms) ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/25571/ )
+
+Failure of a CTest test  38/199 Test  #23: ep-engine_ep_unit_tests ...................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/25571/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/23772/ : FAILURE
+
+<p>clang-format suggested the following changes:
+
+<pre>
+cat <<"EOF" | patch -p1
+diff --git a/engines/ep/src/range_read.cc b/engines/ep/src/range_read.cc
+index 150f009..e7af4ca 100644
+--- a/engines/ep/src/range_read.cc
++++ b/engines/ep/src/range_read.cc
+@@ -31,10 +31,13 @@ void RangeGuard::reset() {
+ }
+ 
+ SeqRange upperLowerBoundsOf(const SeqRange&amp; a, const SeqRange&amp; b) {
+-    return {std::min(a.getBegin(), b.getBegin()), std::max(a.getEnd(), b.getEnd())};
++    return {std::min(a.getBegin(), b.getBegin()),
++            std::max(a.getEnd(), b.getEnd())};
+ }
+ 
+-RangeGuard ReadRangeManager::lockRange(seqno_t start, seqno_t end, bool exclusiveNeeded) {
++RangeGuard ReadRangeManager::lockRange(seqno_t start,
++                                       seqno_t end,
++                                       bool exclusiveNeeded) {
+     auto r = ranges.lock();
+ 
+     if (!r-&gt;all.empty() &amp;&amp; (exclusiveNeeded || r-&gt;currentUseIsExclusive)) {
+@@ -76,7 +79,8 @@ void ReadRangeManager::release(const RangeGuard::ItrType&amp; itrToRange) {
+     r-&gt;updateCombinedRange();
+ }
+ 
+-void ReadRangeManager::updateRangeStart(const RangeGuard::ItrType&amp; itrToStart, seqno_t newStart) {
++void ReadRangeManager::updateRangeStart(const RangeGuard::ItrType&amp; itrToStart,
++                                        seqno_t newStart) {
+     auto r = ranges.lock();
+ 
+     itrToStart-&gt;setBegin(newStart);
+diff --git a/engines/ep/src/range_read.h b/engines/ep/src/range_read.h
+index 741d66f..560607e 100644
+--- a/engines/ep/src/range_read.h
++++ b/engines/ep/src/range_read.h
+@@ -207,8 +207,8 @@ public:
+      *
+      * If `exclusiveNeeded == true`, the requested lock requires that no other
+      * read ranges are present, and prevents any new ones being created while
+-     * exclusive access is required. If a read range is already present, immediately
+-     * returns an invalid RangeGuard without blocking.
++     * exclusive access is required. If a read range is already present,
++     * immediately returns an invalid RangeGuard without blocking.
+      *
+      * @param start First seqno which must be protected from modification
+      * (inclusive)
+@@ -217,8 +217,9 @@ public:
+      * @return an object which will release the range read upon destruction, if
+      * valid.
+      */
+-    RangeGuard lockRange(seqno_t start, seqno_t end, bool exclusiveNeeded=false);
+-
++    RangeGuard lockRange(seqno_t start,
++                         seqno_t end,
++                         bool exclusiveNeeded = false);
+ 
+     SeqRange getCurrentRange() const {
+         return ranges.lock()-&gt;combined;
+@@ -227,31 +228,32 @@ public:
+ protected:
+     void release(const RangeGuard::ItrType&amp; range);
+ 
+-    void updateRangeStart(const RangeGuard::ItrType&amp; itrToStart, seqno_t newStart);
+-
++    void updateRangeStart(const RangeGuard::ItrType&amp; itrToStart,
++                          seqno_t newStart);
+ 
+     struct ReadRanges {
+-
+         void updateCombinedRange();
+         /**
+          * Used to mark of the range where point-in-time snapshot is happening.
+-         * To get a valid point-in-time snapshot and for correct list iteration we
+-         * must not de-duplicate an item in the list in this range.
++         * To get a valid point-in-time snapshot and for correct list iteration
++         * we must not de-duplicate an item in the list in this range.
+          */
+-        SeqRange combined{0,0};
++        SeqRange combined{0, 0};
+         /**
+          * List of currently held read ranges.
+          *
+-         * For simplicity (and front end performance) when multiple concurrent read ranges
+-         * are required, it is treated as if there is a single read range spanning over all
+-         * required seqnos - i.e., an effective read range from the lowest range start to
+-         * the highest range end. This means if the range reads are disjoint, some items
+-         * will be included that don&#39;t strictly need to be - this may lead to more stale
+-         * items than necessary, but means that front end ops only need to check existing
+-         * seqlist items against a single range, rather than many.
++         * For simplicity (and front end performance) when multiple concurrent
++         * read ranges are required, it is treated as if there is a single read
++         * range spanning over all required seqnos - i.e., an effective read
++         * range from the lowest range start to the highest range end. This
++         * means if the range reads are disjoint, some items will be included
++         * that don&#39;t strictly need to be - this may lead to more stale items
++         * than necessary, but means that front end ops only need to check
++         * existing seqlist items against a single range, rather than many.
+          *
+-         * In general it is not expected that there will be many concurrent range reads (largely
+-         * limited by the max number of replicas), and they are unlikely to be disjoint anyway.
++         * In general it is not expected that there will be many concurrent
++         * range reads (largely limited by the max number of replicas), and they
++         * are unlikely to be disjoint anyway.
+          */
+         std::list&lt;SeqRange&gt; all{};
+ 
+diff --git a/engines/ep/tests/module_tests/basic_ll_test.cc b/engines/ep/tests/module_tests/basic_ll_test.cc
+index ae97e4e..56fb3d5 100644
+--- a/engines/ep/tests/module_tests/basic_ll_test.cc
++++ b/engines/ep/tests/module_tests/basic_ll_test.cc
+@@ -737,7 +737,7 @@ TEST_F(BasicLinkedListTest, ConcurrentRangeIterators) {
+     std::vector&lt;seqno_t&gt; seqnos2;
+ 
+     /* Read all the items with the iterators */
+-    for (int i = 0; i&lt;3; i++) {
++    for (int i = 0; i &lt; 3; i++) {
+         seqnos1.push_back(itr1-&gt;getBySeqno());
+         seqnos2.push_back(itr2-&gt;getBySeqno());
+         ++itr1;
+
+EOF
+</pre> ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/23772/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/369/ : FAILURE
+
+Failure of a CTest test [2020-01-20T10:18:12.453Z]  24/212 Test  #23: ep-engine_ep_unit_tests ...................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/369/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/1172/ : FAILURE
+
+Failure of a CTest test [2020-01-20T10:37:47.601Z]  29/205 Test  #26: ep-engine_ep_unit_tests ...................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/1172/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/1200/ : FAILURE
+
+Failure of a CTest test [2020-01-20T10:43:26.239Z]  29/215 Test  #26: ep-engine_ep_unit_tests ...................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/1200/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/21806/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/14967/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/1262/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/9092/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

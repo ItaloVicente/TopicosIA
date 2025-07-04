@@ -1,0 +1,75 @@
+======================================================================================================================
+DESCRIPTION:
+
+Fix static initialization order fiasco in audit / connections
+
+When running memcached_testapp under TSan (macOS), an exception is
+thrown attempting to lock an invalid mutex:
+
+    libc++abi.dylib: terminating with uncaught exception of type std::__1::system_error: mutex lock failed: Invalid argument
+
+With the following backtrace:
+
+    (lldb) bt
+    * thread #1, queue = 'com.apple.main-thread', stop reason = breakpoint 1.1
+      * frame #0: 0x00007fff6585e0f8 libc++abi.dylib` __cxa_throw
+        frame #1: 0x00007fff6583855b libc++.1.dylib` std::__1::__throw_system_error(int, char const*)  + 77
+        frame #2: 0x00007fff6582f54d libc++.1.dylib` std::__1::mutex::lock()  + 29
+        frame #3: 0x00000001014139f1 memcached_testapp` std::__1::unique_lock<std::__1::mutex>::unique_lock(this=0x00007ffeefbff3e8, __m=<unavailable>)  + 65 at __mutex_base:130
+        frame #4: 0x0000000101410811 memcached_testapp` std::__1::unique_lock<std::__1::mutex>::unique_lock(this=<unavailable>, __m=<unavailable>)  + 33 at __mutex_base:130
+        frame #5: 0x000000010141053e memcached_testapp` folly::shared_mutex_detail::annotationGuard(ptr=<unavailable>)  + 110 at SharedMutex.cpp:33
+        frame #6: 0x0000000101410445 memcached_testapp` folly::SharedMutexImpl<...>::annotateLazyCreate(this=0x0000000101984640)  + 53 at SharedMutex.h:719
+        frame #7: 0x000000010140f6ca memcached_testapp` folly::SharedMutexImpl<...>::annotateDestroy(this=0x0000000101984640)  + 26 at SharedMutex.h:732
+        frame #8: 0x000000010140f5af memcached_testapp` folly::SharedMutexImpl<...>::~SharedMutexImpl(this=0x0000000101984640)  + 63 at SharedMutex.h:338
+        frame #9: 0x000000010140f71a memcached_testapp` folly::SharedMutexImpl<...>::~SharedMutexImpl(this=<unavailable>)  + 26 at SharedMutex.h:312
+        frame #10: 0x0000000100d5549a memcached_testapp` folly::Synchronized<std::__1::unique_ptr<cb::audit::Audit, ...>, folly::SharedMutexImpl<...> >::~Synchronized(this=0x0000000101984638)  + 58 at Synchronized.h:489
+        frame #11: 0x0000000100d511a9 memcached_testapp` folly::Synchronized<std::__1::unique_ptr<cb::audit::Audit, ...>, folly::SharedMutexImpl<...> >::~Synchronized(this=0x0000000101984638)  + 41 at Synchronized.h:489
+        frame #12: 0x000000010ad4c721 libclang_rt.tsan_osx_dynamic.dylib` cxa_at_exit_wrapper(void*)  + 33
+        frame #13: 0x00007fff685d813c libsystem_c.dylib` __cxa_finalize_ranges  + 319
+        frame #14: 0x00007fff685d8412 libsystem_c.dylib` exit  + 55
+        frame #15: 0x00007fff6852ecd0 libdyld.dylib` start  + 8
+
+The crash is caused when destructing the static variable
+`auditHandle`, the Synchronized dtor attempts to access another static
+variable (kAnnotationMutexes) which has already been destructed.
+
+The problem is that auditHandle is a static at file scope, so the
+order it it initiailised (and destructed) relative to other statics is
+undefined.
+
+Switch to using a C++11 "magic static" via a getAuditHandle()
+function, which defers construction until the type is used.
+
+The same problem exists for `connections`, fix in the same way.
+
+Change-Id: I58c925f2c71907ab22581bf462ce3c7d092cfefa
+Reviewed-on: http://review.couchbase.org/c/kv_engine/+/138051
+Tested-by: Build Bot <build@couchbase.com>
+Reviewed-by: Trond Norbye <trond.norbye@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Trond Norbye
+Date: 2020-10-16 11:54:00.000000000
+Message: 
+Change has been successfully cherry-picked as aa9f7db2dde490e54542c6e8d55403695f4f40a4 by Trond Norbye
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-10-16 11:54:13.000000000
+Message: 
+Patch Set 3:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/5283/ (1/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-10-16 13:22:48.000000000
+Message: 
+Patch Set 3:
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv-engine-master-perf/3900/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/5283/ : SUCCESS'
+----------------------------------------------------------------------------------------------------------------------

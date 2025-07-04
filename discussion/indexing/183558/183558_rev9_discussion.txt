@@ -1,0 +1,180 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-54419 upload plasma shards to object storage
+
+reusing ShardTransferManager to copy shards to obj store
+modifying STM to make it task agnostic. consumers can
+choose how to consume attributed depending on task
+
+updating logs and reusing objects
+
+Change-Id: Ic5a53143db36bb5627390af34fa3c9bcc7306bad
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dhruvil Shah
+Date: 2022-12-06 05:09:42.000000000
+Message: 
+Patch Set 9: Patch Set 8 was rebased
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2022-12-06 15:47:08.000000000
+Message: 
+Patch Set 9: Code-Review+1
+
+PASS sanity,unit,functional,serverless,integration with storage memdb. See http://ci2i-unstable.northscale.in/gsi-06.12.2022-16.06.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2022-12-06 21:02:33.000000000
+Message: 
+Patch Set 9:
+
+PASS sanity,unit,functional,serverless,integration with storage fdb. See http://ci2i-unstable.northscale.in/gsi-06.12.2022-21.28.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2022-12-07 03:40:58.000000000
+Message: 
+Patch Set 9:
+
+PASS sanity,unit,functional,serverless,integration with storage plasma. See http://ci2i-unstable.northscale.in/gsi-07.12.2022-02.44.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: Deepkaran Salooja
+Date: 2022-12-07 05:23:11.000000000
+Message: 
+Patch Set 9:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> The overall approach looks fine. Please discuss with Varun if anything else needs to be handled wrt using ShardTransferManager for copying shard to S3 e.g. locking/unlocking the shard correctly. 
+----------------------------------------------------------------------------------------------------------------------
+Author: VarunVelamuri
+Date: 2022-12-07 05:46:34.000000000
+Message: 
+Patch Set 9:
+
+(9 comments)
+Line:10, /COMMIT_MSG -> What is STM?
+
+Line:2449, secondary/indexer/message.go -> Why do we need to make this a receiving only channel?
+
+Line:2469, secondary/indexer/message.go -> Can you make this a pointer - Otherwise, each call would make a copy
+
+Line:238, secondary/indexer/pause_pauser.go -> What if there are no indexes for this tenant - Where are we checking that?
+
+Line:248, secondary/indexer/pause_pauser.go -> Plasma mandates that a shard is locked during transfer - Currently, lock shard is happening in shard_transfer_manager as a part of this message but this lock will be moved to shard rebalancer. 
+
+It it the duty of services to handle lock/unlock - not the duty of shard transfer manager. E.g., in this case, we are not unlocking the shard on a error.
+
+I am planning to change this behaviour to move the lock scheme to callers of this message.  You may need to change the code for the same.
+
+Line:252, secondary/indexer/pause_pauser.go -> What if pause is cancelled during the transfer?
+
+Line:120, secondary/indexer/shard_transfer_manager.go -> This appears to be confusing - We are not using index instance ID here right?
+
+Line:121, secondary/indexer/shard_transfer_manager.go -> How is plasma going to name the S3 path incase of pause-resume?
+
+Line:225, secondary/indexer/shard_transfer_manager.go -> Please update the comment as well
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dhruvil Shah
+Date: 2022-12-07 07:08:09.000000000
+Message: 
+Patch Set 9:
+
+(9 comments)
+Line:10, /COMMIT_MSG -> my bad. i'm referring to the shard transfer message (MsgStartShardTransfer)
+
+Line:2449, secondary/indexer/message.go -> since context returns a receiving only channel on .Done(), i modified the cancelCh. it might also keep the close of channel clean where readers can't close channels only writers can
+
+Line:2469, secondary/indexer/message.go -> Ack
+
+Line:238, secondary/indexer/pause_pauser.go -> this check is made during collection of metadata. if we don't get any index definitions then we consider pause as a no-op. it can be found on line 168 of the patch
+
+Line:248, secondary/indexer/pause_pauser.go -> Ack. I'll create a follow up patch upon your merge to lock/unlock plasma shards
+
+Line:252, secondary/indexer/pause_pauser.go -> we are yet to implement cancel for pause. on a high level design, we can save a context in the task obj, on cancellation of task, we cancel the context and propagate the close channel to shard transfer manager and in-turn to plasma copier
+
+Line:120, secondary/indexer/shard_transfer_manager.go -> Ack
+
+Line:121, secondary/indexer/shard_transfer_manager.go -> path goes as this: <nodePath>/plasma_storage/PauseResume/<bucketUuid>/<shardId>. We only pass <nodePath> to transfer manager, rest of the path is generated by plasma
+
+Line:225, secondary/indexer/shard_transfer_manager.go -> Ack
+
+----------------------------------------------------------------------------------------------------------------------
+Author: VarunVelamuri
+Date: 2022-12-07 08:18:49.000000000
+Message: 
+Patch Set 9:
+
+(5 comments)
+Line:10, /COMMIT_MSG -> Can you please elaborate more in the comments. Also, can you format the comment for better readability
+
+Line:2449, secondary/indexer/message.go -> Got it. Thanks!
+
+Line:238, secondary/indexer/pause_pauser.go -> Got it. Thanks! Please check if this.failPause is an idempotent operation - restGetLocalIndexMetadataBinary is calling fail pause and also the caller at line 165 is calling this
+
+Line:252, secondary/indexer/pause_pauser.go -> You may also have to clean the S3 directory on a failed pause
+
+Line:121, secondary/indexer/shard_transfer_manager.go -> Got it. Thanks!
+
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2022-12-07 09:10:42.000000000
+Message: 
+Patch Set 9:
+
+PASS sanity,unit,functional,serverless,integration with storage memdb. See http://ci2i-unstable.northscale.in/gsi-07.12.2022-09.31.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: Dhruvil Shah
+Date: 2022-12-07 09:37:03.000000000
+Message: 
+Patch Set 9:
+
+(4 comments)
+Line:2449, secondary/indexer/message.go -> Done
+
+Line:238, secondary/indexer/pause_pauser.go -> yes it is an idempotent operation. the aim is propagate errors via metakv tokens so it is going to replaced when we integrate the tokens
+
+Line:252, secondary/indexer/pause_pauser.go -> the s3 cleanup is driven by control plane as they own the buckets and the paths used during pause
+
+Line:121, secondary/indexer/shard_transfer_manager.go -> Done
+
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2022-12-07 14:27:59.000000000
+Message: 
+Patch Set 9: Code-Review+1
+
+PASS sanity,unit,functional,serverless,integration with storage fdb. See http://ci2i-unstable.northscale.in/gsi-07.12.2022-14.52.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: Dhruvil Shah
+Date: 2022-12-08 08:22:40.000000000
+MISMATCHED INLINE COMMENT
+Line:10, /COMMIT_MSG -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Dhruvil Shah
+Date: 2022-12-08 08:22:40.000000000
+MISMATCHED INLINE COMMENT
+Line:2469, secondary/indexer/message.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Dhruvil Shah
+Date: 2022-12-12 07:29:40.000000000
+MISMATCHED INLINE COMMENT
+Line:238, secondary/indexer/pause_pauser.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Dhruvil Shah
+Date: 2022-12-12 07:29:40.000000000
+MISMATCHED INLINE COMMENT
+Line:252, secondary/indexer/pause_pauser.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Dhruvil Shah
+Date: 2022-12-08 08:22:40.000000000
+MISMATCHED INLINE COMMENT
+Line:120, secondary/indexer/shard_transfer_manager.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Dhruvil Shah
+Date: 2022-12-08 08:22:40.000000000
+MISMATCHED INLINE COMMENT
+Line:225, secondary/indexer/shard_transfer_manager.go -> Done
+----------------------------------------------------------------------------------------------------------------------

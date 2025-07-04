@@ -1,0 +1,121 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-51606: Notify DM for persistence of dead vBuckets
+
+We might have a vBucket transition from active->dead->replica during
+a rebalance quickly enough that the vBucket is not deleted from
+memory. To ensure that the DM state is correct at the end of the
+transition we should notify the DM of persistence in any state. The
+issue here manifested in the following way:
+
+1) vBucket was active
+2) vBucket starts sync write requiring persistence (seqno 1)
+3) vBucket set to dead
+4) vBucket persists sync write from step 3
+5) vBucket set to replica
+6) vBucket connects to new active and sends no seqno ack
+
+If step 4 had run before step 3 then we would have moved the HPS
+and at step 6 sent a seqno ack of 1. With this order of events though
+the DM is not moving the HPS as the persistence notification is
+ignored for dead vBuckets. At step 6 even though our HPS is logically
+1, it is not acked back to the new active as the DM think it is still
+0. This results in the write getting stuck until another durable write
+is performed.
+
+Correct this issue by notifying vBuckets of persistence regardless of
+state.
+
+Change-Id: I045b04f33a9466d52d1c39a9c9c9c78013946409
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Ben Huddleston
+Date: 2022-03-29 09:11:55.000000000
+Message: 
+Uploaded patch set 4.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-03-29 10:43:10.000000000
+Message: 
+Patch Set 4: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/16229/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/44734/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/37638/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/15159/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/5887/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/18002/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/5947/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/18328/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/19034/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/17082/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/26412/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2022-03-29 13:53:14.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:4078, engines/ep/src/vbucket.cc -> Is there any chance that ack'ing from dead vbuckets might lead Active receiving unexpected ACKs and failing by that?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2022-03-29 14:11:40.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:4078, engines/ep/src/vbucket.cc -> In this case we have a dead vBucket with an ADM which won't send an ack (only a PDM is capable of that).
+
+If we were to have a dead vBucket with a PDM attempt to ack then we'd call this function http://src.couchbase.org/source/xref/trunk/kv_engine/engines/ep/src/vbucket.cc#1062 and trip over that expects there. I don't believe ns_server will do replica->dead while the stream is still alive between active and replica, but I think I'll make a follow up change that takes the state lock in that function and prevents acking if dead
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2022-03-29 15:39:26.000000000
+Message: 
+Patch Set 4: Code-Review+2
+
+(1 comment)
+Line:4078, engines/ep/src/vbucket.cc -> > I don't believe ns_server will do replica->dead while the stream is still alive between active and replica
+
+You caught my main concern there.
+
+> but I think I'll make a follow up change that takes the state lock in that function and prevents acking if dead
+
+So I guess the change would be (a) prevent acking if dead and (b) ensure we ack as soon as replica, right? IIRC we already implement (b) by the existing "pending notification" mechanism.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2022-03-30 07:21:08.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:4078, engines/ep/src/vbucket.cc -> Yeah, here's the change for (a) - https://review.couchbase.org/c/kv_engine/+/172988/1
+
+For (b) that is done here - http://src.couchbase.org/source/xref/trunk/kv_engine/engines/ep/src/dcp/passive_stream.cc#207-215
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2022-05-04 14:09:47.000000000
+Message: 
+Abandoned
+
+moving to neo branch
+----------------------------------------------------------------------------------------------------------------------

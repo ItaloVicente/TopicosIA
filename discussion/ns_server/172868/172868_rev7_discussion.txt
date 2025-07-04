@@ -1,0 +1,331 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-44611: Minimize cbcollect disk usage and refactor core
+
+Modified the task system to minimize the amount of disk and memory
+being used. There are a few approaches used to accomplish this..
+
+The main goal was: Attempt to write files directly from their source,
+to their output inside the zip file, without copying to a temporary
+directory. This has some challenges and limitations such as:
+
+ 1.) You can only open one file at a time inside the zip for writing.
+ 2.) You cannot reopen or append to a file already written to the zip
+ file.
+ 3.) The current set of tasks are all ran to output in different
+ files, sometimes coming back to files written to before.
+
+To solve this we have changed the runtime model for the task system to
+collect up all tasks at the beginning, categorize them by file output,
+and then run them in those chunks. This way we only open a file one
+time, but can run many tasks that write to it without ever coming back
+to that file later.
+
+Additionally, I attempted to add types to the relevant core functions,
+implemented the correct interfaces to treat the ZipStream,
+RedactStream and DoubleStream as writeable streams and changed the
+platforms to use an enum to represent them instead of just a string.
+
+The main flow is this:
+
+ 1.) Create a bunch of tasks, append them all to a list.
+ 2.) Create a TaskRunner with the relevant arguments, specifically
+ ones that mention the name of the zipfile, and the correct redaction
+ information.
+ 3.) Begin running the tasks:
+   a.) Categorize list of tasks into a dictionary that places all tasks
+   that use a specific output/log file into the same list. This
+   actually creates a mapping between the filename -> MetaTask, where
+   a MetaTask is a new construct to contain other tasks that all write
+   to the same file.
+   b.) Depending on whether or not redaction is turned on, construct
+   one or two ZipStream objects that manage the underlying zipfile for
+   the main output, and potentially the redacted zipfile.
+   c.) If redaction is enabled, construct a DoubleStream that combines
+   the RedactStream and the ZipStream into a single stream that can be
+   written into.
+   d.) Begin running through the MetaTasks. The MetaTask.execute starts
+   running through the subtasks of the MetaTask, passing each one the
+   same output pointer (same file).
+   e.) If artifacts are created while running a task, append it to the
+   artifacts list inside the metatask.
+   f.) Run the CollectFileTask's for each artifact, if any exist on
+   the MetaTask we just ran.
+ 4.) Finish running the task and start on a new one.
+
+The 'artifacts' are the only files written to the temporary directory
+after this patch is applied. This is the best possible scenario, since
+all other file types can be directly written to the zip(s) in one way
+or another.
+
+The next largest change is attempting to use type hints as much as
+possible. They can be checked by installing 'mypy' and doing:
+
+ $ mypy cbcollect_info
+
+The types also work as good documentation for consumers of the
+library.
+
+Finally, the next major task was to upgrade all the implicit instance
+members of a class to be explicitly defined in the class body, and
+properly mentioned in the __init__ function. This is instead of just
+smuggling them in with the **kwargs and directly applying them to the
+class dictionary.
+
+This should ensure that the Task API is better defined and the options
+are known explicitly.
+
+Change-Id: Ica83599ab330863e82b93756c0d153fdf1fd9715
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Bryan McCoid
+Date: 2022-04-01 23:56:50.000000000
+Message: 
+Uploaded patch set 7.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-04-01 23:57:01.000000000
+Message: 
+Patch Set 7:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-test/30042/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-04-02 00:00:25.000000000
+Message: 
+Patch Set 7: Well-Formed+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/ns-server-test/30042/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-04-02 01:59:16.000000000
+Message: 
+Patch Set 7: Verified+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2022-04-12 23:42:41.000000000
+Message: 
+Patch Set 7:
+
+(20 comments)
+Line:126, cbcollect_info -> writerS?
+
+Line:445, cbcollect_info -> Why do we need a default here?
+
+Line:460, cbcollect_info -> I wonder if we need a flush() before close here
+
+Line:474, cbcollect_info -> It looks like this comment should be inside the convert_to_bytes function, no?
+
+Line:516, cbcollect_info -> Maybe it makes sense to move it up in the beginning of the file and make it something like a define or constant.
+
+Line:538, cbcollect_info -> What is it doing here? :)
+
+Line:590, cbcollect_info -> Why do you need a named arg here for default_name? It doesn't seem to be used anywhere. Is it some kind of python idiom?
+
+Line:634, cbcollect_info -> Why do you need it here? If we need a default can we have it in one place, either here or in __init__?
+Also I see it is used in many places, can we have a define or constant for it?
+
+Line:895, cbcollect_info -> I wonder if it's ok to read the whole file at once? What if it's a big file?
+
+Line:906, cbcollect_info -> Should it be named collect_directory_tasks (or something similar) instead? Otherwise it's confusing because it doesn't really collect anything.
+
+Line:924, cbcollect_info -> Why does MetaTask need it's own output_file? Task already has one. Seems like I don't understand something here.
+
+Line:948, cbcollect_info -> Not clear why num_samples is ignored inside Task itself. Shouldn't this logic about collecting multiple samples be run inside the task.execute method?
+
+Line:959, cbcollect_info -> If some task produces an artifact it will rewrite it when num_samples > 0. Is this intended?
+
+Line:961, cbcollect_info -> Correct me if I'm wrong but it seems like this function doesn't collect anything. Probably need a rename
+
+Line:1047, cbcollect_info -> What is the point in passing self as a runner here? Is it possible to have different runner than 'self'?
+
+Line:1081, cbcollect_info -> Isn't it a default?
+
+Line:1114, cbcollect_info -> Is it possible to avoid having hardcoded filenames in the middle of more or less generic code?
+
+Line:1125, cbcollect_info -> If I understand correctly we are writing two zip files: one with redacted data and the other one with not redacted data. Why so? Shouldn't we produce only one of them?
+
+Line:1493, cbcollect_info -> Is this another bugfix? Now sure how it related to the change topic
+
+Line:1524, cbcollect_info -> Is this another bugfix? Now sure how it is related to the change topic
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2022-04-12 23:59:13.000000000
+Message: 
+Patch Set 7:
+
+(1 comment)
+Line:938, cbcollect_info -> Other tasks return exit code. I wonder why this task doesn't return anything.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-04-13 02:11:57.000000000
+Message: 
+Patch Set 7:
+
+(21 comments)
+Line:126, cbcollect_info -> Ack
+
+Line:445, cbcollect_info -> We don't. I think at one point we did but we require filename in constructor so I can remove this. Thanks
+
+Line:460, cbcollect_info -> I am gonna have to double check this question further, because I did actually do a bunch of testing and thinking about when to flush and when not to, but I don't remember why this one didn't do it, off the top of my head. I will check this one again.
+
+Line:474, cbcollect_info -> Ack
+
+Line:516, cbcollect_info -> Ack
+
+Line:538, cbcollect_info -> where would you rather it be? I can move it around but we do have a very specific requirement to not write the users.dets file to the redacted one. So I will have to think of a new way to handle that requirement I guess..
+
+Line:590, cbcollect_info -> yeah it's debatable.. It's this or hard code/use a constant. So instead of using a constant you can make it a named arg with default so it can also be overridden. But it could just as easily be a constant.
+
+Line:634, cbcollect_info -> So part of the purpose of these explicit class member definitions is so that people actually know what options are available and what types they are supposed to use. Before, the only easy way was to just copy other tasks, or dig into all the sections of the task system to find all the different options and flags that existed. I also got rid of any dynamic member creation stuff like the self.__dict__.update(**kwargs) business because then you are just adding any members they pass in. Which is flexible, but it seems like a defined interface is much better, in my opinion. 
+
+All that said, I can make constants and try to de-dup as much of this stuff as possible.
+
+Line:895, cbcollect_info -> great catch! this is a mistake -- it should look like the other one where we read 64kb at a time.
+
+Line:906, cbcollect_info -> yeah a name change is probably in order..
+
+Line:924, cbcollect_info -> yeah this is an oversight, and redundant
+
+Line:938, cbcollect_info -> What useful value would it return? Currently this system isn't generic enough to treat metatasks as if they were tasks themselves. They are currently distinct, despite having many of the same characteristics and functions. Problem is it's unclear to me how to make it fully generic, while not making it much more complex than it already has been made. Right now metatask is special because it's required for our runtime model. It's not a task anyone is going to create by hand.
+
+Line:948, cbcollect_info -> I believe the samples collection logic has always been outside of the task.execute, but I also think that would require each individual task type to implement what that means for that task.. which adds flexibility, but it also adds needless boilerplate to every task. Maybe I am misunderstanding your comment, but I don't think that would work as well.
+
+Line:959, cbcollect_info -> I don't believe this is correct. It appears to be in an outer scope than the "for i in range(task.num_samples)".. block. I admit I don't have it pulled up on my computer because I'm working on something else, but even on here it appears to be a different scope.
+
+Line:961, cbcollect_info -> Ack
+
+Line:1047, cbcollect_info -> yeah this can probably be changed. Originally the tasks were categorized in a different class, but now it has access to self, so I can remove this.
+
+Line:1081, cbcollect_info -> yeah, this isn't needed.
+
+Line:1114, cbcollect_info -> yeah I might be able to come up with a more generic mechanism for this.. I'll see what I can come up with.
+
+Line:1125, cbcollect_info -> No -- we create a redacted and regular one when the redaction is turned on (and only 1 when it's turned off). At least that's the previous behavior. I just copied the previous behavior. I wouldn't be against producing only one, but I also assume there might be a good reason we produce two, that I just am not aware of..
+
+Line:1493, cbcollect_info -> that's fair, I must have accidentally included fixes from the autopep8 tool. The previous version of this code uses incorrect escape sequences.
+
+Line:1524, cbcollect_info -> same as above
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2022-04-14 00:29:10.000000000
+MISMATCHED INLINE COMMENT
+Line:126, cbcollect_info -> Not fixed
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-04-14 00:33:40.000000000
+MISMATCHED INLINE COMMENT
+Line:126, cbcollect_info -> shoot, my bad.
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-04-14 23:33:10.000000000
+MISMATCHED INLINE COMMENT
+Line:126, cbcollect_info -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-04-13 21:10:23.000000000
+MISMATCHED INLINE COMMENT
+Line:445, cbcollect_info -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-04-13 21:10:23.000000000
+MISMATCHED INLINE COMMENT
+Line:460, cbcollect_info -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-04-13 21:10:23.000000000
+MISMATCHED INLINE COMMENT
+Line:538, cbcollect_info -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-04-13 21:10:23.000000000
+MISMATCHED INLINE COMMENT
+Line:590, cbcollect_info -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-04-13 21:10:23.000000000
+MISMATCHED INLINE COMMENT
+Line:634, cbcollect_info -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-04-13 21:10:23.000000000
+MISMATCHED INLINE COMMENT
+Line:895, cbcollect_info -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-04-13 21:10:23.000000000
+MISMATCHED INLINE COMMENT
+Line:906, cbcollect_info -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-04-13 21:10:23.000000000
+MISMATCHED INLINE COMMENT
+Line:924, cbcollect_info -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2022-04-14 00:29:10.000000000
+MISMATCHED INLINE COMMENT
+Line:938, cbcollect_info -> Since metatask kind of "implements" the worker "interface", the return value also should be correct I think, but that's up to you.
+I think I would return the first non zero code. Zero if all the codes are zeros.
+Let's keep it as is, I don't think it's a problem.
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-04-14 23:33:10.000000000
+MISMATCHED INLINE COMMENT
+Line:948, cbcollect_info -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-04-13 21:10:23.000000000
+MISMATCHED INLINE COMMENT
+Line:959, cbcollect_info -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-04-13 21:10:23.000000000
+MISMATCHED INLINE COMMENT
+Line:1047, cbcollect_info -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-04-13 21:10:23.000000000
+MISMATCHED INLINE COMMENT
+Line:1081, cbcollect_info -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-04-13 21:10:23.000000000
+MISMATCHED INLINE COMMENT
+Line:1114, cbcollect_info -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2022-04-14 00:58:16.000000000
+MISMATCHED INLINE COMMENT
+Line:1125, cbcollect_info -> The reason for having two .zip files when redaction is specified is to allow for the case where the redacted .zip (which is uploaded) to couchbase isn't sufficient to triage an issue. Support can then ask the customer if they would be willing to update the unredacted .zip (or upzip it themselves and share subsets).
+
+I don't know how often this occurs or even how I know this (probably from Dave).
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-04-14 00:33:40.000000000
+MISMATCHED INLINE COMMENT
+Line:1125, cbcollect_info -> yeah honestly I thought that too on the last stab at all this and had to make some serious adjustments when I realized it.
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2022-04-14 00:29:10.000000000
+MISMATCHED INLINE COMMENT
+Line:1125, cbcollect_info -> Ok, I din't realize we did it before. I have always thought we collect only one file: either redacted or not. Let's keep the previous logic.
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-04-13 21:10:23.000000000
+MISMATCHED INLINE COMMENT
+Line:1493, cbcollect_info -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-04-13 21:10:23.000000000
+MISMATCHED INLINE COMMENT
+Line:1524, cbcollect_info -> Done
+----------------------------------------------------------------------------------------------------------------------

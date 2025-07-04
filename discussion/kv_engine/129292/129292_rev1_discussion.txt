@@ -1,0 +1,159 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-37680: Schedule backfill of snap_markers ASAP
+
+When the BackfillManager sequential schedule order was added it
+resulted in the second (and subsequent) scheduled vbucket backfills
+not running at all until the first was completed. While this might
+been desirable, it has the effect of delaying when the create phase of
+the backfill occurs. This means that the actual opening of the
+couchstore file (or initialization of range read for ephemeral) is
+delayed until the earlier vBuckets have completed.
+
+As a consequence, the consistency of different disk-only backfills
+(the time difference between the high seqno in the snapshot) is
+increased, potentially very significantly.
+
+For example, if a DCP connection requests backfill on 4 vBuckets, and
+each vBucket takes 1 minute to fully backfill (not unreasonable for a
+large dataset), then when using Sequential schedule order the opening
+of the second and subsequent vBuckets will be delayed by:
+
+    T=0    Open vb0, create Snapshot Marker(vb0), send Mutation(vb0...)
+    T=60s  Open vb1, create Snapshot Marker(vb1), send Mutation(vb1...)
+    T=120s Open vb2, create Snapshot Marker(vb2), send Mutation(vb2...)
+    T=180s Open vb3, create Snapshot Marker(vb3), send Mutation(vb2...)
+
+Here there would be 180s skew between vb0's snapshot and vb3's.
+
+To address this, the BackfillManager 'sequential' schedule order is
+slightly relaxed - the first step of new Backfills is always
+round-robin, only once the Backfill has been run once does the
+scheduleOrder parameter take effect.
+
+Change-Id: If85dc61552f3ab52eccbd9373a37c6eaf1dafbb6
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2020-05-28 15:41:50.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-05-28 15:42:05.000000000
+Message: 
+Patch Set 1: Well-Formed+1
+
+Permission granted to commit: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/184750/artifact/restricted.html : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-05-28 16:09:21.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/25823/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/1229/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/1349/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/mad-hatter/698/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/1139/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/1361/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/1356/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/1345/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: James Lee
+Date: 2020-06-01 08:40:04.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+
+I know I'm only CC'd but this was interesting to read over. The overview of the backfill manager was really appreciated; it meant I was able to follow the patch without being completely lost from the get go.
+Line:48, engines/ep/src/dcp/backfill-manager.h -> The
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2020-06-01 08:57:22.000000000
+Message: 
+Patch Set 1: Code-Review-1
+
+(3 comments)
+Line:172, engines/ep/src/dcp/backfill-manager.cc -> This looks odd to me. I'd expect that every backfill would go through newBackfills before we then decide if we want to put it into active/pending based on how many backfills we have running currently. If you take in to account the limit defaulting to 4096 backfills then everything probably works fine, but if the limit was lower then you'd still have the same consistency window issue as you don't initialize the backfill until you move in through "new", right?
+
+Line:58, engines/ep/src/dcp/backfill-manager.h -> typo
+
+Line:61, engines/ep/src/dcp/backfill-manager.h -> I added a comment on the next file but I think it's not clear from this comment (and the diagram below) what the relationship is between new and pending backfills (i.e. either could take precedence based on this comment).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-06-01 09:25:12.000000000
+Message: 
+Patch Set 1:
+
+(2 comments)
+Line:172, engines/ep/src/dcp/backfill-manager.cc -> >  you take in to account the limit defaulting to 4096 backfills then everything probably works fine, but if the limit was lower then you'd still have the same consistency window issue as you don't initialize the backfill until you move in through "new", right?
+
+True, but that's by design. This patch aims to give sequential scheduling the same consistency window as round-robin - that is at-most the first 4096, less in there is memory pressure. It's certainly not a _guarantee_ as KV-Engine simply may not have sufficient resources to have all 4096 or whatever files open.
+
+Hopefully this makes sense in the context of my previous comment - newBAckfills is logically state just before activeBackfills.
+
+Line:61, engines/ep/src/dcp/backfill-manager.h -> So yes, the diagram is wrong and need fixing ;)
+
+Conceptually I'm making newBackfills be a logical extension of activeBackfills - everything does into there for one iteration before it goes into active.
+
+As such, pendingBackfills is before newBackfills now (previously it was before activeBackfills).
+
+Let me fix the diagram and possibly expand it a bit.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2020-06-01 09:27:11.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:61, engines/ep/src/dcp/backfill-manager.h -> Sure :) Naming sucks and all so feel free to disagree but "initializingBackfills" might be a better name than "newBackfills"
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-06-01 13:19:30.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:61, engines/ep/src/dcp/backfill-manager.h -> initialising is not a bad shout. Let me see how that scans...
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-06-04 12:38:22.000000000
+MISMATCHED INLINE COMMENT
+Line:172, engines/ep/src/dcp/backfill-manager.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-06-04 12:38:22.000000000
+MISMATCHED INLINE COMMENT
+Line:48, engines/ep/src/dcp/backfill-manager.h -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-06-04 12:38:22.000000000
+MISMATCHED INLINE COMMENT
+Line:58, engines/ep/src/dcp/backfill-manager.h -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-06-04 12:38:22.000000000
+MISMATCHED INLINE COMMENT
+Line:61, engines/ep/src/dcp/backfill-manager.h -> Done
+----------------------------------------------------------------------------------------------------------------------

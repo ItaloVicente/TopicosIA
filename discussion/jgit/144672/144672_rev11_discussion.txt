@@ -1,0 +1,167 @@
+======================================================================================================================
+DESCRIPTION:
+
+Persist filesystem timestamp resolution and allow manual configuration
+
+To enable persisting filesystem timestamp resolution per FileStore add a
+new config section to the user global git configuration:
+
+- Config section is "filesystem"
+- Config subsection is concatenation of
+  - Java vendor (system property "java.vendor")
+  - runtime version (system property "java.runtime.version")
+  - FileStore's name
+  - separated by '|'
+  e.g.
+    "AdoptOpenJDK|1.8.0_212-b03|/dev/disk1s1"
+  The prefix is needed since some Java versions do not expose the full
+  timestamp resolution of the underlying filesystem. This may also
+  depend on the underlying operating system hence concrete key values
+  may not be portable.
+- Config key for timestamp resolution is "timestampResolution" as a time
+  value, supported time units are those supported by
+  DefaultTypedConfigGetter#getTimeUnit
+
+If timestamp resolution is already configured for a given FileStore
+the configured value is used instead of measuring the resolution.
+
+When timestamp resolution was measured it is persisted in the user
+global git configuration.
+
+Example:
+
+[filesystem "AdoptOpenJDK|1.8.0_212-b03|/dev/disk1s1"]
+	timestampResolution = 1 seconds
+
+If locking the git config file fails retry saving the resolution up to 5
+times in order to workaround races with another thread.
+
+In order to avoid stack overflow use the fallback filesystem timestamp
+resolution when loading FileBasedConfig which creates itself a
+FileSnapshot to help checking if the config changed.
+
+Note:
+- on some OSes Java 8,9 truncate milliseconds, see
+https://bugs.openjdk.java.net/browse/JDK-8177809, fixed in Java 10
+- UnixFileAttributes truncates timestamp resolution to microseconds when
+converting the internal representation to FileTime exposed in the API,
+see https://bugs.openjdk.java.net/browse/JDK-8181493
+- WindowsFileAttributes also provides only microsecond resolution
+
+Hence do not attempt to manually configure a higher timestamp resolution
+than supported by the Java version being used at runtime.
+
+Bug: 546891
+Bug: 548188
+Change-Id: Iff91b8f9e6e5e2295e1463f87c8e95edf4abbcf8
+Signed-off-by: Matthias Sohn <matthias.sohn@sap.com>
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Matthias Sohn
+Date: 2019-07-10 16:17:38.000000000
+Message: 
+Uploaded patch set 11.
+----------------------------------------------------------------------------------------------------------------------
+Author: Han-Wen NIenhuys
+Date: 2019-07-10 17:10:06.000000000
+Message: 
+Patch Set 11:
+
+> Patch Set 10:
+> 
+> > general comment: persisting seems somewhat complicated, and
+>  > provides ways for users to misconfigure things. Why not always
+>  > measure the resolution? If the resolution is R then you should be
+>  > able to roughly measure it in (2 * R) time.
+> 
+> this is true for long running applications but not e.g. for the jgit command line app
+
+I think it's still true that it takes 2*R time; can you elaborate? 
+
+I think you mean that measuring is too slow on some platforms (Windows, DOS), but perhaps you could solve that differently, eg.
+
+  if (platform is DOS) { 
+    timeout = 2.5s 
+  } else { 
+     // measure
+  }
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2019-07-10 17:40:46.000000000
+Message: 
+Patch Set 11:
+
+Build Started https://ci-staging.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/76/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2019-07-10 17:47:50.000000000
+Message: 
+Patch Set 11: Verified-1
+
+Build Failed 
+
+https://ci-staging.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/76/ : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2019-07-10 22:11:43.000000000
+Message: 
+Patch Set 11:
+
+> > Patch Set 10:
+ > >
+ > > > general comment: persisting seems somewhat complicated, and
+ > >  > provides ways for users to misconfigure things. Why not always
+ > >  > measure the resolution? If the resolution is R then you should
+ > be
+ > >  > able to roughly measure it in (2 * R) time.
+ > >
+ > > this is true for long running applications but not e.g. for the
+ > jgit command line app
+ > 
+ > I think it's still true that it takes 2*R time; can you elaborate?
+ 
+you are right, I didn't write what I meant :-)
+
+ > I think you mean that measuring is too slow on some platforms
+ > (Windows, DOS), but perhaps you could solve that differently, eg.
+
+yes, in a short-lived application like JGit command line I think we should not spend time (up to 2s) unnecessarily to measure timestamp resolution since this would impact performance of the command the user executes.
+
+ > 
+ > if (platform is DOS) {
+ > timeout = 2.5s
+ > } else {
+ > // measure
+ > }
+
+There are many filesystem / OS / Java implementations and versions hence I don't want to guess based on the OS name but measure if possible.
+
+Also on Windows there are multiple filesystems: NTFS, FAT, ReFS and some remote file systems like NFS. I didn't use Windows for years hence I have no recent practical experience on this platform.
+
+Java version on the different OSes and also OS clock resolution make guessing even more challenging. There are Java versions which do not expose the full resolution supported by the file system. All Java versions up to Java 12 truncate FileTime to 1 microsecond, this means we loose some digits on filesystems supporting sub-microsecond resolution like ext4, HPFS, NTFS. Java 8 on Mac even truncates all fractions of seconds, this means with Java 8 on Mac OS with HPFS we loose 9 orders of magnitude regarding timestamp resolution.
+
+Storing the measured resolution avoids the measurement overhead after it has been measured once.
+
+We could store the resolutions in a different file, e.g. in a file ~/.jgit to make it less obvious this could be tweaked manually. 
+
+Also we could add an option making persisting timestamp resolution in global git config optional. 
+
+What do you think ?
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2019-07-10 23:13:04.000000000
+Message: 
+Patch Set 11: -Verified
+
+Build Started https://ci-staging.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/97/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2019-07-10 23:27:20.000000000
+Message: 
+Patch Set 11: Verified+1
+
+Build Successful 
+
+https://ci-staging.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/97/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

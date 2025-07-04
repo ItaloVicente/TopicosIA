@@ -1,0 +1,155 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-31810: Implement collection in memory high seqno
+
+GSI need the ability to get the highest seqno of a colelction,
+just like they already do for a vBucket. To supply the high seqno
+for each collection via the VB_GET_ALL_HIGH_SEQNOS DCP command, we
+need to add a per collection high seqno counter. This counter should
+be incremented when an item is queued for this collection within the
+checkpoint manager to the new highest seqno. This counter should be
+monotonic and should be initialized from the persistedHighSeqno
+counter.
+
+Change-Id: Icb2ae1cfb72be7fd1c3641a399eb876fc46043bc
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Ben Huddleston
+Date: 2018-12-05 14:03:00.000000000
+Message: 
+Uploaded patch set 21.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-12-05 14:40:14.000000000
+Message: 
+Patch Set 21: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/6199/ : FAILURE
+
+Failure of a CTest test  28/168 Test  #25: ep-engine_ep_unit_tests ...................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/6199/ )
+
+Failure of a GoogleTest  ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/6199/ )
+
+ThreadSanitizer issue: data race /home/couchbase/jenkins/workspace/kv_engine-threadsanitizer-master/kv_engine/engines/ep/src/objectregistry.cc:73 in ObjectRegistry::initialize(unsigned long (*)(void const*))  ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/6199/ )
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/6349/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/14778/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/3903/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/13166/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/12829/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/14258/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-12-05 16:22:52.000000000
+Message: 
+Patch Set 21: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/6349/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/14778/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/3903/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/13166/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/12829/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/14258/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/6211/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-12-06 10:30:23.000000000
+Message: 
+Patch Set 21: Code-Review-1
+
+(6 comments)
+
+(only got up to vbucket.cc so far...)
+Line:63, engines/ep/src/collections/vbucket_manifest_entry.h -> Alternatively you could un-delete the AtomicMonotonic copy-constructor - I don't see any fundamental reason why we can't copy it.
+
+(As an aside, this is a pretty large function to be inlined - if you don't solve by un-deleting the AtomicMonotonic copy-constructor I'd move the impl to the .cc).
+
+Line:178, engines/ep/src/collections/vbucket_manifest_entry.h -> Probably worth expanding / changing the comment here - a casual read doesn't explain why we need this and the set() method.
+
+Line:278, engines/ep/src/collections/vbucket_manifest_entry.h -> Consider what memory-ordering you need here - do you need the default of sequentially-consistent; or would release-acquire be sufficient? (https://en.cppreference.com/w/cpp/atomic/memory_order)
+
+Line:265, engines/ep/src/ephemeral_bucket.cc -> You should always have a vb here - I'd assert it's non-empty as opposed to doing nothing if it's empty.
+
+Line:120, engines/ep/src/ephemeral_vb.cc -> Maybe rename this from c(aching)ReadHandle to make it clearer the type this is?
+
+Line:2603, engines/ep/src/vbucket.cc -> This looks buggy / error-prone - if we always need to set the highSeqno on the collections handle; then we should probably remove the old override and ensure users always pass it down.
+
+I'm not sure this is the best way to solve this - we're having to pass ReadHandle around the world inside VBucket; which complicates things somewhat. 
+
+Can say move the ReadHandle inside the VBNotifyCtx?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-12-07 15:34:37.000000000
+Message: 
+Patch Set 21:
+
+(1 comment)
+Line:278, engines/ep/src/collections/vbucket_manifest_entry.h -> Well, it depends. As per the examples on preference.com; the AtomicMonotonic /could/ in theory be used as a mutex or condition variable. 
+
+It's true that the vast majority of users will probably just care about it's counting ability; but I don't think we can unconditionally make AtomicMonotonic relaxed.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2018-12-07 15:24:45.000000000
+MISMATCHED INLINE COMMENT
+Line:63, engines/ep/src/collections/vbucket_manifest_entry.h -> Ahh my comment was a little misleading, it's the std::atomic copy-constructor I actually care about. Updated comment and pushed function to cc
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2018-12-07 15:24:45.000000000
+MISMATCHED INLINE COMMENT
+Line:178, engines/ep/src/collections/vbucket_manifest_entry.h -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2018-12-07 15:24:45.000000000
+MISMATCHED INLINE COMMENT
+Line:278, engines/ep/src/collections/vbucket_manifest_entry.h -> interesting...
+
+Given that in AtomicMonotonic we only care about one variable that is a sort of counter, the only reason that I could see why a relaxed ordering wouldn't be okay is if the compiler for some reason decides to reorder the compare exchange weak before the load in the operator= overload. But I can't imagine that it would do so because the compare exchange weak is dependent on the load. So... I THINK... for every case of AtomicMonotonic, a relaxed ordering would be okay given that the only thing AtomicMonotonic cares about is the atomic variable.
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2018-12-10 14:29:16.000000000
+MISMATCHED INLINE COMMENT
+Line:278, engines/ep/src/collections/vbucket_manifest_entry.h -> For sure, flexibility is nice. I had to make a couple changes to AtomicMonotonic to allow us to specify a memory ordering, have put those in a separate patch
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2018-12-07 15:24:45.000000000
+MISMATCHED INLINE COMMENT
+Line:265, engines/ep/src/ephemeral_bucket.cc -> Took me a while to remember why I added this. Have removed from this patch and will raise an MB to cover because it's not related to this change.
+
+Basically for ephemeral buckets if we apply a manifest then create a new vBucket (say we rebalance a node out) then we fail here because part of the vb creation process is to set the manifest, which will call the new seqno cb and that (in ephemeral) requires the vb to not be a nullptr
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2018-12-07 15:24:45.000000000
+MISMATCHED INLINE COMMENT
+Line:120, engines/ep/src/ephemeral_vb.cc -> Oops, I renamed this about 6 times between splitting patches up and rebases and somehow still got it wrong!
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2018-12-07 15:24:45.000000000
+MISMATCHED INLINE COMMENT
+Line:2603, engines/ep/src/vbucket.cc -> You're right about it being buggy, I actually missed a couple...
+
+Putting a handle in VBNotifyCtx was my first attempt. The problem here is needing a ReadHandle in one case and a CachingReadHandle in the others. I think it would be possible if I made the inheritance public and created some virtual function taking a collection id and seqno to update (and then ignoring the collection id for the override in CachingReadHandle to update the seqno for the ManifestEntry at the iterator) but the inheritance is private because the methods in ReadHandle don't really make sense from a CachingReadHandle context. Maybe I'm missing some trick here though.
+
+I've made this less error prone by forcing both overloads to use some type of read handle and pushing all seqno updating logic to these functions. There's one case though, VBucket::queueItem which we currently only use for system events. I can't use these notifyNewSeqno functions in queueItem because that's called within a write lock context and I don't have any reference to the lock object. For now I've just manually called the newSeqnoCb there. 
+
+At the moment I don't track collection high seqnos for system events at all because it wasn't/isn't necessary and is more work.
+----------------------------------------------------------------------------------------------------------------------

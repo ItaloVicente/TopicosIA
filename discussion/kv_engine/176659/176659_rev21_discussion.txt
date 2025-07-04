@@ -1,0 +1,181 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-52264: Wait for memory to reduce before setting new quota
+
+To avoid OOM errors during Bucket quota reduction we can first
+reclaim memory such that it is suitable for the new Bucket quota
+before we enforce the new quota.
+
+To deal with Bucket quota decreases we:
+
+1) Set the storage quota to the new value (to kick off any
+   background memory reclamation)
+2) Set the checkpoint manager watermarks
+3) Decrease our memory determined backfill limit
+4) Set the low and high watermark values
+5) Wake the ItemPager to recover memory from the HashTable
+6) Wait until memory is below the high watermark
+7) Enforce the new quota by changing the config and stats values
+
+Change-Id: I0d707b894fa6b7218340c3a86fa93e8f61a80a7b
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Ben Huddleston
+Date: 2022-07-19 10:16:11.000000000
+Message: 
+Uploaded patch set 21.
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2022-07-19 10:25:16.000000000
+Message: 
+Patch Set 21:
+
+(3 comments)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-07-19 10:53:26.000000000
+Message: 
+Patch Set 21: Verified-1 Code-Review-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/18235/ : FAILURE
+
+<p>clang-format suggested the following changes:
+
+<pre>
+cat <<"EOF" | patch -p1
+diff --git a/engines/ep/src/bucket_quota_change_task.cc b/engines/ep/src/bucket_quota_change_task.cc
+index 6a6faef63..91058c11c 100644
+--- a/engines/ep/src/bucket_quota_change_task.cc
++++ b/engines/ep/src/bucket_quota_change_task.cc
+@@ -68,8 +68,8 @@ bool BucketQuotaChangeTask::run() {
+ 
+             state = ChangeState::WaitingForMemoryReclamation;
+             // Check again soon
+-            snooze(engine-&gt;getConfiguration().getBucketQuotaChangeTaskWaitTime
+-                   ());
++            snooze(engine-&gt;getConfiguration()
++                           .getBucketQuotaChangeTaskWaitTime());
+         }
+         break;
+     case ChangeState::WaitingForMemoryReclamation:
+@@ -82,8 +82,8 @@ bool BucketQuotaChangeTask::run() {
+                     engine-&gt;getEpStats().mem_high_wat);
+ 
+             // Check again soon
+-            snooze(engine-&gt;getConfiguration().getBucketQuotaChangeTaskWaitTime
+-                   ());
++            snooze(engine-&gt;getConfiguration()
++                           .getBucketQuotaChangeTaskWaitTime());
+         }
+         break;
+     case ChangeState::Done:
+diff --git a/engines/ep/tests/module_tests/bucket_quota_change_test.cc b/engines/ep/tests/module_tests/bucket_quota_change_test.cc
+index 4ef1315e1..7dd239bd6 100644
+--- a/engines/ep/tests/module_tests/bucket_quota_change_test.cc
++++ b/engines/ep/tests/module_tests/bucket_quota_change_test.cc
+@@ -319,7 +319,8 @@ TEST_P(BucketQuotaChangeTest, QuotaChangeDownMemoryUsageHigh) {
+     flushVBucketToDiskIfPersistent(vbid, 1);
+ 
+     // Poke the item and the pager setting to ensure that we will evict it
+-    store-&gt;getVBucket(vbid)-&gt;ht.findOnlyCommitted(key)
++    store-&gt;getVBucket(vbid)
++            -&gt;ht.findOnlyCommitted(key)
+             .storedValue-&gt;setFreqCounterValue(0);
+     engine-&gt;getConfiguration().setItemEvictionAgePercentage(0);
+     engine-&gt;getConfiguration().setItemEvictionFreqCounterAgeThreshold(255);
+@@ -357,8 +358,8 @@ TEST_P(BucketQuotaChangeTest, QuotaChangeDownMemoryUsageHigh) {
+ 
+     if (STParameterizedBucketTest::isMagma()) {
+         // Allow magma 10 seconds to reduce memory.
+-        auto timeout = std::chrono::steady_clock::now() +
+-                std::chrono::seconds(10);
++        auto timeout =
++                std::chrono::steady_clock::now() + std::chrono::seconds(10);
+         while (engine-&gt;getEpStats().getMaxDataSize() != newQuota) {
+             if (timeout &lt; std::chrono::steady_clock::now()) {
+                 // We waited too long for magma to reduce memory usage. Either
+
+EOF
+</pre> ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/18235/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/47904/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [2/47]: test max_size - water_mark changes.....\kv_engine\engines\ep\tests\ep_testsuite_basic.cc:133 Test failed: `" (Expected `1000000", got `2500000" - Incorrect even smaller low wat.)
+(56 ms) FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/47904/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/21335/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [2/47]: test max_size - water_mark changes...../kv_engine/engines/ep/tests/ep_testsuite_basic.cc:131 Test failed: `" (Expected `1000000", got `2500000" - Incorrect even smaller low wat.)
+[2022-07-19T10:37:48.102Z] (102 ms) FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/21335/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/29371/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [2/47]: test max_size - water_mark changes...../kv_engine/engines/ep/tests/ep_testsuite_basic.cc:133 Test failed: `" (Expected `1000000", got `2500000" - Incorrect even smaller low wat.)
+[2022-07-19T10:50:30.176Z] (296 ms) FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/29371/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/20222/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [76/160]: disk>RAM delete paged-out...../kv_engine/engines/ep/tests/ep_testsuite.cc:4354 Test failed: `" (Expected `0", got `1" - Unexpected bg_fetched after del/get)
+[2022-07-19T10:34:22.321Z] (121 ms) FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/20222/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/22033/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [2/47]: test max_size - water_mark changes...../kv_engine/engines/ep/tests/ep_testsuite_basic.cc:133 Test failed: `" (Expected `1000000", got `2500000" - Incorrect even smaller low wat.)
+[2022-07-19T10:32:43.735Z] (894 ms) FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/22033/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/20977/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [2/47]: test max_size - water_mark changes...../kv_engine/engines/ep/tests/ep_testsuite_basic.cc:131 Test failed: `" (Expected `1000000", got `2500000" - Incorrect even smaller low wat.)
+[2022-07-19T10:34:53.857Z] (180 ms) FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/20977/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/8854/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [2/47]: test max_size - water_mark changes...../kv_engine/engines/ep/tests/ep_testsuite_basic.cc:131 Test failed: `" (Expected `1000000", got `2500000" - Incorrect even smaller low wat.)
+[2022-07-19T10:35:26.601Z] (20 ms) FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/8854/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/19072/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/40247/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/8758/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

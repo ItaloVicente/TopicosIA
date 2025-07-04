@@ -1,0 +1,334 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 392512 - Support GDB breakpoint notifications
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Marc Khouzam
+Date: 2012-10-29 15:39:51.000000000
+Message: 
+Patch Set 1: (47 inline comments)
+
+Thanks Mikhail for this path.  Reviewing it made it clear there were a _lot_ of details to think of.
+
+At this time, I've mostly only reviewed the code but I didn't test much, although the little testing I did worked very well.
+
+I'm posting the review comments now.  Once I test, if I have other comments, I will add them.
+
+Besides the in-line comments, I have three other ones here:
+
+1- I got this NPE once (I don't remember how):
+java.lang.NullPointerException
+    at org.eclipse.cdt.dsf.gdb.service.GDBBreakpoints_7_4.targetBreakpointModified(GDBBreakpoints_7_4.java:414)
+    at org.eclipse.cdt.dsf.gdb.service.GDBBreakpoints_7_4.targetBreakpointModified(GDBBreakpoints_7_4.java:393)
+    at org.eclipse.cdt.dsf.gdb.service.GDBBreakpoints_7_4.eventReceived(GDBBreakpoints_7_4.java:185)
+    at org.eclipse.cdt.dsf.mi.service.command.AbstractMIControl.processEvent(AbstractMIControl.java:524)
+    at org.eclipse.cdt.dsf.mi.service.command.AbstractMIControl.access$8(AbstractMIControl.java:522)
+    at org.eclipse.cdt.dsf.mi.service.command.AbstractMIControl$RxThread$4.run(AbstractMIControl.java:1027)
+    at org.eclipse.cdt.dsf.concurrent.DefaultDsfExecutor$TracingWrapperRunnable.run(DefaultDsfExecutor.java:374)
+    at java.util.concurrent.Executors$RunnableAdapter.call(Executors.java:441)
+    at java.util.concurrent.FutureTask$Sync.innerRun(FutureTask.java:303)
+    at java.util.concurrent.FutureTask.run(FutureTask.java:138)
+    at java.util.concurrent.ScheduledThreadPoolExecutor$ScheduledFutureTask.access$301(ScheduledThreadPoolExecutor.java:98)
+    at java.util.concurrent.ScheduledThreadPoolExecutor$ScheduledFutureTask.run(ScheduledThreadPoolExecutor.java:206)
+    at java.util.concurrent.ThreadPoolExecutor$Worker.runTask(ThreadPoolExecutor.java:886)
+    at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:908)
+    at java.lang.Thread.run(Thread.java:662)
+
+2- When I change the commands of a tracepoint using the CLI, I noticed that CDT sent the same command again to GDB, it does not cause a problem, but I wondered if this was normal:
+912,559 [MI]  41-interpreter-exec console "comm 11"
+912,564 [MI]  ~">"
+926,064 [MI]  collect $reg,$locals
+926,069 [MI]  ~">"
+927,424 [MI]  end
+927,429 [MI]  =breakpoint-modified,bkpt={number="11",type="tracepoint",disp="keep",enabled="y",addr="0x08048c7f",func="doWork()",file="../src/Producer.cpp",fullname="/home/lmckhou/runtime-TestDSF/Producer/src/Producer.cpp",line="86",times="0",script={"collect $reg,$locals"},original-location="/home/lmckhou/runtime-TestDSF/Producer/src/Producer.cpp:86"}
+927,434 [MI]  41^done
+927,582 [MI]  42-break-commands --thread-group i1 11 "collect $reg,$locals"
+927,586 [MI]  42^done
+
+3- I know it is not trivial but we'll need some JUnit tests for this.  Having those should give us some good stability once the feature is in.
+Line:84, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> Javadoc please.  Just to say what this version of the service does different.
+
+Line:104, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> Can you make these comments javadoc.  It helps when navigating the code, even if it is not API, because it gets shown in the hover.
+
+Line:116, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> Please remove extra IBreakpoints. prefix
+
+Line:145, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> Should we also register with 'IMIBreakpointsExtension'?
+
+Line:202, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> I usually prefer not to add extra APIs unless they really add value.  In this case I believe you only want this so that an overriding class can fetch the service.  That class could instead using the DsfServicesTracker to get the service.
+
+Is there a reason you need this API?
+
+Line:215, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> I think it would be safer to remove the 'break'.  Currently there will be no performance impact since there is not other field in MI, but it may avoid some mistake in the future if we ever want to parse another field.
+
+Line:227, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> You can remove "val != null" since the instanceof check will take care of it.
+
+Line:286, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> I believe bm.breakpointAdded() will do much more than increment the install count.  It will behave as if a new platformBp was created, instead of re-using the existing platform bp.
+
+In fact testing that case gives me:
+
+!ENTRY org.eclipse.cdt.dsf 4 10005 2012-10-24 15:34:53.193
+!MESSAGE Breakpoint already installed
+!SUBENTRY 1 org.eclipse.cdt.dsf.gdb 4 10005 2012-10-24 15:34:53.193
+!MESSAGE Breakpoint already installed
+
+Line:294, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> I'm concerned about removing the entire map here.  We are only interested in the modifications relevant to miBpt.getNumber(), so all other modifications that apply to other breakpoints will be lost.
+
+Maybe fPendingModifications can be indexed on Integer only?  GDB does not re-use breakpoint number between processes, so I think that would be enough.  Or else maybe a key (IBpTargetDmc, Integer)?
+
+Line:299, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> Is it safe to do these modification in parallel or should we serialize these calls to make sure one modification is completed before another is started?
+
+Line:303, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> Empty else
+
+Line:315, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> Do we have to figure out if this bp is a catchpoint, like we do in the other two cases?
+
+Line:319, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> It is not clear to me why we have to uninstall breakpoints for every potential targetDMC.
+
+Can more than one targetDMC hold the same breakpoint id?
+
+Line:325, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> The above is fine, but just in case, I'll mention that you can simply use 'id' there and the auto-boxing feature of java 5 will convert it to an Integer automatically.
+
+Line:329, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> Here we are un-installing the platform breakpoint.  If that platform breakpoint is filtered on two threads, won't this remove the breakpoint from each thread instead of just the thread where it was removed in GDB?  Is that ok?
+
+Line:423, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> GDB 7.5 does not seem to trigger a notif when pass count changes.  I believe a fix for that has been posted by Yao from Mentor but the proposal is to use =tracepoint-modified.
+http://sourceware.org/ml/gdb-patches/2012-10/msg00321.html
+I think we'll need to open a bug to track this until it is settled in GDB
+
+Line:426, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> Can we merge the two
+  if (plBpt instanceof ICTracepoint && miBpt.isTracepoint()
+and once we know we have a tracepoint, we check the different attributes?
+
+Line:454, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> Do we want a break or return here?  Or do we want to keep looping for all remaining breakpoints?
+
+Same comment for two ifs below
+
+Line:510, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> The above code is used multiple times, can we factor it into a method?
+
+Line:560, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> I think this should be createFunctionTracepoint()
+
+Line:821, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> This method is tricky because GDB does not provide the thread-group on which the breakpoint was created.  I'm trying to get GDB 7.6 to provide that info (as part of the bp filtering feature).
+
+I'm not sure what the impact of 'randomly' picking a process will be.
+
+Line:827, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> I think threadId.equals("0") is a special case of the bp applying to all processes, we may want to handle it like threadId == null
+
+Line:883, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> In the below logic, say isFunctionBreakpoint(miBpt) is true but function == null, don't we run the risk of thinking the breakpoint matches?  Do we need a check for that and a continue?
+
+Same for address, fileName and lineNumber, isHardware, isTemporary.
+
+We could take a different approach and avoid the continues, although I'm not sure what is clearer.  I believe the below gives what you intend using a positive set of checks:
+
+		for (MIBreakpoint miBpt : targetBreakpoints) {
+			if (!miBpt.isWatchpoint() && !miBpt.isCatchpoint() && !miBpt.isTracepoint() &&
+			   ( (isFunctionBreakpoint(miBpt) && function != null && function.equals(miBpt.getFunction()) ||
+			     (isAddressBreakpoint(miBpt) && address != null && 
+			                                    address.equals(getPlatformAddress(miBpt.getAddress()).toHexAddressString())) ||
+			     (isLineBreakpoint(miBpt) && 
+			    		 fileName != null && fileName.equals(miBpt.getFullName()) &&
+			    		 lineNumber != null && lineNumber.intValue() == miBpt.getLine()) ) &&
+			   (isHardware == null || isHardware == miBpt.isHardware()) &&
+               (isTemporary == null || isTemporary == miBpt.isHardware()))) {
+				
+				return miBpt;
+			}
+		}
+		return null;
+
+Line:899, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> should be miBpt.isTemporary()
+
+Line:914, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> In the below logic, say isFunctionBreakpoint(miBpt) is true but function == null, don't we run the risk of thinking the breakpoint matches?  Do we need a check for that and a continue?
+
+Same for address, fileName and lineNumber, isHardware, isTemporary.
+
+Line:930, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> should be miBpt.isTemporary()
+
+Line:944, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> In the below logic, if expression or isHardware or isTemporary == null, we could still end up returning miBpt as if it matched.  Is that correct or do we need a check for those values and a continue?
+
+Line:957, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> should be miBpt.isTemporary()
+
+Line:981, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> What if fileName == null?  We'd be returning true...
+
+Would this work?
+  if (fileName == null || !fileName.equals(plBpt.getSourceHandle())) {
+    return false;
+  }
+
+Line:1072, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> else if
+
+Line:1074, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> else if
+
+Line:1079, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> else if
+
+Line:1118, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> Maybe we should only do this if we had to create a new action?  For performance reasons.
+
+Line:1149, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> Since this method is API, I wonder why we need to pass in ISourceLookup?  Can we instead let the method fetch the service itself?
+
+If it is to check early if the sourcelookup service is available, I'd suggest making it global like fConnection and stepping around that issue altogether
+
+Line:1192, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> Is this right?  The OriginalLocation does not seem to be the same as the Function in the notification.
+
+38-break-insert --thread-group i1 -f /home/lmckhou/runtime-TestDSF/Producer/src/Producer.cpp:produce
+38^done,bkpt={number="11",type="breakpoint",disp="keep",enabled="y",addr="0x08048d02",func="produce(void*)",file="../src/Producer.cpp",fullname="/home/lmckhou/runtime-TestDSF/Producer/src/Producer.cpp",line="107",times="0",original-location="/home/lmckhou/runtime-TestDSF/Producer/src/Producer.cpp:produce"}
+
+or
+
+68-break-insert --thread-group i2 -f /home/lmckhou/testing/loopfirst.cc:main
+68^done,bkpt={number="24",type="breakpoint",disp="keep",enabled="y",addr="0x0804850d",func="main()",file="loopfirst.cc",fullname="/home/lmckhou/testing/loopfirst.cc",line="5",times="0",original-location="/home/lmckhou/testing/loopfirst.cc:main"}
+
+Line:1210, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> To avoid a (small) memory leak, we technically need to clean up the 3 global maps of IBreakpointTargetDMC.  Listening for a process exit should do it:
+
+    @DsfServiceEventHandler
+    public void eventDispatched(IExitedDMEvent e) {
+    	if (e.getDMContext() instanceof IContainerDMContext) {
+
+I haven't considered if there could be a race condition between this call and some =breakpoint-delete notifications when a process dies.  I'm assuming GDB does things in order.  But if there is a race condition, then having the memory leak is a simpler way to go
+
+Line:19, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/IMIBreakpointsExtension.java -> How about "IMIBreakpointTrackingListener"?
+
+With the current name, it is not clear if the methods are to notify of a change, or to query of a change (although the lack of a return value gives it away).  But this does match the listener pattern, no?
+
+Line:21, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/IMIBreakpointsExtension.java -> Do we need an IBreakpointsTargetDMContext as a parameter?  Same for the stopped one below.
+
+Line:1273, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/MIBreakpoints.java -> Can you put javadoc saying that this method should only deal with the removal of the breakpoint from GDB?
+
+Maybe even rename the method to "deleteBreakpointFromTarget()" (if I understood things correctly).
+
+Line:1284, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/MIBreakpoints.java -> Should we not propagate an error through the rm?  
+
+The original code would use that error code in removeBreakpoint() to not execute the sending of the BreakpointRemovedEvent.  With the new code, the BreakpointRemovedEvent is always sent.
+
+Line:1351, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/MIBreakpoints.java -> When can a bp number belong to multiple targetDMCs?
+
+Line:378, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/MIBreakpointsManager.java -> Shouldn't this notification (breakpointTracingStopped) be for the specified IBreakpointsTargetDMContext?
+
+Line:379, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/MIBreakpointsManager.java -> rm.done() must be outside if statement
+
+Line:505, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/MIBreakpointsManager.java -> I find it is safer to always us {} even from one-line if statements.  This has been our approach in DSF.  I never mentioned it before because it is not a big deal, but then I found what could be a good reason right in this file, so I thought I'd mention it.
+
+In changes like the one above where the {} were used and included rm.done() by mistake, consistency in using {} may help.  If we don't always use the {} we run the risk of the person writing the code or reviewing it, to miss that the rm.done() is inside the brackets because she/he assumed there was no bracket in this case (as one could argue there should not have been above).
+
+By always using the brackets, we always have to check what is contained inside of them and increase our changes of noticing such bugs.  So although I'm probably not perfect at it, I try to always use brackets.
+
+This is open for discussion of course, since you are the most active (and really the only) other DSF committer.
+
+Line:506, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/MIBreakpointsManager.java -> Shouldn't this notification (breakpointTracingStopped) be for the specified IBreakpointsTargetDMContext?
+
+In multi-process, when a process completes, we stop tracking its breakpoints, but we keep tracking the ones for the other processes
+
+Line:80, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/command/output/MIBreakpoint.java -> This new field must be copied over in the copy constructor
+  public MIBreakpoint(MIBreakpoint other)
+
+Line:500, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/command/output/MIBreakpoint.java -> I don't think this is right.  For example, watchpoints also show the the 'what' field:
+
+bkpt={number="14",type="hw watchpoint",disp="keep",enabled="y",what="myvar",times="0",original-location="myvar"}
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Anonymous Coward
+Date: 2012-11-23 17:59:08.000000000
+Message: 
+Patch Set 1: (48 inline comments)
+
+
+Line:432, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/DebugNewProcessSequence.java -> I don't know what to do with this that's why I just commented. How can I differentiate between core and trace sessions? I want to enable tracking for trace sessions only.
+
+Line:84, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> Done
+
+Line:104, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> Done
+
+Line:116, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> Done
+
+Line:145, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> Do we need to register it? Can't we just use "instanceof"?
+
+Line:202, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> We don't really need it, but I thought it would useful in the future. To use the services tracker we need to extend 'initialize' and add 'doInitialize' which is always a lot of coding.
+I'll change it to private.
+
+Line:215, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> Done
+
+Line:227, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> Done
+
+Line:286, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> How do you test it? 
+I use 'delete' from the console to uninstall a breakpoint. The platform breakpoint's install count is decremented and the platform breakpoint is removed from the session's MIBreakpointsManager. Then I use 'break' from the console to install the breakpoint. The platform breakpoint does exist but MIBreakpointsManager doesn't know about that's why I use 'breakpointAdded()" to simulate the same behavior as for a newly created platform breakpoint.
+
+Line:294, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> You're right. I have updated the code. The map doesn't keep all pending modifications anymore, we only need the latest one because the latest MIBreakpoint contains all previous changes. Instead of removing the entire map now I remove only the modification related to the target breakpoint.
+
+Line:299, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> The latest version doesn't keep multiple modifications, so this comment is not relevant any more.
+
+Line:303, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> Done
+
+Line:315, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> Done
+
+Line:319, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> I changed MIBreakpoints.getBreakpointTargetContexts() to return a single context instead of array.
+
+Line:325, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> Can't explain why but I prefer not mixing it. If you are too annoyed I'll change it.
+
+Line:329, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> No, it's not OK :) I changed it to modify the thread filters if the platform breakpoint is set on more than one thread. Otherwise the platform breakpoint is removed. The other option for the latter is to filter out all threads. What would you prefer?
+
+Line:423, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> Agree. I added a comment to the code.
+
+Line:426, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> Done
+
+Line:454, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> That's a bug, we need to return as soon as find a platform breakpoint. Fixed.
+
+Line:510, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> Done
+
+Line:560, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> Done
+
+Line:821, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> I don't know how to get the right process in this case.
+
+Line:827, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> I tried but it didn't work. The existing code returns correct context but I only try it with one process. I don't see how to support multiple processes unless we use getProcessesBeingDebugged() in this case and handle each process separately.
+
+Line:883, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> You're right re function == null but I am not sure about the code you are suggesting, it's difficult to read. I'm also not sure that
+(isHardware == null || isHardware == miBpt.isHardware()) is correct. I think isHardware == null && !miBpt.isHardware() is valid case. I changed the code to reflect this consideration.
+
+Line:899, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> Done
+
+Line:914, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> Done
+
+Line:930, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> Done
+
+Line:944, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> Done
+
+Line:957, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> Done
+
+Line:981, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> Done
+
+Line:1072, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> Done
+
+Line:1074, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> Done
+
+Line:1079, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> Done
+
+Line:1118, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> Done
+
+Line:1149, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> I think letting the method to fetch the service is right. Fixed.
+
+Line:1192, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> No, this is not right. Fixed it as a part of other changes related to 'original-location'.
+
+Line:1210, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBBreakpoints_7_4.java -> Done
+
+Line:19, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/IMIBreakpointsExtension.java -> I am not sure, the standard listener pattern doesn't seem to work.  Usually a listener register itself with the notifier which has add/remove listener methods. IBreakpoints service is created earlier than MIBreakpointsManager and it is the latter that has to register it as a listener to itself.
+
+Line:21, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/IMIBreakpointsExtension.java -> Currently only the trace file sessions require checking the tracking flag because breakpoint notifications can be fired before the tracking is started. These sessions have only one process.
+But you are right, we need to support multiple targets for future purposes and test it with multiple processes.
+I made the changes and replaced the boolean flag by the set of target contexts.
+
+Line:1273, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/MIBreakpoints.java -> Done
+
+Line:1284, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/MIBreakpoints.java -> Done
+
+Line:1351, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/MIBreakpoints.java -> Change the method to return one target DMC.
+
+Line:378, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/MIBreakpointsManager.java -> Done
+
+Line:379, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/MIBreakpointsManager.java -> Done
+
+Line:505, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/MIBreakpointsManager.java -> I agree, will follow this rule and try to change all bracketless cases in this patch.
+
+Line:506, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/MIBreakpointsManager.java -> Done
+
+Line:80, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/command/output/MIBreakpoint.java -> Done
+
+Line:500, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/command/output/MIBreakpoint.java -> Yes, this broke the watchpoint notifications. I added support for catchpoints after I tested watchpoints.
+
+----------------------------------------------------------------------------------------------------------------------

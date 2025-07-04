@@ -1,0 +1,172 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-43360: Fix collection accounting bug when col dropped but not flushed
+
+Background
+==========
+
+When a collection is dropped when using Magma, we must use the
+collection itemCount to decrement the overall VBucket item count
+during compaction. This is because Magma cannot tell us if a document
+being compacted (from the dropped collection) is the "current" version
+of that document, or a "stale" version.
+
+Bug
+===
+
+When dropping a collection with dirty mutations outstanding (for
+example when a collection is dropped during a rebalance and the
+replica node is still streaming the items from the collection), the
+VBucket item count was not always decremented by the full collection
+item count when cleaned up.
+
+For example, consider a Bucket with collections c_A and c_B, each with
+500 items. Collection c_B is dropped, which should result in the
+overall vBucket item count dropping from 1000 to 500. However it is
+only dropped by a fraction of c_B's item_count, say 400; resulting in
+the VBucket item count incorrectly being 600.
+
+The cause of the bug is related to the (somewhat complex) way
+collection item counts are tracked during flushing (and also
+compaction). The precise scenario which triggers the bug is as follows
+- front-end DCP connection and background flusher task interleaved as
+follows:
+
+    Front-End                           Back-end Writer thread
+    (Replica vBucket receiving          (flushing data to disk)
+     data via DCP.)
+    --------------------------------    --------------------------------
+
+ 1. Snapshot marker(disk)
+    CreateCollection "C"
+    Mutation to "C", key foo.
+
+ 2.                                     flushVBucket()
+                                        - getItemsForCursor finds:
+                                          CreateCollection(C) &
+                                          Mutation
+                                        - KVStore::saveDocs start to
+                                          flush items...
+
+ 3. Mutation to "C" key bar.
+    DropCollection "C"
+    - updates in-memory manifest to
+    mark "C" as dropped.
+
+ 4.                                     ... saveDocs finishes.
+                                        - saveCollectionStats() called,
+                                          calculates new collection item
+                                          count from in-memory value
+                                          plus what was just flushed
+                                          (correctly 0+1=1).
+ ***BUG***                              - postCommitMakeStatsVisible()
+                                          called, sees that "C" is
+                                          marked as deleted in Manifest,
+                                          skips updating in-memory item
+                                          count (should be 1, instead
+                                          0).
+
+ 5.                                     flushVBucket()
+                                        - getItemsForCursor finds:
+                                          Mutation and DropCollection(C)
+                                        - KVStore::saveDocs flushes
+                                          items.
+                                        - saveCollectionStats() called,
+                                          calculates new collection item
+                                          count from in-memory value
+                                          plus what was just flushed
+                                          (should be 1+1=2, instead
+                                          0+1=1).
+
+ 6.                                     Compaction runs to clean up
+                                        dropped collection, decrments
+                                        collection num items (should be
+                                        2, instead 1) from VBucket
+                                        item count.
+
+  ***BUG EXPOSED***
+  VBucket item count is incorrectly reported as 1 instead of 0.
+
+The problem is in step 4, where we consider a collection as dropped as
+we read the in-memory state, yet the drop hasn't been written to disk.
+As a consequence the in-memory collection item count is not updated.
+(One might think this isn't an issue, given the collection _will_ be
+dropped soon, however the correct collection item count is needed
+later...)
+
+At step 5, the collection is still not dropped from disk, so the
+on-disk count still needs to be maintained. However, as it bases the
+current collection item count from the (incorrect) in-memory count
+from step 4, we write an incorrect collection size to disk.
+
+Finally at step 6 when the dropped colleciton is cleaned up during
+compaction, the (incorrect) on-disk item count is subtracted from the
+VBucket item count; resulting in a VBucket item count of 1 instead of
+0.  number of mutations to that collection.
+
+Solution
+========
+
+postCommitMakeStatsVisible() is modified to apply flusher Stats to
+dropped collections in additon to alive ones, by updating the
+appropriate entry in the manifests' droppedCollections structure.
+
+This means that the subsequent flush to disk of collections stats
+(step 6) _does_ include the previously flushed items; and hence the
+following collection cleanup will acount the dropped collection
+correctly.
+
+Change-Id: If4e0d9e1062b52245d510734b34782fbe22273f9
+Reviewed-on: https://review.couchbase.org/c/kv_engine/+/166357
+Tested-by: Build Bot <build@couchbase.com>
+Reviewed-by: Jim Walker <jim@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2021-11-26 11:56:25.000000000
+Message: 
+Change has been successfully cherry-picked as 0b9f2131b11094632e26aca36a9543c3c056e777 by Dave Rigby
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-11-26 11:56:34.000000000
+Message: 
+Patch Set 5:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-TSan-master/6329/ (1/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-11-26 11:56:34.000000000
+Message: 
+Patch Set 5:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-master/9610/ (2/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-11-26 11:58:00.000000000
+Message: 
+Created a revert of this change as I9ed3d86adc1de1e380f58cf76ce503e9d61bc5fb
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-11-26 12:44:41.000000000
+Message: 
+Patch Set 5:
+
+Build Unstable 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-master/9610/ : UNSTABLE
+
+Failure of a testrunner test ( http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-master/9610/ )
+
+ERROR: do_warmup_100k (memcapable.WarmUpMemcachedTest)
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-master/9610/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-TSan-master/6329/ : UNSTABLE
+
+Failure of a testrunner test ( http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-TSan-master/6329/ )
+
+ERROR: do_warmup_100k (memcapable.WarmUpMemcachedTest)
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-TSan-master/6329/ )'
+----------------------------------------------------------------------------------------------------------------------

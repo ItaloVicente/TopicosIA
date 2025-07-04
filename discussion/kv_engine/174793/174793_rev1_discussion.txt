@@ -1,0 +1,86 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-52135: Remove isStalePriv() check in StoredValue::getNext()
+
+During performance testing with large number of Buckets and low quota
+(see CBD-4733 for details), performance profile highlights a large
+amount of time spent in HashTable::pauseResumeVisit, specifically the
+function itself (i.e. not calling any child functions).
+
+90% of the samples inside HashTable::pauseResumeVisit land inside
+getNext(), specifically the call to isStalePriv(). The isStalePriv
+call (and resulting bit test) is likely costly to two reasons:
+
+1. Cache-miss on reading the first (temporal) element from the
+   HashTable object (we are pointer-chasing iterating the HashTable
+   and hence unlikely to have this cache line in cache).
+
+2. Requiring atomic (acquire) memory ordering on the read. As per
+   cppreference.com:
+
+    A load operation with this memory order performs the acquire
+    operation on the affected memory location: no reads or writes in
+    the current thread can be reordered before this load. All writes
+    in other threads that release the same atomic variable are visible
+    in the current thread (see Release-Acquire ordering below)
+
+i.e. this constrains the instruction reordering the CPU is permitted
+to perform.
+
+Given the call to isStalePriv() is just a sanity check (and we've had
+stale flag - added for Ephemeral for a long time) I think it's safe to
+remove it now. This is unlikely to remove all the cost associated with
+traversing the HashTable chains (we will still be paying the cache
+miss cost), but by allowing micro-architectural optimisations to more
+readily occur we should hopefully be able to hide some of that cost.
+
+Note that we _do_ still leave the sanity check in
+StoredValue::setNext() - this has not been observed to be hot in
+profiles, and it's actually more important that we don't accidently
+link the chains together in the wrong way.
+
+Change-Id: Idddba064c83e9844e7f226284ab88c52cb42b54f
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2022-05-13 13:07:10.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-05-13 13:45:28.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/16502/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/46130/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/17483/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/38747/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/18458/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/7094/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/19593/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/19246/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/20271/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/27649/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/7191/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2022-05-13 15:08:02.000000000
+Message: 
+Patch Set 1: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------

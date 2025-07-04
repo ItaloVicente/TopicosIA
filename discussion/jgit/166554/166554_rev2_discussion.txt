@@ -1,0 +1,130 @@
+======================================================================================================================
+DESCRIPTION:
+
+PackedBatchRefUpdate: allow to skip locking loose refs
+
+When running offline Gerrit notedb migration it is creating one new meta
+ref per Gerrit change. For a large repository with 250k Gerrit changes
+we observed that the migration spent more than 2 days to write these
+250k new loose refs to disk. On this test system we could write loose
+refs at a rate of 65-70 refs/minute.
+
+During an offline notedb migration we can ensure that no other process
+is accessing the new refs created by the migration. Hence allow
+to skip locking loose refs in atomic PackedBatchRefUpdate to enable
+speeding up persisting a large number of new refs in such a controlled
+environment.
+
+Using that we can improve the performance of offline notedb migration
+by using atomic PackedBatchRefUpdate without locking loose refs for all
+the new refs. This is necessary under less restricted conditions since
+another process or thread could write a loose ref concurrently while the
+migration is busy writing the new refs to the packed-refs file.
+This could lead to wrong results since if a ref is present both in
+packed-refs and a loose ref then the value of the loose ref takes
+precedence over the refs value in packed-refs.
+
+Change-Id: I364f4970f77e208e5cebb7768ee6ab0163b95b5d
+Signed-off-by: Matthias Sohn <matthias.sohn@sap.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Matthias Sohn
+Date: 2020-07-27 12:26:23.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2020-07-27 12:26:29.000000000
+Message: 
+Patch Set 2:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/3423/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2020-07-27 12:37:00.000000000
+Message: 
+Patch Set 2: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/3423/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2020-07-27 14:04:19.000000000
+Message: 
+Patch Set 2:
+
+2nd try
+----------------------------------------------------------------------------------------------------------------------
+Author: David Ostrovsky
+Date: 2020-07-27 20:15:12.000000000
+Message: 
+Patch Set 2:
+
+(4 comments)
+Line:23, /COMMIT_MSG -> Mention what the improvement for the above use case of 250k would be?
+
+Line:127, org.eclipse.jgit/src/org/eclipse/jgit/lib/BatchRefUpdate.java -> Nit: Start statement with capital letter.
+
+Line:128, org.eclipse.jgit/src/org/eclipse/jgit/lib/BatchRefUpdate.java -> Nit: Point at the end of the statement.
+
+Line:365, org.eclipse.jgit/src/org/eclipse/jgit/lib/BatchRefUpdate.java -> Nit: Not related white space change.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2020-07-27 21:47:11.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:23, /COMMIT_MSG -> I am right now testing this on a copy of our production site, will add the result here when the test is finished
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2020-07-29 22:00:05.000000000
+Message: 
+Abandoned
+
+it turned out it is not a good idea to directly write to packed-refs for notedb migration since resuming the migration from any interruption requires to repeat the migration of all projects which weren't finished when the interruption happened since with this approach all ref updates are only persisted at the end of the migration of a project.
+----------------------------------------------------------------------------------------------------------------------
+Author: David Ostrovsky
+Date: 2020-07-30 06:14:34.000000000
+Message: 
+Patch Set 2:
+
+> [...] with this approach all ref updates are only persisted at the end of the migration of a project
+
+Yes but what was the time saving? If instead of 2 days, it would take only 2 hours, may be we still want to consider this?
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2020-07-31 22:05:10.000000000
+Message: 
+Patch Set 2:
+
+> Patch Set 2:
+> 
+> > [...] with this approach all ref updates are only persisted at the end of the migration of a project
+> 
+> Yes but what was the time saving? If instead of 2 days, it would take only 2 hours, may be we still want to consider this?
+
+I unintentionally pressed Ctrl-C instead of Ctrl-A D when I wanted to leave the screen session
+the migration was running in. I had reached 74% of the migration of a large repository with
+270k changes which took close to 24 hours. After killing the migration process I noticed that
+the result of this partial migration was gone. This happened since I switched the migration
+to use atomic PackedBatchRefUpdate with this jgit patch to skip locking loose refs for these
+many new refs. Though since I killed the migration process all the new refs weren't persisted
+since this would have happened only after complete migration of that repository. In addition
+this showed that we would still need more than 36 hours to migrate only this single repository.
+
+Hence I decided to abandon this approach and instead work on enabling to run the migration with multiple threads per repository by slicing them similar to what was done for indexing.
+In addition I found that the notedb migration used only a single database connection for all the
+threads which run the migration which led to massive lock contention on the JDBC connection.
+Find this new patch series here [1]. With that I can now migrate such large repositories at a
+speed of around 1400 changes/minute instead of 70 before this patch series.
+
+I will now run another test to migrate our complete site with these patches to measure how long this now takes compared to the current stable-2.16 branch which took around one week for the offline migration.
+
+[1] https://gerrit-review.googlesource.com/c/gerrit/+/277561
+----------------------------------------------------------------------------------------------------------------------

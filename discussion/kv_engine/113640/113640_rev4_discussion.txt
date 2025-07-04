@@ -1,0 +1,71 @@
+======================================================================================================================
+DESCRIPTION:
+
+Settings: Avoid static initialization fiasco
+
+When building on macOS with clang 8 and ThreadSanitizer enabled,
+memcached_testapp crashes when destructing the Settings object:
+
+    libc++abi.dylib: terminating with uncaught exception of type std::__1::system_error: mutex lock failed: Invalid argument
+
+With the following backtrace from where the system_error exception is thrown:
+
+* thread #1, queue = 'com.apple.main-thread', stop reason = breakpoint 1.1
+    frame #0: 0x00007fff7b6411f6 libc++abi.dylib` __cxa_throw
+    frame #1: 0x00007fff7b6147af libc++.1.dylib` std::__1::__throw_system_error(int, char const*)  + 77
+    frame #2: 0x00007fff7b606c93 libc++.1.dylib` std::__1::mutex::lock()  + 29
+    frame #3: 0x00000001009c27ff memcached_testapp` folly::SharedMutexImpl<...>::annotateLazyCreate() [inlined] std::__1::unique_lock<std::__1::mutex>::unique_lock(__m=<unavailable>)  + 191 at __mutex_base:131
+    frame #4: 0x00000001009c27f7 memcached_testapp` folly::SharedMutexImpl<...>::annotateLazyCreate() [inlined] std::__1::unique_lock<std::__1::mutex>::unique_lock(__m=<unavailable>)  at __mutex_base:131
+  * frame #5: 0x00000001009c27f7 memcached_testapp` folly::SharedMutexImpl<...>::annotateLazyCreate()  + 140 at SharedMutex.cpp:33
+    frame #6: 0x00000001009c276b memcached_testapp` folly::SharedMutexImpl<...>::annotateLazyCreate(this=0x0000000100c7ddc8)  + 43 at SharedMutex.h:705
+    frame #7: 0x00000001009c191a memcached_testapp` folly::SharedMutexImpl<...>::~SharedMutexImpl() [inlined] folly::SharedMutexImpl<...>::annotateDestroy(this=<unavailable>)  + 8 at SharedMutex.h:718
+    frame #8: 0x00000001009c1912 memcached_testapp` folly::SharedMutexImpl<...>::~SharedMutexImpl()  + 24 at SharedMutex.h:324
+    frame #9: 0x00000001009c18fa memcached_testapp` folly::SharedMutexImpl<...>::~SharedMutexImpl(this=0x0000000100c7ddc8)  + 26 at SharedMutex.h:300
+    frame #10: 0x000000010076b837 memcached_testapp` folly::Synchronized<...>::~Synchronized(this=0x0000000100c7ddb0)  + 55 at Synchronized.h:484
+    frame #11: 0x000000010075d1d9 memcached_testapp` folly::Synchronized<...>::~Synchronized(this=0x0000000100c7ddb0)  + 41 at Synchronized.h:484
+    frame #12: 0x000000010075e8fc memcached_testapp` Settings::~Settings(this=0x0000000100c7db10)  + 76 at settings.h:51
+    frame #13: 0x000000010075c8b9 memcached_testapp` Settings::~Settings(this=0x0000000100c7db10)  + 41 at settings.h:51
+    frame #14: 0x0000000102b7d5c1 libclang_rt.tsan_osx_dynamic.dylib` cxa_at_exit_wrapper(void*)  + 33
+    frame #15: 0x00007fff7d72beed libsystem_c.dylib` __cxa_finalize_ranges  + 351
+    frame #16: 0x00007fff7d72c1fe libsystem_c.dylib` exit  + 55
+    frame #17: 0x00007fff7d67f01c libdyld.dylib` start  + 8
+
+The problem is at frame 5, where as part of the destruction of
+SharedMutex (as used by a member variable of Settings) we are
+attempting to acquire a mutex which has already been destructed (as it
+is itself a function-local static) - i.e. we have encountered the
+static initialization order fiasco :(
+
+Address this by changing `settings` to no longer be a plain static
+(global) variable, and instead be created on first use via a new
+Settings::instance() static method.
+
+Change-Id: I40bd44ed0ae32eb55271ce739fdf990d9869c32f
+Reviewed-on: http://review.couchbase.org/113640
+Tested-by: Build Bot <build@couchbase.com>
+Reviewed-by: Jim Walker <jim@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2019-08-22 15:44:44.000000000
+Message: 
+Change has been successfully cherry-picked as 19748396db4b41ac1e8dab476d180aff47e8260a by Dave Rigby
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-08-22 15:44:54.000000000
+Message: 
+Patch Set 4:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/2074/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-08-22 16:50:53.000000000
+Message: 
+Patch Set 4:
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/2074/ : SUCCESS'
+----------------------------------------------------------------------------------------------------------------------

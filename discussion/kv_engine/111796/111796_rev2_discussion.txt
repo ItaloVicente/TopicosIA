@@ -1,0 +1,114 @@
+======================================================================================================================
+DESCRIPTION:
+
+EPEngine: Disable memory tracking when destructing object
+
+When running ep_engine_benchmarks in Debug build, a crash is seen when
+destructing the EPStats object associated with the engine due to a
+recursive call to memory tracking exhausting the stack
+
+    ... repeats ...
+    frame #261987: 0x0000000100ca57db libmemcached_logger.1.0.0.dylib` operator new(count=<unavailable>)  + 11 at global_new_replacement.cc:71
+    frame #261988: 0x00007fff73e38922 libc++.1.dylib` std::logic_error::logic_error(char const*)  + 52
+    frame #261989: 0x00007fff73e2a7cd libc++.1.dylib` std::__1::__vector_base_common<true>::__throw_out_of_range() const  + 35
+    frame #261990: 0x0000000100032e52 ep_engine_benchmarks` std::__1::vector<folly::CachelinePadded<CoreLocalStats>, std::__1::allocator<folly::CachelinePadded<CoreLocalStats> > >::at(this=<unavailable>, __n=<unavailable>)  + 50 at vector:1521
+    frame #261991: 0x0000000100138b2c ep_engine_benchmarks` EPStats::memAllocated(this=0x000000010984b218, sz=32)  + 44 at stats.cc:164
+    frame #261992: 0x0000000100173f22 ep_engine_benchmarks` ObjectRegistry::memoryAllocated(mem=32)  + 82 at objectregistry.cc:198
+    frame #261993: 0x0000000100201e6f ep_engine_benchmarks` BenchmarkMemoryTracker::NewHook(ptr=<unavailable>, (null)=<unavailable>)  + 63 at benchmark_memory_tracker.cc:92
+    frame #261994: 0x00000001018127ad libplatform_so.0.1.0.dylib` ::cb_malloc(size=31)  + 29 at cb_malloc.cc:51
+    frame #261995: 0x0000000100ca57db libmemcached_logger.1.0.0.dylib` operator new(count=<unavailable>)  + 11 at global_new_replacement.cc:71
+    ... thrown logic error results in a memory allocation, which triggers memory tracking again ...
+    frame #261996: 0x00007fff73e38922 libc++.1.dylib` std::logic_error::logic_error(char const*)  + 52
+    frame #261997: 0x00007fff73e2a7cd libc++.1.dylib` std::__1::__vector_base_common<true>::__throw_out_of_range() const  + 35
+    frame #261998: 0x0000000100032e52 ep_engine_benchmarks` std::__1::vector<folly::CachelinePadded<CoreLocalStats>, std::__1::allocator<folly::CachelinePadded<CoreLocalStats> > >::at(this=<unavailable>, __n=<unavailable>)  + 50 at vector:1521
+    frame #261999: 0x0000000100138c0b ep_engine_benchmarks` EPStats::memDeallocated(this=0x000000010984b218, sz=5120)  + 43 at stats.cc:182
+    frame #262000: 0x0000000100173f92 ep_engine_benchmarks` ObjectRegistry::memoryDeallocated(mem=5120)  + 82 at objectregistry.cc:211
+    frame #262001: 0x0000000100201ea3 ep_engine_benchmarks` BenchmarkMemoryTracker::DeleteHook(ptr=<unavailable>)  + 35 at benchmark_memory_tracker.cc:101
+    frame #262002: 0x000000010181289e libplatform_so.0.1.0.dylib` ::cb_free(ptr=0x00000001098fa800)  + 14 at cb_malloc.cc:69
+    frame #262003: 0x00000001000d2e90 ep_engine_benchmarks` EventuallyPersistentEngine::~EventuallyPersistentEngine(this=0x000000010984b200)  + 288 at ep_engine.cc:6096
+    frame #262004: 0x000000010020fd6e ep_engine_benchmarks` SynchronousEPEngine::~SynchronousEPEngine(this=0x000000010984b200)  + 14 at mock_synchronous_ep_engine.h:46
+    frame #262005: 0x000000010020fd21 ep_engine_benchmarks` SynchronousEPEngineDeleter::operator(this=<unavailable>, engine=0x000000010984b200)(SynchronousEPEngine*)  + 33 at mock_synchronous_ep_engine.cc:94
+    frame #262006: 0x0000000100204710 ep_engine_benchmarks` EngineFixture::TearDown(benchmark::State const&) [inlined] std::__1::unique_ptr<SynchronousEPEngine, SynchronousEPEngineDeleter>::reset(this=<unavailable>)  + 112 at memory:2598
+    frame #262007: 0x00000001002046ea ep_engine_benchmarks` EngineFixture::TearDown(this=<unavailable>, state=<unavailable>)  + 74 at engine_fixture.cc:56
+
+The issue is that at the end of the destruction of the EPStats object
+(frame 262003), memory used by the CoreLocalStats sub-object of
+EPStats is freed, ultimately calling EPStats::memoryDeallocated (frame
+262000). This attempts to access the (now-deleted) CoreLocalStats
+object, which throws an out_of_range_error from std::vector. That in
+turn attempts to allocate memory via `operator new`, which calls
+EPStats::memoryAllocated (frame 261992) and we enter a loop...
+
+This only appears to happen in Debug builds; I assume the exact memory
+deallocation order is different in RelWithDebInfo and this somehow
+avoided.
+
+Fix by hoisting the deregistering of the current thread from
+EventuallyPersistentEngine::operatot delete, to
+EventuallyPersistentEngine's dtor, given the EPStats object's own
+allocations will be freed in ~EPStats which is called from
+~EventuallyPersistentEngine.
+
+Change-Id: Ifb130ec769c8fc0a307d15f9784ade2e18792249
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2019-07-12 15:14:42.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-07-12 16:39:24.000000000
+Message: 
+Patch Set 2: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/12849/ : FAILURE
+
+Failure of a CTest test  24/178 Test  #26: ep_testsuite.value_eviction.comp_passive .....................................Child aborted ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/12849/ )
+
+Failure of a GoogleTest test:
+
+0 tests, listed below: ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/12849/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/21878/ : FAILURE
+
+Failure of a CTest test  ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/21878/ )
+
+Failure of a GoogleTest test:
+
+0 tests, listed below: ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/21878/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/21054/ : FAILURE
+
+One of more core files found at the end of the build. Data for post-mortem saved to archived_core_dumps.tar.bz2 under "Build Artifacts". ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/21054/ )
+
+Failure of a CTest test  27/199 Test  #28: ep-engine-persistence-unit-tests.rocksdb ..................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/21054/ )
+
+Failure of a GoogleTest test:
+
+0 tests, listed below: ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/21054/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/2713/ : FAILURE
+
+One of more core files found at the end of the build. Data for post-mortem saved to archived_core_dumps.tar.bz2 under "Build Artifacts". ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/2713/ )
+
+Failure of a CTest test  27/199 Test  #28: ep-engine-persistence-unit-tests.rocksdb ..................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/2713/ )
+
+Failure of a GoogleTest test:
+
+0 tests, listed below: ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/2713/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/5628/ : FAILURE
+
+Failure of a CTest test [2019-07-12T15:55:59.860Z]  26/179 Test  #28: ep_testsuite.value_eviction.comp_active ......................................Child aborted ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/5628/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/19695/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/12068/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/18754/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

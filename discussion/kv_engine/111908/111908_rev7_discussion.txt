@@ -1,0 +1,118 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-35001: Consumer: Avoid duplicate PREs after disk/mem transition
+
+Summary:
+
+When transitioning to the inMemory phase of an Active DCP stream,
+ensure that the initial in-memory Snapshot has the CKPT flag set, to
+avoid the replica potentially seeing duplicate keys in the same
+Checkpoint.
+
+Details:
+
+Consider the following scenario of items on disk and in memory
+(checkpoint manager):
+
+    Disk:
+    1:PRE(a), 2:CMT(a), 3:SET(b)
+
+    Memory:
+                        3:CKPT_START
+                        3:SET(b),     4:PRE(a), 5:SET(c)
+
+(items 1..2 were in a removed checkpoint and no longer in-memory.)
+
+An ep-engine replica attempting to stream all of this (0..infinity)
+will result in a backfill of items 1..3, with a checkpoint cursor
+being placed at seqno:4. Note this isn't the start of the Checkpoint
+(which is 3) and hence not pointing at a checkpoint_start item.
+
+As such when this is streamed over DCP (up to seqno:4) the consumer
+will see:
+
+    SNAPSHOT_MARKER(start=1, end=3, flags=DISK|CKPT)
+    1:PRE(a)
+    2:CMT(a)
+    3:SET(b)
+    SNAPSHOT_MARKER(start=4, end=5, flags=MEM)
+    4:PRE(a),
+    [[[missing seqno 5]]
+
+If the consumer puts all of these mutations in the same Checkpoint,
+then it will result in duplicate PRE(a) items (which breaks Checkpoint
+invariant).
+
+Address this by adding the CKPT flag to the Snapshot marker when
+transitioning between disk and memory snapshots.
+
+Note there is still an oustanding issue with the calculation of the
+failover table branch point as a consequence of this change; however
+that is being deferred for a second MB - see MB-35003.
+
+Change-Id: Idfb3b676136df0a3a6af7e626d793b6e696d7dfe
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2019-07-15 10:54:00.000000000
+Message: 
+Uploaded patch set 7: Patch Set 6 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-07-15 13:38:10.000000000
+Message: 
+Patch Set 7: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/12887/ : FAILURE
+
+Failure of a CTest test  28/180 Test  #23: ep-engine_ep_unit_tests ...................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/12887/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/21090/ : FAILURE
+
+Failure of a CTest test  35/201 Test  #36: ep_testsuite.full_eviction.rocksdb ........................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/21090/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/19735/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/12102/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/18791/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/21921/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/2748/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/5673/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-07-15 16:28:25.000000000
+Message: 
+Patch Set 7: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/19735/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/12102/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/18791/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/12896/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/21921/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/2748/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/5673/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/21097/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2019-07-16 10:41:17.000000000
+Message: 
+Patch Set 7: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------

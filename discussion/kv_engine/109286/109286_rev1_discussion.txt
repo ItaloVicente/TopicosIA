@@ -1,0 +1,100 @@
+======================================================================================================================
+DESCRIPTION:
+
+Refactor: Move HashTable::commit to EPVBucket
+
+This includes a slight change to the commit logic to use the
+externally visible HashTable interface instead of the internal
+one. This requires that we allow callers to specify if they want to
+avoid deleting Pending StoredValues from the HashTable.
+
+Change-Id: I2f4ddc8ca14f7335ea02a06988a5687c4b0b193b
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Ben Huddleston
+Date: 2019-05-16 18:49:46.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-05-16 19:46:26.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/18027/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/10582/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/17254/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/11198/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/20129/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/1075/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/19433/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/3998/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2019-05-17 07:36:05.000000000
+Message: 
+Topic set to sync_repl
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-05-17 09:04:56.000000000
+Message: 
+Patch Set 1: Code-Review-1
+
+(2 comments)
+Line:613, engines/ep/src/ep_vb.cc -> Prefer findForRead here (if possible) - I'm about to remove unlocked_find in a subsequent patch.
+
+Line:773, engines/ep/tests/module_tests/vbucket_durability_test.cc -> In general you should probably call find() again here (and not rely on `result` still being valid) - in the Ephemeral case if a range read was in play then the committed SV might be a physically different one.
+
+While it technically doesn't matter in this case, it's good practice - people might expand / re-use this test code later so making it robust and work in the general case is desirable.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2019-05-17 10:11:30.000000000
+Message: 
+Patch Set 1:
+
+(2 comments)
+Line:613, engines/ep/src/ep_vb.cc -> I need an unlocked findForRead to do that because I already have the hbl.
+
+Line:773, engines/ep/tests/module_tests/vbucket_durability_test.cc -> Done. This needed to be skipped anyway for ephemeral.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-05-17 10:19:16.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:613, engines/ep/src/ep_vb.cc -> Then I think we need to add an overload for findForRead which takes an existing lock - however...
+
+The change to move commit out of HashTable somewhat breaking the internal abstraction that pending and committed items of the same key are under the same lock (and chain) :(
+
+That's unfortunate as it's potentially error-prone - the caller actually needs to know this (and use the same lock for both).
+
+(Note after the current patches I have in flight, unlocked_find() has been removed; all callers (outside HashTable) are using findFor...() and let it do the locking.)
+
+I *think* the best way to deal with this is to expose the (currency internal) findInner() method in HashTable, which returns *both* the committed and pending StoredValues (if they exist) for a key, alongside the lock. The caller of EPVBucket::commitStoredValue() could then call that to get both of the storedValues at once, then calling delete on the committed one (if non-null) - take a look at http://review.couchbase.org/#/c/109320/ for the new function.
+
+What you have here is probably ok in the short term (until I get my patches cleaned up) - one of us will probably have to refactor once that new API is available...
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2019-05-20 13:46:16.000000000
+Message: 
+Patch Set 1:
+
+(2 comments)
+Line:613, engines/ep/src/ep_vb.cc -> findForCommit now gives us a SVP for the prepare (because we want to modify it) and a SV for the committed. Didn't use SVP for both because calling ht.unlocked_del on the committed will then break stats in the SVP destructor, it's also simpler because I don't have to mess about with the HashBucketLocks
+
+----------------------------------------------------------------------------------------------------------------------

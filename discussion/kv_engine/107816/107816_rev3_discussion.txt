@@ -1,0 +1,125 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-33788 [SR]: Ensure persist-to-active for Level=PersistToMajority
+
+Currently the Active is not included in Majority for Level
+PersistToMajority, which is wrong. E.g.:
+
+- 2 replicas
+- chain: {A, R1, R2}
+- write{level=PersistToMajority}
+- R1 and R2 persist it and ack back to A
+- Majority reached -> write satisfied and committed to client
+- A crashes and restarts, before persisting
+
+With the sequence above we have broken the contract with the client.
+To fix, we always include the Active in Majority for PersistToMajority.
+
+Change-Id: I5e905eae4123ce365f0eccf45b203c6aab43f8b9
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2019-04-15 15:18:35.000000000
+Message: 
+Uploaded patch set 3: Patch Set 2 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-04-15 16:28:37.000000000
+Message: 
+Patch Set 3: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-04-15 17:28:13.000000000
+Message: 
+Patch Set 3: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/281/ : ABORTED
+
+Failure of a CTest test  44/198 Test  #45: ep_testsuite_dcp.value_eviction.comp_active ..................................Child terminated ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/281/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/18619/ : ABORTED
+
+Failure of a CTest test  50/198 Test  #52: ep_testsuite_checkpoint.value_eviction.comp_passive ..........................Child terminated ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/18619/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/17192/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/9883/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/16527/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/10402/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/19271/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/3167/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Ashwin
+Date: 2019-04-16 05:55:31.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:197, engines/ep/src/durability/active_durability_monitor.cc -> This will always make sure `MajorityAndPersistOnMaster` is satisfied.
+There is no check for `PersistToMajority` happening here.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-04-16 07:37:56.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:197, engines/ep/src/durability/active_durability_monitor.cc -> Hi Ashwin,
+not sure I get your point.
+
+Essentially here (at Active) the same logic applies for both PersistToMajority and MajorityAndPersistOnMaster (ie, for both, the Requirements are satisfied when (1) the majority of nodes has ack'ed and (1) the majority includes the Active).
+
+But note, that doesn't mean that those 2 Levels are identical. At Replica:
+- for PersistToMajority, Replica acks back to master only when the write has been *persisted*
+- for MajorityAndPersistOnMaster, Replica acks back to master as soon as the write is in memory
+
+Note that my latter statement isn't 100% correct as I'm ignoring the In-Order Commit logic (see DesignDoc for details), but that highlights the point of why you see the same logic applied to both Levels here.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-04-23 15:46:56.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:197, engines/ep/src/durability/active_durability_monitor.cc -> Hi Ashwin,
+I think that the main point of confusion is about
+
+> ackCount >= majority --> Make sure, majority of nodes received the in-memory mutation
+
+That is wrong.
+That condition ensures that the mutation is "locally-satisfied" on Majority of nodes.
+
+In turn, "locally-satisfied" means that on a node (whether it is Active or Replica):
+- mutation is in-memory, if Level=Majority
+- mutation has been persisted, if Level=PersistToMajority
+
+For Level=MajorityAndPersistOnMaster, locally-satisfied means:
+- mutation is in-memory, if the node is a Replica
+- mutation has been persisted, if the node is the Active
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ashwin
+Date: 2019-04-22 08:44:46.000000000
+MISMATCHED INLINE COMMENT
+Line:197, engines/ep/src/durability/active_durability_monitor.cc -> Hi Paolo,
+This is what I understood from the above line of code L#196:
+  1. ackCount >= majority --> Make sure, majority of nodes received the in-memory mutation
+  2. acks.at(active)      --> Make sure, active nodes is persisted
+
+So as per the line#196, it checks majority of nodes in-memory mutations and persisted on active alone.
+For `PersistToMajority` we need to do something like,
+    acks.at(active) + acks.at(majority_of_nodes)
+
+Please correct me if I am wrong :)
+----------------------------------------------------------------------------------------------------------------------

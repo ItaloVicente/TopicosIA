@@ -1,0 +1,100 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-43525: WIP: Bridge GoogleLog messages to spdlog
+
+Ensure that messages logged via glog (for example by Folly) are
+reported in the normal memcached log file.
+
+WIP: Currently this doesn't work correctly due to the joys of mixing
+shared & static libraries. Specofically, memcached_logger is a shared
+library, so when calling google::InitGoogleLogging() it only
+initialises the glog code linked into platform.so:
+
+    * thread #1, queue = 'com.apple.main-thread', stop reason = breakpoint 4.2
+      * frame #0: 0x000000010ab87864 libplatform_so.0.1.0.dylib` google::InitGoogleLogging(argv0="")  + 4 at logging.cc:2167
+        frame #1: 0x000000010a88e33b libmemcached_logger.1.0.0.dylib` cb::logger::setupBridgeFromGoogleLogging()  + 43 at spdlogger.cc:124
+        frame #2: 0x000000010a88e92b libmemcached_logger.1.0.0.dylib` cb::logger::createConsoleLogger()  + 267 at spdlogger.cc:271
+        frame #3: 0x00000001014067f6 ep-engine_ep_unit_tests` main(argc=1, argv=0x00007ffeefbff5d0)  + 470 at ep_unit_tests_main.cc:154
+        frame #4: 0x00007fff68313cc9 libdyld.dylib` start  + 1
+
+However, later on when Folly attempts to log an error in
+ThreadPoolExecutor.cpp; the instance of glog _it_ uses is from the
+glog code linked into ep-engine_ep_unit_tests (via folly):
+
+    (lldb) bt
+    * thread #9, name = 'NonIoPool1', stop reason = breakpoint 3.2
+      * frame #0: 0x0000000101f5a596 ep-engine_ep_unit_tests` google::LogMessage::SendToLog() [inlined] google::WriteToStderr(message=<unavailable>, len=65)  at logging.cc:716
+        frame #1: 0x0000000101f5a596 ep-engine_ep_unit_tests` google::LogMessage::SendToLog(this=0x0000700003949ce8)  + 38 at logging.cc:1418
+        frame #2: 0x0000000101f5b0b5 ep-engine_ep_unit_tests` google::LogMessage::Flush(this=0x0000700003949ce8)  + 197 at logging.cc:1362
+        frame #3: 0x0000000101f5ae53 ep-engine_ep_unit_tests` google::LogMessage::~LogMessage(this=0x0000700003949ce8)  + 19 at logging.cc:1311
+        frame #4: 0x0000000101f2a88b ep-engine_ep_unit_tests` folly::ThreadPoolExecutor::runTask(...)  + 875 at ThreadPoolExecutor.cpp:100
+
+In this particular instance this problem could be fixed by calling
+google::InitGoogleLogging() (and setting up the bridge) in the main()
+function of ep-engine_ep_unit_tests. However that would probably not
+work for memcached, as ep.so is it's own library (and has it's own
+copy of glog via folly) and hence we'd see the same problem for any
+calls via ep.so
+
+The "proper" solution to this is to only have one instance of glog;
+either convert it to a shared library or make everything which is part
+of memcached a single static binary (i.e. link ep statically).
+
+Change-Id: I515a272378d53d234248d50a06e6fa05647de28a
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2021-01-08 14:59:43.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-01-15 16:43:21.000000000
+Message: 
+Set Work In Progress
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-01-15 19:19:18.000000000
+Message: 
+Patch Set 1:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/32961/ : FAILURE
+
+Compile error at ..\kv_engine\logger\spdlogger.cc(128): error C2039: "__1": is not a member of "std" ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/32961/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/8096/ : FAILURE
+
+Compile error at [2021-01-15T17:01:23.220Z] ../kv_engine/logger/spdlogger.cc:128:18:
+error: ?std::__1? has not been declared
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/8096/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/8221/ : FAILURE
+
+Compile error at [2021-01-15T17:01:17.799Z] ../kv_engine/logger/spdlogger.cc:128:18:
+error: ?std::__1? has not been declared
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/8221/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/8483/ : FAILURE
+
+Compile error at [2021-01-15T17:01:23.117Z] ../kv_engine/logger/spdlogger.cc:128:18:
+error: no member named "__1" in namespace "std"
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/8483/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/16034/ : FAILURE
+
+Compile error at [2021-01-15T17:02:44.275Z] ../kv_engine/logger/spdlogger.cc:128:18:
+error: no member named "__1" in namespace "std"
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/16034/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/7185/ : FAILURE'
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-01-10 12:29:24.000000000
+Message: 
+Abandoned
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,197 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-45523: Add send-queue-size in connection stats
+
+Change-Id: Idcdb4f68d56078e42ad2881af9a56b90ae5f410c
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2021-04-14 09:06:58.000000000
+Message: 
+Uploaded patch set 4.
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2021-04-14 09:26:16.000000000
+Message: 
+Patch Set 4: Code-Review-1
+
+I'm still trying to figure out what we want to see here.. The send queue limitation was added to make sure that we don't suddenly let a connection buffer up 1GB of data, but we also try to make sure that its not empty so that the underlying send calls may operate on bigger system calls. We would therefore always try to fill the buffer up to its max every time we:
+
+a) receive a read notification that new data arrived on the socket
+b) we sent _all_ of the data already spooled up
+c) the underlying engine tried to call notifyIoComplete / scheduleDcpStep
+
+So when the callback for your stats call gets executed I would more or less expect it to be "full" if the underlying engine had data to send (not blocking) (well, depending on the execution order for the callback).
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2021-04-14 09:43:35.000000000
+Message: 
+Patch Set 4:
+
+> Patch Set 4: Code-Review-1
+> 
+> I'm still trying to figure out what we want to see here.. The send queue limitation was added to make sure that we don't suddenly let a connection buffer up 1GB of data, but we also try to make sure that its not empty so that the underlying send calls may operate on bigger system calls. We would therefore always try to fill the buffer up to its max every time we:
+> 
+> a) receive a read notification that new data arrived on the socket
+> b) we sent _all_ of the data already spooled up
+> c) the underlying engine tried to call notifyIoComplete / scheduleDcpStep
+> 
+> So when the callback for your stats call gets executed I would more or less expect it to be "full" if the underlying engine had data to send (not blocking) (well, depending on the execution order for the callback).
+
+Ok, so what you're saying is that the new stat is pointless because the pattern on that quantity is going to be the same on healthy scenarios and on problematic scenarios, right?
+I need to test that honestly, I don't feel I can infer by logic if we would be seeing different patterns for the two cases, sometimes results are unexpected.
+
+Anyway, let's assume that your prediction is right, what do you think we can add/expose for having a quick evidence that we don't stream cause of "!more" ?
+
+Also, with regard to your a/b/c points above, if a connection snoozes for "!more", what is the trigger for unsnoozing it?
+Imagine a case where:
+ 1. EP has pushed everything into the Stream::readyQ, so the connection is NOT "pausing"
+ 2. Connection::executeCommandsCallback hits !more
+How do we end up executing (2) again?
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-04-14 10:13:12.000000000
+Message: 
+Patch Set 4: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/34932/ : FAILURE
+
+Failure of GoogleTest "PersistentAndEphemeral/ConnectionTest.test_mb17042_duplicate_name_producer_connections/3":
+
+<pre>
+[ RUN      ] PersistentAndEphemeral/ConnectionTest.test_mb17042_duplicate_name_producer_connections/3
+unknown file: error: C++ exception with description "cb::io::rmrf: remove of file \\?\C:\Jenkins\workspace\kv_engine-windows-master\build\kv_engine\ep_engine_ep_unit_tests.db\test.252002\magma.1\wal\wal.1 under ep_engine_ep_unit_tests.db/test.252002 failed: The data is invalid." thrown in TearDown().
+[  FAILED  ] PersistentAndEphemeral/ConnectionTest.test_mb17042_duplicate_name_producer_connections/3, where GetParam() = ("persistent", "full_eviction") (28 ms)
+PersistentAndEphemeral/ConnectionTest.test_mb17042_duplicate_name_producer_connections/3
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/34932/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/10212/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [0016/0095]: test dcp replica stream one collection...Uncaught std::exception. what():ThrowExceptionUnderflowPolicy current:497 arg:521
+[2021-04-14T09:12:09.595Z] (23543 ms) DIED
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/10212/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/29979/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/8325/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/6870/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/9844/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/8913/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/9982/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/17761/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-04-14 13:50:17.000000000
+Message: 
+Patch Set 4: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/29979/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/8325/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/6870/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/9844/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/8913/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/9982/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/10219/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/17761/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/34938/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2021-04-15 10:08:10.000000000
+Message: 
+Patch Set 4:
+
+> Patch Set 4:
+> 
+> > Patch Set 4: Code-Review-1
+> > 
+> > I'm still trying to figure out what we want to see here.. The send queue limitation was added to make sure that we don't suddenly let a connection buffer up 1GB of data, but we also try to make sure that its not empty so that the underlying send calls may operate on bigger system calls. We would therefore always try to fill the buffer up to its max every time we:
+> > 
+> > a) receive a read notification that new data arrived on the socket
+> > b) we sent _all_ of the data already spooled up
+> > c) the underlying engine tried to call notifyIoComplete / scheduleDcpStep
+> > 
+> > So when the callback for your stats call gets executed I would more or less expect it to be "full" if the underlying engine had data to send (not blocking) (well, depending on the execution order for the callback).
+> 
+> Ok, so what you're saying is that the new stat is pointless because the pattern on that quantity is going to be the same on healthy scenarios and on problematic scenarios, right?
+> I need to test that honestly, I don't feel I can infer by logic if we would be seeing different patterns for the two cases, sometimes results are unexpected.
+> 
+> Anyway, let's assume that your prediction is right, what do you think we can add/expose for having a quick evidence that we don't stream cause of "!more" ?
+> 
+> Also, with regard to your a/b/c points above, if a connection snoozes for "!more", what is the trigger for unsnoozing it?
+> Imagine a case where:
+>  1. EP has pushed everything into the Stream::readyQ, so the connection is NOT "pausing"
+>  2. Connection::executeCommandsCallback hits !more
+> How do we end up executing (2) again?
+
+So in your situation we now have X MB data spooled into the send queue, and if we now assume that there won't be any data arriving on the socket or that the underlying engine don't call "notify io complete" or "schedule dcp step" we will get the notification from libevent when it sent the last byte of the buffered data into the kernel.
+
+We could always use 
+
+    bufferevent_setwatermark(bev.get(), EV_WRITE, getSendQueueSize() / 2, maxsize);
+
+if we wanted the callback earlier (going all the way to 0 is what we would have done in pre-bufferevent)
+
+(given that you know the number of bytes in the send queue when we exit the event loop and we know the number of bytes in the send queue when we get called again you could always time the gap from exit the callback until we got called again and calculate the transfer speed from there and put that in a stat)
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2021-04-15 13:38:17.000000000
+Message: 
+Patch Set 4:
+
+> we will get the notification from libevent when it sent the last byte of the buffered data into the kernel.
+
+Clear, thanks for info.
+
+> (given that you know the number of bytes in the send queue when we exit the event loop and we know the number of bytes in the send queue when we get called again you could always time the gap from exit the callback until we got called again and calculate the transfer speed from there and put that in a stat)
+
+Mmm that's a good point, I was thinking more on something like "total time spent on !more", but computing an approx. transfer speed sounds like a good idea. Probably we can output both a point-in-time value and an average
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-04-15 13:45:53.000000000
+Message: 
+Patch Set 4:
+
+> Patch Set 4:
+> 
+> > we will get the notification from libevent when it sent the last byte of the buffered data into the kernel.
+> 
+> Clear, thanks for info.
+> 
+> > (given that you know the number of bytes in the send queue when we exit the event loop and we know the number of bytes in the send queue when we get called again you could always time the gap from exit the callback until we got called again and calculate the transfer speed from there and put that in a stat)
+> 
+> Mmm that's a good point, I was thinking more on something like "total time spent on !more", but computing an approx. transfer speed sounds like a good idea. Probably we can output both a point-in-time value and an average
+
+Note if you can get this into mortimer as some kind of aggregation - maybe for all dcp connections with a given prefix?-  then if you have a simple counter then you'll get rate calculations for free like disk queue drain / fill.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2021-04-28 13:12:29.000000000
+Message: 
+Abandoned
+
+Abandoning this as same work has been started at http://review.couchbase.org/c/kv_engine/+/152316
+----------------------------------------------------------------------------------------------------------------------

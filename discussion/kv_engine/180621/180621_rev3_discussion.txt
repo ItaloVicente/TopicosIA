@@ -1,0 +1,103 @@
+======================================================================================================================
+DESCRIPTION:
+
+WIP: allow for tuning TCP keepalive
+
+From googling it looks like it is expressed in seconds on all
+platforms (but reported in ms on linux?) try to verify
+this by fetching it and look at the default value
+to see...
+
+Change-Id: I533d166341e19b368b32b3bd3c00698429772139
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Trond Norbye
+Date: 2022-09-30 06:13:18.000000000
+Message: 
+Uploaded patch set 3.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-09-30 06:33:08.000000000
+Message: 
+Patch Set 3: Verified+1
+
+Build Successful 
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/20028/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/20798/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-windows-master/49853/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/41893/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/10511/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/22782/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/23178/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/24013/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/22184/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/31193/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/10611/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-09-30 08:31:33.000000000
+Message: 
+Patch Set 3: Code-Review-1
+
+(5 comments)
+Line:9, /COMMIT_MSG -> Should also document these new params in the commit message, and have an MB to track this which we can give to the customer ;)
+
+Line:238, daemon/server_socket.cc -> A value greater than 32767 is invalid for linux at least (https://elixir.bootlin.com/linux/latest/source/net/ipv4/tcp.c#L3321) - given we already check the result of setsockopt() it might be simpler to just pass through whatever the user specifies (i.e. don't check for zero) and rely on the individual OS kernels to check if valid or not...
+
+Line:242, daemon/server_socket.cc -> Nit: Only the TCP flag is different, can avoid some duplication by just ifdef'ing the constant to use & name in string.
+
+Line:988, daemon/settings.h -> Please document these - probably sufficient to reference setsockopt() man pages.
+
+Line:993, daemon/settings.h -> We can obviously iterate on these values, but I feel these are reasonably conservative - means we don't close dead connections until 11 minutes.
+
+I had a quick browse around and see others using values closer to 5 minutes - e.g.
+
+* Cassandra: 6 minutes total recommended (https://cassandra.apache.org/doc/latest/cassandra/faq/#why-bootstrapping-stream-error) 
+* DataStax: 90 seconds total recommended (https://docs.datastax.com/en/dse/5.1/dse-dev/datastax_enterprise/config/configRecommendedSettings.html#TCPsettings)
+* Mongo: Use OS setting, but override if more than 300 seconds ( https://github.com/mongodb/mongo/blob/ffededcdc670d83f4fdf5819f5ab1d9c5750c67c/src/mongo/util/net/socket_utils.h#L39)
+
+There's also an interesting blog post from Cloudflare (https://blog.cloudflare.com/when-tcp-sockets-refuse-to-die/) where they mention the newer TCP_USER_TIMEOUT option, which additionally can be used to close connections which have data outstanding but the other side has not read - which normally would prevent TCP keep-alive from operating.
+
+My gut feel is that given app server -> KV-Engine connections _should_ be in fast, low-latency, reliable LAN-type networks; we should be reasonably aggressive in keep-alive (and TCP_USER_TIMEOUT) settings, aiming to kill connections which have not responded (repeatedly) within a minute or so. 
+
+This also has "obvious"  behaviour for customers experimenting with this as they can shutdown a VPN connection / change firewall rules and not have to wait very long before connections are cleaned up.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2022-10-02 09:09:19.000000000
+MISMATCHED INLINE COMMENT
+Line:9, /COMMIT_MSG -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2022-10-02 09:09:19.000000000
+MISMATCHED INLINE COMMENT
+Line:238, daemon/server_socket.cc -> The intention was to let you specify 0 to use the "default"/os value
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2022-10-02 09:09:19.000000000
+MISMATCHED INLINE COMMENT
+Line:242, daemon/server_socket.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2022-10-02 09:09:19.000000000
+MISMATCHED INLINE COMMENT
+Line:988, daemon/settings.h -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2022-10-02 09:09:19.000000000
+MISMATCHED INLINE COMMENT
+Line:993, daemon/settings.h -> I've lowered the numbers... I'm not sure we can use TCP_USER_TIMEOUT as we do have some connections which don't drain their data fast enough (some of our internal clients). We would at least need to figure out how low we may set it to..
+----------------------------------------------------------------------------------------------------------------------

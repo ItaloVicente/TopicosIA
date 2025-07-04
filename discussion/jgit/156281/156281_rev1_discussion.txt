@@ -1,0 +1,121 @@
+======================================================================================================================
+DESCRIPTION:
+
+Simplify ReftableCompactor
+
+The ReftableCompactor supported a byteLimit, but this is currently
+unused. The FileReftableStack has a more sophisticated strategy that
+amortizes compaction costs.
+
+Do not set min/maxUpdateIndex on the compactor. These fields are used
+to control pruning of reflog entries. Since reflogs are generally
+pruned chronologically (oldest entries are expired first), one can
+only prune entries on full compaction.
+
+Rephrase the function Reader#minUpdateIndex and maxUpdateIndex. These
+vars are documented to affect log entries, but semantically, they are
+about ref entries. Since ref entries have their timestamps
+delta-compressed (but log entries are not), it is important for the
+min/maxUpdateIndex values to be coherent between different tables.
+
+Therefore, we set ReftableWriter's min/maxUpdateIndex from the
+merged table we are compacting, rather than from the compaction
+settings (which should only control reflog expiry.)
+
+Change-Id: I2f4eb7866f607fddd0629809e8e61f0b9097717f
+Signed-off-by: Han-Wen Nienhuys <hanwen@google.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Han-Wen NIenhuys
+Date: 2020-01-21 18:07:46.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2020-01-21 18:07:56.000000000
+Message: 
+Patch Set 1:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/2496/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2020-01-21 18:33:57.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/2496/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Han-Wen NIenhuys
+Date: 2020-01-27 14:22:25.000000000
+Message: 
+Patch Set 1:
+
+ping?
+----------------------------------------------------------------------------------------------------------------------
+Author: Minh Thai
+Date: 2020-01-29 00:05:56.000000000
+Message: 
+Patch Set 1: Code-Review-1
+
+(1 comment)
+Line:192, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/reftable/ReftableCompactor.java -> These update indices come from the setters, while the writer in line 157 and 158 uses indices from the reader. Should they be consistent?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Han-Wen NIenhuys
+Date: 2020-01-29 14:03:41.000000000
+Message: 
+Patch Set 1:
+
+(2 comments)
+Line:192, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/reftable/ReftableCompactor.java -> see here
+
+Line:192, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/reftable/ReftableCompactor.java -> No, I don't think so.  in l.157, 158 we set the update_index that we use for delta compressing ref updates. For the compacted table to be valid in its stack, we have to copy the range of update indices. this previously happened in l.192 (see above).
+
+However, this meant that reflog entries could be dropped -  for example,    
+
+  https://eclipse.googlesource.com/jgit/jgit/+/refs/heads/master/Documentation/technical/reftable.md#log-record
+
+says 
+
+"The log_type = 0x0 is mostly useful for git stash drop, removing an entry from the reflog of refs/stash in a transaction file (below), without needing to rewrite larger files. Readers reading a stack of reflogs must treat this as a deletion."
+
+if you delete an existing log entry, by definition, you'd write it at an update_index outside of the range of the table you're writing. This would cause it to be (erroneously) deleted on the next compaction.
+
+it took a while before I understood this finesse, and now it's also not obvious to you from this code, so I should add a test.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Han-Wen NIenhuys
+Date: 2020-01-29 18:15:12.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:192, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/reftable/ReftableCompactor.java -> I tried writing a test, but it's actually hard.
+
+Here is the scenario where the original code would do something wrong:
+
+write a bunch of log entries
+
+  "branch @ 0" - reftable 0-0   // minUpdateIdx = 0, maxUpdateIdx = 0
+  "branch @ 1" - reftable 1-1
+  "branch @ 2" - reftable 2-2
+  "branch @ 3" - reftable 3-3
+
+now issue a tombstone for the first entry: 
+
+  "DELETE branch @ 0" - reftable 4-4  
+
+Now imagine we run a compaction of the last 2 tables, ie.
+
+  "branch @ 3" - reftable 3-3
+  "DELETE branch @ 0" - reftable 4-4  
+
+The previous code would set min=3, max=4 and then throw out the DELETE entry on compaction.
+
+It's hard to test because the deletion logic is in the spec, but it is not exposed in JGit, and the API doesn't allow the amount of control to create just that compaction that would create a problem.
+
+----------------------------------------------------------------------------------------------------------------------

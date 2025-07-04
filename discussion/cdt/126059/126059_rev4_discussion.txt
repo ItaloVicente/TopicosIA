@@ -1,0 +1,81 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 537030. Add implementation for "$cquery/setInactiveRegions" notification message
+
+Change-Id: Ieda3a95d0ea427425a6c7c08047e05e211cd74fd
+Signed-off-by: Manish Khurana <mkmanishkhurana98@gmail.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Manish Khurana
+Date: 2018-07-14 20:23:20.000000000
+Message: 
+Uploaded patch set 4.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-07-14 20:23:27.000000000
+Message: 
+Patch Set 4:
+
+Build Started https://ci.eclipse.org/cdt/job/cdt-verify-test-lsp4e-cpp/43/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-07-14 20:29:31.000000000
+Message: 
+Patch Set 4: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/cdt/job/cdt-verify-test-lsp4e-cpp/43/ : SUCCESS. p2 repository available on https://ci.eclipse.org/cdt/job/cdt-verify-test-lsp4e-cpp/43/artifact/lsp4e-cpp/org.eclipse.lsp4e.cpp.site/target/repository/ for approximately 7 days.
+----------------------------------------------------------------------------------------------------------------------
+Author: Nathan Ridge
+Date: 2018-07-15 07:06:32.000000000
+Message: 
+Patch Set 4:
+
+(4 comments)
+
+Thanks for the patch!
+
+Reviewing this has made me realize that there are several architectural issues with our approach here:
+
+* Using Thread.sleep() to work around race conditions (in this case, a race between the cquery message arriving, and the presentation reconciler being installed) is something we generally try to avoid. (It has two downsides. First, in cases where the reconciler is installed first, we are unnecessarily delaying the update of the inactive regions for 500 ms. Second, if the reconciler is still not installed after 500 ms (e.g. because the machine is running some other expensive computation and the Eclipse process couldn't get scheduled to run in that time), we haven't solved the original problem.)
+
+* Adding the URI -> LineBackgroundListener mapping in setupDocument() but removing it in uninstall() means we can leak mappings if a viewer's document changes.
+
+* The fact that multiple editors (with the same file open in them) can share a LineBackgroundListener means that removing the mapping in uninstall() could leave another editor without a mapping for its file.
+
+I thought about how we can improve this design, and here are my suggestions:
+
+* Let's have one LineBackgroundListener per editor (which also means one per presentation reconciler). It can be created and added in install() and removed in uninstall(). This means two editors open to the same document will not share a listener. On the other hand, changing the document in an editor will reuse the existing listener.
+
+* When the cquery message arrives, let's store the result in a Map<URI, List<Region>>. This would replace our current Map<URI, LineBackgroundListener>. This avoids the race with the reconciler being set up. 
+
+* Give LineBackgroundListener a field of type IDocument, which represents the document currently open in listener's editor. The presentation reconciler updates this field in setupDocument(). (We would keep the text input listener mechanism for calling setupDocument().)
+
+* When the LineBackgroundListener needs to compute a line background, it converts its IDocument to a URI, performs a lookup in the map to get the current inactive regions, and uses those.
+
+How does that sound?
+Line:22, lsp4e-cpp/org.eclipse.lsp4e.cpp.language/src/org/eclipse/lsp4e/cpp/language/CqueryLineBackgroundPainter.java -> The C++ editor's line background listener is called LineBackgroundPainter because it also implements IPainter.
+
+In our case, there is no painting involved, and so I would prefer to call it CqueryLineBackgroundListener.
+
+Line:50, lsp4e-cpp/org.eclipse.lsp4e.cpp.language/src/org/eclipse/lsp4e/cpp/language/CqueryLineBackgroundPainter.java -> If we've found a matching inactive region, we can break from the loop.
+
+Line:54, lsp4e-cpp/org.eclipse.lsp4e.cpp.language/src/org/eclipse/lsp4e/cpp/language/CqueryLineBackgroundPainter.java -> It's better to log errors to the workspace log file.
+
+We generally do this by having a static log(Throwable) method in the plugin class. For example, see CUIPlugin.log(Throwable). Feel free to copy that method, and any helpers it uses, from CUIPlugin into our Activator class, and then in this catch block we can do:
+
+  Activator.log(e);
+
+Line:70, lsp4e-cpp/org.eclipse.lsp4e.cpp.language/src/org/eclipse/lsp4e/cpp/language/PresentationReconcilerCPP.java -> On the one hand, I agree that it is wasteful to do processing like installing text input listeners if the language server is clangd and we don't need them.
+
+On the other hand, if our goal is to get to a state where the user can change the choice of language server and have that take effect right away (bug 536820), then this impedes that goal (if the user switches from clangd to cquery, inactive code highlighting won't work in existing editors, only newly opened editors).
+
+We could handle this by adding additional complexity, such as listening for the preference change and calling a method on every open editor's presentation reconciler to set up the necessary listeners.
+
+However, I think it's better to keep things simple, and just install the listeners unconditionally. I expect that in time clangd will also get things like inactive code highlighting, and then the client-side processing we do will no longer be wasteful.
+
+----------------------------------------------------------------------------------------------------------------------

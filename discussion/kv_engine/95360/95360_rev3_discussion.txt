@@ -1,0 +1,105 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-30008: Avoid fluctuation in HashTable::numItems during eviction
+
+Problem
+-------
+
+As seen during commit validation, 'test access scanner' in
+ep_testsuite.value_eviction intermittently fails with an item count
+mismatch:
+
+    Running [0036/0152]: test access scanner (couchstore)...Expected 2600 curr_items after Wrong number of items, got 2599
+    (1715 ms) DIED
+
+curr_items returns a value one fewer than the expected item count.
+
+Investigation has found that the root cause of this is how the
+HashTable handles statistics updates; specifically the paired
+prologue()/epilogue() functions around HashTable mutators.
+
+Catching the issue in GDB we see that at the point of the mismatch,
+there's a background thread in the middle of ejecting items:
+
+    #7  HashTable::Statistics::epilogue (this=<optimised out>, v=...) at kv_engine/engines/ep/src/hash_table.cc:393
+    #8  0x00007fffee06520b in HashTable::unlocked_ejectItem (this=<optimised out>, vptr=@0x7fffe84b3638: 0x7d10000295c0, policy=VALUE_ONLY) at kv_engine/engines/ep/src/hash_table.cc:770
+    #9  0x00007fffee00e892 in EPVBucket::pageOut (this=0x7d680000f600, lh=..., v=@0x476e7d: 0xfffb812be8c68949) at kv_engine/engines/ep/src/ep_vb.cc:444
+
+Note in frame #7 we are at line 393 in HashTable::Statistics::epilogue
+- which is before we re-increment numItems at line 400 - i.e. while
+paging out we decrement numItems in prologue(); incrementing it in
+epilogue().
+
+While the counts are /eventually/ correct; if we get unlucky with when
+we read the number of items and read between prologue() & epilogue();
+then we can see an item count which is off-by-one.
+
+This is true for any operation which only modifies existing HashTable
+items (e.g. update, eject); and it's also the case for other stats.
+
+Solution
+--------
+
+Address this issue by changing how Hashtable stats are updated. We
+keep the paired prologue() / epilogue() approach, but instead of the
+prologue effectively removing the old StoredValue from stats (and the
+epilogue adding it back in), we instead use the prologue() to capture
+the statistics related properties of the old StoredValue; and then use
+this state in the epilogue() to modify only the stats which have
+changed in the new StoredValue.
+
+In addition to avoiding the stats fluctuation seen in this test; this
+change also reduces the amount of 'churn' on the HashTable counters;
+which should reduce the amount of cache line ping-ponging seen.
+
+Microbenchmark results show a slight speedup in replace performance;
+create and delete performance are similar:
+
+Before:
+
+    ------------------------------------------------------------------------
+    Benchmark                                 Time           CPU Iterations
+    ------------------------------------------------------------------------
+    HashTableBench/Insert/threads:8         857 ns       3269 ns     191824
+    HashTableBench/Replace/threads:8        360 ns       2060 ns     348752
+    HashTableBench/Delete/threads:8         674 ns       3178 ns     241160
+
+After:
+
+    ------------------------------------------------------------------------
+    Benchmark                                 Time           CPU Iterations
+    ------------------------------------------------------------------------
+    HashTableBench/Insert/threads:8         836 ns       3985 ns     181184
+    HashTableBench/Replace/threads:8        255 ns       1399 ns     511024
+    HashTableBench/Delete/threads:8         579 ns       3717 ns     211392
+
+Change-Id: Icc94626baf63cd685c8fac2a17063961a94a8f5e
+Reviewed-on: http://review.couchbase.org/95360
+Tested-by: Build Bot <build@couchbase.com>
+Reviewed-by: Tim Bradgate <tim.bradgate@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2018-06-14 11:05:24.000000000
+Message: 
+Change has been successfully cherry-picked as fa6e4925003598e1f0d91c1a6ed18d2b374b34ff by Dave Rigby
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-06-14 11:05:34.000000000
+Message: 
+Patch Set 3:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv-engine-master-post-commit/4120/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-06-14 11:11:25.000000000
+Message: 
+Patch Set 3:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv-engine-master-post-commit/4120/ : FAILURE'
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,119 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-32880: Set topology during rebalance/vbuckets move.
+
+Set the current and future topology during rebalance/vbucket move, as we set the
+state through the set_vbucket command.
+
+No attempt is made to,
+1. Remove undefined from the map during failover.
+2. Handle a case where increase in replica count adds an undefined in the map.
+
+Expectations from KV:
+KV engine should understand the undefined set in the topology and ignore them.
+
+Change-Id: I369aa95a2fb85c9d65819762c158a66ab5314003
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Abhijeeth Nuthan
+Date: 2019-02-07 18:06:51.000000000
+Message: 
+Uploaded patch set 5.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-02-07 18:07:00.000000000
+Message: 
+Patch Set 5:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-test/8405/
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2019-02-07 18:07:48.000000000
+Message: 
+Patch Set 5:
+
+run simple-test
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-02-07 18:33:18.000000000
+Message: 
+Patch Set 5:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-simple-test/469/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-02-07 18:33:54.000000000
+Message: 
+Patch Set 5: Well-Formed+1
+
+Permission granted to commit to restricted branch
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-02-07 19:20:47.000000000
+Message: 
+Patch Set 5: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/ns-server-simple-test/469/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Poonam Dhavale
+Date: 2019-02-08 21:29:17.000000000
+Message: 
+Patch Set 5:
+
+(1 comment)
+Line:177, src/ns_single_vbucket_mover.erl -> The changes in mover_inner_dcp() are not the way it is described in the ns_server doc. 
+
+E.g. if ns_server sets both the replication chains in KV at this step, before backfill and persistence of high seq #, then that will affect performance of durable writes which come in while these steps are in progress.
+
+Also, the change is setting the new topology on current/new master before the vBucket move. This can lead to issues during certain rebalance failures and subsequent janitor cleanup.
+
+Please take a look at the "Rebalance - Replica Move" & "Active Move" sections and make the changes exactly the way it is in the doc.
+
+These steps were arrived at after several rounds of discussions, making sure that a committed durable writes are not lost due to a failure during rebalance and subsequent janitor run. 
+Also, that performance of durable writes is not unnecessarily affected by rebalance.
+
+Please also add test conditions at the various failure points described in the above sections. Trigger those test conditions and verify the behaviour is as expected.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Poonam Dhavale
+Date: 2019-02-14 16:26:34.000000000
+Message: 
+Patch Set 5:
+
+(1 comment)
+Line:247, src/ns_single_vbucket_mover.erl -> That step is common for both replica and active move.
+
+Consider Replica Move:
+OldChain is [A, B], New Chain is [A, C].
+If ns_server updates the chain on A to [A, C] here, A will synchronously send writes only to Node C. The existing replica Node B may start lagging.
+Now say rebalance is aborted before vBucket map is updated to [A, C].
+The abort could be due to any reason and need not result in auto-failover.
+Map is still [A, B].
+When Janitor runs following the rebalance abort, it will remove replication stream from A -> C. Only the stream from A -> B will be kept.
+But, B may not have all committed sync writes. It may take some time for Node B to catchup. 
+During this window if Node A were to fail and auto-failed over, we may lose some committed sync writes. So, we want the exsting replica NodeB to stay
+up-to-date till the map is actually updated.
+
+There is also an issue if the rebalance abort above were due to auto-failover. 
+
+Consider Active Move:
+Old Chain [A, B]. NewChain [C, D].
+At this point, after the DCP takeover, vBucket is active on C but vBucket map has not been updated yet. 
+Any client writes will be returned with Not My vBucket error till the vBucket map is updated and clients know the new location for the vBucket.
+There is no point in updating the replication chain before vBucket map update - just for the active move case.
+
+If needed, I can explain this in person.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2019-02-11 17:29:18.000000000
+MISMATCHED INLINE COMMENT
+Line:247, src/ns_single_vbucket_mover.erl -> One question I had about the doc, https://docs.google.com/document/d/1N4GCvYnXbia9Fn2SP6IzuC6lpLrNqC__lvbV_ndzNc0/edit#heading=h.3mk2j4tt0liy . 
+Why don't we set the new topology for the active here, i.e., like being done here ? Instead of after the map gets updated as it is in the doc above? 
+I feel I'm missing something here.
+----------------------------------------------------------------------------------------------------------------------

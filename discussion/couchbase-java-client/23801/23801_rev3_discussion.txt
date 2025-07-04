@@ -1,0 +1,118 @@
+======================================================================================================================
+DESCRIPTION:
+
+JCBC-207: Correct Reconnect Logic on Failover
+
+This changeset makes sure the reconnect logic works even when
+failing over the node which is bound as the streaming connection.
+A test has been added to verify the threshold logic of the
+CouchbaseConnectionFactory works as expected.
+
+Change-Id: I314e157b05f77f795d262c234f91d8e1f1c357cc
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Michael Nitschinger
+Date: 2013-01-09 14:16:17.000000000
+Message: 
+Uploaded patch set 3.
+----------------------------------------------------------------------------------------------------------------------
+Author: Michael Nitschinger
+Date: 2013-01-09 14:21:27.000000000
+Message: 
+Patch Set 3:
+
+Ok, so here are my findings so far (there are a few related problems):
+
+- This only occurs when the streaming node is failed over and only with killing it a not a manual fail over.
+
+The implementation so far now works until the point where the old node needs to be removed from the map. The interesting thing is that the logs show it will be removed, but it looks like it still gets used. The map should be updated, but obviously is not. The other thing is that while the node to shutdown is scheduled to so I have doubts the handleIO method does this accordingly.
+
+There was another related problem with passing the bucket name to instatiate the new connection, but this is fixed now by the changeset. As it looks to me, we only need to figure out why still ops go through that want to go to the old server, not to the updated map.
+----------------------------------------------------------------------------------------------------------------------
+Author: Michael Nitschinger
+Date: 2013-01-09 14:30:23.000000000
+Message: 
+Patch Set 3:
+
+After some more investigation it could also be the case that my cluster is not performing correctly.
+
+for example 192.168.1.103 is up and it gets re-routed correctly but:
+
+Jan 9, 2013 3:09:44 PM com.couchbase.client.CouchbaseConnection addOperation
+WARNING: Node expected to receive data is inactive. This could be due to a failure within the cluster. Will check for updated configuration. Key without a configured node is: MYKEY20123.
+Jan 9, 2013 3:09:44 PM com.couchbase.client.CouchbaseConnectionFactory checkConfigUpdate
+FINE: Ignoring config update check. Only 89ms out of a threshold of 1,100ms since last update.
+Jan 9, 2013 3:09:44 PM net.spy.memcached.MemcachedConnection handleIO
+FINE: No selectors ready, interrupted: false
+Jan 9, 2013 3:09:44 PM net.spy.memcached.MemcachedConnection addOperation
+FINE: Added Cmd: 1 Opaque: 5292 Key: MYKEY20123 Cas: 0 Exp: 1800 Flags: 0 Data Length: 12 to {QA sa=192.168.56.103/192.168.56.103:11210, #Rops=0, #Wops=28, #iq=1, topRop=null, topWop=Cmd: 1 Opaque: 5227 Key: MYKEY20066 Cas: 0 Exp: 1800 Flags: 0 Data Length: 12, toWrite=0, interested=0}
+----------------------------------------------------------------------------------------------------------------------
+Author: Michael Nitschinger
+Date: 2013-01-09 15:01:13.000000000
+Message: 
+Patch Set 3:
+
+After more debugging, something strange is going on. Either its my cluster or something else, but it looks like the _map is correctly updated_ but it can't reach the other nodes now?
+
+I have a 3 node cluster running 101, 102 and 103. Connect to 101 and fail it over. Now all keys get directed to 102 and 103 correctly, but I see stuff like this in the logs (and nothing gois through as it seems):
+
+KEY: MYKEY20230 PRIMARY: 192.168.56.103/192.168.56.103:11210
+Jan 9, 2013 3:59:12 PM com.couchbase.client.CouchbaseConnection addOperation
+WARNING: Node expected to receive data is inactive. This could be due to a failure within the cluster. Will check for updated configuration. Key without a configured node is: MYKEY20230.
+
+KEY: MYKEY20231 PRIMARY: 192.168.56.102/192.168.56.102:11210
+Jan 9, 2013 3:59:13 PM com.couchbase.client.CouchbaseConnection addOperation
+WARNING: Node expected to receive data is inactive. This could be due to a failure within the cluster. Will check for updated configuration. Key without a configured node is: MYKEY20231.
+
+I need to investigate why now correct working nodes look like they're inactive, but I think we're on a good way.
+----------------------------------------------------------------------------------------------------------------------
+Author: Michael Nitschinger
+Date: 2013-01-09 15:17:38.000000000
+Message: 
+Patch Set 3:
+
+Finally, it now looks like I know why this is going on: the other nodes are also disconnecting because of exceptions and seem not be able to auth again.
+
+INFO: Reconnecting due to exception on {QA sa=192.168.56.103/192.168.56.103:11210, #Rops=0, #Wops=30, #iq=1, topRop=null, topWop=Cmd: 1 Opaque: 4825 Key: MYKEY19792 Cas: 0 Exp: 0 Flags: 0 Data Length: 12, toWrite=0, interested=8}
+java.lang.IllegalArgumentException: Operation has already timed out; ttl specified would allow it to be valid.
+	at net.spy.memcached.protocol.BaseOperationImpl.isTimedOut(BaseOperationImpl.java:215)
+	at net.spy.memcached.protocol.TCPMemcachedNodeImpl.getNextWritableOp(TCPMemcachedNodeImpl.java:235)
+	at net.spy.memcached.protocol.TCPMemcachedNodeImpl.fillWriteBuffer(TCPMemcachedNodeImpl.java:189)
+	at net.spy.memcached.MemcachedConnection.handleWrites(MemcachedConnection.java:420)
+	at net.spy.memcached.MemcachedConnection.handleIO(MemcachedConnection.java:374)
+	at net.spy.memcached.MemcachedConnection.handleIO(MemcachedConnection.java:243)
+	at com.couchbase.client.CouchbaseConnection.run(CouchbaseConnection.java:240)
+
+One of these things should be fixed in a different changeset, but I also think about queueing all nodes for reconnect?
+----------------------------------------------------------------------------------------------------------------------
+Author: Matt Ingenthron
+Date: 2013-01-09 16:47:14.000000000
+Message: 
+Patch Set 3:
+
+Nice work Michael.
+
+I started testing with my fix for the illegal arg exception.
+
+FWIW, in the future it's probably better to put these kinds of notes in the JCBC, rather than in change set reviews.
+
+I'll pick it up from here.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matt Ingenthron
+Date: 2013-01-09 18:51:33.000000000
+Message: 
+Patch Set 3: (1 inline comment)
+
+Note this latest patchset doesn't compile owing to changes in the ConfigurationProvider interface that weren't added to a mock.
+Line:359, src/main/java/com/couchbase/client/CouchbaseConnectionFactory.java -> It may not hurt, but I'm not sure we want to make this public.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Gerrit Code Review
+Date: 2013-01-16 07:31:25.000000000
+Message: 
+Your change could not be merged due to a path conflict.
+
+Please merge (or rebase) the change locally and upload the resolution for review.
+----------------------------------------------------------------------------------------------------------------------

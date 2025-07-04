@@ -1,0 +1,115 @@
+======================================================================================================================
+DESCRIPTION:
+
+JCBC-1206: Improve ring buffer diagnostics
+
+Motivation
+----------
+When core-io's ringbuffer is filled, a BackpressureException is thrown
+to the app.  This change is to provide some additional helpful
+diagnostics in the exception.
+
+Modifications
+-------------
+On adding a request to the ringbuffer, it's stored in the new
+RingBufferMonitor class.  For lock-free performance, this class uses
+a very simple approach of storing one AtomicInteger counter per
+query type.
+
+When requests are pulled from the ringbuffer, they are also removed
+from the RingBufferMonitor.
+
+If the ringbuffer ever fills, the BackpressureException raised now
+contains additional diagnostics from RingBufferMonitor.
+
+If this change is ok, I'll look at adding an API so that apps can query
+the RingBufferMonitor at any point, and so monitor how close to
+backpressure they are.
+
+Special considerations for review:
+- Is there a good place for the RingBufferMonitor to go, rather than
+  having to be a singleton.
+- I've had to not use the statically created BackpressureException,
+  including some code that sets its stacktrace.  Unsure of the implications.
+- Are the QueryTypes granular enough?
+- Does it also need to be added to RetryHelper?  I think this is after the
+  ringbuffer, but please confirm.
+
+Result
+------
+Tested manually, as wasn't sure how to unit test this.  Counts are
+increased and decreased as expected.
+
+Change-Id: I03ba2f5e949c83b5c0b5441df901b7c414107429
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Graham Pople
+Date: 2018-06-05 10:42:11.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-06-05 10:42:19.000000000
+Message: 
+Patch Set 2:
+
+Build Started http://sdkbuilds.sc.couchbase.com/job/couchbase-jvm-core-test/408/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-06-05 10:45:16.000000000
+Message: 
+Patch Set 2: Verified-1
+
+Build Failed 
+
+http://sdkbuilds.sc.couchbase.com/job/couchbase-jvm-core-test/408/ : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: David Nault
+Date: 2018-06-08 19:58:25.000000000
+Message: 
+Patch Set 2:
+
+(4 comments)
+Line:41, src/main/java/com/couchbase/client/core/BackpressureException.java -> NIT: Conventionally, fields are defined before methods. So this would go right at the top, before the constructors.
+
+Line:44, src/main/java/com/couchbase/client/core/tracing/RingBufferMonitor.java -> STYLE: Names of enum classes should be singular (in this case, QueryType instead of QueryTypes)
+
+Discussion: https://stackoverflow.com/questions/15755955/naming-of-enums-in-java-singular-or-plural
+
+Line:75, src/main/java/com/couchbase/client/core/tracing/RingBufferMonitor.java -> This form of the double-check locking idiom requires the instance field to be `volatile`. See https://wiki.sei.cmu.edu/confluence/display/java/LCK10-J.+Use+a+correct+form+of+the+double-checked+locking+idiom
+
+In this particular case, the instance is inexpensive to create and has no dependencies, so you might as well just initialize the singleton statically, like:
+
+    private static final RingBufferMonitor instance = new RingBufferMonitor();
+
+Line:104, src/main/java/com/couchbase/client/core/tracing/RingBufferMonitor.java -> Lock-free performance is possible with a HashMap as well, if you prefer that solution. Since the map would not modified after creation, concurrent updates aren't an issue. Initialize the map in the c'tor and assign it to a `final` field so it's immediately visible to all threads. For extra peace of mind, (and to make your intent clear) you could wrap the map with Collections.unmodifiableMap().
+
+See http://www.cs.umd.edu/~pugh/java/memoryModel/jsr-133-faq.html#finalRight
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Graham Pople
+Date: 2018-06-20 10:47:31.000000000
+Message: 
+Patch Set 2:
+
+(4 comments)
+Line:41, src/main/java/com/couchbase/client/core/BackpressureException.java -> Done
+
+Line:44, src/main/java/com/couchbase/client/core/tracing/RingBufferMonitor.java -> Done
+
+Line:75, src/main/java/com/couchbase/client/core/tracing/RingBufferMonitor.java -> Done
+
+Line:104, src/main/java/com/couchbase/client/core/tracing/RingBufferMonitor.java -> Yep, and I can still go ahead and do this, but I wanted to keep this implementation as simple and performant as possible, as I don't want to pile any more bad stuff on if a backpressure situation is already happening.  I know a HashMap is hardly going to add any overhead though, and I'm happy to change to that if you prefer it.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Graham Pople
+Date: 2018-06-20 13:09:27.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:75, src/main/java/com/couchbase/client/core/tracing/RingBufferMonitor.java -> Actually, if you know a better place for me to put an instance of RingBufferMonitor, rather than relying on a gross singleton, that would be even better.  I couldn't see an obvious place.
+
+----------------------------------------------------------------------------------------------------------------------

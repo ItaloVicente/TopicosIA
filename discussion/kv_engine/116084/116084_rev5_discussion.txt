@@ -1,0 +1,78 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-36380 [2/2]: Fix missing Flusher wakeup
+
+There is a a race between the Flusher completing a flush iteration and
+deciding if it needs to snooze or not, and a front-end thread
+notifying there's a new mutation to be flushed:
+
+    Flusher::step()
+        ...
+        case State::Running:
+            flushVB();
+            if (_state == State::Running) {
+                double tosleep = computeMinSleepTime();
+    *** notifyFlushEvent() called here ***
+                if (tosleep > 0) {
+                    task->snooze(tosleep);
+                }
+         ...
+
+* computeMinSleepTime() primarily checks if Flusher::pendingMutation is
+  false, if that is the case then the flusher can be put to sleep for
+  a period (between 2 and 10 seconds depending on when it last
+  snoozed).
+
+* notifyFlushEvent() does a compare-exchange on
+  Flusher::pendingMutation, if successful (false -> true) then it
+  calls wake().
+
+Consider the scenario where computeMinSleepTime has returned a
+non-zero value (i.e. no pending work currently), but immediately
+before task->snooze() is called, notifyFlushEvent() is called by a
+front-end thread. That will wake up the task, however the snooze
+immediately below will effectively cancel the wake up, and the task
+will be put to sleep.
+
+If no additional notifyFlushEvent() calls occur, then the Flusher will
+not be run to actually flush the outstanding work until the snooze()
+expires, up to 10s.
+
+Fix by changing the sleep / wake logic in the Flusher to be the same
+as other tasks - initially put the Task to sleep (before clearing the
+notification flag), perform relevent work, then at the end re-check if
+any work is still required and if so wakeup the task.
+
+If a parallel thread also attempts to wake up via notifyFlushEvent()
+then that's fine - it can also wake the task.
+
+Change-Id: I926d98ccbc7d02320420d911bc2dd2455c1c0d44
+Reviewed-on: http://review.couchbase.org/116084
+Tested-by: Build Bot <build@couchbase.com>
+Reviewed-by: Jim Walker <jim@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2019-10-09 14:15:31.000000000
+Message: 
+Change has been successfully cherry-picked as 793f7f7d82507170c77dba5e58ba0c4f948359ca by Dave Rigby
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-10-09 14:15:37.000000000
+Message: 
+Patch Set 5:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/2388/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-10-09 14:42:20.000000000
+Message: 
+Patch Set 5:
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/2388/ : SUCCESS'
+----------------------------------------------------------------------------------------------------------------------

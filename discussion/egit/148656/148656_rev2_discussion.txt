@@ -1,0 +1,340 @@
+======================================================================================================================
+DESCRIPTION:
+
+Cache more repository state for re-use in the UI thread
+
+Many EGit commands depend on some repository state determining their
+enablement. Eclipse re-evaluates activation/enablement expressions or
+handlers' isEnabled() method very frequently. For globally available
+handlers, on every selection change; for others for instance when
+they are included in some (context) menu.
+
+JGit operations to determine repository state access the file system
+(typically config files, or the packed_refs file, or loose refs), and
+check every time whether the file has been changed since the last
+access. In the case of a repository config file, this check is even
+done for the user and system config files, too. If JGit determines
+that a file has been changed it reloads it, perhaps even multiple
+times depending of file timestamp resolution.
+
+Thus accessing the repository config file or determining the currently
+checked out branch are expensive file system operations. Handler
+enablements are evaluated on the UI thread, so EGit did *a lot* of
+expensive file system accesses on the UI thread, which slows down
+Eclipse startup and context menus in particular.
+
+Introduce a cache for the most important values of a repository that
+are used in property testers and in handler activation and enablement
+code. The cache is cleared whenever the workbench selection or the
+"menu selection" changes to avoid serving stale values. When Eclipse
+then re-evaluates enablements, only the first expressions will actually
+access the file system, while all later re-evaluations due to a
+selection change will use the cached values.
+
+Caching values until the next selection change is a valid strategy.
+When a series of enablements is re-computed, these re-computations
+are all based on the same selection, thus using the repository state
+as it was at the beginning is fine.
+
+This greatly reduces the number of times EGit accesses the file system
+on the UI thread and generally makes the EGit UI *much* snappier.
+
+This cache should be used only for evaluations that are known to
+happen synchronously in the UI thread in response to a selection
+change. This includes property testers and isEnabled() on handlers.
+
+Bug: 544600
+Change-Id: Idd369b50d8b4bd6dd68b30d640bbc13f5a5976c5
+Signed-off-by: Thomas Wolf <thomas.wolf@paranor.ch>
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Thomas Wolf
+Date: 2019-08-30 20:13:53.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: EGit Bot
+Date: 2019-08-30 20:13:59.000000000
+Message: 
+Patch Set 2:
+
+Build Started https://ci.eclipse.org/egit/job/egit.gerrit/405/
+----------------------------------------------------------------------------------------------------------------------
+Author: EGit Bot
+Date: 2019-08-30 20:43:13.000000000
+Message: 
+Patch Set 2: Verified-1
+
+Build Failed 
+
+https://ci.eclipse.org/egit/job/egit.gerrit/405/ : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: EGit Bot
+Date: 2019-08-30 20:49:26.000000000
+Message: 
+Patch Set 2: -Verified
+
+Build Started https://ci.eclipse.org/egit/job/egit.gerrit/406/
+----------------------------------------------------------------------------------------------------------------------
+Author: EGit Bot
+Date: 2019-08-30 21:24:09.000000000
+Message: 
+Patch Set 2: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/egit/job/egit.gerrit/406/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2019-08-30 21:55:16.000000000
+Message: 
+Patch Set 2:
+
+This is definitely something for early 5.6.0, not 5.5.0. I see thousands of calls to Repository.getConfig(), each resulting in three calls to FileSnapshot.isModified() when running EGit. More calls to FileSnapshot.isModified() come from getting HEAD. And all these calls are on the UI thread! (There's thousands more in the decorator background threads, but those are less critical.)
+
+All these calls on the UI thread come from handler re-evaluations when the selection changes.
+
+This change reduces these thousands of call dramatically.
+
+Using a child Eclipse with the Java perspective, no open editors, no git views open, and the EGit projects in the workspace and shared with the EGit clone, no tree open in the package explorer (only the projects visible) performing the following steps:
+
+1. Start Eclipse
+2. Select org.eclipse.egit.ui
+3. Open context menu
+4. Open the "Team" sub-menu
+5. Dismiss the context menu, select org.eclipse.egit.core
+6. Navigate to src/org.eclipse.egit.core/EclipseAuthenticator.java
+7. Select the file
+8. Double click the file; let the editor open
+9. Shutdown
+
+I get the following counts for calls on the UI thread without this change:
+
+4.6  target: 294 calls to getConfig(), 1322 calls to isModified()
+4.10 target: 271 calls to getConfig(), 1163 calls to isModified()
+
+Same steps from the same initial situation, but this time with the git repositories view initially open and containing 15 repositories (one of which is the egit repo):
+
+4.6  target: 1846 calls to getConfig(), 6104 calls to isModified()
+4.10 target: 1498 calls to getConfig(), 4958 calls to isModified()
+
+With this change, the numbers are more reasonable:
+
+First scenario (no git views open)
+
+4.6  target: 23 calls to getConfig(), 107 calls to isModified()
+4.10 target: 11 calls to getConfig(), 53 calls to isModified()
+
+Second scenario (git repo view open)
+
+4.6  target: 55 calls to getConfig(), 236 calls to isModified()
+4.10 target: 37 calls to getConfig(), 155 calls to isModified()
+
+Makes the UI react noticeably faster even on my Mac. I guess on Windows the effect might be even more pronounced.
+
+For the decorators I don't see a solution yet, but maybe the same cache could be used if it's also cleared on index diff changes. Our decorators are slow for the same reason, but at least they're not on the UI thread.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2019-08-30 22:09:47.000000000
+Message: 
+Patch Set 2:
+
+(4 comments)
+
+> This is definitely something for early 5.6.0, not 5.5.0. I see
+ > thousands of calls to Repository.getConfig(), each resulting in
+ > three calls to FileSnapshot.isModified() when running EGit. More
+ > calls to FileSnapshot.isModified() come from getting HEAD. And all
+ > these calls are on the UI thread! (There's thousands more in the
+ > decorator background threads, but those are less critical.)
+ > 
+ > All these calls on the UI thread come from handler re-evaluations
+ > when the selection changes.
+ > 
+ > This change reduces these thousands of call dramatically.
+ > 
+ > Using a child Eclipse with the Java perspective, no open editors,
+ > no git views open, and the EGit projects in the workspace and
+ > shared with the EGit clone, no tree open in the package explorer
+ > (only the projects visible) performing the following steps:
+ > 
+ > 1. Start Eclipse
+ > 2. Select org.eclipse.egit.ui
+ > 3. Open context menu
+ > 4. Open the "Team" sub-menu
+ > 5. Dismiss the context menu, select org.eclipse.egit.core
+ > 6. Navigate to src/org.eclipse.egit.core/EclipseAuthenticator.java
+ > 7. Select the file
+ > 8. Double click the file; let the editor open
+ > 9. Shutdown
+ > 
+ > I get the following counts for calls on the UI thread without this
+ > change:
+ > 
+ > 4.6  target: 294 calls to getConfig(), 1322 calls to isModified()
+ > 4.10 target: 271 calls to getConfig(), 1163 calls to isModified()
+ > 
+ > Same steps from the same initial situation, but this time with the
+ > git repositories view initially open and containing 15 repositories
+ > (one of which is the egit repo):
+ > 
+ > 4.6  target: 1846 calls to getConfig(), 6104 calls to isModified()
+ > 4.10 target: 1498 calls to getConfig(), 4958 calls to isModified()
+ > 
+ > With this change, the numbers are more reasonable:
+ > 
+ > First scenario (no git views open)
+ > 
+ > 4.6  target: 23 calls to getConfig(), 107 calls to isModified()
+ > 4.10 target: 11 calls to getConfig(), 53 calls to isModified()
+ > 
+ > Second scenario (git repo view open)
+ > 
+ > 4.6  target: 55 calls to getConfig(), 236 calls to isModified()
+ > 4.10 target: 37 calls to getConfig(), 155 calls to isModified()
+ > 
+ > Makes the UI react noticeably faster even on my Mac. I guess on
+ > Windows the effect might be even more pronounced.
+ 
+ok, that's convincing though it's still a lot of calls.
+
+And before 5.4.2 we were reading the content of system and user global gitconfig for each access to repository config.
+
+ > For the decorators I don't see a solution yet, but maybe the same
+ > cache could be used if it's also cleared on index diff changes. Our
+ > decorators are slow for the same reason, but at least they're not
+ > on the UI thread.
+
+Should we consider to use Caffeine instead of ConcurrentHashMap ?
+
+We could try using WatchService [1] to get notified about file changes 
+instead of polling modification state via thousands of stat calls.
+Maybe we can add support for that generically in FileSnapshot or an
+alternative implementation class.
+
+[1] https://docs.oracle.com/javase/8/docs/api/java/nio/file/WatchService.html
+Line:21, /COMMIT_MSG -> on
+
+Line:24, /COMMIT_MSG -> How expensive is accessing the config file's meta data ? If it didn't change it's 1 stat call per config to be checked, or did I miss something ?
+
+I agree overall this could still be expensive since there are many files.
+
+Do you have some statistics from testing this ?
+
+Line:37, /COMMIT_MSG -> Why ? 
+The repository state can also change by external processes e.g. git command line.
+Can we ignore them for evaluations happening synchronously in the UI thread ?
+
+Line:43, /COMMIT_MSG -> Do you have some statistics from testing this ?
+
+We could try to use strace (on Linux) or dtrace (on Mac) to get stats about file system accesses when running some test.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2019-08-30 22:33:30.000000000
+Message: 
+Patch Set 2:
+
+(3 comments)
+
+> Should we consider to use Caffeine instead of ConcurrentHashMap ?
+
+Why? These maps are small, and I'd be surprised if using Caffeine made a noticeable difference in this use case.
+
+ > We could try using WatchService [1] to get notified about file
+ > changes
+ > instead of polling modification state via thousands of stat calls.
+ > Maybe we can add support for that generically in FileSnapshot or an
+ > alternative implementation class.
+ > 
+ > [1] https://docs.oracle.com/javase/8/docs/api/java/nio/file/WatchService.html
+
+WatchService does not work on all file systems (or may use polling under the hood instead of inotify or similar OS event mechanisms), you can only watch directories, and on Windows last I heard watched directories are locked (can't be deleted).
+Line:24, /COMMIT_MSG -> No statistics. On my Mac stat is cheap, the UI was never unbearably sluggish. But the effect is quite noticeable even on my Mac.
+
+Yes, it's 1 stat call per config, and 3 configs each time you access Repository.getConfig(). For getting head you also get 1 stat call for HEAD, 1 for packed_refs, and 1 for refs/heads/master. We get HEAD very often.
+
+We do know from previous bugs that accessing file metadata is fairly expensive on Windows. I'd be really interested in what Michael says; he's using Windows.
+
+Line:37, /COMMIT_MSG -> I think so. Have you ever seen a context menu with some item enabled/disabled based on state before the external change was picked up, and another item with state picked up after the external change? It could happen theoretically already. With the new code, at least all menu items would use a consistent state (even if it would be slightly out of date).
+
+Line:43, /COMMIT_MSG -> No. I did the easy thing: count the calls in-process (just added counters in jgit).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Michael Keppler
+Date: 2019-08-31 14:12:56.000000000
+Message: 
+Patch Set 2:
+
+(5 comments)
+Line:109, org.eclipse.egit.ui/src/org/eclipse/egit/ui/internal/fetch/SimpleConfigureFetchDialog.java -> What's the reason for introducing 2 methods in both dialogs? I thought it either always makes sense to use the cached data and to rely on it, or never. How should a client decide whether to call the old or new method?
+
+Line:194, org.eclipse.egit.ui/src/org/eclipse/egit/ui/internal/selection/RepositoryStateCache.java -> I guess it is okay that some of the now replaced callers used exactRef(), while others used resolve()?
+
+Line:212, org.eclipse.egit.ui/src/org/eclipse/egit/ui/internal/selection/RepositoryStateCache.java -> you can return the names as is (even for null)...
+
+(continue in line 297)
+
+Line:236, org.eclipse.egit.ui/src/org/eclipse/egit/ui/internal/selection/RepositoryStateCache.java -> you could get rid of the code duplication for this block at the cost of calling items.get(foobar) again afterwards instead of remembering 1 of the 3 values each time.
+However, since this is meant to improve performance, it seems acceptable to have that code duplication.
+
+Line:297, org.eclipse.egit.ui/src/org/eclipse/egit/ui/internal/selection/RepositoryStateCache.java -> ...if you are converting the empty string back to null anyway, thereby making this if-statement superfluous
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2019-08-31 14:41:24.000000000
+Message: 
+Patch Set 2:
+
+(4 comments)
+
+I'd be interested to know whether you see any Eclipse startup or UI speed improvements (the latter mostly for opening context menus).
+Line:109, org.eclipse.egit.ui/src/org/eclipse/egit/ui/internal/fetch/SimpleConfigureFetchDialog.java -> As it says in the javadoc: intended for use in property testers and isEnabled(). In other contexts use the other one.
+
+I don't want the execution of commands to rely on possibly slightly outdated state. For handler evaluations it can happen anyway, so I thought it was OK to do this.
+Also, for command _execution_, these file accesses are only a small part of the overall cost. But for handler evaluations, they are a major factor.
+
+Line:194, org.eclipse.egit.ui/src/org/eclipse/egit/ui/internal/selection/RepositoryStateCache.java -> The exactRef() calls were mostly of the form
+
+  Ref head = repo.exactRef(Constants.HEAD)
+  return head != null && head.getObjectId() != null;
+
+That can be replaced by
+
+  return RepositoryStateCache.INSTANCE.getHead(repo) != null;
+
+I think there is one that was replaced by getHeadRef().
+
+resolve(Constants.HEAD) can be replaced by getHead().
+
+Line:212, org.eclipse.egit.ui/src/org/eclipse/egit/ui/internal/selection/RepositoryStateCache.java -> No, getFullBranchName() would trigger repeated re-evaluations.
+
+Line:297, org.eclipse.egit.ui/src/org/eclipse/egit/ui/internal/selection/RepositoryStateCache.java -> See above.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Michael Keppler
+Date: 2019-08-31 15:24:35.000000000
+Message: 
+Patch Set 2: Code-Review+1
+
+I don't really notice any difference at my home machine, but that one is rather fast anyway. I can check again at work on Monday, where there is more latency due to the strict anti virus settings.
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2019-09-01 11:20:17.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:21, /COMMIT_MSG -> Done
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2019-09-01 16:40:08.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:37, /COMMIT_MSG -> ack
+
+----------------------------------------------------------------------------------------------------------------------

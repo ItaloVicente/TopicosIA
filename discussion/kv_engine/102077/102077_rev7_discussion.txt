@@ -1,0 +1,120 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-32001: Add durability related error codes
+
+* Add new internal engine error codes to be used
+  between the engine and the core to represent
+  durability errors.
+
+* Add new error codes to the on-the-wire protocol
+
+Change-Id: I519321a97eaede51d9bd1ab1d9f0c63f65770813
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Trond Norbye
+Date: 2018-11-27 12:12:03.000000000
+Message: 
+Uploaded patch set 7: Patch Set 6 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-11-27 15:04:32.000000000
+Message: 
+Patch Set 7: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/13850/ : FAILURE
+
+One of more core files found at the end of the build. Data for post-mortem saved to archived_core_dumps.tar.bz2 under "Build Artifacts". ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/13850/ )
+
+Timeout of a CTest test 189/189 Test #136: memcached_testapp.default.Subdoc/SubdocTestappTest ...........................} ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/13850/ )
+
+Failure of a CTest test  36/189 Test  #38: ep_testsuite.full_eviction.rocksdb ........................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/13850/ )
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/6062/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/14439/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/5824/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/3588/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/12866/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/12528/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-11-27 21:05:51.000000000
+Message: 
+Patch Set 7:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/13875/ : FAILURE
+
+Failure of a CTest test  33/189 Test  #33: ep_testsuite.full_eviction.comp_passive ...................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/13875/ )
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/6062/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/14439/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/5824/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/3588/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/12866/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/12528/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2018-11-28 06:34:02.000000000
+Message: 
+Patch Set 7:
+
+(1 comment)
+
+I'll adress the other concerns separately
+Line:428, daemon/connection.cc -> This is a fallback code for clients who didn't enable the xerror feature and hence not using the error map
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-11-28 09:00:51.000000000
+Message: 
+Patch Set 7:
+
+(1 comment)
+Line:130, include/memcached/engine_error.h -> So this is covered in the design doc in some detail (and across a few sections), but a good place to start would be: https://docs.google.com/document/d/1DCIzCNXmm3XjkylF19zwNvxcwJFp3bLqSIsQZzTakZ0/edit#heading=h.5k2s6wh1lm0l
+
+In summary - yes; you're correct the client cannot know if the operation succeeded or failed; and they need to propagate it up to the application if the operation was non-idempotent; but it doesn't cause us to fail Jepsen - Jepsen specifically allows indeterminate results for an operation.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matt Ingenthron
+Date: 2018-11-27 23:51:20.000000000
+MISMATCHED INLINE COMMENT
+Line:428, daemon/connection.cc -> I assume the scenario you're thinking of here is that you have one client that is doing a durable write and another dumb is trying to write to the same?  tmpfail could work, but it might be better to leverage the error map to have the client automagically backoff/retry (until timeout).
+
+Note that a regular tmpfail will bubble up to the application.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matt Ingenthron
+Date: 2018-11-27 23:51:20.000000000
+MISMATCHED INLINE COMMENT
+Line:113, docs/ErrorMap.md -> Looking over the rest of this commit, it looks like this attribute would be used alone?  If that's the case, I wouldn't support this change.
+
+The idea of KVErrorMap is that we bracket errors into things that we can define what to do next, in a state machine fashion.   Some attrs like "dcp" are okay since they go with others, like retry-now, retry-later.  This one doesn't seem to be that case.  
+
+It also doesn't quite map to it's namesake, the HTTP 202.  In an HTTP 202, you'd normally return a location header with where to check for status.  Here, you're saying the status is indeterminate.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matt Ingenthron
+Date: 2018-11-27 23:51:20.000000000
+MISMATCHED INLINE COMMENT
+Line:130, include/memcached/engine_error.h -> Unfortunately, I think this behavior will put us in a state that we can't meet expected requirements.  For example, if Jepsen were used here, this would, I think, fail any of the linearizability tests.  
+
+Take for instance a situation where foo:bar is at CAS 42.  Upsert with durability.  Get ambiguous result.
+
+The application could retry, but assume the CAS is now 43, was that the earlier request that "may [have] succeeded", or did another actor jump into the middle.  The interface doesn't allow that to be determined.
+
+I could be wrong on this, but thinking through it and researching a bit, that's where I've ended up.  Glad to be corrected if you see a way.
+----------------------------------------------------------------------------------------------------------------------

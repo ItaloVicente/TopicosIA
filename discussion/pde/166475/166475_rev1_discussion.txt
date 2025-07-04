@@ -1,0 +1,168 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 564927 - Fix plugin manifest invalid warning
+
+The code to verify whether an extension was seen or not was being
+computed by the state of a build model, rather than whether we had
+verified the contents of the `plugin.xml` file.
+
+If we mark when we see the elements in the file, we can report the
+warning correctly.
+
+Change-Id: I526341d236a5c217f5d6523fa08eb04e8ab3c051
+Signed-off-by: Alex Blewitt <alex.blewitt@gmail.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Alex Blewitt
+Date: 2020-07-18 17:11:23.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: PDE Bot
+Date: 2020-07-18 17:11:51.000000000
+Message: 
+Patch Set 1:
+
+Build Started https://ci.eclipse.org/pde/job/eclipse.pde.ui-Gerrit/2700/
+----------------------------------------------------------------------------------------------------------------------
+Author: PDE Bot
+Date: 2020-07-18 17:41:51.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/pde/job/eclipse.pde.ui-Gerrit/2700/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Alex Blewitt
+Date: 2020-07-18 21:24:31.000000000
+Message: 
+Patch Set 1: Code-Review+1
+
+This looks good to me. Lars, can you review/approve? I don't have rights to this repo.
+----------------------------------------------------------------------------------------------------------------------
+Author: Julian Honnen
+Date: 2020-07-20 06:37:36.000000000
+Message: 
+Patch Set 1:
+
+Is there a repro for this bug?
+
+The extension(Points) are always up-to-date when the error reporter runs in my tests.
+----------------------------------------------------------------------------------------------------------------------
+Author: Alex Blewitt
+Date: 2020-07-20 07:59:59.000000000
+Message: 
+Patch Set 1:
+
+> Patch Set 1:
+> 
+> Is there a repro for this bug?
+
+Yes, in the bug.
+----------------------------------------------------------------------------------------------------------------------
+Author: Julian Honnen
+Date: 2020-07-20 08:32:33.000000000
+Message: 
+Patch Set 1: Code-Review-1
+
+Ah, got it. 
+
+Seems like a legitimate bug in the parsing/registration of extension-points though. Definitely not something we should mask in the error reporting.
+
+If you want to investigate further, here's what I found:
+
+When modifying the build.properties, ExtensionParser::parseExtensionPointAttributes is called.
+But the extension-point is ignored, because it's already part of objectManager
+--> ExtensionsParser:575
+----------------------------------------------------------------------------------------------------------------------
+Author: Alex Blewitt
+Date: 2020-07-20 10:05:12.000000000
+Message: 
+Patch Set 1:
+
+> Patch Set 1: Code-Review-1
+> 
+> Ah, got it. 
+> 
+> Seems like a legitimate bug in the parsing/registration of extension-points though. Definitely not something we should mask in the error reporting.
+> 
+> If you want to investigate further, here's what I found:
+> 
+> When modifying the build.properties, ExtensionParser::parseExtensionPointAttributes is called.
+> But the extension-point is ignored, because it's already part of objectManager
+> --> ExtensionsParser:575
+
+So we have a potential ordering problem here (which is why it may work some time but not others). I think the issue is that we're doing validation by walking the XML file, but then are assuming that the build has happened and updated the build model. I don't think that's necessary or desirable here; if we're walking the XML file to see if there are elements in there, then we already know whether we've visited the elements or not, and therefore whether we should display the message.
+
+I don't think it's an issue of whether the extension point is parsed by the builder or not as to whether the validation should even be using that as a means to check, given that we're walking the XML file.
+----------------------------------------------------------------------------------------------------------------------
+Author: Julian Honnen
+Date: 2020-07-20 11:06:23.000000000
+Message: 
+Patch Set 1:
+
+> So we have a potential ordering problem here (which is why it may work some time but not others).
+
+I would agree with your solution if it were just an ordering problem, but I'm fairly certain it isn't.
+
+A subsequent clean would not be affected by ordering (as the build model doesn't change during clean, only on actual modification), but the marker is still there. Only an eclipse restart will fix the model.
+
+This is the stack when the build.properties are modified. As you can the the extension point never gets added to the scratchVector and thereby will not be added to the model.
+
+	at org.eclipse.core.internal.registry.ExtensionsParser.parseExtensionPointAttributes(ExtensionsParser.java:583)
+	at org.eclipse.core.internal.registry.ExtensionsParser.handleBundleState(ExtensionsParser.java:358)
+	at org.eclipse.core.internal.registry.ExtensionsParser.startElement(ExtensionsParser.java:617)
+	at com.sun.org.apache.xerces.internal.parsers.AbstractSAXParser.startElement(AbstractSAXParser.java:509)
+	at com.sun.org.apache.xerces.internal.parsers.AbstractXMLDocumentParser.emptyElement(AbstractXMLDocumentParser.java:182)
+	at com.sun.org.apache.xerces.internal.impl.XMLNSDocumentScannerImpl.scanStartElement(XMLNSDocumentScannerImpl.java:351)
+	at com.sun.org.apache.xerces.internal.impl.XMLDocumentFragmentScannerImpl$FragmentContentDriver.next(XMLDocumentFragmentScannerImpl.java:2784)
+	at com.sun.org.apache.xerces.internal.impl.XMLDocumentScannerImpl.next(XMLDocumentScannerImpl.java:602)
+	at com.sun.org.apache.xerces.internal.impl.XMLNSDocumentScannerImpl.next(XMLNSDocumentScannerImpl.java:112)
+	at com.sun.org.apache.xerces.internal.impl.XMLDocumentFragmentScannerImpl.scanDocument(XMLDocumentFragmentScannerImpl.java:505)
+	at com.sun.org.apache.xerces.internal.parsers.XML11Configuration.parse(XML11Configuration.java:842)
+	at com.sun.org.apache.xerces.internal.parsers.XML11Configuration.parse(XML11Configuration.java:771)
+	at com.sun.org.apache.xerces.internal.parsers.XMLParser.parse(XMLParser.java:141)
+	at com.sun.org.apache.xerces.internal.parsers.AbstractSAXParser.parse(AbstractSAXParser.java:1213)
+	at com.sun.org.apache.xerces.internal.jaxp.SAXParserImpl$JAXPSAXParser.parse(SAXParserImpl.java:643)
+	at com.sun.org.apache.xerces.internal.jaxp.SAXParserImpl.parse(SAXParserImpl.java:327)
+	at org.eclipse.core.internal.registry.ExtensionsParser.parseManifest(ExtensionsParser.java:414)
+	at org.eclipse.core.internal.registry.ExtensionRegistry.addContribution(ExtensionRegistry.java:1084)
+	at org.eclipse.pde.internal.core.PDERegistryStrategy.addBundle(PDERegistryStrategy.java:234)
+	at org.eclipse.pde.internal.core.PDERegistryStrategy.addBundles(PDERegistryStrategy.java:199)
+	at org.eclipse.pde.internal.core.PDERegistryStrategy.access$2(PDERegistryStrategy.java:197)
+	at org.eclipse.pde.internal.core.PDERegistryStrategy$ModelListener.modelsChanged(PDERegistryStrategy.java:84)
+	at org.eclipse.pde.internal.core.PluginModelManager.fireDelta(PluginModelManager.java:399)
+----------------------------------------------------------------------------------------------------------------------
+Author: Alex Blewitt
+Date: 2020-07-24 08:41:50.000000000
+Message: 
+Patch Set 1:
+
+> Patch Set 1:
+> 
+> > So we have a potential ordering problem here (which is why it may work some time but not others).
+> 
+> I would agree with your solution if it were just an ordering problem, but I'm fairly certain it isn't.
+
+Would you mind taking a look at this bug then, if you're more familiar with how the plugin/model works? It's unfamiliar territory for me and I was trying to help out - but I'd just be submitting changes in the dark.
+----------------------------------------------------------------------------------------------------------------------
+Author: Julian Honnen
+Date: 2020-07-24 11:35:33.000000000
+Message: 
+Patch Set 1:
+
+> Would you mind taking a look at this bug then, if you're more familiar with how the plugin/model works? It's unfamiliar territory for me and I was trying to help out - but I'd just be submitting changes in the dark.
+
+No worries ;) I'll have a closer look when I find some time.
+----------------------------------------------------------------------------------------------------------------------
+Author: Alex Blewitt
+Date: 2020-07-24 13:38:00.000000000
+Message: 
+Abandoned
+
+Abandoning in favour of a different fix/approach
+----------------------------------------------------------------------------------------------------------------------

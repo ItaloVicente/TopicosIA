@@ -1,0 +1,111 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-25342: Update how system events manage collections
+
+Prior to this commit collection lifespans were managed with two system
+events, CreateCollection and BeginDeleteCollection. These events
+mapped to hidden documents (System namespace) and had unique keys.
+Thus the life-span of collection beer, uid:1 may have a seqno 'stream'
+as follows (e.g. if backfill from seqno 0).
+
+seqno 3, key = $collections:create:beer:1 <- create marker
+seqno 4, key = beer::document <- document in the collection
+seqno 5, key = $collections:delete:beer:1 <- delete marker
+
+Now due to the way we support multiple generations of collections
+before the prior one is fully purged, this approach leads us to have a
+seqno stream as follows (e.g. backfill from seqno 0)
+
+seqno 3, key = $collections:create:beer:1 <- create marker
+seqno 4, key = beer::document <- document in the collection
+seqno 5, key = $collections:delete:beer:1 <- delete marker
+seqno 6, key = $collections:create:beer:2 <- create marker
+seqno 7, key = beer::document <- document in the collection
+seqno 8, key = $collections:delete:beer:2 <- delete marker
+
+With this approach (unique-keys) we have to maintain an increasing
+amount of meta-data to enable correct clean-up of the old generations.
+This growing meta-data would need to be in memory and the per VB
+JSON manifest.
+
+So to avoid this unbounded 'list' metadata this commit adjusts the way
+collections spans are managed in-terms of checkpoints and persisted
+data.
+
+1. No longer do we have a Create and separate Delete event - a single
+   SystemEvent::Collection will be used to cover create and delete.
+
+   a) A single key represents all creates/deletes of a collection.
+   b) A delete of a collection is just a delete of that system key.
+
+2. Collection create/delete now closes the checkpoint to ensure we
+   never de-dup create/delete/create into a single create, ensuring
+   a client tracking a vbucket sees explicit creates and deletes and
+   doesn't have to handle de-duplication E.g. "I've been told of
+   beer:2 but never saw delete(beer:1)?"
+
+So the life span of a collection now generates sequence numbers as
+follows:
+
+seqno 3, key = $collections:beer <- create marker
+seqno 4, key = beer::document <- document in the collection
+seqno 5, key = $collections:beer del = true <- delete marker
+
+Now if we dump the by-seqno index we see:
+
+seqno 4, key = beer::document <- document in the collection
+seqno 5, key = $collections:beer del = true <- delete marker
+
+Now if we dump the by-seqno index after re-creating the collection,
+we see.
+
+seqno 4, key = beer::document <- document in the collection
+seqno 6, key = $collections:beer <- create marker
+
+And if we had performed cycles of create/delete we can see that there
+are no longer many keys associated with the collection resulting in no
+extra meta data to store so we can remove old markers.
+
+Note in these examples, DCP wouldn't just replicate the by-seqno index
+as seqno 4 can be identified as being logically deleted (it has a
+seqno < start of beer). Additionally for a backfill from 0 in the
+first example seqno 5 doesn't need to be sent either because the
+client cannot know about the create. These enhancements are not part
+of this commit.
+
+Change-Id: I32f04e512ce039dce7d780323d9bf3642cc507fa
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jim Walker
+Date: 2017-10-10 10:31:31.000000000
+Message: 
+Uploaded patch set 12: Patch Set 11 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2017-10-10 11:11:54.000000000
+Message: 
+Patch Set 12: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/3051/ : FAILURE
+
+Failure of a CTest test  2/83 MemCheck #49: memcached-bucket-tests ......................... ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/3051/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/2993/ : FAILURE
+
+ThreadSanitizer issue: data race /usr/bin/../lib/gcc/x86_64-linux-gnu/5.4.0/../../../../include/c++/5.4.0/bits/shared_ptr_base.h:687:37 in std::__shared_count<(__gnu_cxx::_Lock_policy)2>::_M_swap(std::__shared_count<(__gnu_cxx::_Lock_policy)2>&)  ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/2993/ )
+
+Failure of a CTest test  23/110 Test  #19: ep-engine_ep_unit_tests .......................... ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/2993/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master/2870/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/2702/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/1544/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/3015/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

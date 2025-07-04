@@ -1,0 +1,313 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 491542: [All Diagrams] Undo doesn't work with RuntimeValuesAdvice dialog for creation
+https://bugs.eclipse.org/bugs/show_bug.cgi?id=491542
+
+Support re-entrant command execution in the CheckedOperationHistory,
+which is used by both the CheckedDiagramCommandStack (used by the
+diagrams) and the NestingNotifyingWorkspaceCommandStack (used by
+everything else), in much the same way as the latter supports
+nested execution.  This ensures that, in the case where the execution
+of a top-level operation in the diagram triggers nested execution of
+operations in the EMF editing domain, which both delegate to the same
+CheckedOperationHistory, the nested operations are executed strictly
+within the context of the root operation, not separately as a sequence
+of operations in the history.
+
+Change-Id: I0967a62940d5c1030edf14d39994eeda2d3bdf9b
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Christian Damus
+Date: 2016-04-12 19:41:22.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2016-04-12 19:41:28.000000000
+Message: 
+Patch Set 1:
+
+Build Started https://hudson.eclipse.org/papyrus/job/Papyrus-Gerrit/7056/
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Damus
+Date: 2016-04-12 19:46:23.000000000
+Message: 
+Patch Set 1:
+
+Yes, this is a pretty significant change in a rather core component, so I'd like some careful review and feed-back on it before I merge this change.
+
+My ad hoc testing didn't find any obvious regressions in undo/redo of edits in the diagrams, Model Explorer, and Property Sheet.  However, I don't know what all possible scenarios there are and welcome additional suggestions.
+
+Automated regression tests are a disaster, of course.  The relevant Papyrus-RT JUnit tests all pass and all of the core Papyrus JUnit tests that (I think) cover this area also pass, but there are various errors and other failures in diagrams that look to me more likely related to the removal of SysML and/or other late changes in M6 that have kept the test build off-line since then.  But I am not entirely sure.  I also no longer can let the tests run to completion because there seem to be new memory leaks (or something) that makes them bog down and trash the CPU such that I have to force-quit the process.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2016-04-12 20:49:09.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+https://hudson.eclipse.org/papyrus/job/Papyrus-Gerrit/7056/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Camille Letavernier
+Date: 2016-04-13 13:04:22.000000000
+Message: 
+Patch Set 1: Code-Review+1
+
+I think commit 2265e3a introduced 289 new test failures. We were at 22 failures yesterday (With about 50% of SysML-related failures)
+
+The patch seems OK. I still don't like the inconsistencies between using the EMF CommandStack, the GEF/GMF CommandStack, and the Eclipse OperationHistory... we never managed to properly unify all these elements. I'm not sure that's even possible in theory, as the GEF/GMF CommandStack supports non-transactional commands which won't affect the EMF CommandStack.
+
+Anyway, it's quite similar to what has been done for nested EMF CommandStacks, so it seems consistent
+----------------------------------------------------------------------------------------------------------------------
+Author: Camille Letavernier
+Date: 2016-04-13 13:06:12.000000000
+Message: 
+Patch Set 1:
+
+> I think commit 2265e3a introduced 289 new test failures. We were at 22 failures yesterday (With about 50% of SysML-related failures)
+
+Hum, except that your patch set is not based on this commit... So I wouldn't expect too many failures
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Damus
+Date: 2016-04-13 14:10:46.000000000
+Message: 
+Patch Set 1:
+
+Ah!  The master branch tests are back on-line.  That's great news.  I don't know why it appeared to me that the job was still disabled.
+
+So, I have been able to compare a partial execution of the tests locally with the build:  up to the Class Diagram tests, my results match exactly the test build.
+
+But, the TestClassDiagram:: testToManageClassDiagram test hangs.  I need to delve into why that happens.  Oh, even as I type this now, after several minutes that test errors out and the suite proceeds with green check-marks the rest of the way.
+
+Also, the remark about the GEF and GMF command stacks supporting non-transactional commands has me worried about the entire strategy of relying on re-entrant execution of commands on these stacks.  That can only work for commands that are making recorded EMF changes in the context of a root operation that is an EMF operation.  Because that is the only way that their changes can be recorded for undo/redo.  There's no way that the stack/history can append non-recorded commands to the top command that is executing on the stack/history when they are directly executed in this re-entrant fashion.  It just so happens that only model/diagram (EMF) edits made via the Papyrus Property Sheet framework execute in this way, but it worries me to be adding generalized support for re-entrant execution that breaks undo/redo for all but a specific configuration of commands.
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Damus
+Date: 2016-04-13 14:13:03.000000000
+Message: 
+Patch Set 1:
+
+> 
+ > But, the TestClassDiagram:: testToManageClassDiagram test hangs.  I
+ > need to delve into why that happens.  Oh, even as I type this now,
+ > after several minutes that test errors out and the suite proceeds
+ > with green check-marks the rest of the way.
+
+And I see the same StackOverflowError in the nightly build test results.  Encouraging, in a way.
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Damus
+Date: 2016-04-13 14:18:12.000000000
+Message: 
+Patch Set 1:
+
+Okay, so it seems pretty clear that this change introduces no regressions in the tests.  However, I don't think that any of our tests actually exercise the re-entrant execution case even in the NestingNotifyingWorkspaceCommandStack because that generally only happens when the properties-based EditionDialog is involved, and we certainly don't have tests that exercise this (that would be in the realm of RCPTT, I should think).
+
+I think I had better work up some JUnit tests to cover various scenarios.  And possibly restrict re-entrant execution to configurations of commands only that would plausibly support it for undo/redo.
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Damus
+Date: 2016-04-14 00:28:48.000000000
+Message: 
+Patch Set 1: Code-Review-1
+
+This is solution isn't quite satisfying.
+
+The problem is that, on redo, I get exceptions when replaying change descriptions in nested ToggleCanonicalCommands.  The reason for this is that by delegating directly to a CheckedOperationHistory, the CheckedDiagramCommandStack doesn't execute the original command in a transaction.  Consequently, when that command is a composite (which it almost always is), each of the composed commands, being transactional commands, creates its own top-level transaction.  This results in resource-set-changed notifications being broadcast after each composed command, when each transaction commits, with the diagram reacting by updating edit-parts before the next composed command is executed.  Undoing and redoing this results in the weird exceptions.
+
+So, I can fix this by actually making the CheckedDiagramCommandStack delegate to the transactional editing-domain's command-stack.  As this already implements nested execution, the CheckedOperationHistory no longer needs to do that.  This has the added benefit of unifying the diagram command-stack with the model-explorer/property-sheet command-stack.
+
+*But*, this causes its own problems, because now the execution of a command in the diagram *is* in a top-level transactions.  So, we don't get intermediate notifications of changes from each composed command, so edit-parts aren't updated before the next composed command executes, and subsequent composed commands fail because the edit-parts that should have been created from previous commands aren't yet created.
+
+Back to square 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Camille Letavernier
+Date: 2016-04-14 11:48:52.000000000
+Message: 
+Patch Set 1:
+
+> So, I can fix this by actually making the CheckedDiagramCommandStack delegate to the transactional editing-domain's command-stack. As this already implements nested execution, the CheckedOperationHistory no longer needs to do that. This has the added benefit of unifying the diagram command-stack with the model-explorer/property-sheet command-stack.
+
+The risk here is that GEF commands such as OpenURLCommand are not meant to be transactional/undoable (e.g. Hyperlinks to a web page are GEF Commands executed on the DiagramCommandStack)
+
+The general issue we have is that the nested command stack doesn't handle the specific case where we have a top-level transaction/command, which does nothing by itself, and then only non-transactional commands inside it. In this case, the command stack would receive a new command (and be dirty/undoable), although nothing actually happened
+
+Maybe we can take a different approach to this issue, by having "marker" commands to handle the nesting, rather than executing a command inside a command. For example, when opening a dialog:
+
+- startCommand <-- add a marker command when opening a dialog, which may or may not contain actual nested commands
+- command1
+- command2
+- endCommand <-- another marker command when closing the dialog
+
+When undoing changes, if we find an "endCommand", then we undo all commands until we find a "start" command. If the top-level command is a standard command, then simply undo it. If there is no command between "end" and "start", then undo the command before the start marker (Repeating the same pattern until we actually undo a non-empty command)
+
+So if we open a dialog but do nothing, we have:
+
+- startCommand
+- endCommand
+
+Which can actually be considered empty (The model is not actually dirty). Or:
+
+- previousCommand
+- startCommand
+- endCommand
+
+Calling undo will undo the 'previousCommand'.
+
+Inside a dialog (before the dialog is closed), we have the following pattern:
+
+- startCommand
+- command1
+- command2
+
+So calling undo would undo command2 (We have the same concept with actual nested command stacks)
+
+And of course, if several startCommands/endCommands are nested in the stack, we need to undo as many as required:
+
+- startCommand1
+- startCommand2
+- command
+- command
+- endCommand2
+- command
+- command
+- endCommand1
+
+Undoing would undo everything (including startCommand1)
+
+We just need to ensure that the CommandStack will not remove the startCommand from the history before the associated endCommand has been executed (if the CommandStack is configured to retain e.g. only the last 10 commands)
+
+I'm not sure this would solve all issues related to heterogeneous stacks/histories, but this can help in at least a few cases. And since this would introduce a flat list of commands, without an actual physical nesting, this may also improve performances (Avoiding nested change recorders...)
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Damus
+Date: 2016-04-14 12:47:05.000000000
+Message: 
+Patch Set 1:
+
+> The risk here is that GEF commands such as OpenURLCommand are not
+ > meant to be transactional/undoable (e.g. Hyperlinks to a web page
+ > are GEF Commands executed on the DiagramCommandStack)
+ >
+ > The general issue we have is that the nested command stack doesn't
+ > handle the specific case where we have a top-level
+ > transaction/command, which does nothing by itself, and then only
+ > non-transactional commands inside it. In this case, the command
+ > stack would receive a new command (and be dirty/undoable), although
+ > nothing actually happened
+
+Yes.  I also experimented with a new "pass-through" wrapper command
+that signals to the NestingNotifyingWorkspaceCommandStack that it
+should just execute the wrapped GMF operation on the history verbatim,
+not in a top-level transaction.  The CheckedDiagramCommandStack then
+used this special wrapper to ensure that its top-level commands are
+executed without a transaction, as before, but still on the correct stack
+supporting nested execution of dialog-property-sheet commands.
+
+The result of this was the same exceptions that I was seeing with the
+patch that implemented re-entrant execution directly in the
+CheckedOperationHistory.  Not a surprise, with hindsight.
+
+
+ > Maybe we can take a different approach to this issue, by having
+ > "marker" commands to handle the nesting, rather than executing a
+ > command inside a command. For example, when opening a dialog:
+ > 
+ > - startCommand <-- add a marker command when opening a dialog,
+ > which may or may not contain actual nested commands
+ > - command1
+ > - command2
+ > - endCommand <-- another marker command when closing the dialog
+ > 
+ > When undoing changes, if we find an "endCommand", then we undo all
+ > commands until we find a "start" command. If the top-level command
+ > is a standard command, then simply undo it. If there is no command
+ > between "end" and "start", then undo the command before the start
+ > marker (Repeating the same pattern until we actually undo a
+ > non-empty command)
+ > 
+ > So if we open a dialog but do nothing, we have:
+ > 
+ > - startCommand
+ > - endCommand
+
+You've basically described the Eclipse Operation History's concept
+of an "open composite operation", which automatically gathers within
+it all commands executed on the history until the composite is closed.
+
+??
+ 
+Except that the operation history does not support nesting of open
+composites (it is an error to open a composite while a composite is
+open).
+
+
+ > We just need to ensure that the CommandStack will not remove the
+ > startCommand from the history before the associated endCommand has
+ > been executed (if the CommandStack is configured to retain e.g.
+ > only the last 10 commands)
+
+That is, actually, a serious problem because the limit is implemented
+privately in the DefaultOperationHistory and I don't think we could
+override/alter this behaviour.
+
+Before I consider this further, I think I need to try having the
+CheckedOperationHistory always open and close a composite
+when executing a command (if, of course, a composite isn't
+already open) to capture nested executions automatically.  I'm
+half-certain that it will give me the same exceptions on undo/redo
+as I saw with the original patch, but that means I'm half-uncertain.
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Damus
+Date: 2016-04-14 15:14:23.000000000
+Message: 
+Patch Set 1:
+
+Well, my first attempt at using automatic open composites produces the worst results, yet:  at least with the original patch, only redo produces exceptions from invalid change-description replay.  This approach bombs on undo!  I suspect the marker-commands approach would bomb similarly, because the problem is that nested transactional commands aren't supposed to undo/redo themselves but let the replay of the parent transaction's change-description include their changes.  Otherwise, you get double replay of changes, which is what I'm seeing.
+
+The trick is that, at the time the dialog invokes the re-entrant commands, there is a transaction open that captures them for undo/redo.  This works just fine when the edit is done in the Model Explorer.  The problem is only in the diagram, which by not using the EMF command-stack doesn't provide that parent transaction context.  When I made the diagram command-stack delegate to the EMF command-stack, my port/part creation use cases in Papyrus-RT worked just fine.  But there were a number of test failures in the Papyrus JUnits that showed the weakness of having the top-level transaction, which is that in a compound command that creates a bunch of views in one edit, some later commands rely on edit-parts having been created/updated for changes made in earlier commands.  But that happens in response to notifications from the notation model, which are delayed to the end of the top transaction.
+
+The bottom line is that we are trying very hard to make something work that isn't supposed to.  A command that is executed on the stack is supposed to be fully formed at the time of execution.  No commands should be added to it while it is executing, which is what the dialog does.  Usually, dialog interactions gather user input a priori to determine how to build the command.  But this RuntimeValuesAdvice subverts that by creating entirely new commands on the fly in its dialog.  What we really need is to be able to give that dialog, in this circumstance, a different stack-like thing on which to execute its commands.  Hello, IAtomicOperationExecutor, old friend ...
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Damus
+Date: 2016-04-14 18:32:21.000000000
+Message: 
+Patch Set 1:
+
+A new approach in which the the follow elements are combined:
+
+* NestingNotifyingWorkspaceCommandStack detects when it is executing nested commands even when the root command was expected by the CheckedDiagramCommandStack on its history, not via the NNWCS
+* NNWCS implements a new protocol by which clients can tell it to just execute nested commands "off to the side" instead of in the older nesting algorithm (i.e., in the way this review's patch-set 1 does in the history, itself)
+* RuntimeValuesAdvice is updated to tell the NNWCS to use this "off to the side" strategy for nested commands while the EditionDialog is open
+
+ends up with exactly the same behaviour as patch set 1.  Clean execution of the scenario creating an RTPort with a newly created protocol for its type and clean undo.  But redo throws an exception from invalid change-description replay and subsequent undo and redo invocations all do the same.
+
+My conclusions are that:
+
+1. The design of RuntimeValuesAdvice as a post hoc user-driven machine for creating and executing an unbounded variety of commands in the context of a diagram tool is fundamentally broken.  This strategy is just incompatible with the diagram infrastructure of tools and stack.
+
+2. Given #1, this Gerrit review should be abandoned and the bugzilla resolved as WONTFIX because, in fact, the code that is its subject is unfixable — it just shouldn't exist.
+
+3. For Papyrus-RT, I shall switch from using this advice to a "before" advice that asks the user to choose an existing or a new protocol for the port and just adds appropriate commands *before* any command is executed.  The user can edit the port type after the fact if necessary.
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Damus
+Date: 2016-04-14 18:33:15.000000000
+Message: 
+Abandoned
+
+Per the previous comment.
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Damus
+Date: 2016-04-14 19:06:51.000000000
+Message: 
+Restored
+
+OMG this is complicated.
+
+Now I discover almost immediately on starting down a new path that the exception I was seeing that I thought was related to this whole RuntimeValuesAdvice dialog undo/redo problem isn't at all.  It even happens in the absence of this patch and in the absence of the dialog altogether.  It is entirely a bug in the core command that creates the port shape in the diagram in the first place.
+----------------------------------------------------------------------------------------------------------------------
+Author: Gerrit Code Review
+Date: 2016-04-18 17:57:03.000000000
+Message: 
+Change has been successfully rebased as 928852a40e704d8d53906edfe78f27f5e66c6c95 by Christian W. Damus
+----------------------------------------------------------------------------------------------------------------------

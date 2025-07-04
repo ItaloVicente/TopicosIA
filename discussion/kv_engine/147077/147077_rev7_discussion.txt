@@ -1,0 +1,118 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-44079: Eph - Don't send backfilled committed prepares to replicas
+
+A node may send a committed prepare to another if it's either backfilling
+or streaming from memory. Streaming from memory guarantees that the
+replica will see the committed item for the prepare. Streaming from the
+seqlist does not if the committed item is purged before the committed
+prepare. The issue with this is that the replica does not know that the
+prepare has been committed already and it tries to recommit it.
+
+The question that needs to be addressed here is does a replica need to
+receive committed prepares in a backfill? There's a few cases to consider.
+
+1) [Prepare + Commit]. In this case not having the prepare is fine as the
+commit will exist already. If it were not received by the replica this
+would be a partial snapshot for which we make no guarantees.
+
+2) Prepare + Commit + [Prepare + Commit]. Replica received a snapshot of
+some sort before the backfill snapshot. Not having the (second)  prepare
+here is fine as in case 1.
+
+3) Prepare + [Prepare + Commit]. Replica would not replace the first prepare
+with the second if it was not sent. The commit would set the prepare to
+be completed in the HashTable and remove it from the DurabilityMonitor.
+
+One interesting part of this to note is the HCS check in the backfill scan.
+We can't just skip all completed prepares as we need to send all of the
+prepares that are incomplete at the time of the seqlist iterator creation.
+This is required because we'll stream anything newer from memory and apply
+stricter sanity checks. Currently when we complete a prepare we set the
+state of the prepare to be PrepareCommitted without replacing it. This means
+that we are modifying items in the middle of the seqlist. This is done
+without regard for range reads but this doesn't matter as the only other
+task that needs to check this is the HTTombstoneCleaner (just iterates over
+the HashTable). This leads though to a window in backfill where we may
+complete a prepare and update it to be PrepareCommitted. In this case we
+must actually send it.
+
+Change-Id: Ic3f569425d8e00782cfd89c13b16fac62cc03c59
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Ben Huddleston
+Date: 2021-02-26 12:25:52.000000000
+Message: 
+Uploaded patch set 7.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-02-26 12:26:03.000000000
+Message: 
+Patch Set 7:
+
+Branch restricted. PLEASE READ this URL: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/225653/artifact/restricted.html : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2021-02-26 12:26:13.000000000
+Message: 
+Patch Set 7:
+
+(1 comment)
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2021-02-26 12:35:01.000000000
+Message: 
+Patch Set 7: Code-Review+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-02-26 13:22:01.000000000
+Message: 
+Patch Set 7: Code-Review-1
+
+(1 comment)
+Line:230, engines/ep/src/dcp/backfill_memory.cc -> For completeness, I think it's worth also including in the comment why we don't trust the CommittedState entirely and instead rely on HCS.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-02-26 13:40:05.000000000
+Message: 
+Patch Set 7: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/1984/ : FAILURE
+
+Failure of GoogleTest "TransportProtocols/TuneMcbpSla.NoAccess/Mcbp":
+
+<pre>
+[ RUN      ] TransportProtocols/TuneMcbpSla.NoAccess/Mcbp
+unknown file: error: C++ exception with description "create_connect_plain_socket: Can"t connect to port == -1" thrown in SetUp().
+[  FAILED  ] TransportProtocols/TuneMcbpSla.NoAccess/Mcbp, where GetParam() = Mcbp (1 ms)
+TransportProtocols/TuneMcbpSla.NoAccess/Mcbp
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/1984/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/1760/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/26376/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/1655/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/1872/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/1875/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/1845/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/mad-hatter/1215/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2021-02-26 14:10:47.000000000
+MISMATCHED INLINE COMMENT
+Line:230, engines/ep/src/dcp/backfill_memory.cc -> Done
+----------------------------------------------------------------------------------------------------------------------

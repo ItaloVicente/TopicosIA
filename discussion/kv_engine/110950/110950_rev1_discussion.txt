@@ -1,0 +1,183 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-34516: Allow replicas to resolve Prepares out of order
+
+If a Commit for key1 has been deduped, the PDM might encounter a Commit for
+key2 before the new Commit for key1.
+
+Change-Id: If869480343c27ee20814a2dfba399589fe315b14
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: James H
+Date: 2019-06-20 16:16:12.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-06-20 16:25:15.000000000
+Message: 
+Patch Set 1: Code-Review-1
+
+(1 comment)
+
+I'm not sure this is the correct solution to this problem.
+
+Note (as per comment on commit msg below), we arn't actually committing out of order; it just so happens that some commits are being skipped over because they have been subsequently committed against later.
+
+As such, I don't think we should be ignoring those earlier SyncWrites in the PassiveDM; we should instead commit everything before (in terms of seqno order) the commit which comes in.
+
+In other words, a COMMIT(prepared_seqno=P, commit_seqno=C) implicity commits all PREPARES whose seqno is <P.
+
+It might be worth waiting until Ben has implemented the support for always sending the prepared_seqno inside a COMMIT (and ABORT) - as then we could examine the prepared_seqno of the incoming commit and see how that compares to what's in the PassiveDM.
+
+Additionally, I'm not sure about how Abort needs to be handled here - given what I just said about "implicit commit"; that's not 100% accurate - the COMMIT will implicitly *completes* (commits or aborts) all previous PREPAREs...
+Line:7, /COMMIT_MSG -> Can you change this (and the MB title)? We arn't really allowing things to commit out of order (with respect to the "original" Active timeline), it's just that the replica effectively "skips" the previous commit (which was de-duped away).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2019-06-20 16:25:39.000000000
+Message: 
+Patch Set 1: Code-Review-1
+
+(1 comment)
+Line:10, /COMMIT_MSG -> nit: Formatting, commit messages wouldn't being longer than 72 chars in width. Btw you can automate this check using https://github.com/m1foley/fit-commit/tree/master/lib/fit_commit
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-06-20 16:46:32.000000000
+Message: 
+Patch Set 1: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/12289/ : FAILURE
+
+ThreadSanitizer issue: data race (/home/couchbase/jenkins/workspace/kv_engine-threadsanitizer-master/install/lib/libtsan.so.0+0x6a7b4) in operator delete(void*)  ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/12289/ )
+
+Failure of a CTest test  24/178 Test  #25: ep-engine-persistence-unit-tests.rocksdb ..................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/12289/ )
+
+Failure of a GoogleTest test:
+
+CheckpointRemoverEPTest.CursorDropMemoryFreed (5446 ms) ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/12289/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/19123/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/11562/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/18250/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/21301/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/20519/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/2163/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/5079/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2019-06-21 07:33:43.000000000
+Message: 
+Patch Set 1:
+
+> (1 comment)
+ > 
+ > I'm not sure this is the correct solution to this problem.
+ > 
+ > Note (as per comment on commit msg below), we arn't actually
+ > committing out of order; it just so happens that some commits are
+ > being skipped over because they have been subsequently committed
+ > against later.
+ > 
+ > As such, I don't think we should be ignoring those earlier
+ > SyncWrites in the PassiveDM; we should instead commit everything
+ > before (in terms of seqno order) the commit which comes in.
+ > 
+ > In other words, a COMMIT(prepared_seqno=P, commit_seqno=C)
+ > implicity commits all PREPARES whose seqno is <P.
+ > 
+ > It might be worth waiting until Ben has implemented the support for
+ > always sending the prepared_seqno inside a COMMIT (and ABORT) - as
+ > then we could examine the prepared_seqno of the incoming commit and
+ > see how that compares to what's in the PassiveDM.
+ > 
+ > Additionally, I'm not sure about how Abort needs to be handled here
+ > - given what I just said about "implicit commit"; that's not 100%
+ > accurate - the COMMIT will implicitly *completes* (commits or
+ > aborts) all previous PREPAREs...
+
+I don't think that it's a good idea to explicitly commit the implicitly completed prepares. We don't know whether or not the active has committed or aborted them, only that they've been completed and that we should eventually receive a completion. If the active were to have aborted the skipped completion and the resuming replica was to commit it and then be streamed from by views (which it could as it would not be receiving an initial disk snapshot) then the replica would (temporarily) present a value that was never presented by the active. I think that we should leave the implicitly completed prepares alone (or remove them) as we don't know how to complete them. We could remove them as the replica should send overwriting mutations instead of commits for this case and we should never be promoting this replica until it catches up.
+
+This also creates an interesting situation with warmup (post MB-34107). If we allow the commit of key2 then we increment the persisted HCS to the prepareSeqno of key2 when flushing. When we warmup, we won't load the prepare back into the HashTable. 
+We would then never try to commit this prepare if this replica was promoted which is different to the in-memory case if we keep the prepare in the passiveDM. We'd be in a dataloss situation if this replica was promoted anyway so not sure that we care.
+
+I wasn't planning on adding prepareSeqno back to the commit message originally but I suppose we may as well for sanity once I've made the required persistence change.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-06-21 07:55:21.000000000
+Message: 
+Patch Set 1:
+
+> > (1 comment)
+ > >
+ > > I'm not sure this is the correct solution to this problem.
+ > >
+ > > Note (as per comment on commit msg below), we arn't actually
+ > > committing out of order; it just so happens that some commits are
+ > > being skipped over because they have been subsequently committed
+ > > against later.
+
+<cut>
+
+ > 
+ > I don't think that it's a good idea to explicitly commit the
+ > implicitly completed prepares. We don't know whether or not the
+ > active has committed or aborted them, only that they've been
+ > completed and that we should eventually receive a completion.
+<cut>
+
+Agreed - and I somewhat alluded to that in my above comment (was pretty much writing stream of concious ;)
+
+ > 
+ > This also creates an interesting situation with warmup (post
+ > MB-34107).
+
+Do you mean MB-34623 ?
+
+ If we allow the commit of key2 then we increment the
+ > persisted HCS to the prepareSeqno of key2 when flushing. When we
+ > warmup, we won't load the prepare back into the HashTable.
+ > We would then never try to commit this prepare if this replica was
+ > promoted which is different to the in-memory case if we keep the
+ > prepare in the passiveDM. We'd be in a dataloss situation if this
+ > replica was promoted anyway so not sure that we care.
+ > 
+ > I wasn't planning on adding prepareSeqno back to the commit message
+ > originally but I suppose we may as well for sanity once I've made
+ > the required persistence change.
+
+I think what we should do is only allow out-of-order completion if the following are all true:
+
+(a) PassiveDM
+(b) We are processing a Snapshot which is (potentially) out-of-order - i.e. has the disk snapshot flag set.
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2019-06-21 08:00:58.000000000
+Message: 
+Patch Set 1:
+
+Oops, meant MB-34017.
+
+Both sanity checks sound fine
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2019-06-21 08:08:49.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:219, engines/ep/src/durability/passive_durability_monitor.cc -> should add comment that this will remove the implicitly completed prepare (that we haven't actually completed on this node yet) but are awaiting a completion for
+
+----------------------------------------------------------------------------------------------------------------------

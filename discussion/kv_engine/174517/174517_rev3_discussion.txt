@@ -1,0 +1,129 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-50984: Don't call detachFromManager() in Checkpoint dtor
+
+Legacy code from Neo where CheckpointRemoval::Lazy might lead to
+releasing checkpoints when still attached to the CM.
+That might still be the case, but only at CM destruction, not in the
+steady-state checkpoint removal path.
+
+Change-Id: I86533e78b2eaefab5f79f92c8362f6c1f3776f78
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2022-06-09 09:09:31.000000000
+Message: 
+Uploaded patch set 3: Patch Set 2 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-06-09 10:07:30.000000000
+Message: 
+Patch Set 3: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/19065/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [36/93]: test dcp stream takeover...Exceeded maximum wait time of 60000000us waiting for stat "estimate(dcp-vbtakeover 0 unittest)" to be less than or equal to 10 (last value:12) - aborting.
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/19065/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/17088/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/46719/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/18028/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/39267/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/7686/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/19870/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/20220/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/20870/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/28260/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/7790/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2022-06-10 08:15:08.000000000
+Message: 
+Patch Set 3: Verified+1
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> Known CV/macos failure already fixed at https://review.couchbase.org/c/kv_engine/+/175863
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2022-06-10 08:15:11.000000000
+Message: 
+Removed Verified-1 by <GERRIT_ACCOUNT_1000011>
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-06-13 15:13:27.000000000
+Message: 
+Patch Set 3: Code-Review-1
+
+(1 comment)
+Line:99, engines/ep/src/checkpoint.cc -> Are we expecting here that manager is null? Worth an Expects()?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2022-06-13 15:43:19.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:99, engines/ep/src/checkpoint.cc -> Checkpoint dtor executed in 2 different code paths:
+
+1. Checkpoint detached from manager and moved to Destroyer -> manager==nullptr
+2. Checkpoint still owned by manager (eg, the open checkpoint destroyed at vbucket deletion) -> manager!=nullptr
+
+So unfortunately the logic here needs to account for both scenarios
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2022-06-13 15:47:17.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:99, engines/ep/src/checkpoint.cc -> Please ignore what I wrote, God knows what I was thinking when replying :shrug:
+I ll rewrite a proper answer :D
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2022-06-30 07:52:39.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:99, engines/ep/src/checkpoint.cc -> Reviewing this. Actually my comment was correct, let's sum up what going on here.
+
+Essentially this if-block in ~Checkpoint was here for handling the case of Checkpoints that are destructed when they are still owned by CM.
+For that, in this patch I move the call into ~CM, which is the obvious place where you would expect to find it.
+
+The check on 'manager' was necessary because detachFromManager() is already called for Checkpoints when they are moved to the Destroyer. So the check was to prevent incorrect double-update on CM stats.
+
+Now specifically to your question.
+Manager might still be null or not here depending on the case. We have only CheckpointRemoval::Eager now, so:
+1. Checkpoints that are destructed when they are owned by Destroyer -> manager=nullptr
+2. Checkpoint that are destructed when they are still owned by CM -> manager!=nullptr
+
+Example of (2) is the open checkpoint (or any other referenced checkpoint) at vb deletion.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-06-30 08:52:53.000000000
+Message: 
+Patch Set 3: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------

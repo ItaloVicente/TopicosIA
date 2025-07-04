@@ -1,0 +1,147 @@
+======================================================================================================================
+DESCRIPTION:
+
+Reword a commit without the rebase interactive machinery
+
+Using interactive rebase for rewording a commit has the disadvantage
+that it first rewinds the working tree and then rebases the whole
+history from the commit amended to HEAD. This leads to resource change
+events and triggers potentially time-consuming builds.
+
+This is not necessary. Rewording a commit message does not change
+anything in the working tree or in the index, and it can be done as a
+pure repository operation without touching either.
+
+Re-implement RewordCommitOperation by doing the whole rebase
+non-interactively in memory: simply create a copy of the original
+commit with the new message, then create copies of the children,
+patching in new created commits in place of former parents. At the
+end, update HEAD and ORIG_HEAD.
+
+While doing so, re-sign commits that were signed and committed by the
+same committer.
+
+As a side effect, this new way can also reword merge commit messages.
+
+Bug: 562602
+Change-Id: I50dbfa2f4f8246b0c59ef03ad8dd7a3e465fa9d9
+Signed-off-by: Thomas Wolf <thomas.wolf@paranor.ch>
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Thomas Wolf
+Date: 2020-12-06 22:54:47.000000000
+Message: 
+Uploaded patch set 2: Patch Set 1 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: EGit Bot
+Date: 2020-12-06 22:54:57.000000000
+Message: 
+Patch Set 2:
+
+Build Started https://ci.eclipse.org/egit/job/egit.gerrit/1736/
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2020-12-06 22:57:07.000000000
+Message: 
+Patch Set 2:
+
+(3 comments)
+Line:93, org.eclipse.egit.core/src/org/eclipse/egit/core/op/RewordCommitOperation.java -> Maybe this doesn't even have to be an IWorkspaceRunnable anymore. reword() doesn't touch the working tree at all. Scheduling is ensured already by the RewordHandler, which runs this in a WorkspaceJob with this scheduling rule?
+
+Line:102, org.eclipse.egit.core/src/org/eclipse/egit/core/op/RewordCommitOperation.java -> We don't touch the index. Not sure locking the index is 100% correct, but what is the way to guard against concurrent changes to HEAD or the branch HEAD points to?
+
+File Comment: org.eclipse.egit.ui/src/org/eclipse/egit/ui/internal/history/command/RewordHandler.java -> Hm. Why are two RewordHandlers? I don't get it.
+----------------------------------------------------------------------------------------------------------------------
+Author: EGit Bot
+Date: 2020-12-06 23:16:45.000000000
+Message: 
+Patch Set 2: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/egit/job/egit.gerrit/1736/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2020-12-07 10:04:57.000000000
+Message: 
+Patch Set 2:
+
+I did this in EGit instead of in JGit on purpose. I'm not sure this mechanism is general enough to have in JGit. For instance, it only rebases the history between HEAD and the commit being reworded. If there's a merge from this branch onto some other branch, that other branch is not rewritten. Maybe that'd be fine in general, or maybe not. Or maybe a general operation should allow modifying any commit anywhere... Another consideration for a more general operation is whether tags pointing at commits that get rewritten should also be rewritten. Also, the handling of signatures would need more thought for a general operation. (For EGit, we could give the user more control by adding things to the CommitMessageEditorDialog, compare bug 440211.) But all this goes way beyond the scope of this change and beyond what EGit's RewordCommitOperation did before.
+
+I notice that EGit's way of restricting this to commits reachable from HEAD may traverse the whole history if the commit is _not_ reachable from HEAD. Not sure how to get around this; maybe additionally use the commit time as a cut-off? (If the commit to be changed was committed at T0, we might stop the traversal at commits older than T0, perhaps plus some saftey margin?) And unless I misunderstand something, CommitUtil.isCommitInCurrentBranch() will internally traverse the whole history anyway. I don't see anything telling the walk to stop after it has found the commit.
+
+This history rewriting is of course not limited to changing the message of a commit. It could just as well be used for any other modification that doesn't change the trees (change author/committer/dates/signatures).
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2020-12-08 00:06:05.000000000
+Message: 
+Patch Set 2:
+
+(4 comments)
+Line:93, org.eclipse.egit.core/src/org/eclipse/egit/core/op/RewordCommitOperation.java -> I agree, this seems unnecessary
+
+Line:102, org.eclipse.egit.core/src/org/eclipse/egit/core/op/RewordCommitOperation.java -> I think the index should not be locked since neither working tree nor index content are affected. This reword operation could be even used on a bare repository which doesn't have an index. Not sure if that's a use case for EGit. Gerrit has similar in-memory implementations to auto-merge, auto-rebase or cherry-pick a change on the server side when it is submitted and the update of the target branch isn't a fast-forward so that it requires an auto- merge, cherry-pick or rebase depending on project configuration.
+
+Creating the chain of rewritten commits doesn't require locking since it's only creating new immutable objects. Locking the affected ref (the current branch if reword is started from a checked out branch or HEAD if we start from a detached HEAD) is handled by RefUpdate. See e.g. [1]. HEAD doesn't need to be locked if it refers to a branch since it will not be modified by the reword and after the reword operation HEAD will be unchanged and still refer to the same branch. Only if reword is done from detached HEAD the HEAD needs to be locked.
+
+[1] https://git.eclipse.org/r/plugins/gitiles/jgit/jgit/+/refs/heads/master/org.eclipse.jgit/src/org/eclipse/jgit/api/CheckoutCommand.java#257
+
+Line:195, org.eclipse.egit.core/src/org/eclipse/egit/core/op/RewordCommitOperation.java -> I think reword should write a reflog entry otherwise it doesn't reflect what happened. How about writing the same reflog entry which interactive rebase would write for the same action ?
+
+File Comment: org.eclipse.egit.ui/src/org/eclipse/egit/ui/internal/history/command/RewordHandler.java -> I can't remember why this was done
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2020-12-08 23:21:57.000000000
+MISMATCHED INLINE COMMENT
+Line:93, org.eclipse.egit.core/src/org/eclipse/egit/core/op/RewordCommitOperation.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2020-12-09 09:57:31.000000000
+MISMATCHED INLINE COMMENT
+Line:102, org.eclipse.egit.core/src/org/eclipse/egit/core/op/RewordCommitOperation.java -> yes, symbolic refs should use class SymbolicRef and RefUpdate which apparently isn't done for ORIG_HEAD.
+
+yeah, maybe it wasn't a bad idea to lock the index, except for bare repos (didn't try if that would work with this implementation)
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2020-12-09 08:00:23.000000000
+MISMATCHED INLINE COMMENT
+Line:102, org.eclipse.egit.core/src/org/eclipse/egit/core/op/RewordCommitOperation.java -> Unless I'm missing something fundamental, writing ORIG_HEAD also is not safe. It's not a ref in JGit but just a normal file. C git handles it as a ref (with all the locking involved), and even sets it before it sets HEAD, so when setting ORIG_HEAD fails, HEAD is still unchanged. See for instance C git's "reset" implementation.[1] (ORIG_HEAD appears to be written only in reset and rebase.)
+
+Perhaps locking the index wasn't wrong.
+
+[1] https://github.com/git/git/blob/bf10200/reset.c#L98
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2020-12-08 23:21:57.000000000
+MISMATCHED INLINE COMMENT
+Line:102, org.eclipse.egit.core/src/org/eclipse/egit/core/op/RewordCommitOperation.java -> I'm not worried about concurrent changes to HEAD or to the branch it points to during the RefUpdate. However, since nothing is locked during all this rebasing, some other concurrent operation might have changed HEAD or the branch it points to while we were creating all these new rebased commits. The RefUpdate will then fail, and all the work was in vain.
+
+But I see nothing in RefDatabase that would allow me to selectively lock some refs.
+
+So probably this is the best we can do here.
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2020-12-09 10:04:07.000000000
+MISMATCHED INLINE COMMENT
+Line:102, org.eclipse.egit.core/src/org/eclipse/egit/core/op/RewordCommitOperation.java -> > bare repos (didn't try if that would work with this implementation)
+
+Enablement still tests for repo state SAFE, so the command should not be available for bare repos.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2020-12-09 00:10:28.000000000
+MISMATCHED INLINE COMMENT
+Line:102, org.eclipse.egit.core/src/org/eclipse/egit/core/op/RewordCommitOperation.java -> I think we would need another RefUpdate subclass similar to BatchRefUpdate for this local use case. BatchRefUpdate is made to work with ReceiveCommands created by ReceivePack so it seems not suitable for this local use case.
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2020-12-08 23:21:57.000000000
+MISMATCHED INLINE COMMENT
+Line:195, org.eclipse.egit.core/src/org/eclipse/egit/core/op/RewordCommitOperation.java -> I've added a similar reflog message. Exactly the same appears difficult; the current implementation would write "commit (amend): <New short message>" followed by umpteen "rebase: <short message>" entries, and finally a "rebase finished: returning to ..." entry.
+
+The new implementation updates HEAD only once, so one reflog message is appropriate.
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2020-12-08 23:21:57.000000000
+MISMATCHED INLINE COMMENT
+File Comment: org.eclipse.egit.ui/src/org/eclipse/egit/ui/internal/history/command/RewordHandler.java -> I'll take a look at this in a later change. The one in internal/commit/command is even a default handler, which definitely looks wrong. It's accessible via Quick Access, can be invoked via Quick Access on commits not reachable from HEAD (for instance, if such a commit is shown in a commit editor), then appears to do nothing. This is either just plain wrong, or it's unfinished business.
+----------------------------------------------------------------------------------------------------------------------

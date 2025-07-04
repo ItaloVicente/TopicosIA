@@ -1,0 +1,135 @@
+======================================================================================================================
+DESCRIPTION:
+
+ss: Introduce a generic BufferedBlockingQueue
+
+The BufferedBlockingQueue (nicknamed "BBQ") is a wrapper around
+a standard ArrayBlockingQueue, which accumulates elements in a
+separate Collection before putting them in the actual Queue.
+This allows a producing and a consuming threads to not block each
+other as much when they are producing and consuming at the same
+time.
+
+An identified use case is the ThreadedHistoryTreeProvider, and
+perhaps eventually the AbstractTmfStateProvider too.
+
+Change-Id: I010547d7914c4c377bf1c85f4f830bff0aa8740f
+Signed-off-by: Matthew Khouzam <matthew.khouzam@ericsson.com>
+Signed-off-by: Alexandre Montplaisir <alexmonthy@voxpopuli.im>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Alexandre Montplaisir
+Date: 2015-04-21 22:28:11.000000000
+Message: 
+Uploaded patch set 11.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2015-04-21 22:28:17.000000000
+Message: 
+Patch Set 11:
+
+Build Started https://hudson.eclipse.org/tracecompass/job/tracecompass-gerrit/1978/
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2015-04-21 22:35:33.000000000
+Message: 
+Patch Set 11:
+
+(3 comments)
+Line:55, org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/statesystem/core/utils/BufferedBlockingQueue.java -> I started with standard ReentrantLocks here, but when adding the lookFor...() method, I realized that that is a read-only operation, so concurrent queries didn't need to block each other.
+
+Line:148, org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/statesystem/core/utils/BufferedBlockingQueue.java -> I did getLast() at first here. Turns out getLast() does *not* remove the element from the queue. oops!
+
+Line:176, org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/statesystem/core/utils/BufferedBlockingQueue.java -> This is, obviously, for the backend's iteration over the queue when doing "live" queries.
+
+A proper iterator() implementation would probably be better (it would cover this, and more), but that would probably be a 6-month research project...
+
+Not super happy about exposing a Guava-specific class in the API, but I couldn't find anything better. This can be moved to Java's own Predicate method in 8.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2015-04-21 22:57:56.000000000
+Message: 
+Patch Set 11: Code-Review+1
+
+Build Successful 
+
+https://hudson.eclipse.org/tracecompass/job/tracecompass-gerrit/1978/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthew Khouzam
+Date: 2015-04-21 23:51:02.000000000
+Message: 
+Patch Set 11: Code-Review-1
+
+(4 comments)
+
+Some comments,
+File Comment: org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/statesystem/core/utils/BufferedBlockingQueue.java -> One mini-nit, I would much rather call it collect, as util will end up being a fit all for everything
+Line:148, org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/statesystem/core/utils/BufferedBlockingQueue.java -> Shouldn't we poll?
+
+Line:176, org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/statesystem/core/utils/BufferedBlockingQueue.java -> That is why I made a read only copy.
+
+Line:201, org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/statesystem/core/utils/BufferedBlockingQueue.java -> You can have the innerqueue incremented here as we add an item, it would give a concurrent modification exception.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2015-04-22 00:11:29.000000000
+Message: 
+Patch Set 11:
+
+(4 comments)
+File Comment: org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/statesystem/core/utils/BufferedBlockingQueue.java -> you mean "collect" instead of "utils" in the package name? If so, good idea, it'd be like Guava.
+Line:148, org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/statesystem/core/utils/BufferedBlockingQueue.java -> We want our take() method here to block if the queue is empty, to mimic the behavior of other *BlockingQueue#take().
+
+Let's say you poll() and the queue is empty, what do we do instead?
+
+Line:176, org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/statesystem/core/utils/BufferedBlockingQueue.java -> We could do a read-only shallow copy too. But in both cases the locking would have to be the same (you want to lock while you are copying the elements).
+
+Line:201, org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/statesystem/core/utils/BufferedBlockingQueue.java -> No, ArrayBlockingQueue specifies that you can iterate over it without locking it:
+
+https://docs.oracle.com/javase/7/docs/api/java/util/concurrent/ArrayBlockingQueue.html#iterator%28%29
+
+  The returned Iterator is a "weakly consistent" iterator that will never throw
+  ConcurrentModificationException, and guarantees to traverse elements as
+  they existed upon construction of the iterator, and may (but is not guaranteed
+  to) reflect any modifications subsequent to construction.
+
+However iterating on "chunk" has no such guarantees, but since the the chunks are not modified while they are inside the queue, it should be safe.
+
+One thing I'm not 100% sure though, forgot to mention it, is if that iterator will give us a "chunk" that was removed from the queue while we were iterating on it. Or if it will stop at its current last element.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2015-04-22 00:16:08.000000000
+Message: 
+Patch Set 11:
+
+Hmm, one solution could be to use a ConcurrentLinkedDeque for the "buffers" instead of an ArrayDeque. If I read http://docs.oracle.com/javase/7/docs/api/java/util/concurrent/ConcurrentLinkedDeque.html correctly, does it mean we'd need... no locking... at all? :O
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2015-04-22 00:19:54.000000000
+Message: 
+Patch Set 11:
+
+One thing that bothers me with ConcurrentLinkedDeque is:
+
+ Beware that, unlike in most collections, the size method is NOT
+ a constant-time operation.
+
+We do use .size() to check if the input buffer is full. While the imprecision itself is not a problem (it doesn't matter if there are 100 of 103 elements in the buffer), the element traversal at *every* insertion is not desirable.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthew Khouzam
+Date: 2015-04-22 00:34:23.000000000
+Message: 
+Patch Set 11:
+
+(3 comments)
+Line:148, org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/statesystem/core/utils/BufferedBlockingQueue.java -> Well removelast will throw an exception, so will checknull poll
+
+Line:176, org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/statesystem/core/utils/BufferedBlockingQueue.java -> Yes. I assume that it will lock for a cte time and that checks on the user side can be much slower. They can be faster too, but shallow copies are pretty fast.
+
+Line:201, org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/statesystem/core/utils/BufferedBlockingQueue.java -> Ok, I'm cool with these changes if the unit tests pass. (I know there's a bit of api massaging to do.)
+
+----------------------------------------------------------------------------------------------------------------------

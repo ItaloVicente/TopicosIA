@@ -1,0 +1,145 @@
+======================================================================================================================
+DESCRIPTION:
+
+NCBC-3264: Improve performance of lambda eval for subdoc operations
+
+Motivation
+----------
+The current process for evaluating lambda expressions for subdoc
+operations has a lot of inefficiences which can be improved on. The
+largest is unnecessary lambda compilations causing expensive JIT and
+allocations on each call.
+
+Modifications
+-------------
+- Add short circuits to LambdaSimplifyingExpressionVisitor's
+  ConvertToConstant method for two common scenarios where we may avoid
+  a JIT compilation
+- Add LambdaSimplifyingExpressionVisitor.VisitChildren overloads for
+  2 and 3 parameter cases that avoid allocating an array on the heap
+- Use Span<T> within VisitChildren, along with possible stackalloc, to
+  further reduce heap allocations
+- Refactor VisitMethodCall to avoid the expensive path for 0, 1, and 2
+  argument method calls
+- Refactor VisitMethodCall to use an ArrayPool array for the expensive
+  path of > 3 arguments
+- Use a lightweight cache for SubDocumentPathExpressionBuilder instances
+  to reduce heap allocations, especially of the underlying StringBuilder
+- Use a for loop instead of an enumerator when detecting integral types
+  in SubDocumentPathExpressionBuilder
+- Cleanup some other small misses in SubDocumentPathExpressionBuilder
+
+Results
+-------
+I'm observing the following improvements across several different types
+of lambda expressions, some of which are highly significant.
+
+BenchmarkDotNet=v0.13.1, OS=Windows 10.0.22000
+Intel Core i7-10850H CPU 2.70GHz, 1 CPU, 12 logical and 6 physical cores
+.NET SDK=7.0.100-preview.7.22377.5
+  [Host]     : .NET 6.0.8 (6.0.822.36306), X64 RyuJIT
+  Job-TPSKPX : .NET 6.0.8 (6.0.822.36306), X64 RyuJIT
+
+Runtime=.NET 6.0  Toolchain=net6.0
+
+|  Method |               Type |         Mean |       Error |      StdDev | Ratio | RatioSD | Rank |  Gen 0 |  Gen 1 | Allocated |
+|-------- |------------------- |-------------:|------------:|------------:|------:|--------:|-----:|-------:|-------:|----------:|
+| Current |         ArrayIndex |  43,048.3 ns |   800.68 ns |   748.95 ns | 1.000 |    0.00 |    2 | 0.7324 | 0.3662 |   4,616 B |
+|     New |         ArrayIndex |     343.4 ns |     3.75 ns |     3.33 ns | 0.008 |    0.00 |    1 | 0.0405 |      - |     256 B |
+|         |                    |              |             |             |       |         |      |        |        |           |
+| Current |            DictKey |  33,339.5 ns |   657.21 ns |   614.75 ns |  1.00 |    0.00 |    2 | 0.7935 | 0.3662 |   5,351 B |
+|     New |            DictKey |   1,059.4 ns |     7.69 ns |     6.81 ns |  0.03 |    0.00 |    1 | 0.1125 |      - |     712 B |
+|         |                    |              |             |             |       |         |      |        |        |           |
+| Current |     NestedProperty |     447.2 ns |     7.41 ns |     6.93 ns |  1.00 |    0.00 |    2 | 0.1044 |      - |     656 B |
+|     New |     NestedProperty |     416.1 ns |     7.35 ns |     6.51 ns |  0.93 |    0.02 |    1 | 0.0663 |      - |     416 B |
+|         |                    |              |             |             |       |         |      |        |        |           |
+| Current |           Property |     265.4 ns |     1.60 ns |     1.49 ns |  1.00 |    0.00 |    2 | 0.0749 |      - |     472 B |
+|     New |           Property |     254.8 ns |     4.67 ns |     4.37 ns |  0.96 |    0.02 |    1 | 0.0405 |      - |     256 B |
+|         |                    |              |             |             |       |         |      |        |        |           |
+| Current | VariableArrayIndex | 102,007.3 ns | 1,608.00 ns | 1,504.12 ns | 1.000 |    0.00 |    2 | 0.7324 | 0.3662 |   5,325 B |
+|     New | VariableArrayIndex |     744.5 ns |     3.02 ns |     2.82 ns | 0.007 |    0.00 |    1 | 0.0954 |      - |     600 B |
+|         |                    |              |             |             |       |         |      |        |        |           |
+| Current |    VariableDictKey |  89,919.9 ns |   884.91 ns |   827.74 ns |  1.00 |    0.00 |    2 | 0.8545 | 0.3662 |   5,942 B |
+|     New |    VariableDictKey |   1,659.8 ns |    33.03 ns |    32.44 ns |  0.02 |    0.00 |    1 | 0.1793 |      - |   1,128 B |
+
+Change-Id: Ied2df378cda6dfad8a40007f640acea9d0a5b899
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Brant Burnett
+Date: 2022-09-08 21:08:44.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-09-08 21:08:52.000000000
+Message: 
+Patch Set 1:
+
+Build Started https://sdk.jenkins.couchbase.com/job/dotnet/job/sdk/job/couchbase-net-client-cv-trigger/3525/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-09-08 21:30:30.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+https://sdk.jenkins.couchbase.com/job/dotnet/job/sdk/job/couchbase-net-client-cv-trigger/3525/ : success
+----------------------------------------------------------------------------------------------------------------------
+Author: Brant Burnett
+Date: 2022-09-08 21:57:25.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> Ready for review
+----------------------------------------------------------------------------------------------------------------------
+Author: Jeffry Morris
+Date: 2022-09-12 18:55:25.000000000
+Message: 
+Patch Set 1: Code-Review-2
+
+(1 comment)
+Line:490, src/Couchbase/KeyValue/ExpressionVisitors/SubDocumentPathExpressionVisitor.cs -> I am thinking ThreadStaticAttribute may cause problems in ASP.NET or other multi-threaded environments where the thread that handles the request may not be the thread which handles the response (Thread agility). This goes way back to the .NET 1.0 days, so not sure how current environments have evolved to handle this, but some research indicates it may still have negative impacts (and with await as well):
+
+https://stackoverflow.com/questions/4791208/threadstaticattribute-in-asp-net
+
+https://stackoverflow.com/questions/42507054/threadstatic-in-asynchronous-asp-net-web-api
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Brant Burnett
+Date: 2022-09-12 19:27:46.000000000
+Message: 
+Patch Set 1:
+
+(2 comments)
+File Comment: /PATCHSET_LEVEL -> Please review my reply inline, let me know if you have more questions we can chat on Discord.
+Line:490, src/Couchbase/KeyValue/ExpressionVisitors/SubDocumentPathExpressionVisitor.cs -> That's actually not the case here, since this is designed to be a reuse cache only. What it does is avoid lock contention around the cache. A shared cache requires locking to get an instance from or return an instance to the cache. This approach keeps a single instance for each thread instead, so locking is not required. If you hit lambda eval on the same ThreadPool thread as a previous eval it reuses the cached instance instead of creating a new one. If you lambda eval for the first time on a thread, it finds no cache and creates a new instance.
+
+This pattern would be problematic if we expected the ThreadStatic to be the same across an async execution context, which is what the links you sent are about. But that's not what we're using it for, so it's safe. While the cached instance is in use it's removed from the ThreadStatic so that even if the context were to switch threads it wouldn't matter. Also, the usage of the cached instance is synchronous, so the thread shouldn't switch during the process anyway.
+
+This is the same pattern already in use internally within .NET, such as the StringBuilderCache which reuses StringBuilders: https://source.dot.net/#System.Net.Primitives/src/libraries/Common/src/System/Text/StringBuilderCache.cs,a6dbe82674916ac0
+
+There is one risk to this pattern: memory utilization. Since each thread has its own cache, if you run a large number of long-lived threads then you risk utilizing a large amount of long-lived memory in these caches, which may not be worthwhile if the cache is infrequently used. This is why there is a limit on the size of the StringBuilder, so if one does grow too large we discard it and don't cache.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jeffry Morris
+Date: 2022-09-13 00:13:21.000000000
+Message: 
+Patch Set 1: Code-Review+2
+
+(2 comments)
+File Comment: /PATCHSET_LEVEL -> Thanks for the submission Brant.
+Line:490, src/Couchbase/KeyValue/ExpressionVisitors/SubDocumentPathExpressionVisitor.cs -> Ack
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Brant Burnett
+Date: 2022-09-13 18:13:27.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> Done
+----------------------------------------------------------------------------------------------------------------------

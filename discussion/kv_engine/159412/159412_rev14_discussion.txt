@@ -1,0 +1,130 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-47687: Prevent dropping of prepares which can be undone by Magma rollback
+
+Magma creates checkpoints every few minutes which are used for
+rollback. Since magma does background compaction it is possible
+for compaction to drop deletes between the checkpoints. If
+kv_engine requests a rollback to one of these checkpoints, the
+sequence scan does not see the compacted prepare keys resulting
+in the rollback callback not being called for these keys.
+This patch ensures we dont drop prepares that can be rolled back
+by magma.
+
+Change-Id: If6c3faa48e500506ca36f5282ced6f892018537d
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Apaar gupta
+Date: 2021-09-01 18:56:36.000000000
+Message: 
+Uploaded patch set 14.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-09-01 19:18:02.000000000
+Message: 
+Patch Set 14: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/39326/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/11902/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/33488/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/10685/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/1546/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/1563/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/13514/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/13749/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/12660/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/14178/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/21689/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2021-09-02 06:48:20.000000000
+Message: 
+Patch Set 14: Code-Review-1
+
+(5 comments)
+
+I appreciate that it may be hard to write a unit test for this, but in general we only submit code changes covered by unit tests. Could you please look into writing one for this bug?
+Line:360, engines/ep/src/kvstore/magma-kvstore/magma-kvstore.cc -> I think you should be able to replace "cbCtx.ctx->highCompletedSeqno" with "cbCtx.minRollbackPrepareSeqno" which should always be lower
+
+Line:2054, engines/ep/src/kvstore/magma-kvstore/magma-kvstore.cc -> At what point in which API call does magma do this? KV drives magma compactions in 1 of 2 ways:
+
+1) Compact the entire key range with CompactKVStore by passing two nullKey Slices
+2) Compact n key ranges with CompactKVStore for each collection and then the prepare namespace
+
+In the case of 2 we probably only purge any prepare namespace items in the last phase, but does each reduced range compaction clear all checkpoints?
+
+Line:2055, engines/ep/src/kvstore/magma-kvstore/magma-kvstore.cc -> prefer "std::numeric_limits<uint64_t>::max()" to "UINT64_MAX"
+
+Line:3062, engines/ep/src/kvstore/magma-kvstore/magma-kvstore.cc -> I was under the impression that getting a disk snapshot from magma was expensive. We're doing this for every item visited during a compaction, is that not a concern?
+
+Line:3062, engines/ep/src/kvstore/magma-kvstore/magma-kvstore.cc -> can condense to "auto [status, oldestSnapshot] = " with structured bindings
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Apaar gupta
+Date: 2021-09-02 08:56:50.000000000
+Message: 
+Patch Set 14:
+
+(5 comments)
+
+About the unit test, I tried for around a day to get one working. But since most of kv's durability testing is at the KVStore class level or above, it was messy to get the hooks into magma to create checkpoints at a specific seqno such that prepares are across the checkpoint boundary and  get deterministic background compactions(explicit CompactKVstore does not affect this bug) to drop the prepares. The APIs to do these exist in magma but we will have to expose them in the KVStore api for testing purposes, would that be ok?
+Line:360, engines/ep/src/kvstore/magma-kvstore/magma-kvstore.cc -> yes it should ideally be less than or equal to, do i add some validation on the same or just replace?
+
+Line:2054, engines/ep/src/kvstore/magma-kvstore/magma-kvstore.cc -> All the explicit compaction APIs in magma create a checkpoint with the latest snapshot(for recovery) and clear all older checkpoints. If this is not done the data cleared by the compaction would be held until the checkpoints in the queue are all deleted(around 10 min). Since customers expect the compact button to clear fragmentation immediately and reduce data size we clear the checkpoints. 
+It is similar with collections where dropping a collection should result in disk space being reclaimed in a reasonable time-frame from the user perspective which would not happen unless we clear the checkpoints.
+
+Relevant code - https://github.com/couchbase/magma/blob/master/magma/db.cc#L743 and https://github.com/couchbase/magma/blob/master/magma/db.cc#L787
+
+Line:2055, engines/ep/src/kvstore/magma-kvstore/magma-kvstore.cc -> Will fix
+
+Line:3062, engines/ep/src/kvstore/magma-kvstore/magma-kvstore.cc -> It is an expensive operation. We only call this while initialising the compaction callback ie. once per compaction which should be ok.
+
+Line:3062, engines/ep/src/kvstore/magma-kvstore/magma-kvstore.cc -> I am trying to maintain consistency with the GetSnapshot APIs(https://github.com/couchbase/magma/blob/master/include/libmagma/magma.h#L211 and https://github.com/couchbase/magma/blob/master/include/libmagma/magma.h#L241) which already exist in magma.h.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2021-09-02 09:07:26.000000000
+Message: 
+Patch Set 14:
+
+(4 comments)
+
+> Patch Set 14:
+> 
+> (5 comments)
+> 
+> About the unit test, I tried for around a day to get one working. But since most of kv's durability testing is at the KVStore class level or above, it was messy to get the hooks into magma to create checkpoints at a specific seqno such that prepares are across the checkpoint boundary and  get deterministic background compactions(explicit CompactKVstore does not affect this bug) to drop the prepares. The APIs to do these exist in magma but we will have to expose them in the KVStore api for testing purposes, would that be ok?
+
+To get the prepares across the checkpoint boundaries we could set checkpoint every batch to true then we just have to consider the number of items/batches right? Do we need some other API? It would probably be useful to have a manual way to trigger implicit compactions (for testing). Richard had to work around the lack of that recently.
+Line:360, engines/ep/src/kvstore/magma-kvstore/magma-kvstore.cc -> you could add an expects assertion but I don't think that it should be necessary. I'd just replace (and maybe add a comment to this effect)
+
+Line:2054, engines/ep/src/kvstore/magma-kvstore/magma-kvstore.cc -> Ack
+
+Line:3062, engines/ep/src/kvstore/magma-kvstore/magma-kvstore.cc -> My bad, didn't spot that we just do this for the first item in an implicit compaction
+
+Line:3062, engines/ep/src/kvstore/magma-kvstore/magma-kvstore.cc -> ahh sorry, obviously not enough coffee yet!
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Apaar gupta
+Date: 2021-09-02 09:15:30.000000000
+Message: 
+Patch Set 14:
+
+I did not think of the checkpoint every batch idea. Let me try it out thanks!
+There are two ways we test implicit compactions in magma. We either use util/magma_util.h which as a CompactKVStore API, it triggers a full compact of the kvstore with the compaction context generated by magma config but this requires the Magma pointer. The other way is to dump in sufficient fragmentation and monitor via the callback. But these tests are prone to intermittent failures since it is not exactly deterministic.
+----------------------------------------------------------------------------------------------------------------------

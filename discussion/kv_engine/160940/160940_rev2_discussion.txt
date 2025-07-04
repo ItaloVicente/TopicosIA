@@ -1,0 +1,215 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-48038: Add ability to stop execution in CheckpointVisitor
+
+Here and in the following patches we'll be moving all the checkpoint
+memory-release logic from the CheckpointRemoverTask to the
+VBCBAdaptor/CheckpointVisitor fixture.
+
+While the short-term goal is to get rid of some complexity in the
+CheckpointRemoverTask, our medium-term goal also to remove any
+periodic scheduling of the task for avoiding the current "busy
+polling" model that keeps CPUs busy for nothing. Note that the
+CheckpointRemoverTask is just one among many tasks that follow the same
+model.
+
+So in the short-term:
+- I move most of the logic that actually releases checkpoint-memory from
+  the CheckpointRemoverTask to the CheckpointVisitor
+- Between CheckpointRemoverTask and VBCBAdaptor/CheckpointVisitor we
+  keep the latter beacuse that already implements the
+  PausableVBucketVisitor execution-yield mechanism that we want to
+  maintain
+- For now we cannot remove completely the CheckpointRemoverTask as we
+  need the periodic scheduling until we implement the proper
+  (event-driven) trigger logic for the CheckpointVisitor.
+- So for now we'll just get to a point where the CheckpointRemoverTask
+  will be responsible only for (1) running periodically and (2)
+  launching a VBCBAdaptor/CheckpointVisitor run.
+
+In this patch I start with adding the logic that allows the
+CheckpointVisitor to stop its execution based on how much memory it has
+to release. For that, I add the CheckpointVisitor::memToRelease
+member that will be updated at every VBucket visit. The Visitor will
+stop when memToRelease=0.
+The behaviour of the Visitor doesn't change yet in this patch as
+memToReleased is initialized but never decremented.
+
+Change-Id: I9f1a46f04acf5960e4d28a72b457331cc05e8188
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2021-09-07 09:54:20.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-09-07 10:58:11.000000000
+Message: 
+Patch Set 2: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/39455/ : FAILURE
+
+Failure of GoogleTest "DCPBackfillDiskTest.ScanDiskError":
+
+<pre>
+[ RUN      ] DCPBackfillDiskTest.ScanDiskError
+unknown file: error: SEH exception with code 0xc000001d thrown in the test body.
+[  FAILED  ] DCPBackfillDiskTest.ScanDiskError (22 ms)
+DCPBackfillDiskTest.ScanDiskError
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/39455/ )
+
+Timeout of a CTest test 136/407 Test #130: ep-engine_ep_unit_tests.MagmaKVStoreRollbackTest ..............................................................................} ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/39455/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/10814/ : FAILURE
+
+<p>clang-format suggested the following changes:
+
+<pre>
+cat <<"EOF" | patch -p1
+diff --git a/engines/ep/src/kvstore/magma-kvstore/shared/magma-kvstore_magma_db_stats.cc b/engines/ep/src/kvstore/magma-kvstore/shared/magma-kvstore_magma_db_stats.cc
+index 8985014ad..94df590a7 100644
+--- a/engines/ep/src/kvstore/magma-kvstore/shared/magma-kvstore_magma_db_stats.cc
++++ b/engines/ep/src/kvstore/magma-kvstore/shared/magma-kvstore_magma_db_stats.cc
+@@ -21,7 +21,7 @@ void to_json(nlohmann::json&amp; json, const MagmaDbStats&amp; dbStats) {
+ void from_json(const nlohmann::json&amp; j, MagmaDbStats&amp; dbStats) {
+     dbStats.docCount = std::stoull(j.at(&quot;docCount&quot;).get&lt;std::string&gt;());
+     dbStats.purgeSeqno.reset(
+-        std::stoull(j.at(&quot;purgeSeqno&quot;).get&lt;std::string&gt;()));
++            std::stoull(j.at(&quot;purgeSeqno&quot;).get&lt;std::string&gt;()));
+ }
+ 
+ void MagmaDbStats::Merge(const UserStats&amp; other) {
+@@ -53,15 +53,15 @@ magma::Status MagmaDbStats::Unmarshal(const std::string&amp; encoded) {
+         j = nlohmann::json::parse(encoded);
+     } catch (const nlohmann::json::exception&amp; e) {
+         throw std::logic_error(&quot;MagmaDbStats::Unmarshal cannot decode json:&quot; +
+-            encoded + &quot; &quot; + e.what());
++                               encoded + &quot; &quot; + e.what());
+     }
+ 
+     try {
+         reset(j);
+     } catch (const nlohmann::json::exception&amp; e) {
+         throw std::logic_error(
+-            &quot;MagmaDbStats::Unmarshal cannot construct MagmaDbStats from &quot;
+-            &quot;json:&quot; +
++                &quot;MagmaDbStats::Unmarshal cannot construct MagmaDbStats from &quot;
++                &quot;json:&quot; +
+                 encoded + &quot; &quot; + e.what());
+     }
+ 
+diff --git a/engines/ep/src/kvstore/magma-kvstore/shared/magma-kvstore_magma_db_stats.h b/engines/ep/src/kvstore/magma-kvstore/shared/magma-kvstore_magma_db_stats.h
+index a50c77005..ede071157 100644
+--- a/engines/ep/src/kvstore/magma-kvstore/shared/magma-kvstore_magma_db_stats.h
++++ b/engines/ep/src/kvstore/magma-kvstore/shared/magma-kvstore_magma_db_stats.h
+@@ -28,8 +28,7 @@ class MagmaDbStats : public magma::UserStats {
+ public:
+     explicit MagmaDbStats() = default;
+ 
+-    MagmaDbStats(int64_t docCount,
+-                 uint64_t purgeSeqno) {
++    MagmaDbStats(int64_t docCount, uint64_t purgeSeqno) {
+         reset(docCount, purgeSeqno);
+     }
+ 
+
+EOF
+</pre> ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/10814/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/21824/ : FAILURE
+
+One of more core files found at the end of the build. Data for post-mortem saved to archived_core_dumps.tar.bz2 under "Build Artifacts". ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/21824/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/33613/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/12028/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/12788/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/14314/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/13878/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/13641/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/1691/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/1671/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-09-07 13:43:04.000000000
+Message: 
+Patch Set 2:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/39455/ : FAILURE
+
+Failure of GoogleTest "DCPBackfillDiskTest.ScanDiskError":
+
+<pre>
+[ RUN      ] DCPBackfillDiskTest.ScanDiskError
+unknown file: error: SEH exception with code 0xc000001d thrown in the test body.
+[  FAILED  ] DCPBackfillDiskTest.ScanDiskError (22 ms)
+DCPBackfillDiskTest.ScanDiskError
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/39455/ )
+
+Timeout of a CTest test 136/407 Test #130: ep-engine_ep_unit_tests.MagmaKVStoreRollbackTest ..............................................................................} ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/39455/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/21824/ : FAILURE
+
+One of more core files found at the end of the build. Data for post-mortem saved to archived_core_dumps.tar.bz2 under "Build Artifacts". ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/21824/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/33613/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/12028/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/12788/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/14314/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/13878/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/13641/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/1691/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/1671/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/10839/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-09-07 13:50:33.000000000
+Message: 
+Patch Set 2:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/21850/ : ABORTED
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/33613/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/12028/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/10839/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/12788/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/14314/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/13878/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/13641/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/1691/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/1671/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

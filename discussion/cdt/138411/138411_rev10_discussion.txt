@@ -1,0 +1,158 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 545021 - Implement noexcept operator
+
+- Adds getNoexceptSpecifier() to ICPPFunctionType, returning the
+evaluation for the noexcept specifier.
+- Adds isNoexcept() to ICPPEvaluation, which returns the result of
+applying the noexcept operator to the evaluation.
+- Empty throw() specifier is treated as noexcept(true).
+- Fixes EvalTypeID.isConstantExpression() for conversions.
+
+Change-Id: I4c6418aea21bb258693b33d956bc3745918f3759
+Signed-off-by: Hannes Vogt <hannes@havogt.de>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Hannes Vogt
+Date: 2019-04-20 19:29:20.000000000
+Message: 
+Uploaded patch set 10.
+----------------------------------------------------------------------------------------------------------------------
+Author: CDT Bot
+Date: 2019-04-20 19:29:32.000000000
+Message: 
+Patch Set 10:
+
+Build Started https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-other-pipeline/207/ (2/3)
+----------------------------------------------------------------------------------------------------------------------
+Author: CDT Bot
+Date: 2019-04-20 19:29:32.000000000
+Message: 
+Patch Set 10:
+
+Build Started https://ci.eclipse.org/cdt/job/cdt-verify-code-cleanliness-pipeline/209/ (1/3)
+----------------------------------------------------------------------------------------------------------------------
+Author: CDT Bot
+Date: 2019-04-20 19:29:33.000000000
+Message: 
+Patch Set 10:
+
+Build Started https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-ui-only-pipeline/204/ (3/3)
+----------------------------------------------------------------------------------------------------------------------
+Author: Hannes Vogt
+Date: 2019-04-20 19:40:21.000000000
+Message: 
+Patch Set 10:
+
+(4 comments)
+Line:168, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/CPPASTFunctionDeclarator.java -> See TODO
+
+Line:521, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/semantics/EvalFunctionCall.java -> I think this null check shouldn't be needed, but with the code snippet from the original bug report I get a NPE otherwise. My guess is that we run into another problem, but I didn't spend time to investigate.
+
+Line:253, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/semantics/EvalTypeId.java -> What's the reason why conversion are not created when the evaluation is constructed?
+
+Line:496, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/semantics/EvalTypeId.java -> Can we run into this else-block with something else than a conversion?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: CDT Bot
+Date: 2019-04-20 19:56:40.000000000
+Message: 
+Patch Set 10: Verified-1
+
+Build Unstable 
+
+https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-other-pipeline/207/ : UNSTABLE
+
+https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-ui-only-pipeline/204/ : UNSTABLE
+
+https://ci.eclipse.org/cdt/job/cdt-verify-code-cleanliness-pipeline/209/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Nathan Ridge
+Date: 2019-04-21 05:41:46.000000000
+Message: 
+Patch Set 10:
+
+(5 comments)
+Line:168, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/CPPASTFunctionDeclarator.java -> I don't think we need to invent an AST node, we can just do it at the evaluation level. 
+
+We can add ICPPASTFunctionDeclarator.getNoexceptEvaluation(), whose implementation does:
+
+  if (getNoexceptionExpression() != null) {
+    return getNoexceptionExpression().getEvaluation();
+  }
+  if (getExceptionSpecification() == IASTTypeId.EMPTY_TYPEID_ARRAY) {
+    return /* EvalFixed for "true" */;
+  }
+  return null;
+
+and then use getNoexceptionEvaluation() instead of getNoexceptExpression().getEvaluation() when creating function types.
+
+Line:521, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/semantics/EvalFunctionCall.java -> You could get null if you have invalid code, where a call expression has a variable of non-callable type in place of the function, or if resolution of the call operator fails, etc.
+
+Line:253, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/semantics/EvalTypeId.java -> Do I understand correctly, that the added code is intended to handle cases like this:
+
+struct S {
+  constexpr operator int() { return 42; }
+};
+
+constexpr int val = int(S());
+
+?
+
+If so, I think not handling it may be an oversight. We should probably add support for this to getValue() as well. (We can do that in a separate patch.)
+
+Line:496, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/semantics/EvalTypeId.java -> * Invalid code can probably lead to the constructor being null, or a ProblemBinding other than CPPFunctionProblem.
+* You could have something like "int(5)", which involves neither a constructor nor a conversion function.
+
+In any case, we need to check the noexcept-ness of the arguments.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Nathan Ridge
+Date: 2019-04-21 21:03:02.000000000
+Message: 
+Patch Set 10:
+
+(3 comments)
+Line:253, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/semantics/EvalTypeId.java -> Not sure what you mean by opposite. "int(S{})" and and "static_cast<int>(S{})" are basically the same thing written different ways (they both end up calling S.operator int()).
+
+Do you have a suggestion for a common place to create the conversion evaluations?
+
+Line:496, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/semantics/EvalTypeId.java -> What is it that you're trying to distinguish between? The way it was written, e.g. static_cast<T>(x) vs. T(x)? Or whether we actually end up calling a conversion operator rather than a constructor?
+
+Note that the latter cannot be distinguished based on syntax alone. In general, given two class types A and B, "A{B{}}" could call either a conversion operator or a constructor. It could even be ambiguous between both.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Hannes Vogt
+Date: 2019-04-29 07:04:27.000000000
+Message: 
+Patch Set 10:
+
+(2 comments)
+Line:253, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/semantics/EvalTypeId.java -> Sorry, by opposite I meant, my fix handles the non-constexpr case. Before my change, all conversions were considered to be constant expressions.
+I propose we discuss better handling of conversion in bug 546616. (My naive understanding would be that a maybeApplyConversion()-like method could be called whenever a EvalTypeId is created. But I didn't look in detail.)
+
+Line:496, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/semantics/EvalTypeId.java -> The second, if it isn't a constructor I assume it is a conversion (or at least that "maybe" it is a conversion). Probably there is an implicit assumption here that `!(getConstructor() instanceof CPPFunction)` is equivalent to `getConstructor() == null`.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Hannes Vogt
+Date: 2019-04-21 20:01:52.000000000
+MISMATCHED INLINE COMMENT
+Line:253, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/semantics/EvalTypeId.java -> It is actually to handle the opposite:
+
+  struct S {
+    operator int() { return 42; }
+  };
+
+  constexpr bool is_noexcept = noexcept(static_cast<int>(S{}));
+
+Without the change is_noexcept would be true (but should be false), as the EvalFunctionCall for the conversion operator is only created in the maybeApplyConversion(). And as you pointed out, there are probably other places were conversion is not properly checked. Therefore, I was wondering why the evaluations for conversions are not created in any case, but have to be created case by case via maybeApplyConversion.
+----------------------------------------------------------------------------------------------------------------------
+Author: Hannes Vogt
+Date: 2019-04-21 20:01:52.000000000
+MISMATCHED INLINE COMMENT
+Line:496, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/semantics/EvalTypeId.java -> - Added check for arguments.
+- Only assume that it is a conversion if it has only one argument. As far as I can see there is no better way to check that the EvalTypeID was created for a conversion operation.
+----------------------------------------------------------------------------------------------------------------------

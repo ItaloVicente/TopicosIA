@@ -1,0 +1,113 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 379684 Support for User Defined Literals
+
+This patch adds preliminary support for C++11 user defined litrals:
+* Syntax support
+* Type deduction in expressions
+* Template literal operators
+* String literal concatenation
+
+I made quite a few changes in CPPASTLiteralExpression so that it more
+closely follows the spec when parsing numbers. And I'd like some
+feedback on the changes I made to CPPSemantics with regards to 
+template literal operators; there may still yet be a better way to do
+it.
+
+Change-Id: I8a9760036a2c8428295f0e1ffb4b519a0a2577c9
+Signed-off-by: Richard Eames <eclipse@naddiseo.ca>
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: CI Bot
+Date: 2015-01-06 00:03:28.000000000
+Message: 
+Patch Set 6:
+
+Build Started https://hudson.eclipse.org/cdt/job/cdt-verify/1865/
+----------------------------------------------------------------------------------------------------------------------
+Author: Sergey Prigogin
+Date: 2015-01-06 00:05:08.000000000
+Message: 
+Patch Set 6:
+
+The patch breaks the following code:
+#define MACRO "macro"
+void f(const char* s);
+void test() {
+  f("aaa"MACRO);
+}
+
+I've added AST2CPPTests.testStringConcatenationWithMacro to catch that breakage.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2015-01-06 00:48:06.000000000
+Message: 
+Patch Set 6: Code-Review-1
+
+Build Unstable 
+
+https://hudson.eclipse.org/cdt/job/cdt-verify/1865/ : UNSTABLE
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard Eames
+Date: 2015-01-18 05:01:27.000000000
+Message: 
+Patch Set 6:
+
+I may need further guidance to solve that macro problem. If I run it through g++, it issues a warning saying that there needs to be an intervening space between the string and the macro. Should CDT issue a warning too? If so, how would I go about seeing if the macro is defined inside Lexer? 
+
+As it stands, the argument to `f()` in the test receives `IProblemBinding.SEMANTIC_INVALID_TYPE`, which as far as I can tell is correct, but I don't know how to indicate to the user that the suffix has no corresponding operator.
+
+I have some time over the next few days to look into this, although I have the flu at the moment, so I may not be doing my best work.
+----------------------------------------------------------------------------------------------------------------------
+Author: Sergey Prigogin
+Date: 2015-01-18 08:13:37.000000000
+Message: 
+Patch Set 6:
+
+Hmm. Clang and our local variant of g++ 4.9 do not produce any warning. It's possible that the warning is disabled by some global setting. Since g++ still compiles the code even if it issues a warning, CDT has to be able to parse it too.
+
+According to my reading of C++11 standard, "aaa"MACRO should be treated as a preprocessor token, but that would mean that C++11 is not backward compatible with C++98. Possibly we have to keep two alternative token representations '"aaa"MACRO' and '"aaa"', 'MACRO' and chose between them after macro substitution.
+
+I may be able to consult a C++ expert in a couple of days.
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard Eames
+Date: 2015-01-18 18:13:06.000000000
+Message: 
+Patch Set 6:
+
+That was how I understood the spec too. My patch currently assumes c++11 parsing if the scanner has "fSupportsUserDefinedLiterals" set to true. 
+
+If we go the route of having two representations of string/char UDLs, my plan would be to modify `fetchToken` in CPreprocessor to do something like:
+
+if nextToken == tUSER_DEFINED_STRING_LITERAL:
+    suffix = StringType.getUserDefinedLiteralSuffix(nextToken)
+    type = nextToken.getType()
+    if !type and isMacro(suffix):
+        nextToken = nextToken.withoutSuffix()
+        tokenList.push(suffix)
+
+An alternate way would be introspecting what standard we're using. My understanding of CDT is that it does really "know" what standard it's parsing for. Perhaps this could be changed, and some kind of feature table could be added depending on what __cplusplus is set to. eg, if it's 201104, then CDT enables all c++11 features, if it's lower, then it's set to c++98. If this is a change to be considered, my udl patch may have to wait.
+----------------------------------------------------------------------------------------------------------------------
+Author: Sergey Prigogin
+Date: 2015-01-18 20:33:51.000000000
+Message: 
+Patch Set 6:
+
+> if nextToken == tUSER_DEFINED_STRING_LITERAL:
+>    suffix = StringType.getUserDefinedLiteralSuffix(nextToken)
+>    type = nextToken.getType()
+>    if !type and isMacro(suffix):
+>        nextToken = nextToken.withoutSuffix()
+>        tokenList.push(suffix)
+
+This looks pretty reasonable. The value of __cplusplus is available to the parser, but it doesn't seem to make a lot of difference in this case because "aaa"MACRO must continue to work with C++11 features enabled.
+----------------------------------------------------------------------------------------------------------------------
+Author: Sergey Prigogin
+Date: 2015-01-18 20:46:03.000000000
+Message: 
+Patch Set 6:
+
+See also https://gcc.gnu.org/ml/gcc-patches/2013-06/txt5v2l_mgAu2.txt
+----------------------------------------------------------------------------------------------------------------------

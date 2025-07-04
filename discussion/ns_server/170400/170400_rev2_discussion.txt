@@ -1,0 +1,153 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-50896: Include user identity in get_keys request to memcached
+
+Change-Id: I57bddc55df57db45b47c21bee228195d36474e62
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Navdeep S Boparai
+Date: 2022-02-09 20:18:51.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-02-09 20:18:59.000000000
+Message: 
+Patch Set 2:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-test/29497/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-02-09 20:24:47.000000000
+Message: 
+Patch Set 2: Well-Formed+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/ns-server-test/29497/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Navdeep S Boparai
+Date: 2022-02-09 20:42:52.000000000
+Message: 
+Patch Set 2: Verified+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2022-02-10 17:13:28.000000000
+Message: 
+Patch Set 2:
+
+(6 comments)
+Line:344, src/mc_binary.erl -> This can be replaced to be called as mc_binary:encode(req, Header, ...) .. that way you wouldn't need the get_req_magic/1 call. mc_binary:encode already does that if the first argument to it is 'req'.
+
+Line:360, src/mc_binary.erl -> Same comment as above.
+
+Line:130, src/menelaus_web_crud.erl -> I think it'll reduce the amount of redundant code (downstream from this call) if you set "Identity" to undefined here based on the fact if Identity is [] or not.
+
+Something like: 
+
+case maybe_add_identity(Req) ->
+    [] -> undefined; 
+    [I] -> I
+end
+
+That way you not have to deal with unpacking the identity from the list in the downstream calls.
+
+Line:1551, src/ns_memcached.erl -> If we pass in "Identity" as 'undefined' from the menelaus_web_crud .. we wouldn't need do_get_keys_call/4.
+
+you could just do:
+do_call({server(Bucket), Node}, Bucket, {get_keys, VBuckets,
+                                                     Params, Identity}, infinity);
+
+Line:649, src/ns_memcached.erl -> If Identity is passed as undefined .. this extra function clause wouldn't be necessary.
+
+Line:665, src/ns_memcached.erl -> You would also have to change the function clause signature for 'get_keys' in assign_queue (at line 380) .. I know it is a bit odd; but if you follow the code starting at do_get_keys -> do_call (read inside do_call it eventually calls queue_call which call assign_queue), you'll be able to see why that change is necessary.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2022-02-10 17:49:08.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:649, src/ns_memcached.erl -> Small correction here - you would need "do_handle_call" for both {get_keys, Vbuckets, Params} and {get_keys, Vbuckets, Params, Identity} to be backward compatible for calls made from nodes which are pre-Neo to a Neo node.
+
+I would suggest the following: 
+
+do_handle_call({get_keys, VBuckets, Params}, From, State) ->
+    do_handle_call({get_keys, VBuckets, Params, undefined}, From,
+                   State);
+do_handle_call({get_keys, VBuckets, Params, Identity}, _From,
+    #state{worker_features = Features} = State) ->
+
+etc ...
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2022-02-10 19:40:37.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:332, src/mc_binary.erl -> This can be written more idiomatically (and shorter):
+get_req_magic(undefined) -> ?REQ_MAGIC;
+get_req_magic(_) -> ?ALT_CLIENT_REQ_MAGIC.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2022-02-10 19:45:27.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:344, src/mc_binary.erl -> I second Hareen's comment
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2022-02-10 20:54:25.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:1551, src/ns_memcached.erl -> Sorry another correction here: I see why you needed do_get_keys_call/4 -> it helps in the case when a Neo node makes a call to node whose version is lesser than Neo.
+
+You could case match on Identity and make the correct call; i.e when Identity is 'undefined' make the {get_keys, VBuckets, Params} call and when there is a valid Identity, make the {get_keys, VBuckets, Params, Identity} call.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Navdeep S Boparai
+Date: 2022-02-10 23:06:41.000000000
+MISMATCHED INLINE COMMENT
+Line:332, src/mc_binary.erl -> Good point, thanks!
+----------------------------------------------------------------------------------------------------------------------
+Author: Navdeep S Boparai
+Date: 2022-02-10 23:06:41.000000000
+MISMATCHED INLINE COMMENT
+Line:344, src/mc_binary.erl -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Navdeep S Boparai
+Date: 2022-02-10 23:06:41.000000000
+MISMATCHED INLINE COMMENT
+Line:360, src/mc_binary.erl -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Navdeep S Boparai
+Date: 2022-02-10 23:06:41.000000000
+MISMATCHED INLINE COMMENT
+Line:130, src/menelaus_web_crud.erl -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Navdeep S Boparai
+Date: 2022-02-10 23:06:41.000000000
+MISMATCHED INLINE COMMENT
+Line:1551, src/ns_memcached.erl -> Ack
+----------------------------------------------------------------------------------------------------------------------
+Author: Navdeep S Boparai
+Date: 2022-02-10 23:06:41.000000000
+MISMATCHED INLINE COMMENT
+Line:649, src/ns_memcached.erl -> Left as is per discussion with Hareen. The existing way supports backwards compat, just added comment to existing call.
+----------------------------------------------------------------------------------------------------------------------
+Author: Navdeep S Boparai
+Date: 2022-02-10 23:06:41.000000000
+MISMATCHED INLINE COMMENT
+Line:665, src/ns_memcached.erl -> Good point, actually looks like a new header needs to be added all together instead that includes identity. The existing one should be left alone to support mixed mode scenario where non neo node is trying to do assign_queue on neo node. I have made that change.
+----------------------------------------------------------------------------------------------------------------------

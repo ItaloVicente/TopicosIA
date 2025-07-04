@@ -1,0 +1,114 @@
+======================================================================================================================
+DESCRIPTION:
+
+Fix core.autocrlf for non-normalized index
+
+With text=auto or core.autocrlf=true, git does not normalize upon
+check-in if the file in the index contains already CR/LFs. The
+documentation says: "When text is set to "auto", the path is
+marked for automatic end-of-line conversion. If Git decides that
+the content is text, its line endings are converted to LF on
+checkin. When the file has been committed with CRLF, no conversion
+is done."[1]
+
+Implement the last bit as in canonical git: check the blob in the
+index for CR/LFs. For very large files, we check only the first 8000
+bytes, like RawText.isBinary() and AutoLFInputStream do.
+
+In Auto(CR)LFInputStream, ensure that the buffer is filled as much as
+possible for the isBinary() check.
+
+Regarding these content checks, there are a number of inconsistencies:
+
+* Canonical git considers files containing lone CRs as binary.
+* RawText checks the first 8000 bytes.
+* Auto(CR)LFInputStream checks the first 8096 (not 8192!) bytes.
+
+None of these are changed with this commit. It appears that canonical
+git will check the whole blob, not just the first 8k bytes. Also
+note: the check for CR/LF text won't work with LFS (neither in JGit
+nor in git) since the blob data is not run through the smudge filter.
+C.f. [2].
+
+Two tests in AddCommandTest actually tested that normalization was
+done even if the file was already committed with CR/LF.These tests
+had to be adapted. I find the git documentation unclear about the
+case where core.autocrlf=input, but from [3] it looks as if this
+non-normalization also applies in this case.
+
+[1] https://git-scm.com/docs/gitattributes
+[2] https://github.com/git/git/blob/00da9b2/convert.c#L225
+[3] https://github.com/git/git/blob/00da9b2/convert.c#L529
+
+Bug: 470643
+Change-Id: Ie7310539fbe6c737d78b1dcc29e34735d4616b88
+Signed-off-by: Thomas Wolf <thomas.wolf@paranor.ch>
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Thomas Wolf
+Date: 2018-08-12 19:54:04.000000000
+Message: 
+Uploaded patch set 4.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-08-12 19:54:14.000000000
+Message: 
+Patch Set 4:
+
+Build Started https://ci.eclipse.org/jgit/job/jgit.gerrit/13624/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-08-12 20:07:40.000000000
+Message: 
+Patch Set 4: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/jgit.gerrit/13624/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Michael Keppler
+Date: 2018-09-02 17:36:30.000000000
+Message: 
+Patch Set 4: Code-Review-1
+
+(5 comments)
+Line:22, /COMMIT_MSG -> Just out of curiosity: Have you ever seen such behaviour of a stream? Although this is perfectly valid (according to the doc), I would just not expect it. If more bytes are available for the second, third... call, why would the implementation not deliver it in the first call?
+
+To be very clear: I'm definitely not critizing your implementation, I'm just really curious.
+
+Line:625, org.eclipse.jgit.test/tst/org/eclipse/jgit/api/CommitCommandTest.java -> Many other tests in this class use try-with, but it seems generally mixed. I cannot judge this, so would you recommend removing it everywhere, adding it everywhere, or something different based on some other criteria?
+
+Line:347, org.eclipse.jgit/src/org/eclipse/jgit/diff/RawText.java -> The documentation says that n==0 can only happen if the buffer length is 0. Nevertheless, we could strengthen ourself against an implementation error in a sub class by testing n<=0 here (and in the other 2 similar loops). If such an error existed in any stream sub class, our code would be an endless loop.
+
+Do you consider such defensive programming useful, or would you simply rely on the Javadoc of the stream class?
+
+Line:1108, org.eclipse.jgit/src/org/eclipse/jgit/treewalk/WorkingTreeIterator.java -> This is not symmetric to the call below. I noticed the related field check in the fillBuffer() method of only one of both streams during the review of your change (switch between file 7 and file 8 of the change repeatedly, and you will notice). Again I have no idea whether that is relevant...
+
+Line:1510, org.eclipse.jgit/src/org/eclipse/jgit/treewalk/WorkingTreeIterator.java -> Did you forget normalizing the Java name after checking the C sources, maybe?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2018-09-02 18:54:23.000000000
+Message: 
+Patch Set 4:
+
+(5 comments)
+Line:22, /COMMIT_MSG -> For any buffered stream it would be OK to return the current buffered contents first, and only on the next call go fetch more (or return -1 for EOF). May in particular happen with network streams, but could just as well happen with file streams.
+
+Line:625, org.eclipse.jgit.test/tst/org/eclipse/jgit/api/CommitCommandTest.java -> Yes, I had noticed this inconsistency, too. Sitting on the fence regarding this. Git.wrap is a little less to write... but perhaps using a try-with-resource would be cleaner and more future-proof. Honestly said, I don't know why Git.wrap() does not produce a warning about a potentially missing close().
+
+Done.
+
+Line:347, org.eclipse.jgit/src/org/eclipse/jgit/diff/RawText.java -> We generally rely on n == -1 for EOF detection, also in other places in JGit. See for instance isBinary (line 276 above).
+
+Line:1108, org.eclipse.jgit/src/org/eclipse/jgit/treewalk/WorkingTreeIterator.java -> Yes, AutoLFInputStream and AutoCRLFInputStream are not symmetric. But that appears correct and unrelated.
+
+Line:1510, org.eclipse.jgit/src/org/eclipse/jgit/treewalk/WorkingTreeIterator.java -> Yeah, been looking at too much C code. Done.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2019-02-24 22:12:02.000000000
+MISMATCHED INLINE COMMENT
+Line:1510, org.eclipse.jgit/src/org/eclipse/jgit/treewalk/WorkingTreeIterator.java -> style nit: use camel case instead of underscores
+----------------------------------------------------------------------------------------------------------------------

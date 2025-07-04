@@ -1,0 +1,210 @@
+======================================================================================================================
+DESCRIPTION:
+
+WIP MB-37739: Add magma UserStats and refactor compaction
+
+Magma UserStats are a way to keep track of specific stats that get
+updated during compaction but we can't update vbstate because compaction
+runs in a different thread than the BG Writer thread. In the wrapper
+code, we're using MagmaDbInfo as the UserStats. It containss:
+
+    docCount - official document count
+    highSeqno - highest seqno
+    purgeSeqno - highest seqno purged
+    onDiskPrepares - # of prepared documents
+
+This replaces MagmaInfo.
+
+Change-Id: I255f8dadf7707c4ce04c01816d6d1e2e7722509d
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Scott Lashley
+Date: 2020-04-13 23:12:23.000000000
+Message: 
+Uploaded patch set 10: Patch Set 9 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-04-13 23:48:59.000000000
+Message: 
+Patch Set 10: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/1679/ : FAILURE
+
+<p>clang-tidy suggested the following changes:
+<pre>
+
+cat &lt;&lt;&quot;EOF&quot; | patch -p1
+diff --git a/engines/ep/src/magma-kvstore/magma-kvstore.cc b/engines/ep/src/magma-kvstore/magma-kvstore.cc
+index f557f50..1e3d8bd 100644
+--- a/engines/ep/src/magma-kvstore/magma-kvstore.cc
++++ b/engines/ep/src/magma-kvstore/magma-kvstore.cc
+@@ -35,6 +35,7 @@
+ #include &lt;string.h&gt;
+ #include &lt;algorithm&gt;
+ #include &lt;limits&gt;
++#include &lt;utility&gt;
+ 
+ class Snapshot;
+ 
+@@ -229,7 +230,7 @@ MagmaKVStore::MagmaCompactionCB::MagmaCompactionCB(
+         std::function&lt;std::unique_ptr&lt;compaction_ctx&gt;(Vbid)&gt; makeCompactionCtx,
+         compaction_ctx* ctx)
+     : magmaKVStore(magmaKVStore),
+-      makeCompactionCtx(makeCompactionCtx),
++      makeCompactionCtx(std::move(makeCompactionCtx)),
+       ctx(ctx) {
+     magmaKVStore.logger-&gt;TRACE(&quot;MagmaCompactionCB constructor&quot;);
+ }
+diff --git a/engines/ep/src/magma-kvstore/magma-kvstore.h b/engines/ep/src/magma-kvstore/magma-kvstore.h
+index 93a0b24..bebb919 100644
+--- a/engines/ep/src/magma-kvstore/magma-kvstore.h
++++ b/engines/ep/src/magma-kvstore/magma-kvstore.h
+@@ -56,8 +56,7 @@ struct vbucket_state;
+  */
+ class MagmaDbInfo : public magma::UserStats {
+ public:
+-    explicit MagmaDbInfo() {
+-    }
++    explicit MagmaDbInfo() = default;
+     MagmaDbInfo(MagmaDbInfo&amp;&amp; other)
+         : docCount(other.docCount), onDiskPrepares(other.onDiskPrepares) {
+         highSeqno.reset(other.highSeqno);
+@@ -175,7 +174,7 @@ public:
+ 
+     class MagmaLocalDelReq : public MagmaLocalReq {
+     public:
+-        MagmaLocalDelReq(std::string key) : key(std::move(key)) {
++        explicit MagmaLocalDelReq(std::string key) : key(std::move(key)) {
+         }
+ 
+         std::string key;
+@@ -183,7 +182,7 @@ public:
+ 
+     class MagmaDbInfoReq : public MagmaLocalReq {
+     public:
+-        MagmaDbInfoReq(MagmaDbInfo&amp; dbInfo);
++        explicit MagmaDbInfoReq(MagmaDbInfo&amp; dbInfo);
+ 
+         MagmaDbInfo dbInfo;
+     };
+EOF
+
+</pre> ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/1679/ )
+
+clang-tidy found the following problems:
+
+<pre>
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy/kv_engine/engines/ep/src/magma-kvstore/magma-kvstore.cc:229:9: warning: pass by value and use std::move [modernize-pass-by-value]
+        std::function<std::unique_ptr<compaction_ctx>(Vbid)> makeCompactionCtx,
+        ^
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy/kv_engine/engines/ep/src/magma-kvstore/magma-kvstore.cc:38:1: note: FIX-IT applied suggested code changes
+^
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy/kv_engine/engines/ep/src/magma-kvstore/magma-kvstore.cc:232:25: note: FIX-IT applied suggested code changes
+      makeCompactionCtx(makeCompactionCtx),
+                        ^
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy/kv_engine/engines/ep/src/magma-kvstore/magma-kvstore.cc:232:42: note: FIX-IT applied suggested code changes
+      makeCompactionCtx(makeCompactionCtx),
+                                         ^
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy/kv_engine/engines/ep/src/magma-kvstore/magma-kvstore.h:59:14: warning: use "= default" to define a trivial default constructor [modernize-use-equals-default]
+    explicit MagmaDbInfo() {
+             ^             ~
+                           = default;
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy/kv_engine/engines/ep/src/magma-kvstore/magma-kvstore.h:59:28: note: FIX-IT applied suggested code changes
+    explicit MagmaDbInfo() {
+                           ^
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy/kv_engine/engines/ep/src/magma-kvstore/magma-kvstore.h:178:9: warning: single-argument constructors must be marked explicit to avoid unintentional implicit conversions [google-explicit-constructor]
+        MagmaLocalDelReq(std::string key) : key(std::move(key)) {
+        ^
+        explicit 
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy/kv_engine/engines/ep/src/magma-kvstore/magma-kvstore.h:178:9: note: FIX-IT applied suggested code changes
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy/kv_engine/engines/ep/src/magma-kvstore/magma-kvstore.h:186:9: warning: single-argument constructors must be marked explicit to avoid unintentional implicit conversions [google-explicit-constructor]
+        MagmaDbInfoReq(MagmaDbInfo& dbInfo);
+        ^
+        explicit 
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy/kv_engine/engines/ep/src/magma-kvstore/magma-kvstore.h:186:9: note: FIX-IT applied suggested code changes
+clang-tidy suggested the following changes:
+
+cat &lt;&lt;&quot;EOF&quot; | patch -p1
+diff --git a/engines/ep/src/magma-kvstore/magma-kvstore.cc b/engines/ep/src/magma-kvstore/magma-kvstore.cc
+index f557f50..1e3d8bd 100644
+--- a/engines/ep/src/magma-kvstore/magma-kvstore.cc
++++ b/engines/ep/src/magma-kvstore/magma-kvstore.cc
+@@ -35,6 +35,7 @@
+ #include &lt;string.h&gt;
+ #include &lt;algorithm&gt;
+ #include &lt;limits&gt;
++#include &lt;utility&gt;
+ 
+ class Snapshot;
+ 
+@@ -229,7 +230,7 @@ MagmaKVStore::MagmaCompactionCB::MagmaCompactionCB(
+         std::function&lt;std::unique_ptr&lt;compaction_ctx&gt;(Vbid)&gt; makeCompactionCtx,
+         compaction_ctx* ctx)
+     : magmaKVStore(magmaKVStore),
+-      makeCompactionCtx(makeCompactionCtx),
++      makeCompactionCtx(std::move(makeCompactionCtx)),
+       ctx(ctx) {
+     magmaKVStore.logger-&gt;TRACE(&quot;MagmaCompactionCB constructor&quot;);
+ }
+diff --git a/engines/ep/src/magma-kvstore/magma-kvstore.h b/engines/ep/src/magma-kvstore/magma-kvstore.h
+index 93a0b24..bebb919 100644
+--- a/engines/ep/src/magma-kvstore/magma-kvstore.h
++++ b/engines/ep/src/magma-kvstore/magma-kvstore.h
+@@ -56,8 +56,7 @@ struct vbucket_state;
+  */
+ class MagmaDbInfo : public magma::UserStats {
+ public:
+-    explicit MagmaDbInfo() {
+-    }
++    explicit MagmaDbInfo() = default;
+     MagmaDbInfo(MagmaDbInfo&amp;&amp; other)
+         : docCount(other.docCount), onDiskPrepares(other.onDiskPrepares) {
+         highSeqno.reset(other.highSeqno);
+@@ -175,7 +174,7 @@ public:
+ 
+     class MagmaLocalDelReq : public MagmaLocalReq {
+     public:
+-        MagmaLocalDelReq(std::string key) : key(std::move(key)) {
++        explicit MagmaLocalDelReq(std::string key) : key(std::move(key)) {
+         }
+ 
+         std::string key;
+@@ -183,7 +182,7 @@ public:
+ 
+     class MagmaDbInfoReq : public MagmaLocalReq {
+     public:
+-        MagmaDbInfoReq(MagmaDbInfo&amp; dbInfo);
++        explicit MagmaDbInfoReq(MagmaDbInfo&amp; dbInfo);
+ 
+         MagmaDbInfo dbInfo;
+     };
+EOF
+
+</pre> ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/1679/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/3160/ : FAILURE
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/10958/ : FAILURE
+
+Failure of a CTest test [2020-04-13T23:22:58.991Z] 231/384 Test #232: ep_testsuite_basic.full_eviction.magma ......................................................................Child aborted ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/10958/ )
+
+AddressSanitizer issue: 3043 byte(s) leaked in 28 allocation(s). ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/10958/ )
+
+Undefined Sanitizer: log...../kv_engine/engines/ep/src/dcp/active_stream.cc:399:56: runtime error: member call on null pointer of type "struct ConnHandler" ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/10958/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/27485/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/199/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/23504/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/3108/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/2151/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/3090/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

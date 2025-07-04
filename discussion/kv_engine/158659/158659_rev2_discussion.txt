@@ -1,0 +1,214 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-47714: Add configuration support for magma Group Commit
+
+magma_enable_group_commit
+Group Commit allows transactions in magma to be grouped together
+to reduce the number of WAL fsyncs. When a transaction is ready to
+fsync, if there are new transactions waiting to start, we stall the
+transaction waiting to fsync until there are no more transactions
+waiting to start for a given magma instance.
+
+magma_wal_sync_time
+When magma group commit is enabled, magma_wal_sync_time can
+be used as a limit to how long a stalled transaction will
+wait before the WAL fsync is executed regardless if there are
+transactions waiting to execute.  The number of transactions
+waiting to start is limited by the number of writer threads.
+When magma_wal_sync_time = 0ms, then transactions are stalled until
+there are no transactions waiting to start.  If magma_wal_sync_time
+is set to some value, when a transaction gets to the fsync phase,
+if there are stalled transactions that have been waiting for more
+than magma_wal_sync_time, magma will fsync the WAL to allow any
+stalled and the current transaction to complete.
+
+Change-Id: I774d89ae14bffebdff9acd46070ab08fbcf63d32
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Scott Lashley
+Date: 2021-08-03 18:41:49.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-08-03 19:01:09.000000000
+Message: 
+Patch Set 2: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/12844/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/12844/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/9737/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/38293/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/11061/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/32655/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/12656/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/13200/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/11772/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/20740/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/669/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/687/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-08-04 10:35:03.000000000
+Message: 
+Patch Set 2: Code-Review-1
+
+(1 comment)
+Line:16, /COMMIT_MSG -> I think using a time, while attractive in terms of giving an end-user an explicit cap on how long they could wait for flushing; isn't great in terms of having a parameter with a sensible default value which users do not need to tune.
+
+For example, a fast NVMe disk will fsync() significantly faster than say a remote SAN disk - potentially 2-3 orders of magnitude. Giving some illustrative numbers, let's say the NVMe can fsync in 10us and a remote SAN can fsync in 10ms.
+
+Therefore, selecting a sensible default value for "magma_wal_sync_time" is difficult - for example choosing 10ms would: 
+
+- Allow only one transaction to be merged for the SAN (not really giving any benefit to such high throughput, high latency disk where Group Commit *is* actually a good thing to enable).
+- Allow 1000 transactions to be merged for the NVMe, which feels like too many given it would potentially slow down NVMe latency by 1000x.
+
+As such, I think using a "maximum_group_size" parameter is probably a better solution here - we can determine a "reasonable" default (10, 100...?) which will automatically work well across a range of environments.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Scott Lashley
+Date: 2021-08-04 15:50:07.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:16, /COMMIT_MSG -> Why does it matter how many txns get grouped together? Whether it's 1 or 1000 (Note... 1000 would never occur; the maximum number of txns participating in group commit is always limited by the number of writers), there is no data loss in the event of a crash because those txns were never acknowledged. The only issue here is write latency and txn throughput.
+Time is easily understood and works with all device speeds and all workloads. It does not care whether the WAL device is fast or slow. It does not care if the batch sizes are large or small. It guarantees that the WAL will fsync approximately every N ms thereby having predictable write latencies.
+I think it would be far more confusing and require more tuning on the part of the end user to use a number of commits as that tells me very little of the effect group commit will have on write latency since write latency will then be dependent on WAL device speed (which is constant per installation) and batch sizes (which fluctuates based on application workload).
+IMO... I think there are 2 choices...
+1. Enable group commit and leave WAL Sync = 0. The WAL fsync will then be dependent on how fast kv can generate txn batches. Worst case scenario is that writer threads are able to generate txns faster than magma can write them to the WAL minus the fsync. Not my first choice.
+2. Pick a WAL Sync Time based on our experience with customers that we think works best. When choosing this solution, it's trivial to explain that if the customer is write latency sensitive, make it smaller.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-08-04 16:02:51.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:16, /COMMIT_MSG -> So note that in general the contents of configuration.json is not exposed to end-users - while they _can_ (with the help of support / dev) use undocumented diag/eval call to change parameters, otherwise only the parameters we explicitly add support for in the REST API / UI are modifiable (things like bucket quota, eviction mode etc).
+
+Given that, we want to have a sensible wal_sync_time which works "out of the box". 
+
+The issue with a time-based value is (as I described above), an "acceptable"  value for say an NVMe will be very different to a SAN. An NVMe without group commit will say have a write latency of 10us (random example, exact value not important). Enabling group commit (say with the current default 0ms) could result in up to N commits being batched (where N = the numbers of flushers, which I believe we might want to be equal to the number of cores of the system - for example a 64 core system could have a flush latency of 640ns. That's a massive increase in latency from their "expected" baseline case.
+
+If we instead cap it to a number (10, 20, whatever), then there's an reasonable bound on the latency increase.
+
+Ultimately "Group Commit" is a throughput optimisation, but it trades off individual mutation latency. I think a more generic approach is to limit mutation latency by some factor of "normal" latency, instead of making it some absolute number which means very different things in different setups.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-08-04 16:15:18.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:16, /COMMIT_MSG -> Typo: s/640ns/640us/
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Scott Lashley
+Date: 2021-08-04 16:31:17.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:16, /COMMIT_MSG -> By choosing to focus on the NVME case, does that mean we expect the majority of customers to be using raided NVME? 
+In the case you just described, if you look at the other extreme, say SAN as the slow device, where we pick a cap of say 10, won't that have a much larger impact on latency on the application because it's now going to be 10x the slower speed which might end up being an order of magnitude or more in latency increase. And because it's a slower storage device likely with fast CPUs, the ability of the engine to generate txn batches faster than can be consumed is more likely so we'll always hit the max of the group commit threshold.
+
+I could understand the need to change the units from ms to us to add support for very fast NVME. But, changing to a hard cap count of GC participating txns is the least flexible, least reliable way to come up with a reasonable default across a wide variety of devices and workloads.
+
+If the goal is to have all tunable parameters to be out-of-the-box ready for a specific hardware configuration, that's ok too. Then, we just need to provide guidance on what to tune when the customer's HW and application don't meet that criteria.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-08-05 08:46:52.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:16, /COMMIT_MSG -> > By choosing to focus on the NVME case, does that mean we expect the majority of customers to be using raided NVME? 
+
+Not necessarily, I'm just using NVMe as an example of the fact that current storage technology in use has significant variations in latency.
+
+For some more concrete examples, around 50% of our customers deploy in the cloud; and in AWS[1] there's broadly 3 tiers of storage:
+
+a) Local instance store NVMe - these have throughput of the order of 500,000 write IOP/s (~2us latency).
+b) Local instance store SSD - throughput of the order of 50,000 write IOP/s (~20us latency).
+c) Remote block storage (EBS) - throughput and latency no longer closely linked, latency of the order of 1ms.
+
+There's probably a reasonable distribution of users on those different storage types. 
+
+> In the case you just described, if you look at the other extreme, say SAN as the slow device, where we pick a cap of say 10, won't that have a much larger impact on latency on the application because it's now going to be 10x the slower speed which might end up being an order of magnitude or more in latency increase.
+
+So what I expect customers would care about is how much the latency of their operation deviates from the "baseline" or "ideal" of their storage device.
+
+If they pick say a local NVMe which can do a single write IOP in 2us, if we tell them write amp with Magma is typically ~5x then they'd expect to see SET latencies of ~10us. However, if with Group commit and a wal_sync_time of 1ms they might see a range from 10us to say 500us (50x, assuming there's up to 50 flusher threads working this single WAL). They might be somewhat surprised (and disappointed) they see such variance in latency.
+
+Compare this with someone using say a local SSD which can do a single write IOP in 100us (5x 20us); they are only going to see a SET latency range from 100us to 1ms (10x), a much smaller variance.
+
+Going one step further, with an EBS disk a single SET might take 5ms (same 5x write amp) and hence they'd see a few small range in SET latency - should never really exceed 5ms (given the wal_sync_time is only 1ms).
+
+> If the goal is to have all tunable parameters to be out-of-the-box ready for a specific hardware configuration, that's ok too. Then, we just need to provide guidance on what to tune when the customer's HW and application don't meet that criteria.
+
+The goal is to work "well" out of the box for a range of hardware configurations. 
+
+Obviously you can tune the wal_sync_time for each of those different setups, to limit the variance in SET latency; but my point is we *don't* want to have to expose those kinds of tuneables - the design approach of Couchbase Server is that we "just work" as far as possible, and don't need an Oracle-style deployment expert just to make it work reasonably well.
+
+Hence my suggestion of essentially a cap on the multiplier we see above - a simple maximum number of mutations which can be grouped together imposes an upper bound on the variance based on the speed of the underlying disk.
+
+Admittedly such a numeric cap is pessimistic - _if_ 20 writes to the WAL all came in at the same time on 20 threads, we could clearly commit all 20 in a single group and basically pay minimal extra latency, however if there was a numeric cap of 10 writes then yes, we would still split them up. The more optimal solution would be to do something clever like track the median fsync() time and then allow a multiple of that to be used as the limit to the group commit - but obviously that's more complex.  
+
+
+[1] https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/general-purpose-instances.html
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-08-05 16:01:03.000000000
+Message: 
+Patch Set 2: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/9737/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/38293/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/11061/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/32655/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/12656/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/13200/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/11772/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/20740/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/669/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/687/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/12894/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Scott Lashley
+Date: 2021-08-10 04:58:43.000000000
+MISMATCHED INLINE COMMENT
+Line:16, /COMMIT_MSG -> 1 configuration parameter is not sufficient to handle both fast and slow devices, so, we've added a 2nd parameter. This should be sufficient.
+----------------------------------------------------------------------------------------------------------------------

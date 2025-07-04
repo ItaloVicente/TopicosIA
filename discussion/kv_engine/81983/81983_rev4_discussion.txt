@@ -1,0 +1,111 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-25342: Reorder Collections::VB::Manifest update/serialise
+
+Previous to this commit an update to the Collections::VB::Manifest
+would:
+
+1: Serialise the manifest state to a system-event
+2: Update the manifest
+
+This ordering is creating issues for new code that is performing full
+deletion of the collection data. The issue being that some new changes
+being made by step 2 don't get captured in step 1.
+
+It is much simpler to (and really should of been like this from the
+start):
+
+1: Update the manifest
+2: Serialise the manifest state to a system-event
+
+This patch refactors the add/beginDelete methods so that they return
+the ManifestEntry which is affected by the update allowing us to
+"patch" it with the seqno we get from queueing of the serialised
+manifest.
+
+::completeDeletion is also updated but not refactored.
+
+VbucketManifestTest is also altered slightly so that completeDeletion
+is given more test coverage, it now applies updates to the replica
+and compares active with replica.
+
+Change-Id: I7361c5675356e47888afcf751dc4db21ac03762e
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jim Walker
+Date: 2017-08-07 14:59:53.000000000
+Message: 
+Uploaded patch set 4.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2017-08-07 15:21:15.000000000
+Message: 
+Patch Set 4: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/1789/ : FAILURE
+
+Failure of a CTest test  1/63 MemCheck #46: memcached-bucket-unit-tests .................... ( http://cv.jenkins.couchbase.com//job/kv_engine-linux-master/1789/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master/1743/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/1785/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/1816/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/1615/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2017-08-07 15:52:28.000000000
+Message: 
+Patch Set 4: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/1791/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master/1745/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/1787/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/1818/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/1617/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Will Gardner
+Date: 2017-08-08 00:03:34.000000000
+Message: 
+Patch Set 4: Code-Review-1
+
+(4 comments)
+Line:173, engines/ep/src/collections/vbucket_manifest.cc -> This probably occurred as a result of some intermediate refactoring, but it looks like the direct check from how it was before (`collection == DefaultCollectionIdentifier`) would still be valid here (I don't see `defaultEntry` being used for anything else).
+
+Line:174, engines/ep/src/collections/vbucket_manifest.cc -> nit: This is more of a philosophical thing - it's not immediately apparent to a reader that `modifiedEntry` isn't NULL in this situation (especially given it gets initialised to that above) which could potentially result in a null dereference if this function were poorly modified in the future.
+
+I would personally either explicitly check this isn't null directly preceding this line (ie. ensuring the post-condition) or restructure the function such that the declaration of `modifiedEntry` is in the scope of the if-block and can be turned into a reference (and then directly returned from that scope).
+
+Line:184, engines/ep/src/collections/vbucket_manifest.cc -> I guess it's already implied by including the function name, but it might be nice to include the reason (collection already exists) in the exception message.
+
+Line:238, engines/ep/src/collections/vbucket_manifest.cc -> Can be restructured to make it easier to read (Testing positive conditions first, no else after return/exception, uses direct return instead of pointer):
+
+    ManifestEntry& Manifest::beginDeleteCollectionEntry(
+            cb::const_char_buffer collection, uint32_t revision) {
+        auto itr = map.find(collection);
+        if (itr == map.end()) {
+            throw std::logic_error("beginDelCollection: did not find collection:" +
+                                   cb::to_string(collection) + ", revision:" +
+                                   std::to_string(revision));
+        }
+
+        if (collection == DefaultCollectionIdentifier) {
+            defaultCollectionExists = false;
+        }
+
+        return *itr->second;
+    }
+
+----------------------------------------------------------------------------------------------------------------------

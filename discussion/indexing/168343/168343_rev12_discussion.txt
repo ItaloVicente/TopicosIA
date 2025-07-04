@@ -1,0 +1,196 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-49382 (7.1.0 2012) Indexer use cgroups CPU and mem info when enabled
+
+1. cpu_throttle.go should use cgroup CPU usage stats when cgroups are
+   supported. This is so the usage is correctly calculated against the
+   number of CPUs allocated to the cgroup rather than the whole node.
+   If not supported fall back to the standard algorithm of CPU ticks in
+   different categories that is collected for the whole node.
+
+2. Indexer set number of CPUs to min(node, cgroup, GSI) available CPUs,
+   where cgroup is sigar num_cpu_prc when cgroups are supported and GSI
+   is config value indexer.settings.max_cpu_percent (exposed on UI as
+   Advanced Index Settings / Indexer Threads).
+
+3. Log message to console if, in #2, GSI > min(node, cgroup) and use the
+   latter instead.
+
+4. planner/proxy.go RetrievePlanFromCluster was calling
+   getIndexSettings() to set CpuQuota based on runtime.NumCPUs() and
+   indexer.settings.max_cpu_percent, but the code in that method was
+   incorrect. Replaced with a call to runtime.GOMAXPROCS(0) which will
+   now get the logical min(node, cgroup, GSI) per #2 above. (Note that
+   CpuQuota is not used in Planner anyway -- its enforcement is
+   commented out in planner/planner.go Validate().) This changes
+   eliminates REST calls to all remote indexer nodes and a use of
+   ClusterInfoCache.
+
+5. Replace direct lookup of indexer.settings.memory_quota with new
+   Config.GetIndexerMemoryQuota() method that takes cgroup setting into
+   account (sigar memory_max) if cgroups are supported.
+
+Change-Id: I3c906070d78ba51888a6c07c7dd05959fba9b27b
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Kevin Cherkauer
+Date: 2022-01-11 01:25:10.000000000
+Message: 
+Patch Set 12: Patch Set 11 was rebased
+----------------------------------------------------------------------------------------------------------------------
+Author: VarunVelamuri
+Date: 2022-01-11 04:17:24.000000000
+Message: 
+Patch Set 12:
+
+(2 comments)
+Line:124, secondary/indexer/settings.go -> This is another example where grep on the method name does not point to the log line as the prefix is moved to different line. Please keep the prefix in the same line or use a hard-coded string for easy debugging.
+
+Line:148, secondary/planner/proxy.go -> When planner runs on query node, will this not set the CPU quota of query process instead of indexer process? What is the expectation here - To set the cpuQuota to indexer process or query process?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2022-01-11 05:07:02.000000000
+Message: 
+Patch Set 12:
+
+(2 comments)
+Line:124, secondary/indexer/settings.go -> We had this discussion already with Jeelan and he explicitly agreed that we do not need to keep the variable on the same line as the message, but instead one can grep with a line or two of context (e.g. grep -B 1 -A 1).
+
+Line:148, secondary/planner/proxy.go -> True, but as described in my entry #indexing-dev, in most cases this code actually sets the plan.CpuQuota to the same thing the old code did (runtime.NumCPUs() of the local node), but also includes the cgroup info. Also, Amit pointed out that plan.CpuQuota is not actually used. IMO the plan.CpuQuota field could thus be deleted. Since it is not actually used it is not worth constructing something more complex.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2022-01-11 05:35:19.000000000
+Message: 
+Patch Set 12:
+
+(1 comment)
+Line:124, secondary/indexer/settings.go -> This looks like it was in an email thread with Jeelan and Deep that you were not on:
+
+From: Kevin Cherkauer <kevin.cherkauer@couchbase.com>
+Sent: Thursday, November 4, 2021 11:53 PM
+To: Jeelan Poola <jeelan.poola@couchbase.com>
+Cc: Deepkaran Salooja <deepkaran@couchbase.com>
+Subject: Re: Method name constants; code improvements
+ 
+...
+[Kevin to Jeelan:]
+The suggestion you made below will partially address Varun’s concern. It won’t fully address it as the method variable has to come after the log formatting string, so it will be quite frequently not on the same line as the log message text itself unless you also want us never to add a line break in a log statement until after that point.
+...
+
+
+From: Jeelan Poola <jeelan.poola@couchbase.com>
+Date: Sunday, November 7, 2021 at 9:44 PM
+To: Kevin Cherkauer <kevin.cherkauer@couchbase.com>
+Cc: Deepkaran Salooja <deepkaran@couchbase.com>
+Subject: Re: Method name constants; code improvements
+ 
+...
+[Jeelan to Kevin:]
+>unless you also want us never to add a line break in a log statement until after that point
+ 
+This is a minor point. It's ok even if we don't keep the tag on the first line of log statement as 'grep' would anyways give us the log line + a couple of lines from the first line. So, the context is there.
+...
+
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2022-01-11 16:07:56.000000000
+Message: 
+Patch Set 12: Code-Review+1
+
+PASS sanity,unit,functional,integration with storage fdb. See http://ci2i-unstable.northscale.in/gsi-11.01.2022-17.29.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2022-01-11 20:08:52.000000000
+Message: 
+Patch Set 12: -Code-Review
+
+MAYBE FAIL sanity,unit,functional,integration with storage plasma. See http://ci2i-unstable.northscale.in/gsi-11.01.2022-21.49.fail.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2022-01-11 23:14:35.000000000
+Message: 
+Patch Set 12:
+
+MAYBE FAIL sanity,unit,functional,integration with storage memdb. See http://ci2i-unstable.northscale.in/gsi-12.01.2022-01.50.fail.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2022-01-12 02:05:46.000000000
+Message: 
+Patch Set 12:
+
+MAYBE FAIL sanity,unit,functional,integration with storage fdb. See http://ci2i-unstable.northscale.in/gsi-12.01.2022-04.56.fail.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2022-01-12 10:32:29.000000000
+Message: 
+Patch Set 12: Code-Review+1
+
+PASS sanity,unit,functional,integration with storage plasma. See http://ci2i-unstable.northscale.in/gsi-12.01.2022-11.03.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2022-01-12 14:47:56.000000000
+Message: 
+Patch Set 12: -Code-Review
+
+MAYBE FAIL sanity,unit,functional,integration with storage memdb. See http://ci2i-unstable.northscale.in/gsi-12.01.2022-16.14.fail.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2022-01-12 18:59:58.000000000
+Message: 
+Patch Set 12: Code-Review+1
+
+PASS sanity,unit,functional,integration with storage fdb. See http://ci2i-unstable.northscale.in/gsi-12.01.2022-20.30.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: Deepkaran Salooja
+Date: 2022-01-12 20:15:36.000000000
+Message: 
+Patch Set 12: Code-Review+2
+
+(1 comment)
+Line:148, secondary/planner/proxy.go -> Please add your comments to the code as well, so it is clear why it is being done like this. And in future if we decide to use CpuQuota again, the setting would need to be fetched from indexer/metakv.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2022-01-12 22:30:08.000000000
+Message: 
+Patch Set 12:
+
+(1 comment)
+Line:148, secondary/planner/proxy.go -> Expanding the comment to the following before delivery:
+
+// GOMAXPROCS is now set to the logical minimum of
+//   1. runtime.NumCPU
+//   2. SigarControlGroupInfo.NumCpuPrc / 100 (only included if cgroups are supported)
+//   3. indexer.settings.max_cpu_percent / 100 (current Indexer Threads UI setting)
+// We assume all Index nodes are configured the same w.r.t the above. It is impossible to
+// configure #3 differently across nodes, but it is possible, though not advised, to configure
+// #1 and #2 differently. The resulting CpuQuota is correct if Planner is running directly on
+// an Index node and they are all configured the same, but it will not pick up #3 if it is
+// running on a non-Index node (e.g. Query not colocated with Index) and the result in this case
+// may also be based on a different value for #2 than Index nodes use.
+//
+// Currently plan.CpuQuota is not actually used other than to be logged in some messages, so we
+// have not spent time making this more sophisticated. Note also there is only one plan.CpuQuota
+// value, so if nodes are configured differently it is not clear which one's value to use.
+//
+// If CpuQuota constraints are ever re-enabled, we will need to revisit the above questions. We
+// could implement a means of retrieving GOMAXPROCS from all Index nodes, but we'd also need to
+// address the issue of them possibly being different, e.g. by enhancing Planner to save
+// CpuQuota on a per-node basis and related enhancements to how it uses these values.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2022-01-12 22:36:33.000000000
+MISMATCHED INLINE COMMENT
+Line:124, secondary/indexer/settings.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2022-01-12 22:35:51.000000000
+MISMATCHED INLINE COMMENT
+Line:124, secondary/indexer/settings.go -> Discussed with Deep. It is okay this way, as it avoids very long code lines, and grep -B1 (or -B2, etc.) can find the messages. Note there are log messages in existing code whose strings are broken across several lines due to length, so to see the whole messages -B flag was already needed.
+----------------------------------------------------------------------------------------------------------------------

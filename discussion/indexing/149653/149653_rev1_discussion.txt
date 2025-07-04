@@ -1,0 +1,119 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-45230 fix checking for pending writer before storage snapshot
+
+Golang doesn't provide any instruction ordering guarantee as observed
+from an external goroutine, if no sychronization mechanism/channel
+communication has been used.
+
+This could result in the existing pending writer check(waitPersist),
+based on the value of atomic qCount, to go wrong if the storage insert/delete
+function call has not returned before the qCount is set by command
+workers.
+
+This patch addresses the problem by setting the qCount in a defer call,
+which is guaranteed by the golang runtime to execute after the function
+body has finished executing.
+
+Defer function call has an overhead of about 35ns in Go 1.13. This has
+been optimized to be about 6ns in Go 1.14. Given all the processing
+which needs to happen for a mutation(GSI layer and storage), the
+pipeline should be able to absorb this extra cost.
+
+e.g. if indexer can process 1M mutations/sec on a 50 core box, that's
+about 20k mutations/sec on a single core. This translates to roughly
+50us for a single mutation. Adding a 35ns overhead to this looks fine.
+
+The other option considered was to make the setting of qCount
+conditional on the return value of the storage insert/delete function.
+This approach should also work but is still not backed by any runtime
+guarantees. If there is any perf regression, this option can be
+considered.
+
+Change-Id: I9f9e23f6ab87ad44275e9a95ebabc3fd60f3b623
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Deepkaran Salooja
+Date: 2021-03-25 19:15:53.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: VarunVelamuri
+Date: 2021-03-25 19:32:43.000000000
+Message: 
+Patch Set 1: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------
+Author: Jeelan Basha Poola
+Date: 2021-03-26 03:09:32.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:761, secondary/indexer/memdb_slice_impl.go -> Seems like cost of 2 stack frames for 'delete' now. Is it possible to avoid it?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2021-03-26 04:10:28.000000000
+Message: 
+Patch Set 1: Code-Review+1
+
+PASS sanity,unit,functional,integration with storage plasma. See http://ci2i-unstable.northscale.in/gsi-26.03.2021-05.30.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: Deepkaran Salooja
+Date: 2021-03-26 05:04:53.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:761, secondary/indexer/memdb_slice_impl.go -> Using defer is going to add 35ns overhead to both insert and delete. Or do you mean the extra function call to "delete2"?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jeelan Basha Poola
+Date: 2021-03-26 05:24:30.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:761, secondary/indexer/memdb_slice_impl.go -> extra function call to delete2
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Deepkaran Salooja
+Date: 2021-03-26 05:30:19.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:761, secondary/indexer/memdb_slice_impl.go -> A function call in golang costs 6ns. defer has other overheads which make it 35ns. Also, golang complier is very efficient at inling and these simple cases get optimized. Otherwise, modular programming would carry a lot of penalty and developers would need to write more procedural style code.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jeelan Basha Poola
+Date: 2021-03-26 05:43:59.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:761, secondary/indexer/memdb_slice_impl.go -> Thanks Deep! Somehow, I liked your earlier idea of doing it based on return value '(if err != nil)' in the caller. It's fine though.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jeelan Basha Poola
+Date: 2021-03-26 05:44:07.000000000
+Message: 
+Patch Set 1: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------
+Author: Deepkaran Salooja
+Date: 2021-03-26 05:54:25.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:761, secondary/indexer/memdb_slice_impl.go -> I leaned more towards this one as it is fool-proof. And with upgrade to go1.14 the extra cost will go away. Let's see if the perf tests are not happy, then we'll have to do the other option.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Deepkaran Salooja
+Date: 2021-03-26 05:54:35.000000000
+Message: 
+Patch Set 1: Verified+1
+----------------------------------------------------------------------------------------------------------------------

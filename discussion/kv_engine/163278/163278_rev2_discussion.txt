@@ -1,0 +1,187 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-48819: Change Cookie::engine_storage to be atomic
+
+As seen on cluster_run built with TSan, the following race is seen
+aborting a timed-out SyncWrite:
+
+    WARNING: ThreadSanitizer: data race (pid=46769)
+      Write of size 8 at 0x7b5400291698 by thread T60 (mutexes: read M542537949550136824, write M360774, read M541974810616805208, write M1133353977207195360):
+        #0 Cookie::setEngineStorage(void*) kv_engine/daemon/cookie.h:432 (memcached+0x66a6e1)
+        #1 EventuallyPersistentEngine::storeEngineSpecific(CookieIface const*, void*) kv_engine/engines/ep/src/ep_engine.cc:1841 (memcached+0x7c4162)
+        #2 operator() kv_engine/engines/ep/src/kv_bucket.cc:2756 (memcached+0xa65268)
+        #3 __invoke_impl<void, KVBucket::makeSyncWriteCompleteCB()::<...> /usr/include/c++/10/bits/invoke.h:60 (memcached+0xa65268)
+        #4 __invoke_r<void, KVBucket::makeSyncWriteCompleteCB()::<...> /usr/include/c++/10/bits/invoke.h:110 (memcached+0xa65268)
+        #5 _M_invoke /usr/include/c++/10/bits/std_function.h:291 (memcached+0xa65268)
+        #6 std::function<void (CookieIface const*, cb::engine_errc)>::operator()(...) const /usr/include/c++/10/bits/std_function.h:622 (memcached+0x9bf920)
+        #7 VBucket::notifyClientOfSyncWriteComplete(CookieIface const*, cb::engine_errc) kv_engine/engines/ep/src/vbucket.cc:1041 (memcached+0x9bf920)
+        ...
+
+      Previous write of size 8 at 0x7b5400291698 by thread T18 (mutexes: write M3809):
+        #0 Cookie::setEngineStorage(void*) /home/daver/repos/couchbase/server/kv_engine/daemon/cookie.h:432 (memcached+0x66a6e1)
+        #1 EventuallyPersistentEngine::storeEngineSpecific(...) kv_engine/engines/ep/src/ep_engine.cc:1841 (memcached+0x7bb0c2)
+        #2 EventuallyPersistentEngine::storeIfInner(...) kv_engine/engines/ep/src/ep_engine.cc:2539 (memcached+0x7de96a)
+        #3 EventuallyPersistentEngine::store_if(...) kv_engine/engines/ep/src/ep_engine.cc:478 (memcached+0x7debed)
+        #4 bucket_store_if(...) kv_engine/daemon/protocol/mcbp/engine_wrapper.cc:148 (memcached+0x7517bd)
+        #5 MutationCommandContext::storeItem() kv_engine/daemon/protocol/mcbp/mutation_context.cc:288 (memcached+0x733f6d)
+        #6 MutationCommandContext::step() kv_engine/daemon/protocol/mcbp/mutation_context.cc:54 (memcached+0x7385f7)
+        ...
+
+When setEngineStorage is called from
+EventuallyPersistentEngine::store_if (when issueing a SyncWrite) from
+the frontend thread, the per-frontend thread mutex is held when
+modifying Cookie:engine_storage. However when the background thread
+later modifies Cookie:engine_storage the front-end thread mutex is not
+held.
+
+Address this by making Cookie::engine_storage atomic. We could have
+added a mutex around it, but that would add additional space
+requirements for each Cookie (of which there are potentially many), so
+atomic_ptr suffices for the time being.
+
+Change-Id: I62e25b6a74d47c2da6b500cb3dc20d7ad2b01e03
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2021-10-08 14:07:18.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-10-08 14:51:47.000000000
+Message: 
+Patch Set 2: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/15220/ : FAILURE
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/34842/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/40974/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/13340/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/12128/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/14949/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/2970/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/15828/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/23248/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/3011/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/14099/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-10-08 15:29:42.000000000
+Message: 
+Patch Set 2: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/34842/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/40974/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/13340/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/12128/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/14949/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/2970/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/15828/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/23248/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/3011/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/14099/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/15228/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2021-10-11 04:05:42.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:39, /COMMIT_MSG -> There's something that I don't get here.
+
+The connection is paused after the SW is stored for processing, and then woken up only by:
+
+SyncWriteCompleteCallback KVBucket::makeSyncWriteCompleteCB() {
+    return [&engine = this->engine](const CookieIface* cookie,
+                                    cb::engine_errc status) {
+        if (status != cb::engine_errc::success) {
+            // For non-success status codes clear the cookie's engine_specific;
+            // as the operation is now complete. This ensures that any
+            // subsequent call by the same cookie to store() is treated as a new
+            // operation (and not the completion of the previous one).
+            engine.storeEngineSpecific(cookie, nullptr);
+        }
+        engine.notifyIOComplete(cookie, status);
+    };
+}
+
+So, the Cookie::engine_specific is written in the bg-thread only in a state where the fe-thread can't really run on the same Cookie yet, as the notification is the latest step in SyncWriteCompleteCallback.
+
+Is TSAN spotting more a "potential" race than an actual one.. ? Or maybe the test is executing some Out Of Order on that connection.. ?
+I don't recall now if any OOO can really happen when SW is in the mix..
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-10-11 08:18:18.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:39, /COMMIT_MSG -> > So, the Cookie::engine_specific is written in the bg-thread only in a state where the fe-thread can't really run on the same Cookie yet, as the notification is the latest step in SyncWriteCompleteCallback.
+
+Correct, in this particular scenario the FE thread (well, Cookie) is in ewouldblock state and hence shouldn't (by our application logic) run while the cookie is being updated - so in one sense the Cookie::engine_storage should not be accessed at the same time.
+
+_However_, if we write to Cookie::engine_storage without a lock (or atomic), then it's possible that the write by NonIO thread will not be observed by the FE thread when it next runs.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2021-10-11 09:07:23.000000000
+Message: 
+Patch Set 2: Code-Review+1
+
+Was this also hit in the new test at http://review.couchbase.org/c/kv_engine/+/162085/ ?
+Or maybe an existing testsuite/cluster_test already fails (maybe intermittently) on this ?
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2021-10-11 09:07:55.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:39, /COMMIT_MSG -> Got it, thanks
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-10-11 10:41:58.000000000
+Message: 
+Patch Set 2:
+
+> Patch Set 2: Code-Review+1
+> 
+> Was this also hit in the new test at http://review.couchbase.org/c/kv_engine/+/162085/ ?
+> Or maybe an existing testsuite/cluster_test already fails (maybe intermittently) on this ?
+
+Yes, hence why I've moved this patch in front of that one.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2021-10-11 10:51:38.000000000
+Message: 
+Patch Set 2: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,111 @@
+======================================================================================================================
+DESCRIPTION:
+
+Fix incorrect assignment to EngineErrorGetScopeIDResult
+
+This patch fixes Collections::Manager::doOneScopeStats() by changing it
+returns is scopeID after parsing a scopeID using std::stoi(). Currently
+we create a cb::EngineErrorGetScopeIDResult() and instantiate using the
+ScopeID() object. This is wrong, as this then cast implicitly to a
+uint64_t, which is is treated as the manifestId and is thus assigned to
+the manifestId member of cb::EngineErrorGetScopeIDResult() rather than
+the scopeId member. Which could then end up with us perform incorrect
+privilege checks for Collections::Manager::doOneScopeStats().
+
+So to fix this ensure we assign the scopeID to
+cb::EngineErrorGetScopeIDResult.scopeId directly.
+
+Change-Id: Ica2de8fced4d2d8b6be55eab35b2410125feddc4
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Richard de Mellow
+Date: 2020-08-13 09:02:13.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-08-13 10:10:20.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/25589/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/3766/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/2290/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/29543/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/4109/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/5080/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/5179/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/4991/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/12896/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-08-14 08:45:15.000000000
+Message: 
+Patch Set 1: Code-Review-1
+
+(1 comment)
+Line:649, engines/ep/src/collections/manager.cc -> I'm not sure of Jim's intent here - given this would previously set the result to cb::engine_errc::unknown_scope and now it will be 'failed'. Suggest @jim takes a look at this when he gets back.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2020-08-24 10:08:13.000000000
+Message: 
+Patch Set 1: Code-Review-1
+
+(1 comment)
+Line:649, engines/ep/src/collections/manager.cc -> The code's definitley wrong :() the fix here isn't right either.
+
+So I think the code was trying to re-use the res.scopeID to store scopeId down to the checkPrivilege call on line 664, but the construction is incorrect (as you have spotted, manifestID is being initialised with the scope). I think the original intent was that the if and else (line 635 to 661) use 'res', so when we hit line 664 'res' stores a valid scope.
+
+From what I can see else block is correct, although that EP_LOG_WARN could be removed now, same as line 641, no real need to log a warning there either.
+
+However I can see a problem when the scope-id given to use via the 'atoi' route is invalid, i.e. it is a valid format, just an unknown scope. 
+
+If we do your fix and we feed the code with an unknown scope, e.g. 9 the checkPrivilege call will return 'unknown_scope' and we will return that to the caller, but the manifest-id of 'res' is 0 (never set). Whenever KV returns unknown scope or unknown collection we should also return the manifest-ID relating to failed 'look-up'.
+
+So in the current code, the 'atoi' route is never doing a "is this a real scope check" before calling checkPrivilege, whereas the else block does (because it uses the manifest for name to id search)
+
+In summary we need to change code so that the if block does a scope-id check, but no method exists at the moment (that I can see)
+
+e.g. 
+
+    if (cb_isPrefix(statKey, "scopes-byid")) {
+        ScopeID scopeID;
+        // provided argument should be a hex scope ID N, 0xN or 0XN
+        try {
+            scopeID = std::stoi(arg, nullptr, 16);
+        } catch (const std::logic_error& e) {
+            EP_LOG_WARN(
+                    "Collections::Manager::doOneScopeStats invalid "
+                    "scope arg:{}, exception:{}",
+                    arg,
+                    e.what());
+            return cb::EngineErrorGetScopeIDResult{
+                    cb::engine_errc::invalid_arguments};
+        }
+        res = bucket.getCollectionsManager().isValidScopeID(scopeID);
+    } else {
+
+
+And the check for !success in the else block should be moved out so it is checking both the if/else
+
+Make sense?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2020-08-25 09:19:07.000000000
+MISMATCHED INLINE COMMENT
+Line:649, engines/ep/src/collections/manager.cc -> Done
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,107 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-36366: Don't drop cursors if checkpoint expelling was good enough
+
+Reviewing of the code revealed that if we're in a situation where
+checkpoint memory is above the upper bound the amount of memory that
+ClosedUnrefCheckpointRemoverTask::attemptMemoryRecovery is told to
+reclaim is too large, the result could be that if expelling was
+successful in getting checkpoint memory down to the lower bound the
+function would still go on to cursor dropping.
+
+The following shows the values used when evaluating memory recovery
+and goes onto highlight the issue fixed here.
+
+0                                                                      #
+├───────────────────┬───────────────┬───────────────┬────┬────┬────┬───┤
+│                   │               │               │    │    │    │   │
+│                   │               │               │    │    │    │   │
+└───────────────────▼───────────────▼───────────────▼────▼────▼────▼───┘
+                    A               B               L    C    H    D
+
+Using the coded defaults and the default configuration.json:
+
+A = cursor_dropping_checkpoint_mem_lower_mark (30%)
+B = cursor_dropping_checkpoint_mem_upper_mark (50%)
+C = cursor_dropping_lower_mark (80%)
+D = cursor_dropping_upper_mark (95%)
+L = mem_low_watermark (75%)
+H = mem_high_watermark (85%)
+
+In a situation when checkpoint memory alone is larger than B we wish to
+attempt to get checkpoint memory down to A or less. The same diagram
+shows an example checkpoint (X) memory and mem_used (Y).
+
+0                                                                      #
+├───────────────────┬───────────────┬───┬───────────┬──┬─┬────┬────┬───┤
+│                   │               │   │           │  │ │    │    │   │
+│                   │               │   │           │  │ │    │    │   │
+└───────────────────▼───────────────▼───▼───────────▼──▼─▼────▼────▼───┘
+                    A               B   X           L  Y C    H    D
+
+The difference between X and Y should be non checkpoint memory, ideally
+the data in the cache, but could be other transient allocations. Before
+this commit the target to free was calculated as Y - A, i.e. we're
+including the size of the cached items in the target.
+
+So if expelling ran and successfully moved X down to A or lower, the
+ClosedUnrefCheckpointRemoverTask::attemptMemoryRecovery would see that
+the target is unsatisfied and still go on to drop cursors.
+
+This commit changes the target to be X - A, so if expelling is by itself
+successful in getting X down to A or less, then the target is satisfied
+and cursor dropping is not attempted.
+
+This commit also:
+
+1) updates attemptMemoryRecovery to read mem_used once and base all
+ calculations from that data-point, this makes the function simpler to
+ reason about.
+
+2) When mem_used exceeds the cursor_dropping_upper_mark (95%) also log
+ the checkpoint consumption. It could happen that we trigger expelling
+ and cursor dropping, yet checkpoint consumption isn't an issue, it is
+ worth logging if this ever happens.
+
+Change-Id: I480cf2d8fbe229d3e64933058ff94a213d7b5b5e
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jim Walker
+Date: 2019-10-08 16:12:06.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-10-08 17:28:06.000000000
+Message: 
+Patch Set 2: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/23924/ : FAILURE
+
+Link error: fatal error LNK1168: cannot open couchstore\couchstore.dll for writing ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/23924/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/4571/ : FAILURE
+
+One of more core files found at the end of the build. Data for post-mortem saved to archived_core_dumps.tar.bz2 under "Build Artifacts". ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/4571/ )
+
+Failure of a CTest test  46/203 Test  #43: ep_testsuite_basic.full_eviction.rocksdb .....................................Child aborted ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/4571/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/7530/ : FAILURE
+
+Failure of a CTest test [2019-10-08T16:57:56.893Z] 153/192 Test #154: memcached_testapp.ep.TransportProtocols/DurabilityTest .......................Child aborted ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/7530/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/20417/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/21506/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/14887/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/13686/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/22892/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

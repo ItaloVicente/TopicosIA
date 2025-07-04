@@ -1,0 +1,168 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-54810: Include overflow samples in Prometheus histograms
+
+Make use of the newly-added overflow metrics in timing histograms to
+show the number of samples which exceeded the representable range of
+the histogram.
+
+Example output from _prometheusMetricsHigh endpoint, with 1000
+"overflowed" samples synthesized:
+
+    $ http --auth Administrator:asdasd http://localhost:11996/_prometheusMetricsHigh|rg kv_cmd_duration_seconds | rg -w GET
+    kv_cmd_duration_seconds_count{bucket="default",opcode="GET"} 4052 1676562996000
+    kv_cmd_duration_seconds_sum{bucket="default",opcode="GET"} 0.049494 1676562996000
+    kv_cmd_duration_seconds_bucket{bucket="default",opcode="GET",le="0.000001"} 1 1676562996000
+    ...
+    kv_cmd_duration_seconds_bucket{bucket="default",opcode="GET",le="33.554432"} 3052 1676562996000
+    kv_cmd_duration_seconds_bucket{bucket="default",opcode="GET",le="65.011712"} 3052 1676562996000
+    kv_cmd_duration_seconds_bucket{bucket="default",opcode="GET",le="+Inf"} 4052 1676562996000
+
+Note that up to the highest bucket the histogram tracks (65s) there
+are cumulatively 3052 samples; however at the "infinity" bucket there
+are an additional 1000 samples. These are also reflected in the _count
+metric.
+
+Change-Id: I3491997ce50de756f0d414ddf345bddf8e07fd97
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2023-02-21 13:57:10.000000000
+Message: 
+Patch Set 6: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: Restriction Checker
+Date: 2023-02-21 13:57:25.000000000
+Message: 
+Patch Set 6: Well-Formed+1
+
+Permission granted to commit: 
+
+https://server.jenkins.couchbase.com/job/restricted-branch-check/339113/artifact/restricted.html : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2023-02-21 14:01:25.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2023-02-21 14:16:29.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+Line:57, statistics/prometheus_collector.cc -> Won't altering the count but not the sum lead to lower than expected mean calculations in Prometheus?
+
+I get that we can't meaningfully update the sum as we don't know the overflowed values as it stands...
+IIRC Vesko mentioned on a different patch that a future enhancement could be to track min/mean/max of the overflow bucket; seems like with at least the mean we could update the sum with the overflow bucket info.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2023-02-21 14:36:45.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+Line:57, statistics/prometheus_collector.cc -> > Won't altering the count but not the sum lead to lower than expected mean calculations in Prometheus?
+
+Potentially. We are in a sub-optimal place here, given the APIs which prometheus exposes:
+
+a) We either entirely ignore the overflow count in what we report to prometheus (don't include them in the le=inf bucket) - but count and sum are "correct", or
+
+b) We do include the overflowed count in le=inf - ie. this patch; but we potentially have an inaccurate mean. 
+
+_Ideally_ we would have no overflow and always bucket data, but we don't live in that world and it's not trivial to "fix" HdrHistogram to do that.
+
+What I would highlight is we would _expect_ overflow count to be small vs the non-overflowed values; so mean, estimated quartiles are not expected to be significantly affected.
+
+> IIRC Vesko mentioned on a different patch that a future enhancement could be to track min/mean/max of the overflow bucket; seems like with at least the mean we could update the sum with the overflow bucket info.
+
+We could track a sum of the overflow; but again I'd argue that's of limited value as we don't have the distribution of the samples - which is kinda what histograms are trying to give you.
+
+Ultimately I think the way forward (if overflowed samples are considered significant enough to warrant work in this area) would be to change to a different histogram impl which can support a much wider range (ideally everything we ever encounter) but with a similar memory footprint to hdr_histogram.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2023-02-21 14:40:22.000000000
+Message: 
+Patch Set 6: Code-Review+1
+
+(1 comment)
+Line:57, statistics/prometheus_collector.cc -> Agreed 👍
+
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2023-02-21 15:00:34.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+Line:57, statistics/prometheus_collector.cc -> Although, on second thought...
+
+> We could track a sum of the overflow; but again I'd argue that's of limited value
+
+This would at least allow us to meet the expectation of Prometheus histograms.
+
+I think having an asterisk of "if you have overflows, your mean is wrong" is a bit too much of a foot gun - it's not inconceivable that someone has a dashboard showing computed means, which after upgrading couchbase serve now significantly misrepresent the mean when overflowed values are present.
+
+For an extreme case, imagine a histogram _only_ recorded overflowed samples, so _only_ had samples in the Inf bucket. It now has a sample count != 0, but a sample sum = 0, and yet a cumulative distribution which indicates there are no samples less than the upper bound of the highest real bucket.
+
+Recording the overflow sum seems sufficient to bring the Prometheus sum back in line.
+
+I also can't warrant that no other prometheus functions rely on a "correct" sum.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2023-02-21 15:00:41.000000000
+Message: 
+Patch Set 6: -Code-Review
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2023-02-21 15:24:50.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+Line:57, statistics/prometheus_collector.cc -> Their mean was already "wrong" before - we blindly ignored any values over 60s (for most of the histograms we are talking about here), so the fact we now give them a different "wrong" mean doesn't seem any worse than before.
+
+I'd argue mean is pretty useless for most things you're tracking in histograms - the interesting metrics are at the high percentiles.
+
+Note that p50, p90 etc _are_ more meaningful now, as they include the overflow samples (via the le=inf bucket) - they aren't affected by the lack of the sum,
+
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2023-02-21 15:30:10.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+Line:57, statistics/prometheus_collector.cc -> Before the mean omitted samples, now it will actively move in the wrong direction because every overflowed sample "appears" to be a sample at 0 (count went up, sum did not, same behaviour as recording a 0), and will then be "poisoned" to be below the correct value forever.
+With the overflow sum, the mean is "right", and the cost is tracking one extra value per histogram :shrug:
+
+I'd forseen the argument of "they're looking at the wrong thing", but that doesn't stop people doing it ;)
+
+Will defer to you if you think the cost/benefit doesn't line up :vaultboy:
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2023-02-21 15:35:11.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+Line:57, statistics/prometheus_collector.cc -> Fair point about the (lack of) samples vs bias.
+
+I'll see if I can easily add it - it doesn't ready help the cbstats-style histograms as they display the different percentiles and those are still limited to the tracked buckets, but for Prometheus mean I can see value...
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Vesko Karaganev
+Date: 2023-02-21 16:51:04.000000000
+Message: 
+Removed Code-Review+1 by <GERRIT_ACCOUNT_1004964>
+
+----------------------------------------------------------------------------------------------------------------------

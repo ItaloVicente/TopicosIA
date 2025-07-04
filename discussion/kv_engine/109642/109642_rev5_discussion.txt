@@ -1,0 +1,186 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-34094,MB-34120: Fix on disk stats underflow and add unit tests
+
+Fix underflow of onDiskTotalItems in EPVBucket seen in MB-34120 and an
+underflow of diskCount in ManifestEntry which stores the number of items
+on disk for a given collection, which was observed in MB-34094.
+
+This bug is due to us not correctly incrementing
+EPVBucket::onDiskTotalItems every time insert a new mutation on disk,
+which should include prepares. As they should be treated a new separate
+document items to a committed document, due to the fact that couch-store
+and our other storage engines have no consept of the relationship
+between a prepare and a committed document.
+
+To fix this, we've modified the set PersistenceCallback to increment
+onDiskTotalItems for all prepare sets as well as a new key commits.
+Also we only remove the new cache item flag when we observe a
+committed mutation. Furthermore, when looking up the persisted item
+from the HashTable during the set or delete PersistenceCallback's (in
+the case of delete this happens in VBucket::deletedOnDiskCbk which is
+called by the delete PersistenceCallback). We search for the correct
+pending / committed document, instead of using fetchValidValue which
+will return Committed or Pending depending on the state of the
+HashTable. Also, if findOnlyPrepared() dose not return an item, but
+the queued time is pending and the mutation status passed to the set
+call back is KVStore::MutationSetResultState::Insert then we also
+increment the on item count. As this implies the item isn't available
+in the HashTable right now but we have just written a new prepare to
+disk.
+
+This patch also adds a set of unit tests to verify that our accounting
+of the number of documents on disk are correct.
+
+Change-Id: I4e6933aabf7b8424f08a6d1126a16683cc7849c9
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Richard de Mellow
+Date: 2019-06-03 10:38:46.000000000
+Message: 
+Uploaded patch set 5.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-06-03 11:05:56.000000000
+Message: 
+Patch Set 5: Code-Review-1
+
+(19 comments)
+Line:16, /COMMIT_MSG -> Style: generally written as "couchstore".
+
+Line:16, /COMMIT_MSG -> This was a bit hard to follow. Can you try to re-phase to make clearer?
+
+Line:17, /COMMIT_MSG -> concept
+
+Line:26, /COMMIT_MSG -> Again, this sentence seems to stop abruptly - can you re-word?
+
+Line:32, engines/ep/src/couch-kvstore/couch-kvstore.cc -> Is this necessary? I wouldn't have thought that couch-kvstore.cc should directly know about the specific ep-engine persistence callback type.
+
+Line:2029, engines/ep/src/couch-kvstore/couch-kvstore.cc -> I don't quite follow why this is needed - the keyStats map defaults to false (new document) in CouchKVStore::saveDocs, so why do we need this code here?
+
+Line:63, engines/ep/src/persistence_callback.cc -> This isn't necessarily true - there _can_ be separate Prepared and Committed StoredValues, assuming that the Prepared item cannot be committed until it's been persisted to disk for example.
+
+Line:68, engines/ep/src/persistence_callback.cc -> Not sure this is correct - given NewCacheItem is used to determine if a StoredValue should be counted or not, I think we should be considering it for both prepared and committed StoredValues (given both are counted in total items).
+
+Line:583, engines/ep/tests/module_tests/evp_store_durability_test.cc -> ... ?
+
+Line:594, engines/ep/tests/module_tests/evp_store_durability_test.cc -> ditto
+
+Line:654, engines/ep/tests/module_tests/evp_store_durability_test.cc -> Lots of repetition here (2x SyncWrite). can you pull the repeated code into some helper functions please?
+
+Line:700, engines/ep/tests/module_tests/evp_store_durability_test.cc -> tracked
+
+Line:705, engines/ep/tests/module_tests/evp_store_durability_test.cc -> an
+
+Line:820, engines/ep/tests/module_tests/evp_store_durability_test.cc -> Similar in this test - this looks basically the same the first half of the function. Can you pull this into some helper functions please?
+
+Line:922, engines/ep/tests/module_tests/evp_store_durability_test.cc -> Same comment as previous
+
+Line:1058, engines/ep/tests/module_tests/evp_store_durability_test.cc -> ditto
+
+Line:1064, engines/ep/tests/module_tests/evp_store_durability_test.cc -> Why 20? Can we achieve the same effect with fewer iterators?
+
+Line:1086, engines/ep/tests/module_tests/evp_store_durability_test.cc -> Why 10? Can we achieve the same effect / coverage with fewer?
+
+Line:1136, engines/ep/tests/module_tests/evp_store_durability_test.cc -> Ditto. 
+
+If you're running purely synchronously (as we are here) and control the flusher explicitly, why do we need 200 iterations - what does it give us which 2 iterations doesn't?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-06-03 12:50:43.000000000
+Message: 
+Patch Set 5: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/20764/ : FAILURE
+
+CMake error: C:/Jenkins/workspace/kv_engine-windows-master/tlm/cmake/Modules/CouchbaseGoogleTestAddTests.cmake:39 (message) ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/20764/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/18575/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/11092/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/17774/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/11765/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/1648/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/20003/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/4566/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2019-06-04 13:15:10.000000000
+Message: 
+Patch Set 5:
+
+(13 comments)
+Line:16, /COMMIT_MSG -> Done
+
+Line:17, /COMMIT_MSG -> Done
+
+Line:32, engines/ep/src/couch-kvstore/couch-kvstore.cc -> Done
+
+Line:2029, engines/ep/src/couch-kvstore/couch-kvstore.cc -> Done
+
+Line:583, engines/ep/tests/module_tests/evp_store_durability_test.cc -> Done
+
+Line:594, engines/ep/tests/module_tests/evp_store_durability_test.cc -> Done
+
+Line:654, engines/ep/tests/module_tests/evp_store_durability_test.cc -> Done
+
+Line:654, engines/ep/tests/module_tests/evp_store_durability_test.cc -> Done
+
+Line:700, engines/ep/tests/module_tests/evp_store_durability_test.cc -> Done
+
+Line:705, engines/ep/tests/module_tests/evp_store_durability_test.cc -> Done
+
+Line:820, engines/ep/tests/module_tests/evp_store_durability_test.cc -> Done
+
+Line:922, engines/ep/tests/module_tests/evp_store_durability_test.cc -> Done
+
+Line:1058, engines/ep/tests/module_tests/evp_store_durability_test.cc -> Done
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-06-04 13:55:27.000000000
+Message: 
+Patch Set 5:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/20832/ : FAILURE
+
+Failure of a CTest test  ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/20832/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/18575/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/11092/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/17774/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/11765/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/1648/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/20003/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/4566/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2019-06-04 14:19:35.000000000
+Message: 
+Patch Set 5:
+
+(2 comments)
+Line:16, /COMMIT_MSG -> Done
+
+Line:26, /COMMIT_MSG -> Done
+
+----------------------------------------------------------------------------------------------------------------------

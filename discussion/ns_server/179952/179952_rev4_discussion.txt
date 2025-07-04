@@ -1,0 +1,231 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-53445: Error when stream end seen for stream currently being set up
+
+The DCP proxy (dcp_consumer_conn in particular) handles replication set
+up by sending a DCP_ADD_STREAM to the DCP consumer which issues a
+DCP_STREAM_REQUEST to the DCP producer. The DCP proxy sets up streams as
+instructed by the dcp_replicator but it will not reply to the
+dcp_replicator until all streams have been set up (successfully or not).
+It is possible for the producer of a replication connection to send a
+stream end to the consumer before the proxy has processed the add stream
+response. dcp_consumer_conn ignores such a scenario as it expects that
+an add stream response (successful or not) will be made. There are
+(error) cases in kv_engine which can cause the DCP consumer to fail to
+send an add stream response and in such a scenario dcp_consumer_conn
+will never reponsd to the dcp_replicator. This results in rebalance
+hanging indefinitely.
+
+To address this issue, add a new handler for producer_stream_end
+messages to dcp_consumer_conn which matches only when the
+state == stream_state (we are setting up streams) that removes any
+entries from ToAdd for the offending vBucket and adds an error for the
+call (which ultimately fails the rebalance).
+
+Change-Id: I93165dc686dee79515495bce73c8128808779f62
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Ben Huddleston
+Date: 2022-09-14 14:46:59.000000000
+Message: 
+Uploaded patch set 4.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-09-14 14:47:06.000000000
+Message: 
+Patch Set 4: -Well-Formed
+
+Build Started https://cv.jenkins.couchbase.com/job/ns-server-test/31530/
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2022-09-14 14:47:56.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2022-09-14 14:48:45.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> make simple-test
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-09-14 14:48:55.000000000
+Message: 
+Patch Set 4:
+
+Build Started https://cv.jenkins.couchbase.com/job/ns-server-simple-test/3873/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-09-14 14:52:39.000000000
+Message: 
+Patch Set 4: Well-Formed+1
+
+Build Successful 
+
+https://cv.jenkins.couchbase.com/job/ns-server-test/31530/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-09-14 15:35:12.000000000
+Message: 
+Patch Set 4: Verified+1
+
+Build Successful 
+
+https://cv.jenkins.couchbase.com/job/ns-server-simple-test/3873/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2022-09-14 18:42:40.000000000
+Message: 
+Patch Set 4: Verified+1
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> Also tested locally with some KV changes to forcibly close the stream for some vBucket and skip sending the add stream response
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2022-09-21 17:02:58.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> From the problem description it sounds like we are trying to workaround the memcached bug. What is the reason we are fixing this on ns_server side vs. the memcached side?
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2022-09-21 18:41:51.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> This also seems to be the issue in MB-51223 which I need to read through tomorrow with some coffee because there is some interesting discussion there.
+
+This was caused by a memcached bug in this case (and I believe in MB-51223 too). Those bugs have been fixed now. I'm unsure how this manifested in MB-51223, but in MB-53445 this manifests as a rebalance hang, which isn't a graceful way for ns_server to deal with a memcached bug. In this case I think it's better for ns_server to just fail the rebalance.
+
+If looks like this failed a rebalance on first glance in MB-51223 which is different to my observed behaviour so I should review what is happening there to see if this still makes sense.
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2022-09-21 20:53:21.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> Regardless of the necessity of this fix, the comment about the overall approach: one of the main principles of erlang coding is: if something goes wrong - crash. So why don't we just crash dcp_consumer_conn if we get unexpected message from memcached. I didn't dig dip, but theoretically it should interrupt rebalance and rebuild the connection from scratch correctly.
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2022-09-22 13:35:17.000000000
+Message: 
+Patch Set 4:
+
+(3 comments)
+File Comment: /PATCHSET_LEVEL -> I can make this crash explicitly if you prefer, but I also didn't make any attempt to avoid crashing here. The current change should propagate up an error via the errors member of #stream_state which should then result in a rebalance failure when setup_streams returns an error; this is an existing mechanism which already handles any non-success add stream responses.
+
+I think that we should take a consistent approach to these sorts of errors, I don't particularly mind which approach that is, but I chose the approach in this change as much for consistency as anything else.
+File Comment: /PATCHSET_LEVEL -> I read through MB-51223 today and this looks to be a very similar, albeit subtly different issue. in MB-53445 we hang a rebalance after we ignore a stream end while setting up streams, and we never receive an add stream response. In MB-51223 we (eventually) fail a rebalance after getting stuck without a stream as we have processed (and ignored) a stream end while setting up streams before we received the add stream response. 
+
+I believe that this fix (to error should we see a stream end before we process an add stream response) will address both cases and cause a rebalance to fail rather than hang for some potentially indefinite period.
+Line:344, src/dcp_consumer_conn.erl -> This case is interesting and probably impossible to hit. The code (at least in its current form) can only instruct KV to set up streams to infinity which means that a successful stream end shouldn't happen
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2022-09-22 13:36:30.000000000
+Message: 
+Patch Set 4: Verified+1
+
+(1 comment)
+Line:344, src/dcp_consumer_conn.erl -> Removed
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2022-10-11 07:48:55.000000000
+MISMATCHED INLINE COMMENT
+File Comment: /PATCHSET_LEVEL -> > do we ever expect add_stream response and then stream end from producer for partition 1 before we receive add_stream response for vb 2
+
+No, I don't believe so, but the reasoning for this is a little bit implicit.
+
+When ns_server sets up a stream it does so by sending a DCP_ADD_STREAM to the consumer node. At this point the handling is dealt with within memcached, and memcached sends a DCP_STREAM_REQUEST to the producer node. memcached send the DCP_STREAM_REQUEST with an end seqno of std::numeric_limits<uint64_t>::max() which tells the producer node to stream everything until the stream is closed. It is then up to ns_server to close the stream when it determines that the backfill has completed here for takeover https://src.couchbase.org/source/xref/trunk/ns_server/src/ns_single_vbucket_mover.erl?r=91e43c8d#208-210. Any stream end at this point that was not driven by a close stream send by ns_server would be unexpected.
+
+When we start a takeover we hit this function in dcp_replicator.erl https://src.couchbase.org/source/xref/trunk/ns_server/src/dcp_replicator.erl?r=3ffb51f4#151-156. It closes the stream before proceeding the the takeover. Closing the stream may or may not cause memcached to send a stream end, depending on configuration and version, but, the closing of the stream and the following takeover only matches if we have a state of idle https://src.couchbase.org/source/xref/trunk/ns_server/src/dcp_consumer_conn.erl?r=91e43c8d&fi=maybe_close_stream#161-162. If we are in the process of setting up a stream then we should have a state of "stream_state" with the appropriate extra context. I didn't follow through the entire flow of the code, but I'd expect to see this error littering the logs https://src.couchbase.org/source/xref/trunk/ns_server/src/dcp_consumer_conn.erl?r=91e43c8d&fi=maybe_close_stream#268-270 and a bunch of other hangs if it wasn't working as described above.
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2022-09-26 18:36:58.000000000
+MISMATCHED INLINE COMMENT
+File Comment: /PATCHSET_LEVEL -> I've been expanding the testing for this today and we do (sometimes) crash with unrecognized opaque if we receive an add_stream response (we may ignore the packet if we are in the idle or shut states which does not result in a crash). The additional testing with multiple stream creations highlights that an explicit error is probably better/safer than adding to the errors stream_state as we may not propagate an error up the stack for an extended period of time while we finish setting up other streams.
+
+> If stream_end comes when the partition is in to_add list, we shouldn't remove it from the to_add list, but store it in some other list. When add_stream response is received we need to check this list and error out if the partition is in that list despite add_stream being successful. That will cover the potential race between successful add_stream response and end_stream issued right after.
+
+I'm not sure I follow the need for the extra list here. If we want to assert that we process add_stream responses before stream_end messages then why should we not just throw when we receive a stream_end if we haven't yet seen the add_stream response?
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2022-10-11 17:43:51.000000000
+MISMATCHED INLINE COMMENT
+File Comment: /PATCHSET_LEVEL -> I don't fully comprehended the explanation, we can take this discussion offline as it isn't pertinent to this change.
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2022-09-23 04:11:52.000000000
+MISMATCHED INLINE COMMENT
+File Comment: /PATCHSET_LEVEL -> We had a discussion on a syncup today and that's what we agreed on:
+
+1. If we send add_stream request to memcached, the memcached is obligated to respond with add_stream response. Therefore only 2 outcomes should be possible: a) add_stream response is received. b) the connection is broken
+
+2. The situation when add_stream response is received first and stream_end follows is already covered by the current code.
+
+3. If the error happens and we receive end_stream before add_stream response we do need to make sure that the callers will receive the error and the streams will be considered closed
+
+4. We still want to crash the connection if we receive add_stream response with the unknown opaque, because it indicates that the connection state is out of sync with memcached. Therefore in this case the connection should be crashed and recreated from scratch.
+
+So we need to do something along these lines:
+
+If stream_end comes when the partition is in to_add list, we shouldn't remove it from the to_add list, but store it in some other list. When add_stream response is received we need to check this list and error out if the partition is in that list despite add_stream being successful. That will cover the potential race between successful add_stream response and end_stream issued right after.
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2022-10-11 00:03:32.000000000
+MISMATCHED INLINE COMMENT
+File Comment: /PATCHSET_LEVEL -> I think I like the solution that Ben is proposing here. We clearly never expect stream_end to occur before add_stream, this is sort of akin to never expecting unrecognized opaque. We should crash the process and connection because we are in a bad state. IMO it is cleaner than maintaining the second list of opaques when we receive stream_end, because those don't get cleaned up if add_stream is missing and we are still stuck in a loop or replied in the affirmative when we haven't added the stream. Also, as Artem mentions this is in the ethos of erlang, "if something goes wrong - crash".
+Having said that I can be swayed easily considering I may not know all the edge cases here.
+
+Also one more question. Currently(even without this change), if we are adding more than one partition/stream say for vb 1,2 in a replication connection, do we ever expect add_stream response and then stream end from producer for partition 1 before we receive add_stream response for vb 2. This would mean we reply potentially with ok to the caller asking to setup these replication, when in fact the stream is closed on vb 1, is that correct? If so do we need to fix it?
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2022-09-22 18:25:51.000000000
+MISMATCHED INLINE COMMENT
+File Comment: /PATCHSET_LEVEL -> Apparently it does not crash. At least here: https://issues.couchbase.com/browse/MB-51223
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2022-09-22 16:44:14.000000000
+MISMATCHED INLINE COMMENT
+File Comment: /PATCHSET_LEVEL -> I'm not sure if this can happen, but if we receive stream_end before the add_stream response and then receive the add stream response, the dcp_consummer_conn process will crash with {unrecognized_opaque, ...}.
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2022-10-13 11:24:01.000000000
+MISMATCHED INLINE COMMENT
+File Comment: /PATCHSET_LEVEL -> Ack, discussed via zoom
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2022-10-06 01:40:11.000000000
+MISMATCHED INLINE COMMENT
+File Comment: /PATCHSET_LEVEL -> My understanding on this is that the gen_server behaviour (dcp_proxy in this case) is such that we only process a single message at a time (and these the DCP packets are processed in this way).
+
+My other assumption here is that the erlang:error(...) being propagated up the call stack will result in this process crashing and no more messages being processed by the gen_server. 
+
+Building on that, as soon as we see a stream end and we have not yet processed an add stream response we will error up the call stack and:
+a) crash the process
+b) close the socket
+c) not process any more packets (add stream responses being the ones we care about)
+
+Have I misunderstood any of that (or my code)?
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2022-09-22 19:09:34.000000000
+MISMATCHED INLINE COMMENT
+File Comment: /PATCHSET_LEVEL -> It will crash with this patch
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2022-10-05 22:39:04.000000000
+MISMATCHED INLINE COMMENT
+File Comment: /PATCHSET_LEVEL -> We should throw if we know if there's no race between stream_end and add_stream response delivering an error. Otherwise we will have either crash or error return depending on which one came first.
+----------------------------------------------------------------------------------------------------------------------

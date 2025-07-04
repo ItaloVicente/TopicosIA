@@ -1,0 +1,131 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-44168: Handle disk-write failures at DB bootstrap
+
+At vbucket creation we generate a new couchstore file. That operation
+may fail (eg IO failures) and leave a corrupted file on disk. From the
+couchstore's PoV even an empty file is corrupted, as the storage will
+not be able to open and work on ever again.
+
+With this patch we introduce a bootstrap procedure that creates new
+couchstore's file atomically, and we execute it when the system detects
+that there is no file on disk yet for a vbucket.
+
+The result of the new bootstrap procedure is either a new well-formed
+couchstore file that contains the first header at filepos 0, or no file
+at all.
+
+Change-Id: I9d5c907b886b54c329193c12f7dc99c354c71bff
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2021-03-15 08:05:56.000000000
+Message: 
+Uploaded patch set 8.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2021-03-15 08:11:06.000000000
+Message: 
+Patch Set 8:
+
+ping for review
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-03-15 09:15:13.000000000
+Message: 
+Patch Set 8: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/29384/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/34222/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/7606/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/6144/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/8271/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/9209/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/9563/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/9354/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/17112/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2021-03-15 16:10:39.000000000
+Message: 
+Patch Set 8: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-03-15 16:15:39.000000000
+Message: 
+Patch Set 8: Code-Review+1
+
+(1 comment)
+Line:4287, engines/ep/src/couch-kvstore/couch-kvstore.cc -> Style: You might want to use folly::ScopeGuard for this to reduce the repetition https://github.com/facebook/folly/blob/master/folly/ScopeGuard.h#L135-L175
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2021-03-16 08:31:38.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:4287, engines/ep/src/couch-kvstore/couch-kvstore.cc -> Mmm that's an interesting one. From the docs:
+
+> it guarantees that a function is executed upon leaving the current scope unless otherwise told.
+
+In the specific case here that doesn't seem to fit well as 'removing the temp file' is executed here (and in other places) as "error cleanup step", while at the bottom of the function as a final "success step".
+So essentially here I would end up with the same complexity (if not more) but just a different style.
+
+Thanks for the comment btw, I've learned a new thing 😊
+
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2021-03-16 14:32:15.000000000
+MISMATCHED INLINE COMMENT
+Line:4287, engines/ep/src/couch-kvstore/couch-kvstore.cc -> For what it's worth (I know this is merged, obviously doesn't need changing :) )
+A scope guard can make some things easier to reason about
+
+"The guard has been created, if we exit after this the guard will make sure the cleanup is done"
+"Ah! Now the guard has been dismissed, so after this point _don't_ need that cleanup"
+
+and if any new exit cases - or an exception is thrown we weren't expecting - there's no danger of forgetting to remove the temp file, the guard is taking care of it, like std::lock_guard vs manual lock() unlock().
+
+e.g.,:
+
+ {
+   auto guard = makeGuard(...);
+   thisCallMightThrow(); // will be cleaned up by the guard if it does throw!
+   if (maybeExit) {
+     ...
+     return;
+   }
+   if (maybeExitForAnotherReason) 
+     ...
+     return;
+   }
+  doTheImportantThing();
+  // phew! we made it past all the potential early exits and finished what we needed to do, so we don't need the clean up anymore
+  guard.dismiss();
+ }
+   
+
+Though of course if some code ends up with multiple .dismiss() calls in different branches, it could end up _more_ confusing to follow!
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2021-03-16 14:43:58.000000000
+MISMATCHED INLINE COMMENT
+Line:4287, engines/ep/src/couch-kvstore/couch-kvstore.cc -> > Though of course if some code ends up with multiple .dismiss() calls in different branches, it could end up _more_ confusing to follow!
+
+You got exactly the point - that would be the case here, as you would need to "drive" the out-of-scope behaviour as removeFileIfExists() is not just simply an error/success step.
+
+See line 4272: that is to ensure that we start the bootstrap procedure with no temp-file, the call at line 4279 would fail otherwise. So that call must stay there even if you implement a ScopedGuard.
+----------------------------------------------------------------------------------------------------------------------

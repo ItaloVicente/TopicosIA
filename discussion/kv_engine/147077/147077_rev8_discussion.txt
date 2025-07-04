@@ -1,0 +1,153 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-44079: Eph - Don't send backfilled committed prepares to replicas
+
+A node may send a committed prepare to another if it's either backfilling
+or streaming from memory. Streaming from memory guarantees that the
+replica will see the committed item for the prepare. Streaming from the
+seqlist does not if the committed item is purged before the committed
+prepare. The issue with this is that the replica does not know that the
+prepare has been committed already and it tries to recommit it.
+
+The question that needs to be addressed here is does a replica need to
+receive committed prepares in a backfill? There's a few cases to consider.
+
+1) [Prepare + Commit]. In this case not having the prepare is fine as the
+commit will exist already. If it were not received by the replica this
+would be a partial snapshot for which we make no guarantees.
+
+2) Prepare + Commit + [Prepare + Commit]. Replica received a snapshot of
+some sort before the backfill snapshot. Not having the (second)  prepare
+here is fine as in case 1.
+
+3) Prepare + [Prepare + Commit]. Replica would not replace the first prepare
+with the second if it was not sent. The commit would set the prepare to
+be completed in the HashTable and remove it from the DurabilityMonitor.
+
+One interesting part of this to note is the HCS check in the backfill scan.
+We can't just skip all completed prepares as we need to send all of the
+prepares that are incomplete at the time of the seqlist iterator creation.
+This is required because we'll stream anything newer from memory and apply
+stricter sanity checks. Currently when we complete a prepare we set the
+state of the prepare to be PrepareCommitted without replacing it. This means
+that we are modifying items in the middle of the seqlist. This is done
+without regard for range reads but this doesn't matter as the only other
+task that needs to check this is the HTTombstoneCleaner (just iterates over
+the HashTable). This leads though to a window in backfill where we may
+complete a prepare and update it to be PrepareCommitted. In this case we
+must actually send it.
+
+Change-Id: Ic3f569425d8e00782cfd89c13b16fac62cc03c59
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Ben Huddleston
+Date: 2021-02-26 14:10:32.000000000
+Message: 
+Uploaded patch set 8.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-02-26 14:10:47.000000000
+Message: 
+Patch Set 8:
+
+Branch restricted. PLEASE READ this URL: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/225662/artifact/restricted.html : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2021-02-26 14:10:47.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2021-02-26 14:24:56.000000000
+Message: 
+Patch Set 8: Code-Review+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-02-26 14:26:13.000000000
+Message: 
+Patch Set 8: Code-Review-1
+
+(1 comment)
+Line:248, engines/ep/src/dcp/backfill_memory.cc -> Is there an issue here where a Pending item might subsequently become PrepareAborted - but we'd skip sending it if it was still in Pending the moment we read it?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2021-02-26 14:40:15.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:248, engines/ep/src/dcp/backfill_memory.cc -> I don't think so. If the backfill were already in progress at abort then the HCS value taken at creation would govern what we send and we'd send the prepare then the abort from a memory snapshot. So any race would be between range read creation and the write. We update to PrepareAborted whilst holding the seqlist write lock so I think we're fine there.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-02-26 14:41:37.000000000
+Message: 
+Patch Set 8: Code-Review+2
+
+(1 comment)
+Line:248, engines/ep/src/dcp/backfill_memory.cc -> Cool, thanks for confirming.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-02-26 15:39:43.000000000
+Message: 
+Patch Set 8: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/1761/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/26377/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/1985/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/mad-hatter/1216/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/1876/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/1656/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/1846/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/1873/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-02-26 16:32:13.000000000
+Message: 
+Patch Set 8:
+
+check approval
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-02-26 16:32:27.000000000
+Message: 
+Patch Set 8:
+
+Branch restricted. PLEASE READ this URL: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/225679/artifact/restricted.html : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-02-26 16:34:58.000000000
+Message: 
+Patch Set 8:
+
+check approval
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-02-26 16:35:08.000000000
+Message: 
+Patch Set 8: Well-Formed+1
+
+Permission granted to commit: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/225683/artifact/restricted.html : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

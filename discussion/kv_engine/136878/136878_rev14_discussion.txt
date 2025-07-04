@@ -1,0 +1,273 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-41321: 1/4 Defer collection statistic updates until successful commit
+
+Collection statistics (items, disk size and persistent high-seqno) for
+persistent buckets are managed by the flusher thread.  This is done
+because we maintain statistic documents in KVStore (e.g. _local
+documents), and as the flusher writes documents to KVStore, we can count
+and update these statistic documents along with the documents. Warmup
+for example can open a KVStore and know the count and size of all
+collections just by reading the statistic documents.
+
+Prior to this change the visible collection statistics were updated by
+callbacks invoked by the KVStore before 'commit'. So cmd_stat etc... are
+reading counters that are written to from the flusher - if the KVStore
+update fails the flusher retries the batch of items, which means that
+the counters are  updated multiple times, giving the wrong counters or
+in-case of deletes underflow exceptions.
+
+As part of this fix it was also identified that the collections flusher
+code (collections/flush.cc) made decisions about documents in the
+flush batch and documents already stored on disk by querying the
+VB::Manifest object. This is a flawed approach because the VB::Manifest
+contains changes that are not yet 'durable', i.e. we may update the
+statistics on disk based on the VB::Manifest saying a collection was
+dropped, but that drop is somewhere in a yet-to-be persisted
+checkpoint - warm-up and that collection drop redacts but it's too late
+for the statistic updates, the values could now be wrong.
+
+This commit changes how collection statistics are updated to occur in
+multiple steps.
+
+1) As the items of the batch are processed, we now update a flusher
+owned map of collection-ID to collection statistics - this collects
+the 'deltas' of changes being made by the flusher batch.
+
+2) Before commit we read the current collection statistics and apply
+the collected changes to generate statistics for the '_local' updates.
+
+3) If the commit is successful, we update the current in-memory
+statistics.
+
+As part of these steps the changes to collection persisted statistics
+now don't use the VB::Manifest 'map' of what are current collections,
+except for the final 'make visible' write. The functions doing the
+updates now make decisions about dropped collections based on the
+current flush data, which knows if collections were dropped in the batch
+(and the sequence number of the drop), and secondly (for existing items
+in the document update case) what collections have already been dropped
+in the KVStore we are  updating.
+
+Finally to allow for the flusher to make changes to a collection's
+statistics and avoid a cycle of "read statistics, update, write
+statistics" the VB::Manifest is modified so that it doesn't immediately
+discard the count/size/seqno of dropped collections. This allows the
+flusher to just do 'update and write' (which is what it has always done
+for collections).
+
+Change-Id: Ib3065457057bbeca983849cef4c5e1cb2854343c
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jim Walker
+Date: 2020-10-06 21:53:16.000000000
+Message: 
+Uploaded patch set 14.
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2020-10-06 21:54:40.000000000
+Message: 
+Patch Set 14:
+
+(4 comments)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-10-06 22:34:50.000000000
+Message: 
+Patch Set 14: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/30916/ : FAILURE
+
+Link error: fatal error LNK1168: cannot open phosphor\phosphor.dll for writing ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/30916/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/14112/ : FAILURE
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/3445/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/4917/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/26715/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/5294/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/6337/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/6450/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/6219/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-10-07 08:48:42.000000000
+Message: 
+Patch Set 14:
+
+(2 comments)
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-10-07 08:49:17.000000000
+Message: 
+Patch Set 14: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-10-07 09:10:20.000000000
+Message: 
+Patch Set 14:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/14117/ : FAILURE
+
+Timeout of a CTest test [2020-10-07T09:03:08.942Z]  31/391 Test #197: ep-engine_ep_unit_tests.FullOrValue/DurabilityWarmupTest ....................................................} ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/14117/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/30923/ : FAILURE
+
+Link error: fatal error LNK1168: cannot open phosphor\phosphor.dll for writing ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/30923/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/5300/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [0077/0158]: disk>RAM delete paged-out...../kv_engine/engines/ep/tests/ep_testsuite.cc:4368 Test failed: `" (Expected `0", got `1" - Unexpected bg_fetched after del/get)
+[2020-10-07T08:38:33.597Z] (88 ms) FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/5300/ )
+
+Failure of a CTest test [2020-10-07T08:38:33.596Z]  16/405 Test #241: ep_testsuite.full_eviction.rocksdb ..........................................................................Child aborted ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/5300/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/6456/ : FAILURE
+
+ThreadSanitizer issue: data race (/home/couchbase/jenkins/workspace/kv_engine.threadsanitizer_master/build/kv_engine/ep_testsuite_dcp+0x530dbe) in operator delete(void*, unsigned long)  ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/6456/ )
+
+Failure of a CTest test [2020-10-07T08:46:33.721Z]   8/386 Test #247: ep_testsuite_dcp.value_eviction.magma ....................................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/6456/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/3451/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/4923/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/26721/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/6343/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/6225/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2020-10-07 11:34:49.000000000
+Message: 
+Patch Set 14:
+
+(1 comment)
+
+Thanks for the review
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-10-07 12:41:50.000000000
+Message: 
+Patch Set 14:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/30966/ : FAILURE
+
+CMake error: build/tlm/deps/openssl.exploded/CMakeLists.txt:1 (FILE) ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/30966/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/6477/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/14142/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/3471/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/4943/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/26741/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/5322/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/6364/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/6247/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-10-07 13:22:39.000000000
+Message: 
+Patch Set 14:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/30972/ : FAILURE
+
+Link error: fatal error LNK1168: cannot open phosphor\phosphor.dll for writing ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/30972/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/6477/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/14142/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/3471/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/4943/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/26741/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/5322/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/6364/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/6247/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-10-07 13:28:38.000000000
+Message: 
+Patch Set 14:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/30973/ : FAILURE
+
+Link error: fatal error LNK1168: cannot open phosphor\phosphor.dll for writing ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/30973/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/6477/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/14142/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/3471/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/4943/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/26741/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/5322/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/6364/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/6247/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-10-07 14:28:39.000000000
+Message: 
+Patch Set 14: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/6477/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/14142/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/3471/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/4943/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/26741/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/5322/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/6364/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/6247/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/30976/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

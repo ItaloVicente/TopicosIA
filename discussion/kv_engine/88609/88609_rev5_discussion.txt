@@ -1,0 +1,182 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-24860: Switch memory tracking to be more read efficient
+
+The initial CoreStore integration makes getTotalMemUsed a more heavy
+weight function compared to the TLS version. The old getTotalMemUsed
+would always aggregate the current core counters, so means a loop
+and some cache crossing.
+
+This patch re-instates a similar technique used in TLS which means
+that the read of mem_used is 'cheap', a plain and 'global' relaxed
+atomic is read and now the write side (memAlloc/memDealloc) have a
+merge threshold. When the core counter accumulates a abs(value) which
+exceeds the threshold, the core value is accumulated into the
+'global', thus  getTotalMemUsed returns a value which may lag the real
+total, but that matches more closely the TLS behaviour.
+
+Note the original TLS code had an updates threshold and a bytes
+allocated threshold, only the bytes allocated threshold remains as
+doing n 1 byte allocations doesn't really need to trigger a merge.
+
+An updated benchmark has been written and the original TLS code was
+re-benchmarked with a similar benchmark.
+
+Test AllocNRead1 (write heavy test and benchmark output trimmed):
+
+TLS code (github/jimwwalker/kv_engine @ daa00adb):
+
+  Run on (24 X 1232.7 MHz CPU s)
+  2018-01-31 09:03:48
+  -------------------------------------------------------------------
+  Benchmark                            Time           CPU Iterations
+  -------------------------------------------------------------------
+  AllocNRead1/0/threads:96             0 ns          4 ns  163069344
+  AllocNRead1/1/threads:96             0 ns         46 ns   15367776
+  AllocNRead1/2/threads:96             1 ns         87 ns    8211072
+  AllocNRead1/4/threads:96             2 ns        166 ns    4326816
+  AllocNRead1/8/threads:96             4 ns        333 ns    2219808
+  AllocNRead1/16/threads:96            7 ns        635 ns    1079040
+  AllocNRead1/32/threads:96           13 ns       1268 ns     561216
+  AllocNRead1/64/threads:96           27 ns       2477 ns     282048
+  AllocNRead1/128/threads:96          60 ns       5569 ns     139872
+  AllocNRead1/256/threads:96         118 ns      11096 ns      66432
+  AllocNRead1/512/threads:96         213 ns      20396 ns      34656
+  AllocNRead1/1024/threads:96        483 ns      45152 ns      17760
+  AllocNRead1/2048/threads:96        884 ns      84550 ns       7968
+  AllocNRead1/4000/threads:96       1851 ns     169866 ns       4032
+
+CoreStore (i.e. this commit):
+
+ Run on (24 X 1237.67 MHz CPU s)
+ 2018-02-01 14:18:38
+ ***WARNING*** CPU scaling is enabled, the benchmark real time measurements may be noisy and will incur extra overhead.
+ -------------------------------------------------------------------
+ Benchmark                            Time           CPU Iterations
+ -------------------------------------------------------------------
+ AllocNRead1/0/threads:96             0 ns          5 ns  126621984
+ AllocNRead1/1/threads:96             0 ns         41 ns   17480736
+ AllocNRead1/2/threads:96             1 ns         87 ns    8632128
+ AllocNRead1/4/threads:96             2 ns        168 ns    3970560
+ AllocNRead1/8/threads:96             4 ns        352 ns    2025696
+ AllocNRead1/16/threads:96            7 ns        684 ns    1026528
+ AllocNRead1/32/threads:96           15 ns       1389 ns     512832
+ AllocNRead1/64/threads:96           29 ns       2735 ns     259584
+ AllocNRead1/128/threads:96          63 ns       5915 ns     125568
+ AllocNRead1/256/threads:96         119 ns      10876 ns      63936
+ AllocNRead1/512/threads:96         267 ns      23952 ns      31776
+ AllocNRead1/1024/threads:96        524 ns      47242 ns      14688
+ AllocNRead1/2048/threads:96        967 ns      92247 ns       7584
+ AllocNRead1/4000/threads:96       1977 ns     184717 ns       4032
+
+AllocNReadM (read heavy output trimmed):
+
+Test shown does 512 or 1024 writes and increasing reads (128, 256 upto
+4000).
+
+TLS code (github/jimwwalker/kv_engine @ daa00adb):
+
+ Run on (24 X 1199.97 MHz CPU s)
+ 2018-01-31 11:17:57
+ -------------------------------------------------------------------
+ Benchmark                          Time           CPU Iterations
+ -------------------------------------------------------------------
+ AllocNReadM/512/128/threads:96     257 ns      23747 ns      27936
+ AllocNReadM/512/256/threads:96     265 ns      24671 ns      30528
+ AllocNReadM/512/512/threads:96     286 ns      25831 ns      30144
+ AllocNReadM/512/1024/threads:96    271 ns      25536 ns      26208
+ AllocNReadM/512/2048/threads:96    267 ns      24820 ns      23904
+ AllocNReadM/512/4000/threads:96    367 ns      34593 ns      19488
+ AllocNReadM/1024/128/threads:96    476 ns      45633 ns      13248
+ AllocNReadM/1024/256/threads:96    475 ns      44718 ns      14976
+ AllocNReadM/1024/512/threads:96    460 ns      43996 ns      13536
+ AllocNReadM/1024/1024/threads:96   626 ns      58202 ns       9600
+ AllocNReadM/1024/2048/threads:96   526 ns      49646 ns      11616
+ AllocNReadM/1024/4000/threads:96   590 ns      55348 ns      13056
+
+CoreStore (i.e. this commit):
+
+ Run on (24 X 1203.98 MHz CPU s)
+ 2018-01-31 11:18:07
+ ------------------------------------------------------------------
+ Benchmark                          Time           CPU Iterations
+ ------------------------------------------------------------------
+ AllocNReadM/512/128/threads:96     260 ns      24193 ns      25344
+ AllocNReadM/512/256/threads:96     276 ns      25273 ns      28128
+ AllocNReadM/512/512/threads:96     295 ns      25984 ns      26880
+ AllocNReadM/512/1024/threads:96    306 ns      27264 ns      28896
+ AllocNReadM/512/2048/threads:96    328 ns      28684 ns      25824
+ AllocNReadM/512/4000/threads:96    340 ns      31127 ns      22560
+ AllocNReadM/1024/128/threads:96    582 ns      53013 ns      10560
+ AllocNReadM/1024/256/threads:96    540 ns      49227 ns      14496
+ AllocNReadM/1024/512/threads:96    572 ns      52553 ns      15072
+ AllocNReadM/1024/1024/threads:96   534 ns      50390 ns      13824
+ AllocNReadM/1024/2048/threads:96   576 ns      54154 ns       9600
+ AllocNReadM/1024/4000/threads:96   597 ns      56172 ns      13152
+
+Change-Id: I50fd34f6d40c0da4e102220ae86944a10d075572
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jim Walker
+Date: 2018-02-01 15:40:37.000000000
+Message: 
+Uploaded patch set 5.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-02-01 15:45:15.000000000
+Message: 
+Patch Set 5: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-02-01 16:18:16.000000000
+Message: 
+Patch Set 5: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/6327/ : FAILURE
+
+Compile error at ..\kv_engine\engines\ep\src\stats.cc(186): error C2039: "exchange": is not a member of "Couchbase::RelaxedAtomic<int64_t>" ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/6327/ )
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/526/ : FAILURE
+
+Compile error at /home/couchbase/jenkins/workspace/kv-engine-cv-perf/kv_engine/engines/ep/tests/module_tests/stats_test.cc:391:33:
+error: no matching function for call to "swap(std::_Bind<void (EPStats::*(TestEpStat*, std::_Placeholder<1>))(long unsigned int)>&, std::_Bind<void (EPStats::*(TestEpStat*, std::_Placeholder<1>))(long unsigned int)>&)"
+ ( http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/526/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/5771/ : FAILURE
+
+Compile error at /home/couchbase/jenkins/workspace/kv_engine-clang_analyzer-master/kv_engine/engines/ep/tests/module_tests/stats_test.cc:391:33:
+error: no matching function for call to "swap(std::_Bind<void (EPStats::*(TestEpStat*, std::_Placeholder<1>))(long unsigned int)>&, std::_Bind<void (EPStats::*(TestEpStat*, std::_Placeholder<1>))(long unsigned int)>&)"
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/5771/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/6704/ : FAILURE
+
+Compile error at /home/couchbase/jenkins/workspace/kv_engine-linux-master/kv_engine/engines/ep/tests/module_tests/stats_test.cc:391:33:
+error: no matching function for call to "swap(std::_Bind<void (EPStats::*(TestEpStat*, std::_Placeholder<1>))(long unsigned int)>&, std::_Bind<void (EPStats::*(TestEpStat*, std::_Placeholder<1>))(long unsigned int)>&)"
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/6704/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master/6006/ : FAILURE
+
+Compile error at /home/couchbase/jenkins/workspace/kv_engine-addresssanitizer-master/kv_engine/engines/ep/tests/module_tests/stats_test.cc:391:17:
+error: no matching function for call to "swap"
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master/6006/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/6213/ : FAILURE
+
+Compile error at /home/couchbase/jenkins/workspace/kv_engine-threadsanitizer-master/kv_engine/engines/ep/tests/module_tests/stats_test.cc:391:17:
+error: no matching function for call to "swap"
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/6213/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/4797/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2018-02-01 16:34:06.000000000
+Message: 
+Patch Set 5:
+
+needs a few tweaks, test are failing as the merge thresh is now too high. Will add config ability to this patch so tests can run with a low threshold. Will add dynamic support in a later commit
+----------------------------------------------------------------------------------------------------------------------

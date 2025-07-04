@@ -1,0 +1,217 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-51752 [BP] Gather projector profiles when TLS is enforced
+
+This backports these changes from MB-51197
+
+1) Add tls status of node to dump-guts/cbcollect
+
+Adds tls support to dump-guts, and cbcollect so that it can be used to
+alter the behavior of the projector collector task and make the
+correct requests to https instead of http when cluster encryption is
+enabled. Also makes this information generally available for other
+tasks to use in cbcollect, as needed.
+
+2) add curl '-k' (allow-insecure) option by default to get
+
+Allow insecure connections that don't require the proper certificate
+for curl to connect to self-signed or unknown certificates on
+cbcollect. Used primarily for collecting projector dumps but is also
+added by default for get requests and can be expanded to other
+requests in the future, if needed.
+
+Change-Id: Ibbb6bc9298c74a0aea42a1c127c33e8b59203987
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Steve Watanabe
+Date: 2022-04-08 18:17:59.000000000
+Message: 
+Uploaded patch set 2: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: Restriction Checker
+Date: 2022-04-08 18:18:09.000000000
+Message: 
+Patch Set 2: Well-Formed+1
+
+Permission granted to commit: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/294776/artifact/restricted.html : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-04-08 18:18:38.000000000
+Message: 
+Patch Set 2: -Well-Formed
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-test/30102/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-04-08 18:24:33.000000000
+Message: 
+Patch Set 2: Well-Formed+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/ns-server-test/30102/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2022-04-08 18:29:07.000000000
+Message: 
+Patch Set 2: Verified+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2022-04-08 19:18:51.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:1324, cbcollect_info -> Steve, I understand that this is just a backport but still I have a question.
+From the code it looks like we choose scheme (http or https) based on the node_encryption value in ns_config. But node_encryption doesn't really affect service encryption (at least it should not). Encryption level should affect it instead (when it's all or strict).
+In other words, it seems like this code should not work when n2n encryption is 'on' (node_encryption==true), while encryption level is 'control' (projector should use tcp, not tls).
+But maybe I'm missing something. What do you think?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2022-04-08 19:52:07.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:1324, cbcollect_info -> You're more familiar with this than I am. My assumption that using node_encryption was all that was needed to determine http vs https. This "tls" affects only the projector and fixes the reported issue "After TLS is enabled, projector uses the same port for TLS communication as well. So, any HTTP REST request would return: "Client sent an HTTP request to an HTTPS server"."
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2022-04-08 19:54:57.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:1324, cbcollect_info -> Here's the cbcollect.log for my test where it seems the projector doesn't error out.
+
+[2022-04-08T11:45:33.860320-07:00] Projector Go Routine Dump:  (['curl', '-sS', '-k', '--proxy', '', '-K-', 'https://127.0.0.1:10000/debug/pprof/goroutine?debug=1']) - OK
+[2022-04-08T11:45:33.961471-07:00] Projector CPU Profile:  (['curl', '-sS', '-k', '--proxy', '', '-K-', 'https://127.0.0.1:10000/debug/pprof/profile?seconds=30']) - OK
+[2022-04-08T11:46:04.090023-07:00] Projector Memory Profile:  (['curl', '-sS', '-k', '--proxy', '', '-K-', 'https://127.0.0.1:10000/debug/pprof/heap?debug=1']) - OK
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2022-04-08 20:07:04.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:1324, cbcollect_info -> "After TLS is enabled" for projector happens when encryption level changes to 'all'. While node_encryption flag tells us if erlang nodes use tls to communicate with each other.
+I see that on my machine port 10000 doesn't support TLS when node_encryption=on and encryption level==control:
+
+ (n_0@node0.localhost)2> ns_config:read_key_fast({node, node(), node_encryption}, 1).
+ true
+ (n_0@node0.localhost)3> ns_config:read_key_fast(cluster_encryption_level, 1).
+control
+
+ $ testssl.sh -6 [::1]:10000
+ ...
+  Your /usr/local/opt/openssl@1.1/bin/openssl is not IPv6 aware, or [::1]:10000 doesn't seem to be a TLS/SSL enabled server
+ The results might look ok but they could be nonsense. Really proceed ? ("yes" to continue) -->
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2022-04-08 20:14:56.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:1324, cbcollect_info -> Here's the collected projector files without this change:
+
+$ ll projector*
+-rw-r--r--  1 stevewatanabe  staff  48 Apr  8 13:08 projector_cprof.log
+-rw-r--r--  1 stevewatanabe  staff  48 Apr  8 13:08 projector_mprof.log
+-rw-r--r--  1 stevewatanabe  staff  48 Apr  8 13:08 projector_pprof.log
+stevewatanabe @ ~/cheshire-cat/ns_server/tmp/cbcollect_info_n_0@192.168.1.117_20220408-200450 (noDelta) $ cat projector_cprof.log
+Client sent an HTTP request to an HTTPS server.
+stevewatanabe @ ~/cheshire-cat/ns_server/tmp/cbcollect_info_n_0@192.168.1.117_20220408-200450 (noDelta) $ cat projector_mprof.log
+Client sent an HTTP request to an HTTPS server.
+stevewatanabe @ ~/cheshire-cat/ns_server/tmp/cbcollect_info_n_0@192.168.1.117_20220408-200450 (noDelta) $ cat projector_pprof.log
+Client sent an HTTP request to an HTTPS server.
+
+
+and here's the collected projector files with this change:
+
+$ ll project*
+-rw-r--r--  1 stevewatanabe  staff    1611 Apr  8 11:48 projector_cprof.log
+-rw-r--r--  1 stevewatanabe  staff  661307 Apr  8 11:46 projector_mprof.log
+-rw-r--r--  1 stevewatanabe  staff   33217 Apr  8 11:45 projector_pprof.log
+$ head -7 projector_pprof.log
+goroutine profile: total 186
+64 @ 0x4032b90 0x404243b 0x47b59fe 0x4060911
+#	0x47b59fd	github.com/couchbase/indexing/secondary/projector.(*VbucketWorker).run+0x22d	/Users/stevewatanabe/cheshire-cat/goproj/src/github.com/couchbase/indexing/secondary/projector/worker.go:274
+
+64 @ 0x4032b90 0x404243b 0x47b6497 0x4060911
+#	0x47b6496	github.com/couchbase/indexing/secondary/projector.(*VbucketWorker).genServer+0x1d6	/Users/stevewatanabe/cheshire-cat/goproj/src/github.com/couchbase/indexing/secondary/projector/worker.go:345
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2022-04-08 20:24:06.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:1324, cbcollect_info -> To be honest I have no idea how it works:
+
+ (n_0@node0.localhost)1> ns_config:read_key_fast({node, node(), node_encryption}, 
+1).
+ true
+ (n_0@node0.localhost)2> ns_config:read_key_fast(cluster_encryption_level, 1).
+ control
+ (n_0@node0.localhost)3>
+
+
+ $ curl 'https://Administrator:asdasd@[::1]:10000/debug/pprof/goroutine?debug=1' -k -v
+ *   Trying ::1...
+ * TCP_NODELAY set
+ * Connected to ::1 (::1) port 10000 (#0)
+ * ALPN, offering h2
+ * ALPN, offering http/1.1
+ * successfully set certificate verify locations:
+ *   CAfile: /etc/ssl/cert.pem
+   CApath: none
+ * TLSv1.2 (OUT), TLS handshake, Client hello (1):
+ * error:1400410B:SSL routines:CONNECT_CR_SRVR_HELLO:wrong version number
+ * Closing connection 0
+ curl: (35) error:1400410B:SSL routines:CONNECT_CR_SRVR_HELLO:wrong version number
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2022-04-08 20:34:48.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:1324, cbcollect_info -> For me:
+
+ $ cat projector_cprof.log
+ curl: (35) error:1408F10B:SSL routines:ssl3_get_record:wrong version number
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2022-04-08 20:39:08.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:1324, cbcollect_info -> After setting
+
+./couchbase-cli setting-security -c localhost:9000 -u Administrator -p asdasd --set --cluster-encryption-level control
+
+I see this in the collected results...
+
+$ ll project*
+-rw-r--r--  1 stevewatanabe  staff  76 Apr  8 13:33 projector_cprof.log
+-rw-r--r--  1 stevewatanabe  staff  76 Apr  8 13:33 projector_mprof.log
+-rw-r--r--  1 stevewatanabe  staff  76 Apr  8 13:33 projector_pprof.log
+stevewatanabe @ ~/cheshire-cat/ns_server/tmp/cbcollect_info_n_0@192.168.1.117_20220408-202906 (backport) $ cat projector_cprof.log
+curl: (35) error:1408F10B:SSL routines:ssl3_get_record:wrong version number
+
+which matches Timofey's observation.
+
+----------------------------------------------------------------------------------------------------------------------

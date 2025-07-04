@@ -1,0 +1,129 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-28139: Don't fail indexer bootstrap if index storage is corrupted.
+
+I.
+Detect the storage corruption and handle it gracefully. If storage
+is corrupt for an index (or a partition of an index):
+(1) Don't make it available
+(2) Cleanup its data
+(3) Notify the administrator about the corruption and cleanup.
+
+II.
+This allows availability of non-corrupted indices.
+
+III.
+Allow DeleteOrPruneIndexInstance during bootstrap
+
+IV.
+Handle disk corruption for MOI during/after NewStorageManager.
+
+Change-Id: I352e03ed285f889cfb18d3facef6ebc1624e6f26
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: amithk
+Date: 2018-04-24 15:47:27.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: John Liang
+Date: 2018-04-26 04:23:29.000000000
+Message: 
+Patch Set 1:
+
+(14 comments)
+Line:107, secondary/indexer/forestdb_slice_writer.go -> does it have to handle FDB_CORRUPTION_ERR?
+
+Line:112, secondary/indexer/forestdb_slice_writer.go -> does it have to handle FDB_CORRUPTION_ERR?
+
+Line:3570, secondary/indexer/indexer.go -> You don't get half baked slice.  You get nil as slice.  I am not clear why you need to add the slice to partnInst.  When are you going to remove the slice from partnInst?
+
+Line:3574, secondary/indexer/indexer.go -> You could have use FailedIndexPartnMap to return failed partition instead.  And you can reuse FailedIndexPartnMap.Add() to make the code slightly easier to read.
+
+Line:4675, secondary/indexer/indexer.go -> The error handling should be similar to initFromPersistenceStore.  So it would be better to consolidate the logic.
+
+Line:4908, secondary/indexer/indexer.go -> Instead of checking isPartitioned(), you should check if the index inst has any partition left as follows:
+
+len(inst.Pc.GetAllPartitions()) == 0
+
+If there is no partition, then you proceed to delete the inst from indexInstMap and indexPartnMap, as well as deleting the stats.
+
+Line:4925, secondary/indexer/indexer.go -> If this is only called during bootstrap, rebalance cannot happen.
+
+Line:4936, secondary/indexer/indexer.go -> You will end up deleting all the slice/partition for the index instance, including the good partition.   
+
+You can take a look at forceCleanupIndexData().   You can construct the directory path and delete it.  This is used to clean up data during bootstrap.
+
+You also need to remove partition from indexInst.Pc as follows
+
+indexInst.Pc.RemovePartition(partnId)
+
+Line:4943, secondary/indexer/indexer.go -> You also have to handle case where it a partitioned index, but all partitions are bad.  So you should keep this function just to remove partition from index instance.
+
+Line:4971, secondary/indexer/indexer.go -> You don't need retry when sending message to ClustMgr.
+
+Line:132, secondary/indexer/storage_manager.go -> Returning from here will skip calling s.run().  This will make indexer unable to send any message to storage manager.
+
+Line:1172, secondary/indexer/storage_manager.go -> This function is going to be called in handleRollback().  In this case, this should panic if getting non-recoverable error.
+
+Line:1232, secondary/indexer/storage_manager.go -> Since you define FailedIdxPartnMap as a type, it could have a function to add failed partition, such as
+
+func (m *FailedIdxPartnMap) Add(instId common.IndexInstId, partitionId common.PartitionId) FailedIdxPartnMap
+
+If m is nil, then the function can allocate the map.  The caller can
+
+failedPartitions = failedPartitions.Add(instId, partnId)
+
+This will make better code reuse
+
+Line:203, secondary/manager/lifecycle.go -> It can be dangerous to allow OPCODE_DROP_OR_PRUNE_INSTANCE to be called during bootstrap.   Rebalance manager can call this, but we don't want rebalance call to proceed during bootstrap.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2018-04-26 06:24:54.000000000
+Message: 
+Patch Set 1:
+
+(14 comments)
+Line:107, secondary/indexer/forestdb_slice_writer.go -> Will do it.
+
+Line:112, secondary/indexer/forestdb_slice_writer.go -> Will do it.
+
+Line:3570, secondary/indexer/indexer.go -> I have modified the code to return half baked slice in case of corruption error. If we reconstruct the path like in forceCleanupIndexData, we can avoid doing this.
+
+
+In case of corruption error, the partnInst is only used for cleanup. It is not stored in partnInstanceMap.
+
+Line:3574, secondary/indexer/indexer.go -> I will implement this.
+
+Line:4675, secondary/indexer/indexer.go -> Most of the code is consolidated in idx.cleanupFailedPartnInstance. Will try to consolidate cleanup of idx.indexInstMap and idx.indexPartnMap.
+
+Line:4908, secondary/indexer/indexer.go -> Will fix this.
+
+Line:4925, secondary/indexer/indexer.go -> Okay. Will remove the comment.
+
+Line:4936, secondary/indexer/indexer.go -> forceCleanupIndexData constructs the path in exactly same way as that of NewSlice. NewSlice internally stores that path in slice.path. During destroy, os.RemoveAll is called for the slice.path. So, the behaviour should be the same. (I will double check this in my testing).
+
+indexInst.Pc.RemovePartition(partnId): will do this.
+
+Line:4943, secondary/indexer/indexer.go -> Yes. Will handle this case.
+
+Line:4971, secondary/indexer/indexer.go -> I did not rule out the possibility of retryable errors. So, I had added this. Will check and remove this retry loop if not needed.
+
+Line:132, secondary/indexer/storage_manager.go -> Will fix this.
+
+Line:1172, secondary/indexer/storage_manager.go -> Will fix this.
+
+Line:1232, secondary/indexer/storage_manager.go -> Will do this.
+
+Line:203, secondary/manager/lifecycle.go -> I will re-analyse this. Can it get called in bootstrap? 
+
+- In NewIndexer, Rebalance manager is initialized after bootstrap. 
+- m.janitor.run() can trigger OPCODE_DROP_OR_PRUNE_INSTANCE but janitor runs only after indexer bootstrap is done.
+
+Anyways. If needed, I will add a new message and/or opcode to handle if there is a race. In general, if there is a race, need more analysis on whether to run this in bootstrap.
+
+----------------------------------------------------------------------------------------------------------------------

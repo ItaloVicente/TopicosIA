@@ -1,0 +1,145 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-29675: Move ObjectRegistry stats to CoreLocalStats
+
+ObjectRegistry updates stats on the number and size of various object
+classes whenever those classes are constructed/destructed. Currently
+it updates a single set of stats per Bucket. However, these statistics
+are highly contended by all the frontend worker threads; as such the
+various functions to update the stats show high in profiling.
+
+For example during 20/80 R/W pillowfight run, a representative worker
+thread shows the following:
+
+    Samples: 205K of event 'cycles:ppp', Event count (approx.): 110332199760, Thread: mc:worker_16
+    Overhead  Command       Shared Object                 Symbol
+       1.52%  mc:worker_16  ep.so                         [.] ObjectRegistry::onCreateBlob
+       1.43%  mc:worker_16  ep.so                         [.] ObjectRegistry::onCreateItem
+       1.04%  mc:worker_16  ep.so                         [.] ObjectRegistry::onDeleteItem
+       0.59%  mc:worker_16  ep.so                         [.] ObjectRegistry::onDeleteBlob
+
+Approx ~4.5% of the thread's runtime is spent in stats
+updating. Examining the asm-level, a significant number of the cycles
+is spent on the atomic updates to those counters; which appears to be
+due to cacheline contention.
+
+Given these stats are frequerntly updated but rarely read, we can
+reduce this cost by moving these hotly-contended counters into the new
+CoreLocalStats class, so each core has it's own instance to write to.
+
+In microbenchmarks this reduces the cost to create/delete a
+StoredValue by ~20%:
+
+Before:
+
+    Run on (8 X 2300 MHz CPU s)
+    2018-05-29 17:00:45
+    ---------------------------------------------------------------------------------------
+    Benchmark                                                Time           CPU Iterations
+    ---------------------------------------------------------------------------------------
+    VBucketBench/CreateDeleteStoredValue/threads:16        229 ns       1954 ns     368128
+
+After:
+
+    Run on (8 X 2300 MHz CPU s)
+    2018-05-29 17:02:54
+    ---------------------------------------------------------------------------------------
+    Benchmark                                                Time           CPU Iterations
+    ---------------------------------------------------------------------------------------
+    VBucketBench/CreateDeleteStoredValue/threads:16        209 ns       1559 ns     461152
+
+Change-Id: I668b4fb54997e32e9cd9229fcfaf5d411b11305d
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2018-05-31 13:54:03.000000000
+Message: 
+Uploaded patch set 4: Patch Set 3 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-05-31 14:47:58.000000000
+Message: 
+Patch Set 4: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-vulcan/489/ : FAILURE
+
+Failure of a GoogleTest  ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-vulcan/489/ )
+
+Failure of a CTest test 146/151 Test #147: memcached_testapp.ep.TransportProtocols/XattrTest ............................ ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-vulcan/489/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-vulcan/617/ : FAILURE
+
+Failure of a GoogleTest  ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-vulcan/617/ )
+
+Failure of a CTest test 140/145 Test #143: memcached_testapp.ep.TransportProtocols/XattrDisabledTest .................... ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-vulcan/617/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/8302/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-vulcan/454/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-vulcan/441/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-undefinedsanitizer-vulcan/480/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-vulcan/547/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-05-31 15:25:43.000000000
+Message: 
+Patch Set 4: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/8302/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-vulcan/454/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-vulcan/441/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-undefinedsanitizer-vulcan/480/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-vulcan/547/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-vulcan/620/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-vulcan/491/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2018-06-01 08:18:10.000000000
+Message: 
+Patch Set 4: Code-Review+1
+
+(1 comment)
+Line:279, engines/ep/src/kv_bucket.cc -> Not sure if we need this, as we store 0 in the constructor of RelaxedAtomic: http://src.couchbase.org/source/xref/vulcan/platform/include/relaxed_atomic.h#30
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-06-01 09:00:58.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:279, engines/ep/src/kv_bucket.cc -> You're right that it'll be set to zero in the EPStats constructor, however there's a somewhat complex relationship here - stats object is owned by EPEngine, and a reference held by the bucket here. 
+
+Given where we are with vulcan I think it's safer (although maybe unnecessary) to keep this reset here to avoid any regression.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2018-06-01 09:18:27.000000000
+Message: 
+Patch Set 4: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------
+Author: Tim Bradgate
+Date: 2018-06-01 10:52:50.000000000
+Message: 
+Patch Set 4: Code-Review+1
+
+(1 comment)
+Line:30, /COMMIT_MSG -> frequently
+
+----------------------------------------------------------------------------------------------------------------------

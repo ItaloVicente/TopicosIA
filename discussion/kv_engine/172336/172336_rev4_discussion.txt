@@ -1,0 +1,171 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-51413: Don't warmup vBuckets without state
+
+It's possible for both couchstore and magma backends to create a
+"vBucket" (header/KVStore respectively) without persisting the
+vbucket_state. Warming up such a vBucket currently causes us to
+warmup a vBucket with a defaul initialized vBucket state. Doing so
+should be benign, ns_server should spot the vBucket in the incorrect
+state post-warmup and correct it. If we were to have some IO error
+during warmup though and we were to fail to persist the vBucket state
+to disk during the PopulateVBMap phase of warmup then the subsequent
+scan of the vBucket would find no vbucket_state and an exception would
+be thrown. We'd already be in a bad state, having been unable to persist
+something to disk, but the warmup would then be aborted and no more
+items would be loaded into memory.
+
+There is no point even trying to scan a vBucket in such a state, it
+should not be possible for us to have a vBucket without a state that
+actually has data, and such a vBucket is in an invalid state anyway.
+Treat a vBucket in this state similary to one with a corrupt snapshot
+and don't load it at all, ns_server will correct the vBucket states
+post-warmup.
+
+Change-Id: Iac6eb1c681c6ec8802900b66b1cbc2dc86f4901f
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Ben Huddleston
+Date: 2022-03-21 08:13:38.000000000
+Message: 
+Uploaded patch set 4: Patch Set 3 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-03-21 09:05:08.000000000
+Message: 
+Patch Set 4: Verified-1 Code-Review-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/16090/ : FAILURE
+
+clang-tidy found the following problems:
+
+<pre>
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy-master/kv_engine/engines/ep/tests/mock/mock_couch_kvstore.h:113:18: error: variable has incomplete type "DbHolder" [clang-diagnostic-error]
+        DbHolder db(*this);
+                 ^
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy-master/kv_engine/engines/ep/src/kvstore/couch-kvstore/couch-kvstore.h:38:7: note: forward declaration of "DbHolder"
+class DbHolder;
+      ^
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy-master/platform/include/hdrhistogram/hdrhistogram.h:29:10: error: "hdr_histogram.h" file not found [clang-diagnostic-error]
+#include <hdr_histogram.h>
+         ^
+
+</pre> ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/16090/ )
+
+Compile error at /home/couchbase/jenkins/workspace/kv_engine-clang_tidy-master/kv_engine/engines/ep/tests/mock/mock_couch_kvstore.h:113:18:
+error: variable has incomplete type "DbHolder" [clang-diagnostic-error]
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/16090/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/44551/ : FAILURE
+
+Compile error at c:\jenkins\workspace\kv_engine-windows-master\kv_engine\engines\ep\tests\module_tests\../mock/mock_couch_kvstore.h(113): error C2079: "db" uses undefined class "DbHolder" ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/44551/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/15017/ : FAILURE
+
+<p>clang-format suggested the following changes:
+
+<pre>
+cat <<"EOF" | patch -p1
+diff --git a/engines/ep/tests/mock/mock_couch_kvstore.h b/engines/ep/tests/mock/mock_couch_kvstore.h
+index cca1b356d..37fcce4d3 100644
+--- a/engines/ep/tests/mock/mock_couch_kvstore.h
++++ b/engines/ep/tests/mock/mock_couch_kvstore.h
+@@ -119,7 +119,8 @@ public:
+ 
+         updateLocalDocuments(*db, pendingLocalReqsQ);
+ 
+-        errCode = couchstore_commit(db, [](const std::system_error&amp;){return true;});
++        errCode = couchstore_commit(
++                db, [](const std::system_error&amp;) { return true; });
+ 
+         return !errCode;
+     }
+diff --git a/engines/ep/tests/module_tests/kvstore_error_injection_test.cc b/engines/ep/tests/module_tests/kvstore_error_injection_test.cc
+index 88a3b89df..0c0f2966d 100644
+--- a/engines/ep/tests/module_tests/kvstore_error_injection_test.cc
++++ b/engines/ep/tests/module_tests/kvstore_error_injection_test.cc
+@@ -85,7 +85,8 @@ public:
+ 
+     void failAllSnapshotVBuckets() override {
+         using namespace testing;
+-        EXPECT_CALL(ops, sync(_, _)).WillRepeatedly(Return(COUCHSTORE_ERROR_WRITE));
++        EXPECT_CALL(ops, sync(_, _))
++                .WillRepeatedly(Return(COUCHSTORE_ERROR_WRITE));
+     }
+ 
+     bool deleteLocalDoc(Vbid vbid, std::string_view key) override {
+@@ -122,9 +123,7 @@ public:
+     }
+ 
+     void failAllSnapshotVBuckets() override {
+-        kvstore-&gt;snapshotVBucketErrorInjector = []() {
+-            return false;
+-        };
++        kvstore-&gt;snapshotVBucketErrorInjector = []() { return false; };
+     }
+ 
+     bool deleteLocalDoc(Vbid vbid, std::string_view key) override {
+@@ -893,7 +892,8 @@ TEST_P(KVStoreErrorInjectionTest, WarmupVBucketWithoutState) {
+     // Before the fix we would fail during a warmup backfill as magma would not
+     // create a scan context if a vBucket state did not exist on disk.
+     EXPECT_NO_THROW(runReadersUntilWarmedUp());
+-    EXPECT_EQ(WarmupState::State::Done, engine-&gt;getKVBucket()-&gt;getWarmup()-&gt;getWarmupState());
++    EXPECT_EQ(WarmupState::State::Done,
++              engine-&gt;getKVBucket()-&gt;getWarmup()-&gt;getWarmupState());
+ }
+ 
+ INSTANTIATE_TEST_SUITE_P(
+
+EOF
+</pre> ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/15017/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/16933/ : FAILURE
+
+Compile error at [2022-03-21T08:51:23.056Z] ../kv_engine/engines/ep/tests/mock/mock_couch_kvstore.h:113:18:
+error: variable has incomplete type "DbHolder"
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/16933/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/5747/ : FAILURE
+
+Compile error at [2022-03-21T08:30:00.488Z] ../kv_engine/engines/ep/tests/mock/mock_couch_kvstore.h:113:18:
+error: variable has incomplete type "DbHolder"
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/5747/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/17858/ : FAILURE
+
+Compile error at [2022-03-21T08:30:50.309Z] ../kv_engine/engines/ep/tests/mock/mock_couch_kvstore.h:113:20:
+error: variable ?DbHolder db? has initializer but incomplete type
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/17858/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/18892/ : FAILURE
+
+Compile error at [2022-03-21T08:43:13.373Z] ../kv_engine/engines/ep/tests/mock/mock_couch_kvstore.h:113:18:
+error: variable has incomplete type "DbHolder"
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/18892/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/5805/ : FAILURE
+
+Compile error at [2022-03-21T08:38:04.912Z] ../kv_engine/engines/ep/tests/mock/mock_couch_kvstore.h:113:20:
+error: variable ?DbHolder db? has initializer but incomplete type
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/5805/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/18180/ : FAILURE
+
+Compile error at [2022-03-21T08:37:08.808Z] ../kv_engine/engines/ep/tests/mock/mock_couch_kvstore.h:113:20:
+error: variable ?DbHolder db? has initializer but incomplete type
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/18180/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/26265/ : FAILURE
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/37505/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2022-03-21 10:07:13.000000000
+Message: 
+Hashtag added: 7.1.1
+----------------------------------------------------------------------------------------------------------------------

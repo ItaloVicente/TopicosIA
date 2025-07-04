@@ -1,0 +1,205 @@
+======================================================================================================================
+DESCRIPTION:
+
+JGIT garbage collection fails to delete pack file
+
+JGit library accidently opens a deleted pack file before pruning it.
+This pack file could not be deleted because it is not closed. The fix
+is to force close the pack file before delete operation.
+
+Bug: 574178
+Signed-off-by: andrew.xian2000@gmail.com
+Change-Id: Icd59931a218d84c9c97b450eea87b21ed01248ff
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: andy xian
+Date: 2021-06-15 23:28:05.000000000
+Message: 
+Uploaded patch set 3: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2021-06-15 23:28:14.000000000
+Message: 
+Patch Set 3:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/5016/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2021-06-15 23:41:03.000000000
+Message: 
+Patch Set 3: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/5016/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Halstrick
+Date: 2021-06-17 23:22:58.000000000
+Message: 
+Patch Set 3: Code-Review-1
+
+I am not so sure that we can say that the JGit library has "accidently" opened a deleted pack file. Maybe it is simply a different process which run's concurrently to the process executing GC. Couldn't it be that process A runs the GC and decides to delete packfile. And an object x which is contained only in this packfile is according to the GC algorithm unreferenced (so, it can be deleted). But another process B (running JGit or even native git) running concurrently has created in parallel a new reference pointing to x (the reference was created after process A decided that it intends to delete the packfile). Because process B has created the reference to x it may also opened the packfile. 
+
+Now process A is back and tries to delete the packfile. Because process B still has opened the  packfile the deletion attempt is failing ... and that's a good thing. If process A deletes the packfile we would have a inconsistent repo with references to x but no packfile containing x. 
+
+Instead of forcefully deleting the packfile why don't we let the packfile hanging around and wait for the next gc? In the next GC we detect that object x has to be saved into the newly written packfiles.
+----------------------------------------------------------------------------------------------------------------------
+Author: andy xian
+Date: 2021-06-18 04:32:45.000000000
+Message: 
+Patch Set 3:
+
+> Patch Set 3: Code-Review-1
+> 
+> I am not so sure that we can say that the JGit library has "accidently" opened a deleted pack file. Maybe it is simply a different process which run's concurrently to the process executing GC. Couldn't it be that process A runs the GC and decides to delete packfile. And an object x which is contained only in this packfile is according to the GC algorithm unreferenced (so, it can be deleted). But another process B (running JGit or even native git) running concurrently has created in parallel a new reference pointing to x (the reference was created after process A decided that it intends to delete the packfile). Because process B has created the reference to x it may also opened the packfile. 
+> 
+> Now process A is back and tries to delete the packfile. Because process B still has opened the  packfile the deletion attempt is failing ... and that's a good thing. If process A deletes the packfile we would have a inconsistent repo with references to x but no packfile containing x. 
+> 
+> Instead of forcefully deleting the packfile why don't we let the packfile hanging around and wait for the next gc? In the next GC we detect that object x has to be saved into the newly written packfiles.
+
+I am have double checked that only one process is executing GC as this is on my laptop.
+
+I also debugged at line  https://github.com/eclipse/jgit/blob/master/org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/Pack.java#L648 and watches jgit library opens the pack file. And that file  keeps opening.
+
+Again I use a monitor tool: https://docs.microsoft.com/en-us/sysinternals/downloads/process-explorer to confirm that it is the jgit library opens the file.
+
+Next GC does not solve the issue for me as I have run the jgit clean up program several times, but it does not help.
+
+The analysis for the source code is below:
+
+From the stack trace when the pack file is opened, I can see that:
+ 
+loosen:294, GC (org.eclipse.jgit.internal.storage.file)
+deleteOldPacks:349, GC (org.eclipse.jgit.internal.storage.file)
+repack:862, GC (org.eclipse.jgit.internal.storage.file)
+doGc:270, GC (org.eclipse.jgit.internal.storage.file)
+gc:221, GC (org.eclipse.jgit.internal.storage.file)
+call:179, GarbageCollectCommand (org.eclipse.jgit.api)
+main:44, Test
+
+Corresponding source code is:https://github.com/eclipse/jgit/blob/master/org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/GC.java#L294.
+My understanding for the stacktrace and source code is: jgit library tries to extract loosen files out of pack file so it is absolutely right to open the pack file to do its job. 
+
+The problem is that the library does not close the pack file after extracting job is done. 
+
+And in my opino, we should close the pack file afterwards.
+----------------------------------------------------------------------------------------------------------------------
+Author: andy xian
+Date: 2021-06-18 04:37:27.000000000
+Message: 
+Patch Set 3:
+
+> Patch Set 3:
+> 
+> > Patch Set 3: Code-Review-1
+> > 
+> > I am not so sure that we can say that the JGit library has "accidently" opened a deleted pack file. Maybe it is simply a different process which run's concurrently to the process executing GC. Couldn't it be that process A runs the GC and decides to delete packfile. And an object x which is contained only in this packfile is according to the GC algorithm unreferenced (so, it can be deleted). But another process B (running JGit or even native git) running concurrently has created in parallel a new reference pointing to x (the reference was created after process A decided that it intends to delete the packfile). Because process B has created the reference to x it may also opened the packfile. 
+> > 
+> > Now process A is back and tries to delete the packfile. Because process B still has opened the  packfile the deletion attempt is failing ... and that's a good thing. If process A deletes the packfile we would have a inconsistent repo with references to x but no packfile containing x. 
+> > 
+> > Instead of forcefully deleting the packfile why don't we let the packfile hanging around and wait for the next gc? In the next GC we detect that object x has to be saved into the newly written packfiles.
+> 
+> I am have double checked that only one process is executing GC as this is on my laptop.
+> 
+> I also debugged at line  https://github.com/eclipse/jgit/blob/master/org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/Pack.java#L648 and watches jgit library opens the pack file. And that file  keeps opening.
+> 
+> Again I use a monitor tool: https://docs.microsoft.com/en-us/sysinternals/downloads/process-explorer to confirm that it is the jgit library opens the file.
+> 
+> Next GC does not solve the issue for me as I have run the jgit clean up program several times, but it does not help.
+> 
+> The analysis for the source code is below:
+> 
+> From the stack trace when the pack file is opened, I can see that:
+>  
+> loosen:294, GC (org.eclipse.jgit.internal.storage.file)
+> deleteOldPacks:349, GC (org.eclipse.jgit.internal.storage.file)
+> repack:862, GC (org.eclipse.jgit.internal.storage.file)
+> doGc:270, GC (org.eclipse.jgit.internal.storage.file)
+> gc:221, GC (org.eclipse.jgit.internal.storage.file)
+> call:179, GarbageCollectCommand (org.eclipse.jgit.api)
+> main:44, Test
+> 
+> Corresponding source code is:https://github.com/eclipse/jgit/blob/master/org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/GC.java#L294.
+> My understanding for the stacktrace and source code is: jgit library tries to extract loosen files out of pack file so it is absolutely right to open the pack file to do its job. 
+> 
+> The problem is that the library does not close the pack file after extracting job is done. 
+> 
+> And in my opino, we should close the pack file afterwards.
+
+I do have waited enough time to get pack file expired before the next GC is running, and jgit gc does not clean up pack file.
+----------------------------------------------------------------------------------------------------------------------
+Author: andy xian
+Date: 2021-06-18 04:40:27.000000000
+Message: 
+Patch Set 3:
+
+> Patch Set 3:
+> 
+> > Patch Set 3:
+> > 
+> > > Patch Set 3: Code-Review-1
+> > > 
+> > > I am not so sure that we can say that the JGit library has "accidently" opened a deleted pack file. Maybe it is simply a different process which run's concurrently to the process executing GC. Couldn't it be that process A runs the GC and decides to delete packfile. And an object x which is contained only in this packfile is according to the GC algorithm unreferenced (so, it can be deleted). But another process B (running JGit or even native git) running concurrently has created in parallel a new reference pointing to x (the reference was created after process A decided that it intends to delete the packfile). Because process B has created the reference to x it may also opened the packfile. 
+> > > 
+> > > Now process A is back and tries to delete the packfile. Because process B still has opened the  packfile the deletion attempt is failing ... and that's a good thing. If process A deletes the packfile we would have a inconsistent repo with references to x but no packfile containing x. 
+> > > 
+> > > Instead of forcefully deleting the packfile why don't we let the packfile hanging around and wait for the next gc? In the next GC we detect that object x has to be saved into the newly written packfiles.
+> > 
+> > I am have double checked that only one process is executing GC as this is on my laptop.
+> > 
+> > I also debugged at line  https://github.com/eclipse/jgit/blob/master/org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/Pack.java#L648 and watches jgit library opens the pack file. And that file  keeps opening.
+> > 
+> > Again I use a monitor tool: https://docs.microsoft.com/en-us/sysinternals/downloads/process-explorer to confirm that it is the jgit library opens the file.
+> > 
+> > Next GC does not solve the issue for me as I have run the jgit clean up program several times, but it does not help.
+> > 
+> > The analysis for the source code is below:
+> > 
+> > From the stack trace when the pack file is opened, I can see that:
+> >  
+> > loosen:294, GC (org.eclipse.jgit.internal.storage.file)
+> > deleteOldPacks:349, GC (org.eclipse.jgit.internal.storage.file)
+> > repack:862, GC (org.eclipse.jgit.internal.storage.file)
+> > doGc:270, GC (org.eclipse.jgit.internal.storage.file)
+> > gc:221, GC (org.eclipse.jgit.internal.storage.file)
+> > call:179, GarbageCollectCommand (org.eclipse.jgit.api)
+> > main:44, Test
+> > 
+> > Corresponding source code is:https://github.com/eclipse/jgit/blob/master/org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/GC.java#L294.
+> > My understanding for the stacktrace and source code is: jgit library tries to extract loosen files out of pack file so it is absolutely right to open the pack file to do its job. 
+> > 
+> > The problem is that the library does not close the pack file after extracting job is done. 
+> > 
+> > And in my opino, we should close the pack file afterwards.
+> 
+> I do have waited enough time to get pack file expired before the next GC is running, and jgit gc does not clean up pack file.
+
+The full stacktrace of jgit library open pack file in prune operation is below:
+
+doOpen:648, Pack (org.eclipse.jgit.internal.storage.file)
+beginWindowCache:628, Pack (org.eclipse.jgit.internal.storage.file)
+load:510, WindowCache (org.eclipse.jgit.internal.storage.file)
+getOrLoad:602, WindowCache (org.eclipse.jgit.internal.storage.file)
+get:385, WindowCache (org.eclipse.jgit.internal.storage.file)
+pin:327, WindowCursor (org.eclipse.jgit.internal.storage.file)
+copy:226, WindowCursor (org.eclipse.jgit.internal.storage.file)
+readFully:604, Pack (org.eclipse.jgit.internal.storage.file)
+load:787, Pack (org.eclipse.jgit.internal.storage.file)
+get:274, Pack (org.eclipse.jgit.internal.storage.file)
+open:211, PackDirectory (org.eclipse.jgit.internal.storage.file)
+openPackedObject:390, ObjectDirectory (org.eclipse.jgit.internal.storage.file)
+openPackedFromSelfOrAlternate:354, ObjectDirectory (org.eclipse.jgit.internal.storage.file)
+openObjectWithoutRestoring:345, ObjectDirectory (org.eclipse.jgit.internal.storage.file)
+openObject:330, ObjectDirectory (org.eclipse.jgit.internal.storage.file)
+open:132, WindowCursor (org.eclipse.jgit.internal.storage.file)
+open:212, ObjectReader (org.eclipse.jgit.lib)
+loosen:294, GC (org.eclipse.jgit.internal.storage.file)
+deleteOldPacks:349, GC (org.eclipse.jgit.internal.storage.file)
+repack:862, GC (org.eclipse.jgit.internal.storage.file)
+doGc:270, GC (org.eclipse.jgit.internal.storage.file)
+gc:221, GC (org.eclipse.jgit.internal.storage.file)
+call:179, GarbageCollectCommand (org.eclipse.jgit.api)
+main:44, Test
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,149 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-37739: Refactor magma compaction to copy compaction_ctx
+
+Magma has explicit compactions triggered by kvstore API call compactDB.
+It also has implicit compactions trigger by certain conditions within
+magma. Sometimes those implicit compactions can overlap with explicit
+compactions and pick up the compaction context. We need to make a copy
+of the compaction_ctx and when compactions see the compaction_ctx,
+they need to allocate their own copy of the eraserContext.
+
+Change-Id: I1c8653a448051d7912882025e8ec778b22bb7cf6
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Trond Norbye
+Date: 2020-02-10 14:42:17.000000000
+Message: 
+Patch Set 10: Patch Set 9 was rebased
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-02-10 16:55:01.000000000
+Message: 
+Patch Set 10: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/24334/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/26048/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/15339/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/22222/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/1632/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/830/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/9556/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/1737/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/1666/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-02-11 09:10:53.000000000
+Message: 
+Patch Set 10: Code-Review-1
+
+(2 comments)
+Line:128, engines/ep/src/kvstore.h -> Please don't inline this; this is a reasonably large chunk of code to have in a header file.
+
+Line:134, engines/ep/src/kvstore.h -> Given both these members are non-const shard pointers, you're actually doing a shallow copy of them - which is inconsistent with the copy of most of the other members (and specifically eraserContext).
+
+This is likely surprise people (and means the copy could end up modifying the state of the original; even though `other` is passed as const&.
+
+For example see: https://gcc.godbolt.org/z/gSw_Up
+
+Suggest you either:
+
+1. Perform a deep copy of the members
+2. If the members are never modified after compaction_ctx is constructed, you could change their types to std::shared_ptr<const ...> which allows you to safely share the same copy between multiple compaction_ctx objects.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2020-02-11 09:12:23.000000000
+Message: 
+Removed Code-Review+2 by Jim Walker <jim@couchbase.com>
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Scott Lashley
+Date: 2020-02-11 16:51:07.000000000
+Message: 
+Patch Set 10:
+
+(1 comment)
+Line:134, engines/ep/src/kvstore.h -> Note: We don't use bloomFilterCallback as bloom filters are turned off for magma. This is a stop gap solution until KV team can provide proper callback function to create the compaction_ctx. We need to do a copy because the compaction_ctx.CompactionStats is updated. I thought this was deep copy? I will have to explore more to determine what you mean by deep copy vs what I read on the web.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-02-11 17:04:53.000000000
+Message: 
+Patch Set 10:
+
+(1 comment)
+Line:134, engines/ep/src/kvstore.h -> Basically you're just taking an additional reference to the shared_ptr, as opposed to creating a second copy of the pointer-to objects.
+
+See the example code I posted demonstrating with a std::string.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Scott Lashley
+Date: 2020-02-11 18:28:30.000000000
+Message: 
+Patch Set 10:
+
+(1 comment)
+Line:134, engines/ep/src/kvstore.h -> I have moved the code to kvstore.cc to avoid inline.
+I don't understand the example you gave nor what your trying to do.
+I understand you want to update the shared pointer and not make a copy but when I do that I run into constant issues.
+The example shows the same code as what I was doing.
+Maybe you could just write the code as you want it so I can see exactly what you are trying to say rather than pointing me to a piece of code.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Scott Lashley
+Date: 2020-02-12 21:16:41.000000000
+Message: 
+Patch Set 10:
+
+(1 comment)
+Line:134, engines/ep/src/kvstore.h -> You have again exceed my c++ knowledge. BloomFilterCallback and ExpiredItemsCallback are defined in ep_bucket.cc so how do you make a new shared pointer?
+Please note: This is TEMPORARY and only needs to work until KV team can provide a proper callback routine. Do we really need to worry about someone getting confused if we use the same shared pointer? Do we need to make this complicated given its temporary nature?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-02-13 11:52:36.000000000
+Message: 
+Patch Set 10:
+
+(1 comment)
+Line:134, engines/ep/src/kvstore.h -> My experience is that code committed to master is rarely temporary - it gets left there and before you know it it's being shipped unless you are very careful.
+
+If you want something temporary, then I suggest you just use a toy build with your own local patches. Otherwise we should do things correctly.
+
+You're right that currently the definition of ExpiredItemsCallback is in ep-engine.cc; but that could be moved, or we could add a clone() method to Callback to make a copy of it on a subclass-basis.
+
+However, I don't think this temporary appeacoh is going to work very well. The compaction context has various temporal state (e.g. eraserContext) which is not going to be valid to use past when the explicit compaction was invoked - for example if a collection was created / deleted then the copied eraserContext isn't going to get updated until an explicit compaction is triggered.
+
+The more I look at this the more it seems like a "Temporary" workaround isn't going to be particular robust or correct. I suggest we wait until the correct fix to the expiry callbacks has been done.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Scott Lashley
+Date: 2020-02-13 16:45:31.000000000
+Message: 
+Patch Set 10:
+
+(1 comment)
+Line:134, engines/ep/src/kvstore.h -> In this case, we do know its temporary because the compaction callback must be done before GA and will replace this code. Without this fix, it holds up MB-33463: Turn on some module tests to test magma which means we continue to have no testing of magma for durability, etc. If this fix isn't acceptable, then we should escalate MB-37739 and (sorry don't see the compaction callback MB).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-02-12 08:49:28.000000000
+MISMATCHED INLINE COMMENT
+Line:134, engines/ep/src/kvstore.h -> I was giving an example of how a shallow copy (as you're doing here) is problematic - as after "copying" 'a' into 'b', modifying a b.str which is managed by a shared_ptr) also changes a.str.
+
+To avoid this you want to actually create new Callback objects for the bloom filter and expiry, in a similar way to how you've copied the eraserContext (but using std::make_shared instead of make_unique).
+----------------------------------------------------------------------------------------------------------------------

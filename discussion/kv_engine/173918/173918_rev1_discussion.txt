@@ -1,0 +1,125 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-51805: Inherit HPS from previous Checkpoint
+
+In each Checkpoint we store a highPreparedSeqno value. This value is
+later persisted to disk when we persist the last value in the
+snapshot as the highPreparedSeqno. Currently each Checkpoint's
+highPreparedSeqno value is independent to the Checkpoint. It will
+only be set if we see a prepare in the Checkpoint. As we have a
+default value of 0 we would see this value bounce between 0 and
+an appropriate value if we dump the contents of the CheckpointManager.
+
+This logically doesn't make loads of sense, as the highPreparedSeqno
+should not only be Monotonic in a Checkpoint, it should also be
+Monotonic across Checkpoints. In this change we are going to pre-load
+each new Checkpoint with the value from the previous Checkpoint. This
+fixes an issue where a replica node received a partial snapshot which
+contained a prepare and restarted, before receiving the rest of the
+snapshot which did not contain a prepare. Whilst we have already
+corrected the in-memory HPS value in this case, the on disk HPS value
+would remain at 0 for lack of a value to persist. This was due to a
+particular behaviour in PassiveStream; the first snapshot in any
+PassiveStream creates a new Checkpoint. Whilst we were loading the
+HPS into the CheckpointManager, the creation of the new Checkpoint on
+new snapshot in the PassiveStream meant that this value was "lost"
+until this change.
+
+MB-51806:
+
+Currently we only update the highPreparedSeqno on disk if we are
+persisting the item at the end of a snapshot. This is correct, but
+fails to take into account that a Checkpoint only sets it's HPS
+value when it sees a prepare. We could have a flush batch such that
+we persist no item at a snapshot end for Checkpoints containing
+prepares and the HPS is not moved when it should be. E.g.
+
+[1:Pre(key1), 2:Mutation(key2)][3:Mutation(key2)]
+             ^
+         HPS = 1
+
+When visited by the flusher the HPS of 1 is not persisted. This allows
+for a scenario where a replica node restarts and the HPS goes backwards
+as this node would still ack 1 back to the Producer. If the cluster
+has two replicas and the other replica is behind, it's possible for it
+to be picked for promotion over this node. See MB for full scenario.
+
+This change fixes this issue as the second Checkpoint inherits the
+highPreparedSeqno value from the previous one, and rather than finding
+no value to flush, it finds the correct value of 1.
+
+Change-Id: I06f43c18975049187705efcb967f2d9c1fa5c782
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Ben Huddleston
+Date: 2022-04-20 14:58:03.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Restriction Checker
+Date: 2022-04-20 14:58:38.000000000
+Message: 
+Patch Set 1: Well-Formed-1
+
+Branch restricted. PLEASE READ this URL: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/295799/artifact/restricted.html : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-04-20 17:38:05.000000000
+Message: 
+Patch Set 1: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/neo/99/ : FAILURE
+
+Failure of GoogleTest "PiTR_Test.MB51007":
+
+<pre>
+[ RUN      ] PiTR_Test.MB51007
+[2022-04-20T16:04:20.220Z] 2022-04-20T16:04:04.082572+00:00 ERROR (MB51007) CouchKVStore::compactDB: exception while performing compaction for vb:0 - Details: cb::couchstore::replay() - precommit hook Failed: document not found
+[2022-04-20T16:04:20.220Z] 2022-04-20T16:04:04.083532+00:00 ERROR (MB51007) EPBucket::compactInternal: compaction failed for vb:0
+[2022-04-20T16:04:20.220Z] /home/couchbase/jenkins/workspace/kv_engine.linux_neo/kv_engine/tests/testapp_cluster/pitr_tests.cc:55: Failure
+[2022-04-20T16:04:20.220Z] Value of: rsp.isSuccess()
+[2022-04-20T16:04:20.220Z]   Actual: false
+[2022-04-20T16:04:20.220Z] Expected: true
+[2022-04-20T16:04:20.220Z] Compaction failed for some reason: Internal error
+[2022-04-20T16:04:20.220Z] 
+[2022-04-20T16:04:20.220Z] WARNING: Logging before InitGoogleLogging() is written to STDERR
+[2022-04-20T16:04:20.220Z] W0420 16:04:04.629595 78873 HazptrDomain.h:670] Using the default inline executor for asynchronous reclamation may be susceptible to deadlock if the current thread happens to hold a resource needed by the deleter of a reclaimable object
+[2022-04-20T16:04:20.220Z] WARNING: Logging before InitGoogleLogging() is written to STDERR
+[2022-04-20T16:04:20.220Z] W0420 16:04:05.459648 78932 HazptrDomain.h:670] Using the default inline executor for asynchronous reclamation may be susceptible to deadlock if the current thread happens to hold a resource needed by the deleter of a reclaimable object
+[2022-04-20T16:04:20.220Z] WARNING: Logging before InitGoogleLogging() is written to STDERR
+[2022-04-20T16:04:20.220Z] W0420 16:04:05.668918 79101 HazptrDomain.h:670] Using the default inline executor for asynchronous reclamation may be susceptible to deadlock if the current thread happens to hold a resource needed by the deleter of a reclaimable object
+[2022-04-20T16:04:20.220Z] /home/couchbase/jenkins/workspace/kv_engine.linux_neo/kv_engine/tests/testapp_cluster/pitr_tests.cc:80: Failure
+[2022-04-20T16:04:20.220Z] Expected: (10) <= (num_compaction), actual: 10 vs 0
+[2022-04-20T16:04:20.220Z] Expected at least 10 compactions
+[2022-04-20T16:04:20.220Z] [  FAILED  ] PiTR_Test.MB51007 (10094 ms)
+PiTR_Test.MB51007
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/neo/99/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-neo/97/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-neo/130/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-neo/96/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/15747/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/neo/97/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/neo/99/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/neo/98/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/neo/100/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/neo/100/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/neo/91/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

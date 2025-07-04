@@ -1,0 +1,154 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-26390: CouchKVStore::getMultiCb: set non-zero status correctly
+
+If a couchstore file becomes corrupted such that a document cannot be
+fetched from disk using getMulti (returning CHECKSUM_FAIL or any other
+non-zero status), then instead of logging and returning a error to the
+user (TMPFAIL), KV-Engine incorrectly returns ENOENT - i.e. document
+doesn't exist.
+
+The issue is that the status code was set *after* the rest of GetValue
+had already been assigned elsewhere, meaning a non-zero status code
+was lost. The bug was introduced by commit
+4df093d4e1e7c65158c8539604b6f1907951ae15, which refactored GetMulti
+ownership.
+
+Change-Id: I70f4f3eba48e453ec3e5aba15821f0f041f45928
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2017-10-13 10:59:18.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2017-10-13 10:59:26.000000000
+Message: 
+Patch Set 1: Well-Formed-1
+
+Branch restricted. PLEASE READ this URL: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/64486/artifact/restricted.html : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2017-10-13 11:02:32.000000000
+Message: 
+Patch Set 1:
+
+check approval
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2017-10-13 11:02:44.000000000
+Message: 
+Patch Set 1: Well-Formed+1
+
+Permission granted to commit: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/64487/artifact/restricted.html : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2017-10-13 11:29:21.000000000
+Message: 
+Patch Set 1: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-spock/645/ : FAILURE
+
+One of more core files found at the end of the build. Data for post-mortem saved to archived_core_dumps.tar.bz2 under "Build Artifacts". ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-spock/645/ )
+
+Failure of a CTest test 26/99 Test #26: ep_testsuite_dcp.value_eviction ................ ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-spock/645/ )
+
+Failure of a GoogleTest  ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-spock/645/ )
+
+Timeout of a CTest test 90/99 Test #74: memcached-basic-unit-tests-bulk ................} ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-spock/645/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-spock/648/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-spock/637/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/1605/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-spock/657/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2017-10-13 12:26:48.000000000
+Message: 
+Patch Set 1:
+
+Are we sure tmpfail is the right thing to return? A client would probably retry the operation given the error code, and retrying will probably return the same error.. wouldn't failed be a better code?
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2017-10-13 12:40:02.000000000
+Message: 
+Patch Set 1:
+
+> Are we sure tmpfail is the right thing to return? A client would
+ > probably retry the operation given the error code, and retrying
+ > will probably return the same error.. wouldn't failed be a better
+ > code?
+
+It's possibly not the ideal return value, but we should at least restore the pre-5.0 behaviour first.
+
+Having said that, I don't think there's a better existing error code. Note additionally that ETMPTAIL is documented to include persistence issues:
+
+    /** A temporary error condition occurred. Retrying the
+     * operation may resolve the problem. This could be that the
+     * server is in a degraded situation (like running warmup on
+     * the node), the vbucket could be in an "incorrect" state, a
+     * temporary failure from the underlying persistence layer,
+     * etc).
+     */
+    Etmpfail = 0x86,
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2017-10-13 13:06:11.000000000
+Message: 
+Patch Set 1:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-spock/646/ : FAILURE
+
+Timeout of a CTest test 82/99 Test #74: memcached-basic-unit-tests-bulk ................} ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-spock/646/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-spock/648/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-spock/637/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/1605/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-spock/657/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2017-10-13 13:27:20.000000000
+Message: 
+Patch Set 1:
+
+> > Are we sure tmpfail is the right thing to return? A client would
+ > > probably retry the operation given the error code, and retrying
+ > > will probably return the same error.. wouldn't failed be a better
+ > > code?
+ > 
+ > It's possibly not the ideal return value, but we should at least
+ > restore the pre-5.0 behaviour first.
+ > 
+ > Having said that, I don't think there's a better existing error
+ > code. Note additionally that ETMPTAIL is documented to include
+ > persistence issues:
+ > 
+ > /** A temporary error condition occurred. Retrying the
+ > * operation may resolve the problem. This could be that the
+ > * server is in a degraded situation (like running warmup on
+ > * the node), the vbucket could be in an "incorrect" state, a
+ > * temporary failure from the underlying persistence layer,
+ > * etc).
+ > */
+ > Etmpfail = 0x86,
+
+Sure,. The reason for my comment is that we also return tmpfail for locked items (unless xerror is enabled) and for temporary out of memory issues.. where the client treats all of these as backoff and try again. For a corrupt issue backing off won't help. I think it would be better to define a new error code and map that to tmpfail unless xerror is enabled..
+----------------------------------------------------------------------------------------------------------------------

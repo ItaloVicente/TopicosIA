@@ -1,0 +1,88 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-37546: Early-return if no items for persistence cursor
+
+Before this change, the logic in EPBucket::flushVBucket() is:
+
+  if (some-items-for-persistence-cursor) {
+    <many lines of code for flushing to disk>
+  }
+  <epilogue>
+
+The epilogue, which is executed regardless of whether we have flushed
+or not, performs:
+  - KVStore::pendingTasks()
+  - Notify satisfied SeqnoPersistence requests
+  - Checkpoint related operations:
+    - Wakeup CheckpointRemover if CM has checkpoints that can be removed
+    - Notify satisfied CheckpointPersistence requests
+
+With this change we remove the extra indentation of many lines of code:
+
+  if (no-items-for-persistence-cursor) {
+    return;
+  }
+  <many lines of code for flushing to disk>
+  <epilogue>
+
+The side effect of this is that we do /not/ execute the <epilogue> if we
+early-return. But:
+  - KVStore::pendingTasks() does not need to be executed as by
+    definition "is called after persisting a batch of data to perform
+    any pending tasks on the underlying store"
+  - There is definitely no SeqnoPersistence requests to notify as we
+    have not persisted anything
+So that is fine.
+
+Now about the Checkpoint related operations:
+  - Wakeup CheckpointRemover
+      I am keeping this by executing it unconditionally just after the
+      call to VB::getItemsForPersistence(), as the persistence cursor
+      may have just moved to the beginning of a new checkpoint, which
+      may make the previous checkpoint eligible for removal.
+      Also, it is safe to execute this step regardless of whether (1)
+      no-items-for-pcursor or (2) flush-success or (3) flush-failure.
+      Note that before this change we missed to execute this step before
+      some nested return statement. Which is fixed here.
+  - Notify satisfied CheckpointPersistence request
+      This step must still be executed if we early-return because
+      (again) the persistence cursor may have moved.
+      But, we cannot execute this step unconditionally because we cannot
+      notify if the flush fails.
+      So, this step is executed if (1) no-items-for-pcursor or (2)
+      flush-success, but not executed if (3) flush-failure.
+
+For reference, the CheckpointPersistence command seems to be just legacy
+from TAP, so we can probably remove it in a follow-up.
+
+Change-Id: I12fb3f0afffcfca2db768d3179592f0eda2a2f18
+Reviewed-on: http://review.couchbase.org/121052
+Well-Formed: Build Bot <build@couchbase.com>
+Tested-by: Build Bot <build@couchbase.com>
+Reviewed-by: James Harrison <james.harrison@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2020-02-12 14:24:55.000000000
+Message: 
+Change has been successfully cherry-picked as ed5c176f01487d88abb3280d48b06b57d8b1f428 by Dave Rigby
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-02-12 14:25:00.000000000
+Message: 
+Patch Set 17:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-madhatter-post-commit/393/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-02-12 15:20:07.000000000
+Message: 
+Patch Set 17:
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-madhatter-post-commit/393/ : SUCCESS'
+----------------------------------------------------------------------------------------------------------------------

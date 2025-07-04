@@ -1,0 +1,138 @@
+======================================================================================================================
+DESCRIPTION:
+
+Kv pause/resume functionality for buckets
+
+Change-Id: I136f32a5cfecef4f837351c73823f9a140359cc0
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Navdeep S Boparai
+Date: 2022-11-19 02:19:15.000000000
+Message: 
+Uploaded patch set 25.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-11-19 02:19:24.000000000
+Message: 
+Patch Set 25:
+
+Build Started https://cv.jenkins.couchbase.com/job/ns-server-test/32437/ (1/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-11-19 02:19:25.000000000
+Message: 
+Patch Set 25:
+
+Build Started https://cv.jenkins.couchbase.com/job/ns-server-ns-test/511/ (2/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-11-19 02:34:19.000000000
+Message: 
+Patch Set 25: Well-Formed+1
+
+Build Successful 
+
+https://cv.jenkins.couchbase.com/job/ns-server-test/32437/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/ns-server-ns-test/511/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2022-11-22 00:04:17.000000000
+Message: 
+Patch Set 25:
+
+(18 comments)
+Line:40, src/hibernation_manager.erl -> I feel we could avoid splitting the S3 URI here and reconstructing it back in hibernation_utils.
+
+We could append "data" to the 'RemotePath' here and pass it down to the necessary function and expect the 'Dest' to be an s3 URI when SyncCode == 'to' in sync_s3/3.
+
+Line:100, src/hibernation_manager.erl -> Minor suggestion - I think we can reorganize this code a bit differently.
+
+We could remove build_workers_params function entirely since it isn't adding much value now and do the following:
+
+{_, KVNodes, _} = KVWorkerParams = build_kv_worker_params(RemotePath, Snapshot),
+ServiceWorkersParams = build_service_workers_params(RemotePath, Snapshot),
+
+WorkerParams = [KvWorkerParams | ServiceWorkerParams].
+
+We could move the logic in get_pause_kv_nodes into build_kv_workers_params/2.
+
+Line:132, src/hibernation_manager.erl -> Nit - Could be simplified as below but please feel to ignore.
+
+lists:filter(fun ({K, _V}) ->
+                  not lists:member(K, Filter)
+             end).
+
+Line:135, src/hibernation_manager.erl -> Minor formatting nit: Item<-Items needs a space between them; Item <- Items (That seems to be the accepted formatting across the codebase).
+
+Line:186, src/kv_hibernation_agent.erl -> Ah I am not sure why we need this - we don't have a prepare step during resume right now. So only when Op == pause_bucket, we'll receive this 'DOWN' message. 
+
+Another interesting thing can happen though due to a very tiny race - the bucket can be 'undefined' and we should probably avoid calling  do_unpause_bucket/2 then. Let me open an MB to fix it in a separate patch.
+
+Line:1191, src/ns_bucket.erl -> validate_map is a very interesting function - it validates everything and just drops the error if it is invalid :)
+ 
+I think it should be fixed outside this patch. 
+
+validate_map(Map) ->
+    case mb_map:is_valid(Map) of
+        true ->
+            ok;
+        different_length_chains ->
+            ok
+    end.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Navdeep S Boparai
+Date: 2022-11-29 19:53:39.000000000
+MISMATCHED INLINE COMMENT
+Line:40, src/hibernation_manager.erl -> That is reasonable suggestion, but on the flip side sync_s3/3 Source and Dest arguments I have intentionally written to not require any s3 identifier on the paths. It feels cleaner from an interface POV for that function arguments to not require an s3 identifier and just take raw paths and be symmetrical with source or destination arguments, and have the function insert the s3 identifier to source or destination as required based on syncCode. Will leave it as is since I think a little massaging here to just get the raw data path seems ok. Marking resolved for now, please feel free to re-open the comment, if you still think otherwise, we can discuss it more.
+----------------------------------------------------------------------------------------------------------------------
+Author: Navdeep S Boparai
+Date: 2022-11-29 19:53:39.000000000
+MISMATCHED INLINE COMMENT
+Line:100, src/hibernation_manager.erl -> So in addition to pause, resume uses build_service_workers_params() too, so it is beneficial to keep it. And in resume the KV nodes to "resume on" don't come from the Snapshot of the bucket as the bucket doesn't exist yet, so we can't move get_pause_kv_nodes() into build_kv_workers_params(). For that reason, it just made sense to separately give the service_workers_params the list of KV nodes the pause or resume is to be run on.
+----------------------------------------------------------------------------------------------------------------------
+Author: Navdeep S Boparai
+Date: 2022-11-29 19:53:39.000000000
+MISMATCHED INLINE COMMENT
+Line:132, src/hibernation_manager.erl -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Navdeep S Boparai
+Date: 2022-11-29 19:53:39.000000000
+MISMATCHED INLINE COMMENT
+Line:135, src/hibernation_manager.erl -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Navdeep S Boparai
+Date: 2022-12-09 20:54:06.000000000
+MISMATCHED INLINE COMMENT
+Line:186, src/kv_hibernation_agent.erl -> in that case, updated to just crash if OP is not pause
+----------------------------------------------------------------------------------------------------------------------
+Author: Navdeep S Boparai
+Date: 2022-11-29 19:53:39.000000000
+MISMATCHED INLINE COMMENT
+Line:186, src/kv_hibernation_agent.erl -> That is a good point that we would only get the DOWN for pause, but I still think it is a good idea to check for OP anyways and don't see a downside for the OP check, so I am tempted to keep it unless you have a strong reason for not having it?
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2022-12-01 20:15:28.000000000
+MISMATCHED INLINE COMMENT
+Line:186, src/kv_hibernation_agent.erl -> When a new resume operation is run, we unset_service_manager and clear any state that was previously present, so we shouldn't receive a 'DOWN' message from a previously completed pause operation while a resume operation is running.
+
+If the above does happen - I feel we should crash since that would be a bug; so unpause_bucket should check if the op is 'pause_bucket' and maybe pause if the bucket is not 'undefined'.
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2022-12-01 20:15:28.000000000
+MISMATCHED INLINE COMMENT
+Line:1191, src/ns_bucket.erl -> ah I see - I misread the only error sent back via mb_map:is_valid/1 was different_length_chains and therefore thought we are "dropping all the errors".
+----------------------------------------------------------------------------------------------------------------------
+Author: Navdeep S Boparai
+Date: 2022-12-09 20:54:06.000000000
+MISMATCHED INLINE COMMENT
+Line:1191, src/ns_bucket.erl -> Ack
+----------------------------------------------------------------------------------------------------------------------
+Author: Navdeep S Boparai
+Date: 2022-11-29 19:53:39.000000000
+MISMATCHED INLINE COMMENT
+Line:1191, src/ns_bucket.erl -> Oh sorry didn't follow the comment, I thought the intention of it was to allow it to crash for case statement mismatch?
+----------------------------------------------------------------------------------------------------------------------

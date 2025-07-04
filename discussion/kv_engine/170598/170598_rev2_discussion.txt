@@ -1,0 +1,176 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-50747: TOY-BUILD
+
+Compaction may skip dropped collection item count updates
+
+MagmaKVStore drops collections in the implicit compaction as follows.
+
+1. Compact and find all tables storing prepares
+2. Iterate through the list of dropped collections
+2.1 Compact and find all tables storing keys of that collection
+
+During 2.1 the item count of that collection was decremented from the
+vbucket total.
+
+However a bug exists in that steps 1 and 2.1 will attempt to purge all
+keys from the found table(s), this means 1 or 2.1 could also fully
+purge a collection that we've yet to reach in step 2.
+
+When this happens, the item count of that collection doesn't get
+decremented from the total, and the vbucket item count now shows more
+items than it stores.
+
+To fix add an optional collection-ID to the compaction context. When
+this optional stores a value, the compactionCore will only drop keys
+of that collection.
+
+Secondly move the prepare namespace purge to the last namespace
+compacted so that it doesn't encounter keys from dropped collections
+other than any remaining prepares not dropped.
+
+MB-50747: "logical-insert" of a tombstone leads to negative item count
+
+Adding range checks on the item count detected that one unit test was
+producing a negative item count when the backend is magma.
+
+The following sequence of operations occurs.
+
+seq:operation => expected item count
+
+1:create collection c1 =>          1
+2:insert key1 into c1 =>           2
+
+flush
+
+3:drop collection c1 =>            1
+4:create collection c1 =>          2
+5:insert a deleted key1 into c1 => 2
+6:drop collection c1 =>            1
+flush
+
+Prior to this fix after this sequence when compaction runs the
+final item count became -1
+
+This occurs because seq:5 was treated as a plain delete and set
+the magma `docCount` for that flush as -2 (ninserts:0 + ndeletes:2).
+I.e. drop collection was -1 and the delete was -1.
+
+The compaction then took the item count of 1 and subtracted -2.
+
+The fix here skips the ndeletes count for the store at seq:5, the
+'logically inserted tombstone' should have no affect on the item
+count.
+
+Change-Id: I6a88f80e34275188a53ddd245a9ccc780f135d6b
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jim Walker
+Date: 2022-02-15 12:24:41.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-02-15 12:50:58.000000000
+Message: 
+Patch Set 2: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/43942/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [0015/0047]: set+get hit (bin)...(25 ms) OK
+
+
+99% tests passed, 2 tests failed out of 419
+
+Total Test time (real) = 336.43 sec
+
+The following tests FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/43942/ )
+
+Failure of GoogleTest "TransportProtocols/TuneMcbpSla.SlowCommandLogging/McbpSsl":
+
+<pre>
+[ RUN      ] TransportProtocols/TuneMcbpSla.SlowCommandLogging/McbpSsl
+C:/Jenkins/workspace/kv_engine-windows-master/kv_engine/tests/testapp/testapp_tune_mcbp_sla.cc(180): error: Failed
+Timed out before the slow log appeared in the files
+[  FAILED  ] TransportProtocols/TuneMcbpSla.SlowCommandLogging/McbpSsl, where GetParam() = McbpSsl (30006 ms)
+TransportProtocols/TuneMcbpSla.SlowCommandLogging/McbpSsl
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/43942/ )
+
+Timeout of a CTest test 419/419 Test #281: ep_testsuite_basic.ephemeral.comp_active ......................................................................................} ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/43942/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/5334/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/5334/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/18408/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/18408/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/25773/ : FAILURE
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/17376/ : FAILURE
+
+Failure of GoogleTest "TransportProtocols/TuneMcbpSla.SlowCommandLogging/McbpSsl":
+
+<pre>
+[ RUN      ] TransportProtocols/TuneMcbpSla.SlowCommandLogging/McbpSsl
+[2022-02-15T12:42:45.559Z] /home/couchbase/jenkins/workspace/kv_engine.linux-CE_master/kv_engine/tests/testapp/testapp_tune_mcbp_sla.cc:180: Failure
+[2022-02-15T12:42:45.559Z] Failed
+[2022-02-15T12:42:45.559Z] Timed out before the slow log appeared in the files
+[2022-02-15T12:42:45.559Z] [  FAILED  ] TransportProtocols/TuneMcbpSla.SlowCommandLogging/McbpSsl, where GetParam() = McbpSsl (30015 ms)
+TransportProtocols/TuneMcbpSla.SlowCommandLogging/McbpSsl
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/17376/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/17681/ : FAILURE
+
+Failure of GoogleTest "TransportProtocols/TuneMcbpSla.SlowCommandLogging/McbpSsl":
+
+<pre>
+[ RUN      ] TransportProtocols/TuneMcbpSla.SlowCommandLogging/McbpSsl
+[2022-02-15T12:50:31.647Z] /home/couchbase/jenkins/workspace/kv_engine.linux_master/kv_engine/tests/testapp/testapp_tune_mcbp_sla.cc:180: Failure
+[2022-02-15T12:50:31.647Z] Failed
+[2022-02-15T12:50:31.647Z] Timed out before the slow log appeared in the files
+[2022-02-15T12:50:31.647Z] [  FAILED  ] TransportProtocols/TuneMcbpSla.SlowCommandLogging/McbpSsl, where GetParam() = McbpSsl (30019 ms)
+TransportProtocols/TuneMcbpSla.SlowCommandLogging/McbpSsl
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/17681/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/16442/ : FAILURE
+
+Failure of GoogleTest "TransportProtocols/TuneMcbpSla.SlowCommandLogging/McbpSsl":
+
+<pre>
+[ RUN      ] TransportProtocols/TuneMcbpSla.SlowCommandLogging/McbpSsl
+[2022-02-15T12:47:41.386Z] /Users/couchbase/workspace/workspace/kv_engine.macos_master_2/kv_engine/tests/testapp/testapp_tune_mcbp_sla.cc:180: Failure
+[2022-02-15T12:47:41.386Z] Failed
+[2022-02-15T12:47:41.386Z] Timed out before the slow log appeared in the files
+[2022-02-15T12:47:41.386Z] [  FAILED  ] TransportProtocols/TuneMcbpSla.SlowCommandLogging/McbpSsl, where GetParam() = McbpSsl (30027 ms)
+TransportProtocols/TuneMcbpSla.SlowCommandLogging/McbpSsl
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/16442/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/14467/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/15625/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/37052/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/5273/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2022-02-16 16:00:33.000000000
+Message: 
+Abandoned
+----------------------------------------------------------------------------------------------------------------------

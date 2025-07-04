@@ -1,0 +1,198 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 472765: Use gdb's "set substitute-path from to"
+
+Add support for gdb's "set substitute-path from to" by adding a new
+service called GDBSourceLookup that uses GDB to perform the path
+mapping.
+
+The new GDBSourceLookup service uses the new GdbSourceLookupDirector to
+get the set of paths that need mapping using GDB's "set
+substitute-path" and the director resolves compilation path differently
+so as to leave the GDB backend to handle the local path to compile path
+resolution.
+
+The MappingSourceContainer has been enhanced to allow a per mapping
+container override of the new behaviour. This is a fallback as the
+default behaviour when using GDB is to use "set substitute-path".
+
+The MappingSourceContainerDialog exposes the new option in
+MappingSourceContainer as a checkbox at the bottom of the path mapping
+dialog in a backend agnostic way.
+
+The new code is tested in methods called "sourceSubstitute*" and
+mirror the same tests for the now non-backend handled version
+which are "sourceMapping*". Note that
+doMappingAndLaunch/doSubstituteAndLaunch have been updated to explicitly
+check or uncheck the setIsMappingWithBackendEnabled setting
+
+Change-Id: I122d7c597cd461d8e38c4f82522ccfdf9e51a5ba
+Signed-off-by: Jonah Graham <jonah@kichwacoders.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jonah Graham
+Date: 2016-03-15 22:07:12.000000000
+Message: 
+Uploaded patch set 28.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2016-03-15 22:07:22.000000000
+Message: 
+Patch Set 28:
+
+Build Started https://hudson.eclipse.org/cdt/job/cdt-verify/4634/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2016-03-15 22:51:35.000000000
+Message: 
+Patch Set 28: Verified+1
+
+Build Successful 
+
+https://hudson.eclipse.org/cdt/job/cdt-verify/4634/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc Khouzam
+Date: 2016-03-16 03:40:09.000000000
+Message: 
+Patch Set 28: Code-Review-1
+
+(1 comment)
+Line:151, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/launching/GdbSourceLookupDirector.java -> I still don't think this is right :)  But maybe I'm not understanding the big picture...
+I wrote a new test to illustrate better, and I pushed a new patchset with that test.
+Here is my thought process.
+Once a valid substitute mapping is found above, it should be used; meaning that we should not
+go to the next mapping.  Going to the next mapping could screw up if that mapping is wrong
+(I'm not sure the user would ever create such a mapping though... but solely based on the
+code review, it seems possible).
+How to we know it is a *valid* substitute mapping?  We have to call getCompilcationPath()
+and make sure it does find a mapping for sourceName.  If we do, we must return right away.	
+The below should address the problem:
+			if (container instanceof IMappingSourceContainer) {
+				IPath mappedPath = ((IMappingSourceContainer) container).getCompilationPath(sourceName);
+
+				if (mappedPath != null) {
+				    // The path mapping is applicable to sourceName
+				    // First check if the backend is handling those mappings automatically
+				    if (container instanceof MappingSourceContainer
+						&& ((MappingSourceContainer) container).isMappingWithBackendEnabled()) {
+    					/*
+					     * This mapping has been handled by GDB backend (i.e. it was
+					     * collected by collectSubstitutionsPaths to pass to gdb's
+					     * "set substitute-path").
+					     * 
+					     * As the containers themselves do not know whether the
+					     * director requesting the compilation path supports backend
+					     * mapping we cannot rely on the call to getCompilationPath
+					     * but need to force a null here.
+					     */
+					    return new Path(sourceName);
+					}
+				    return mappedPath;
+				}
+			} else if (container.isComposite()) {
+			...
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonah Graham
+Date: 2016-03-16 19:45:57.000000000
+Message: 
+Patch Set 28:
+
+(1 comment)
+Line:151, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/launching/GdbSourceLookupDirector.java -> OK, there are two things going on in this piece of code. There was a clear bug that has now been fixed.
+
+Now what is left is much more woolly. 
+
+I don't think there should be such an early exit from the loop. This is because if the user really wants to have two apparently conflicting mappings we should let them. 
+
+This case is slightly contrived, but derived on some real world issue we have with a customer. In the customers case the install has two sets of pre-built source code, most of the code is built continuously, but some of the big libraries  are built less often. In the install directory you have something like this:
+
+    /user/install/location/main.c
+    /user/install/location/lib/lib.c
+
+At build time the files were here:
+
+    /build/continuous/main.c
+    /build/nightly/lib/lib.c
+
+This leads to a case of mappings like this:
+
+    /build/continuous -> /user/install/location
+    /build/nightly/lib -> /user/install/location/lib
+
+In this case it is obvious that CDT cannot know which one of the mappings is the correct one to resolve (unless we do like GDB and start reading debug info). 
+
+Now extend the case to one where the user has set the first to be substitute-path and the second to be mapping (for unknown/contrived reason*). Pass in /user/install/location/lib/lib.c and the loop will exit early, meaning that /user/install/location/lib/lib.c is passed to GDB and the breakpoint fails to insert correctly.
+
+Without the early exit you can also create a case that fails. However I would argue we should not be doing the check at all since it can be wrong.
+
+BTW fortunately the above case does work with this patch. The more complicated case that is impossible without subsitute-path (and more closely matches the real case we have with one of our customers is):
+
+Supplied in the installation:
+
+    /user/install/location/main.c
+    /user/install/location/lib.c
+
+At build time the files were:
+
+    /build/continuous/main.c
+    /build/nightly/lib/lib.c
+
+In addition, the user edits/adds file like this:
+
+    /user/install/location/user.c
+
+So you need a path mapping like this:
+
+    /build/continuous -> /user/install/location
+    /build/nightly -> /user/install/location
+
+Keeping in mind that one of the cases (user.c) no mapping should apply at all!
+
+If you want, this script simulates that in your /tmp directory
+
+	mkdir -p /tmp/build/continuous
+	mkdir -p /tmp/build/nightly
+	mkdir -p /tmp/user/install/location
+
+	# this part is the build machine, in reality the o files end up in libraries
+	echo "int main() {extern int lib(); lib();extern int user(); user();}" > /tmp/build/continuous/main.c
+	echo "int lib() {}" > /tmp/build/nightly/lib.c
+	gcc -g -c /tmp/build/continuous/main.c -o /tmp/build/continuous/main.o
+	gcc -g -c /tmp/build/nightly/lib.c -o /tmp/build/nightly/lib.o
+
+	# simulate the install (we do it with a mv because the original is on the build machine)
+	mv -fv /tmp/build/continuous/main.* /tmp/user/install/location
+	mv -fv /tmp/build/nightly/lib.* /tmp/user/install/location
+
+	# this is the user adding in there own bit and linking it together
+	echo "int user() {}" > /tmp/user/install/location/user.c
+	gcc -g -c /tmp/user/install/location/user.c -o /tmp/user/install/location/user.o
+	gcc -g /tmp/user/install/location/user.o \
+               /tmp/user/install/location/lib.o \
+               /tmp/user/install/location/main.o \
+            -o /tmp/user/install/location/example.elf
+
+	gdb --interpreter=mi2 /tmp/user/install/location/example.elf \
+          -ex "set substitute-path /tmp/build/nightly /tmp/user/install/location" \
+          -ex "set substitute-path /tmp/build/continuous /tmp/user/install/location" \
+          -ex "b /tmp/user/install/location/main.c:1" \
+          -ex "b /tmp/user/install/location/lib.c:1" \
+          -ex "b /tmp/user/install/location/user.c:1"
+
+
+Observe how GDB has correctly resolved the three breakpoints to the correct build location (file field) and current location (fullname field)
+
+	=breakpoint-created,bkpt={number="1",type="breakpoint",disp="keep",enabled="y",addr="0x0000000000400508",func="main",file="/tmp/build/continuous/main.c",fullname="/tmp/user/install/location/main.c",line="1",thread-groups=["i1"],times="0",original-location="/tmp/user/install/location/main.c:1"}
+	=breakpoint-created,bkpt={number="2",type="breakpoint",disp="keep",enabled="y",addr="0x0000000000400501",func="lib",file="/tmp/build/nightly/lib.c",fullname="/tmp/user/install/location/lib.c",line="1",thread-groups=["i1"],times="0",original-location="/tmp/user/install/location/lib.c:1"}
+	=breakpoint-created,bkpt={number="3",type="breakpoint",disp="keep",enabled="y",addr="0x00000000004004fa",func="user",file="/tmp/user/install/location/user.c",fullname="/tmp/user/install/location/user.c",line="1",thread-groups=["i1"],times="0",original-location="/tmp/user/install/location/user.c:1"}
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Gerrit Code Review
+Date: 2016-03-17 02:30:54.000000000
+Message: 
+Change has been successfully rebased as 628389071558c43c52b666995e1eaa5c4aa67a8f by Marc Khouzam
+----------------------------------------------------------------------------------------------------------------------

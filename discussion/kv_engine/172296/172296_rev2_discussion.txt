@@ -1,0 +1,85 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-27146: add err msg for non-KVnode cbstats calls
+
+Instead of exiting with "mc_bin_client.ErrorKeyEnoent: Memcached error #1:
+KEY_ENOENT : Not Found :" any time a cbstats call is executed against a
+node that is not running the Data (KV) Service, catch and specifically
+handle this error - printing a more user-friendly error message.
+
+Change-Id: I26f41ed3ec4f14fa5259bc182978503a8e872c4c
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Douglas
+Date: 2022-03-18 15:47:22.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-03-18 16:10:02.000000000
+Message: 
+Patch Set 2: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/16078/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/44538/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/37493/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/15002/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/5735/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/16921/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/18168/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/17846/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/18879/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/26253/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/5793/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-03-18 17:06:03.000000000
+Message: 
+Patch Set 2: Code-Review-1
+
+(1 comment)
+Line:114, engines/ep/management/cli_auth_utils.py -> Style: 
+
+- First letter of sentence is not capitalised.
+- Exclamation mark isn't in line with other messages.
+- Message is arguably still at bit prescriptive - it doesn't actually tell the user what the problem is par-se. I'd suggest something more along the lines of describing what the problem is (that no bucket with the given name exists), and then possible solutions.
+
+Note from looking at the code (https://github.com/couchbase/kv_engine/blob/master/daemon/protocol/mcbp/select_bucket_executor.cc#L63), it _appears_ that key_enoent could still be returned for a case where the specified bucket name doesn't exist. Out of interest what happens if the allBuckets (-a?) argument to cbstats is passed when you target a non- Data Service node?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Douglas
+Date: 2022-03-28 14:06:23.000000000
+MISMATCHED INLINE COMMENT
+Line:114, engines/ep/management/cli_auth_utils.py -> Good points, thanks. Passing -a returns "No accessible buckets found" because of https://github.com/couchbase/kv_engine/blob/master/engines/ep/management/cli_auth_utils.py#L94-L97.
+
+Since, AIUI:
+* All nodes run memcached, but without the Data Service configured there are no buckets present;
+* The !mayAccessBucket (https://github.com/couchbase/kv_engine/blob/master/daemon/protocol/mcbp/select_bucket_executor.cc#L26) block is entered only if the bucket was not explicitly named as accessible to the user, and the user does not have wildcard permissions;
+* associate_bucket returns false if there is no bucket found with that name, or there is but it is in a state other than Ready
+
+Both of these conditions must hold to fall through to key_enoent, i.e.,
+* User must have a permissions entry to that bucket name, or a wildcard entry
+* No Ready bucket with the given name [at the time the lock is held] on the specified node's memcached
+
+So key_enoent is raised when either:
+(1) the bucket doesn't exist and the user has wildcard permissions;
+(2) the bucket exists in the _cluster_ (and so the permissions map), but this is a non-data node and so no bucket with that name is found by memcached;
+
+But it's also raised in cases we may want to be more explicit about:
+(3) The user has permissions and the bucket exists but is not yet active on the supplied node (e.g., Creating, Initializing, Stopping, Destroying).
+----------------------------------------------------------------------------------------------------------------------

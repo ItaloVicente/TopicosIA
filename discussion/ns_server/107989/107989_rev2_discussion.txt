@@ -1,0 +1,61 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-33853 Don't use async:perform for leader_lease_acquire_worker.
+
+Use a regular spawn_link instead. The parent process traps exits
+anyway, so it just needs to handle those instead of the monitor DOWN
+messages.
+
+The problem in the referred bug is due to async:perform/1 not cleaning
+up PIDs of temporary processes that leader_lease_acquire_worker
+spawns (via misc:executing_on_new_process/1). Over a long time each
+worker will accumulate a significant number of PIDs of processes that
+has long been dead. Once the VM spawns enough new processes (on the
+order of 2²⁸ in our case, but the number can be significantly lower in
+certain situations), it starts recycling old PIDs. So what happens is
+that a newly spawned processes might take over some of the PIDs that
+some worker still holds on to. When such worker is terminated (most
+likely because another node became a master), at least two undesirable
+situations may arise:
+
+ - The worker terminates an unrelated process that has taken over one
+   of its PIDs.
+
+ - The worker might get stuck. This is possible because internally
+   misc:terminate_and_wait/2 first sends an exit signals to all PIDs
+   it's given and only then starts monitoring the PIDs to wait till
+   they terminate. So if one of the PIDs is overtaken right in between
+   these two steps, the worker will end up waiting for a process to
+   terminate when that process never received the exit signal. Hence
+   the worker gets stuck.
+
+It's the second case that was observed in couple of customer
+escalations. There are two factors that make it quite likely:
+
+ - Over time a worker will accumulate a lot of PIDs, so the window
+   between two steps in misc:terminate_and_wait/2 above becomes quite
+   large: each of the steps has to traverse this long list.
+
+ - Incidentally, long worker shutdown time (which slows down the
+   shutdown of mb_master_sup) causes mb_master process to get blocked
+   for some time. This in turn results in node_monitor and related
+   processes to crash and restart because mb_master:master_mode()
+   times out. So it's these processes that start at the exactly wrong
+   moment and lock up the entire shutdown sequence.
+
+Change-Id: I47dd29bf970c636669b5eea44f87ff281fc9c176
+Reviewed-on: http://review.couchbase.org/107989
+Well-Formed: Build Bot <build@couchbase.com>
+Tested-by: Aliaksey Artamonau <aliaksey.artamonau@couchbase.com>
+Reviewed-by: Dave Finlay <dave.finlay@couchbase.com>
+Reviewed-by: Artem Stemkovski <artem@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Aliaksey Artamonau
+Date: 2019-04-18 05:22:49.000000000
+Message: 
+Change has been successfully cherry-picked as a537789f4e223feb0617518a173ccd06de23c460 by Aliaksey Artamonau
+----------------------------------------------------------------------------------------------------------------------

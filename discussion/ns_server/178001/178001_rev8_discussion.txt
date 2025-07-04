@@ -1,0 +1,188 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-53103: Do periodic garbage collection
+
+Change-Id: Ia5bb6f469cf2a6d6d996092c1d79b55c301f0906
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Navdeep S Boparai
+Date: 2022-07-28 19:58:26.000000000
+Message: 
+Uploaded patch set 8.
+----------------------------------------------------------------------------------------------------------------------
+Author: Restriction Checker
+Date: 2022-07-28 19:58:37.000000000
+Message: 
+Patch Set 8: Well-Formed-1
+
+Branch restricted. PLEASE READ this URL: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/308479/artifact/restricted.html : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Navdeep S Boparai
+Date: 2022-07-28 19:58:56.000000000
+Message: 
+Patch Set 8: Verified+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2022-07-28 20:16:30.000000000
+Message: 
+Patch Set 8:
+
+(5 comments)
+Line:31, src/ns_gc_runner.erl -> Add a type
+
+time :: integer()
+
+Line:69, src/ns_gc_runner.erl -> initialize "time" to zero in case someone calls ns_gc_runner:time() before it has a "real" value (or has garbage if GC is disabled).
+
+Line:74, src/ns_gc_runner.erl -> This is where you should do
+
+    erlang:cancel_timer(TimerRef),
+    misc:flush(collect_garbage),
+    
+and then...
+
+    {reply, ok, State#state{is_gc_enabled=false,timer_ref=undefined}};
+
+Line:95, src/ns_gc_runner.erl -> The fact we're in this function means the collect_garbage message was received...which is a result of the timer popping. And so there's no cancel needed. Also this is handling the collect_garbage and since there's only one outstanding at a time there's nothing to flush.
+
+The canceling of the timer and flushing of the message is needed when GC is disabled.
+
+Line:119, src/ns_gc_runner.erl -> I suggest minimizing the duplicate code. Maybe something like:
+
+    NewTime = case {reply, ok, State#state{is_gc_enabled=false}} of
+        {true, NewMaxDuration} ->
+            Now;
+        {_, NewMaxDuration} ->
+            MaxDuration
+    end,
+    {noreply, State#state{time=NewTime,
+                          pid_list=RestPids,
+                          max_gc_duration=NewMaxDuration,
+                          timer_ref=TimerRef}}.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2022-07-28 20:54:57.000000000
+Message: 
+Patch Set 8:
+
+(3 comments)
+Line:99, src/ns_gc_runner.erl -> I would also output the length of erlang:processes() here. I think it's useful and close to be free for us.
+
+Line:108, src/ns_gc_runner.erl -> Let's consider the following scenario.
+At some point in time we create a lot of temporary processes, this process captures the pid list and slowly runs through them. Since most of them are dead already, this process will actually do nothing for a pretty long time.
+Hence the question: should we do the pause _only_ if GC is succ? Or maybe the pause should be shorter in case if GC is unsucc?
+
+Not sure it's a good idea.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Finlay
+Date: 2022-07-28 20:58:29.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:108, src/ns_gc_runner.erl -> I think it's a good idea. Think it should be the case that we do 1 actual GC per interval rather than just invoke garbage_collect once per interval.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2022-07-28 21:01:33.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:108, src/ns_gc_runner.erl -> So maybe the use of erlang:is_process_alive does have some value (skip the dead process and try the next one).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2022-07-28 21:12:04.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:108, src/ns_gc_runner.erl -> No, I don't think we need erlang:is_process_alive. erlang:garbage_collect returns true when the garbage was actually collected.
+
+I would still make a small pause between unsucc garbage collects though. Just to avoid sudden cpu consumption spikes in case if there are a lot of dead processes in the list.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Navdeep S Boparai
+Date: 2022-07-28 21:34:41.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:95, src/ns_gc_runner.erl -> :) Well I think it is not needed in any case. The whole design is arm, trigger fires(we-rearm). I personally prefer cancel to just change the state to disable and not do any flushes or cancel_timer anywhere. 
+
+Reasoning:
+For this patch, disable() would need to be called only when we are in big trouble. We find that GC has potentially caused some issue and we need to disable it. 
+
+We provide a diag eval to disable this patch.
+Option 1: we have cancel of a timer/and flush of a process queue(more intrusive) action when that cancel call happens.
+Option 2: the disable just changes the state to disable, the timer fires, we don't schedule the next timer. We are disabled!
+
+I prefer the passive option 2 for this patch so prefer not to do any flushes, unless there is a strong reasoning to.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2022-07-28 22:05:31.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:105, src/ns_gc_runner.erl -> I think it makes sense to start the timer after garbage collecting, to make sure we are actually pausing between GCs. Because currently we are not pausing if GC takes >= 1s.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2022-07-28 22:31:56.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:95, src/ns_gc_runner.erl -> All along I said my suggestion was good hygiene and not a correctness issue. So I leave the decision to you.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Navdeep S Boparai
+Date: 2022-07-28 23:10:03.000000000
+MISMATCHED INLINE COMMENT
+Line:31, src/ns_gc_runner.erl -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Navdeep S Boparai
+Date: 2022-07-28 23:10:03.000000000
+MISMATCHED INLINE COMMENT
+Line:69, src/ns_gc_runner.erl -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Navdeep S Boparai
+Date: 2022-07-28 23:10:03.000000000
+MISMATCHED INLINE COMMENT
+Line:74, src/ns_gc_runner.erl -> Being discussed in other open comment.
+----------------------------------------------------------------------------------------------------------------------
+Author: Navdeep S Boparai
+Date: 2022-07-28 23:10:03.000000000
+MISMATCHED INLINE COMMENT
+Line:95, src/ns_gc_runner.erl -> Ack
+----------------------------------------------------------------------------------------------------------------------
+Author: Navdeep S Boparai
+Date: 2022-07-28 23:10:03.000000000
+MISMATCHED INLINE COMMENT
+Line:99, src/ns_gc_runner.erl -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Navdeep S Boparai
+Date: 2022-07-28 23:10:03.000000000
+MISMATCHED INLINE COMMENT
+Line:105, src/ns_gc_runner.erl -> good point, it gets addressed now because I changed it such that, we do gc first. If GC works, we do the next timer based on gc_pass_interval parameter, and if it fails we do the next timer based on gc_fail_interval.
+----------------------------------------------------------------------------------------------------------------------
+Author: Navdeep S Boparai
+Date: 2022-07-28 23:10:03.000000000
+MISMATCHED INLINE COMMENT
+Line:108, src/ns_gc_runner.erl -> Changed code such that if GC call failed, we do the next timer based on gc_fail_interval.
+----------------------------------------------------------------------------------------------------------------------
+Author: Navdeep S Boparai
+Date: 2022-07-28 23:10:29.000000000
+MISMATCHED INLINE COMMENT
+Line:119, src/ns_gc_runner.erl -> Done
+----------------------------------------------------------------------------------------------------------------------

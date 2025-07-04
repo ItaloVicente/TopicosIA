@@ -1,0 +1,109 @@
+======================================================================================================================
+DESCRIPTION:
+
+NCBC-310: Amendment #3 - exponential back-off strategy
+
+This commit amends the other NCBC-310: Refactor Connection Pool
+commits by adding an exponential back-off strategy to the Dispose
+method of the SocketPool class. This allows operations that are in
+flight time to execute before closing the connection and destroying
+the object.
+
+Change-Id: I188b9852282812b85a58e5548c9c70f2645fb22c
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jeffry Morris
+Date: 2013-11-25 22:12:25.000000000
+Message: 
+Patch Set 5: Verified+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Mark Nunberg
+Date: 2013-11-26 00:41:01.000000000
+Message: 
+Patch Set 5:
+
+(3 comments)
+
+There should be a more clever backoff strategy w.r.t Dispose. If we're 'Disposing' because of a configuration update, then yes -- though in this case I don't think we want an exponential backoff -- a simple grace period will do.
+Line:168, src/Couchbase/SocketPool.cs -> It would really help if the logging messages weren't part of this commit. Makes it more difficult to see what's changed -- though understandable
+
+Line:281, src/Couchbase/SocketPool.cs -> Eh?
+
+Line:24, src/Enyim.Caching/Memcached/OperationInterfaces.cs -> What's the point of the GUID here? Do we maintain a hashtable of sorts? Also, what's the overhead - I believe this is something like 16 bytes just for this?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Mark Nunberg
+Date: 2013-11-26 00:46:59.000000000
+Message: 
+Patch Set 5:
+
+(4 comments)
+
+This would be much easier to read if you can point out the bits where this backoff takes place. I _suppose_ the backoff-on-dispose makes sense but it seems like kind of a hack. That a 'Dispose' type method should block sounds a bit odd, but considering that this is fixing a bug, if it works I'm OK with it.
+Line:308, src/Couchbase/CouchbaseClient.cs -> You're doing an 'Interlocked.Increment' but your conditional is not thread safe :). I'm not sure how important this is, though
+
+Line:351, src/Couchbase/CouchbaseClient.cs -> This whole block should probably be moved to its own method
+
+Line:191, src/Couchbase/CouchbasePooledSocket.cs -> Does 'Close' ever block at all? Perhaps for some of the fancier win-32 stuff it does. but normally sockets don't need closing.
+
+Line:7, src/Couchbase/Exceptions/OperationTimeoutException.cs -> It's about friggin time we have this
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matt Ingenthron
+Date: 2013-11-26 01:45:12.000000000
+Message: 
+Patch Set 5: Code-Review-1
+
+(6 comments)
+
+Some minor comments.  
+
+The main one I'd like to have looked at is the GUID.
+
+Mark: note that the exponential backoff works here because we can receive many events in a row so we want to dispose them as fast as reasonably possible, but not while they're in use.  This gives the system time to get things worked through.  I agree it could be better, and will be in the future!
+Line:7, /COMMIT_MSG -> Not a big deal, but I wonder if it makes sense to consume so much space in the commit summary.  It's pretty apparent that it's an amendment.
+
+"Exponential backoff strategy" doesn't really summarize the change.  I'd recommend at least covering the change in there.
+
+Line:233, src/Couchbase.Tests/CouchbasePooledSocketTests.cs -> None of these tests seem to worry about authentication, but that's another "state" of the connection.  It can be connected, but not auth'd or connected and auth failed.
+
+I don't know that we need tests for this, but I'm just raising it for your consideration.
+
+One downside to our protocol is that if you attempt to auth and it fails, you'll still be wired to the "default" bucket.  If we have a bug in auth, that can lead to silent data corruption.
+
+Line:152, src/Couchbase.Tests/SocketPoolTests.cs -> I'm not sure I follow this test.  aren't we checking for aliveness while they've been acquired.
+
+Line:252, src/Couchbase/Configuration/CouchbaseClientConfiguration.cs -> whitespace!  and unaligned whitespace!
+
+(not a big deal, but thought you should know)
+
+Might be nice to have a comment here indicating what it's for if it's not obvious.  Especially, since there's retryCount above.
+
+Line:281, src/Couchbase/SocketPool.cs -> I think 12 came from my pseudocode.  2^12 or a 4 second sleep with other shorter sleeps before it.  This could probably be cleaner/clearer with a ceiling, but it would work. A local variable instead of having 12 in here twice may make things clearer.
+
+Line:25, src/Enyim.Caching/Memcached/OperationInterfaces.cs -> I do agree with Mark here.  I don't know what the cost is for creating a GUID, but because of the "G" I'd imagine it's relatively expensive?  Not something we want to be doing tens of thousands of times a second if we have another option.
+
+A fairly natural and already existing way to uniquely identify operations may be through the the combination of the key and the opaque.  We should have all of that info already, I think.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jeffry Morris
+Date: 2013-11-26 03:38:46.000000000
+Message: 
+Patch Set 5:
+
+(6 comments)
+Line:233, src/Couchbase.Tests/CouchbasePooledSocketTests.cs -> Hmm...the SocketPool.Create method should throw an exception if the auth failed. I'll add more tests to see if this works as expected.
+
+Line:152, src/Couchbase.Tests/SocketPoolTests.cs -> It's a bit incomplete, but it's really testing the internal state and ensuring that after dispose is called on a pool with no sockets out, that all will be dead immediately.
+
+Line:252, src/Couchbase/Configuration/CouchbaseClientConfiguration.cs -> yuck...the unaligned bit is because I changed my ide settings back to spaces (from tabs).
+
+Line:191, src/Couchbase/CouchbasePooledSocket.cs -> No, close doesn't block. This ensures that all of the un-managed resources are properly cleaned up. It's not quite the same as explicitly closing a TCP connection.
+
+Line:168, src/Couchbase/SocketPool.cs -> Yeah, agreed...collateral damage.
+
+Line:25, src/Enyim.Caching/Memcached/OperationInterfaces.cs -> I added this for tracing operations, I admit I didn't put much thought into the Type I was using for this. I needed something that was fairly unique and easy to read. AFAIK, the operations aren't aware of keys at the base level and I didn't want to make a regression mess by retrofitting it across the entire code base.
+
+----------------------------------------------------------------------------------------------------------------------

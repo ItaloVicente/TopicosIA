@@ -1,0 +1,109 @@
+======================================================================================================================
+DESCRIPTION:
+
+PackWriter: clarify mutating and non-mutating usages of #sortedByName
+
+The #sortedByName field is being used as both a cache of the value,
+which should not be mutated, and a copy of the value, which is taken
+from the field and then mutated.
+
+Separate the computation of this value and store an immutable copy in
+the field and create a mutable copy when needed.
+
+Change-Id: I134e1a416891c031cb18f7fee389ccf86b9feb6c
+Signed-off-by: Anna Papitto <annapapitto@google.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Anna Papitto
+Date: 2022-12-09 17:44:40.000000000
+Message: 
+Uploaded patch set 3: New patch set was added with same tree, parent, and commit message as Patch Set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2022-12-09 17:44:53.000000000
+Message: 
+Patch Set 3:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline.java11/2409/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2022-12-09 18:13:32.000000000
+Message: 
+Patch Set 3: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline.java11/2409/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2022-12-09 23:20:13.000000000
+Message: 
+Patch Set 3:
+
+(2 comments)
+Line:10, /COMMIT_MSG -> It seems the new implementation copies the list once more than the old implementation.
+
+What's the performance impact of this additional copying ?
+Copying the list takes time and produces more garbage for Java gc to collect.
+
+Line:1088, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/pack/PackWriter.java -> - this is too wide, we use a max line width of 80
+- while you are at this remove the final qualifier, see https://wiki.eclipse.org/EGit/Contributor_Guide#Use_of_the_.22final.22_modifier
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Anna Papitto
+Date: 2022-12-16 18:34:02.000000000
+MISMATCHED INLINE COMMENT
+Line:10, /COMMIT_MSG -> Hi Matthias, sorry for such a long comment -- any thoughts from you?
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2022-12-19 23:12:24.000000000
+MISMATCHED INLINE COMMENT
+Line:10, /COMMIT_MSG -> I was commenting on PS 3 where the list was copied, in PS11 this was fixed by wrapping the list to become unmodifiable
+----------------------------------------------------------------------------------------------------------------------
+Author: Ivan Frade
+Date: 2022-12-19 22:50:00.000000000
+MISMATCHED INLINE COMMENT
+Line:10, /COMMIT_MSG -> > It seems the new implementation copies the list once more than the old implementation.
+
+The new implementation uses Collections::unmodifiableList. Checking the code (openjdk11)[1], it doesn't copy the elements, it just wraps the reference in a class that prevents modification[2],[3]. From the code, it shouldn't have a big memory impact (some bytes of class headers for the whole list) and Anna's profiling confirms that.
+
+[1] https://github.com/openjdk/jdk/blob/master/src/java.base/share/classes/java/util/Collections.java#L1325
+[2] https://github.com/openjdk/jdk/blob/master/src/java.base/share/classes/java/util/Collections.java#L1341
+[3] https://github.com/openjdk/jdk/blob/master/src/java.base/share/classes/java/util/Collections.java#L1038
+----------------------------------------------------------------------------------------------------------------------
+Author: Anna Papitto
+Date: 2022-12-20 00:06:47.000000000
+MISMATCHED INLINE COMMENT
+Line:10, /COMMIT_MSG -> Ack
+----------------------------------------------------------------------------------------------------------------------
+Author: Anna Papitto
+Date: 2022-12-14 21:14:59.000000000
+MISMATCHED INLINE COMMENT
+Line:10, /COMMIT_MSG -> Thanks for bringing this up! I did some runtime performance investigation. 
+
+Gerrit does not support table formatting in comments, but here is the millisecond averages from 5 runs of the `gc` command on a real repository (the cgit one) with 329,847 objects counted.
+
+* All units are milliseconds	allHeadsAndTags makeSortedByName	allHeadsAndTags getSortedByName with initialization	allHeadsAndTags makeSortedByName for bitmap	nonHeads makeSortedByName	nonHeads getSortedByName with initialization	GC#repack writePack calls
+* Lists.copyOf	130	143	77	1	1	12614
+* Collections.unmodifiableList	130	130	78	1	1	12471
+* Use and clear (baseline)	141	142	-	2	2	12695
+
+The investigation revealed that the `List.copyOf` takes about ~13 milliseconds right after creating the sorted list (143ms including 130ms). However, the variability in runs means that the baseline implementation came out as 142ms, which is only 1ms different.
+
+Especially when you zoom out to the level of Gc#repack making three writePack calls among much other work, each initialization of sortedByName is pretty negligible for this example repository.
+
+When looking into this, I remembered `Collections.unmodifiableList`, which just wraps the given list, without having to copy the contents. This has <1ms of overhead for both a longer list (allHeadsAndTags) and a short list (nonHeads). I updated the implementation to use this approach, since it also provides the protection against future buggy side-effect usages with a tiny constant time overhead. 
+
+Of course, we’re still incurring a ~78 millisecond overhead later, when writeBitmap creates its own modifiable sorted list using makeSortedByName. However, this avoids the implicit reliance on writeBitmaps being the last method called on PackWriter that uses the sortedByName instance field. If someone later introduces a method that gets called later, or calls the existing methods in a different order, they will unknowingly need sortedByName to be re-initialized. Thus losing the negligible optimization of the existing implementation in a way that is hard to catch in code review.
+
+IMO, the negligible (in the context of Gc#repack) overhead for the `Collections.unmodifiableList` approach is worthwhile for the couple of qualitative improvements I’ve brought up.
+
+Please let me know any other investigation that you recommend, and what your thoughts are. Thank you again!
+----------------------------------------------------------------------------------------------------------------------
+Author: Anna Papitto
+Date: 2022-12-14 21:14:59.000000000
+MISMATCHED INLINE COMMENT
+Line:1088, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/pack/PackWriter.java -> Done
+----------------------------------------------------------------------------------------------------------------------

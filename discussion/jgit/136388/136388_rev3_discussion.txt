@@ -1,0 +1,172 @@
+======================================================================================================================
+DESCRIPTION:
+
+Reload the full pack list when one pack disappears
+
+When running a GC operation on a busy git repo, the repack
+replaces the old packfiles with the new ones generated.
+
+JGit detects the problem automatically and removes the
+inexistent packfiles from the in-memory list. However, the new
+packfiles created by the GC are not immediately visible
+and the higher level application (Gerrit in this case)
+reports a 500.
+
+When the repository involved is All-Users, the effects
+of not refreshing the full list immediately are quite
+catastrophic and all the accounts on that packfile are
+not reachable anymore.
+
+By reloading synchronously the entire list of packfiles,
+the in-memory list becomes consistent again and the end user
+won't notice anything. The drawback is a slowdown due to
+the in-flight packfiles reload, which is happening anyway
+only when inconsistencies are detected.
+
+Issue: Bug 544199
+Change-Id: Icdf33fa2fcc87d82c1983bfb9bda629211746f35
+Signed-off-by: Luca Milanesio <luca.milanesio@gmail.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: David Pursehouse
+Date: 2019-02-14 01:47:05.000000000
+Message: 
+Uploaded patch set 3: Patch Set 2 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2019-02-18 05:35:29.000000000
+Message: 
+Patch Set 3:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit/15598/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2019-02-18 05:49:34.000000000
+Message: 
+Patch Set 3: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit/15598/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2019-02-18 23:28:50.000000000
+Message: 
+Patch Set 3:
+
+I have deployed to prod the latest stable-5.1 with the extra logging on the full exception that causes a packfile is removed from the list.
+
+As a surprise I found out two things:
+a) The packfile was previously flagged as invalid, but there is no trace in the log of earlier errors
+b) The packfile removed from the list was *exactly* the one re-created by GC. The result is quite nasty, because the only valid packfile in "good shape" and active after GC is the one that is getting removed from the in-memory cache.
+
+See the exception below:
+
+[2019-02-18 21:36:37,636] [pool-28-thread-8] WARN  org.eclipse.jgit.internal.storage.file.ObjectDirectory : Packfile /var/gerrit/git/All-Users.git/objects/pack/pack-71b0129d6dc814b0debdce685ed2d37544245c37.pack is corrupted
+org.eclipse.jgit.errors.PackInvalidException: Pack file invalid: /var/gerrit/git/All-Users.git/objects/pack/pack-71b0129d6dc814b0debdce685ed2d37544245c37.pack
+        at org.eclipse.jgit.internal.storage.file.PackFile.doOpen(PackFile.java:641)
+        at org.eclipse.jgit.internal.storage.file.PackFile.beginWindowCache(PackFile.java:625)
+        at org.eclipse.jgit.internal.storage.file.WindowCache.load(WindowCache.java:295)
+        at org.eclipse.jgit.internal.storage.file.WindowCache.getOrLoad(WindowCache.java:379)
+        at org.eclipse.jgit.internal.storage.file.WindowCache.get(WindowCache.java:184)
+        at org.eclipse.jgit.internal.storage.file.WindowCursor.pin(WindowCursor.java:360)
+        at org.eclipse.jgit.internal.storage.file.WindowCursor.copy(WindowCursor.java:259)
+        at org.eclipse.jgit.internal.storage.file.PackFile.readFully(PackFile.java:601)
+        at org.eclipse.jgit.internal.storage.file.PackFile.load(PackFile.java:773)
+        at org.eclipse.jgit.internal.storage.file.PackFile.get(PackFile.java:285)
+        at org.eclipse.jgit.internal.storage.file.ObjectDirectory.openPackedObject(ObjectDirectory.java:491)
+        at org.eclipse.jgit.internal.storage.file.ObjectDirectory.openPackedFromSelfOrAlternate(ObjectDirectory.java:449)
+        at org.eclipse.jgit.internal.storage.file.ObjectDirectory.openObject(ObjectDirectory.java:440)
+        at org.eclipse.jgit.internal.storage.file.WindowCursor.open(WindowCursor.java:165)
+        at org.eclipse.jgit.lib.ObjectDatabase.open(ObjectDatabase.java:176)
+        at org.eclipse.jgit.lib.ObjectDatabase.open(ObjectDatabase.java:146)
+        at org.eclipse.jgit.lib.Repository.open(Repository.java:349)
+
+Any ideas?
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2019-02-18 23:30:34.000000000
+Message: 
+Patch Set 3:
+
+> Patch Set 3:
+> 
+> I have deployed to prod the latest stable-5.1 with the extra logging on the full exception that causes a packfile is removed from the list.
+> 
+> As a surprise I found out two things:
+> a) The packfile was previously flagged as invalid, but there is no trace in the log of earlier errors
+> b) The packfile removed from the list was *exactly* the one re-created by GC. The result is quite nasty, because the only valid packfile in "good shape" and active after GC is the one that is getting removed from the in-memory cache.
+> 
+> See the exception below:
+> 
+> [2019-02-18 21:36:37,636] [pool-28-thread-8] WARN  org.eclipse.jgit.internal.storage.file.ObjectDirectory : Packfile /var/gerrit/git/All-Users.git/objects/pack/pack-71b0129d6dc814b0debdce685ed2d37544245c37.pack is corrupted
+> org.eclipse.jgit.errors.PackInvalidException: Pack file invalid: /var/gerrit/git/All-Users.git/objects/pack/pack-71b0129d6dc814b0debdce685ed2d37544245c37.pack
+>         at org.eclipse.jgit.internal.storage.file.PackFile.doOpen(PackFile.java:641)
+>         at org.eclipse.jgit.internal.storage.file.PackFile.beginWindowCache(PackFile.java:625)
+>         at org.eclipse.jgit.internal.storage.file.WindowCache.load(WindowCache.java:295)
+>         at org.eclipse.jgit.internal.storage.file.WindowCache.getOrLoad(WindowCache.java:379)
+>         at org.eclipse.jgit.internal.storage.file.WindowCache.get(WindowCache.java:184)
+>         at org.eclipse.jgit.internal.storage.file.WindowCursor.pin(WindowCursor.java:360)
+>         at org.eclipse.jgit.internal.storage.file.WindowCursor.copy(WindowCursor.java:259)
+>         at org.eclipse.jgit.internal.storage.file.PackFile.readFully(PackFile.java:601)
+>         at org.eclipse.jgit.internal.storage.file.PackFile.load(PackFile.java:773)
+>         at org.eclipse.jgit.internal.storage.file.PackFile.get(PackFile.java:285)
+>         at org.eclipse.jgit.internal.storage.file.ObjectDirectory.openPackedObject(ObjectDirectory.java:491)
+>         at org.eclipse.jgit.internal.storage.file.ObjectDirectory.openPackedFromSelfOrAlternate(ObjectDirectory.java:449)
+>         at org.eclipse.jgit.internal.storage.file.ObjectDirectory.openObject(ObjectDirectory.java:440)
+>         at org.eclipse.jgit.internal.storage.file.WindowCursor.open(WindowCursor.java:165)
+>         at org.eclipse.jgit.lib.ObjectDatabase.open(ObjectDatabase.java:176)
+>         at org.eclipse.jgit.lib.ObjectDatabase.open(ObjectDatabase.java:146)
+>         at org.eclipse.jgit.lib.Repository.open(Repository.java:349)
+> 
+> Any ideas?
+
+P.S. The packfile is 100% fine, I checked it with git verify-pack. After a while, JGit tries to reload the packfile and it is all fine. Not clear to me why it has been previously flagged as invalid.
+
+The problem is the transitory moment when JGit "believes" that the packfile is invalid, flags it as invalid in memory and then removes from the list, without reloading it again.
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2019-02-23 20:24:53.000000000
+Message: 
+Patch Set 3:
+
+> P.S. The packfile is 100% fine, I checked it with git verify-pack. After a while, JGit tries to reload the packfile and it is all fine. Not clear to me why it has been previously flagged as invalid.
+> 
+> The problem is the transitory moment when JGit "believes" that the packfile is invalid, flags it as invalid in memory and then removes from the list, without reloading it again.
+
+I added more logs and this is the reason why the packfile was flagged as invalid:
+
+org.eclipse.jgit.errors.PackMismatchException: Pack object count mismatch: pack 6f719c50dc701ac904db90330b687c0536e3a27e index 27441a6f9776584ecb698daeddb261a686c6bb02: /var/gerrit/git/All-Users.git/objects/pack/pack-60be33b0b453c89a7ba6d62b9c490dad71d7e022.pack
+        at org.eclipse.jgit.internal.storage.file.PackFile.onOpenPack(PackFile.java:763)
+        at org.eclipse.jgit.internal.storage.file.PackFile.doOpen(PackFile.java:651)
+        at org.eclipse.jgit.internal.storage.file.PackFile.beginWindowCache(PackFile.java:631)
+        at org.eclipse.jgit.internal.storage.file.WindowCache.load(WindowCache.java:295)
+
+It seems that during GC the packfile and the index may be out of sync?
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2019-02-23 22:46:16.000000000
+Message: 
+Patch Set 3: Code-Review-1
+
+I did a bit more investigation and it seems like there is a bug, but in a different place.
+
+The same packfiles are constantly thought to be invalid because of a checksum mismatch with the corresponding idx.
+Then they are *actually* removed from the list but then reloaded and they seem fine, but again they are found invalid after a while.
+
+It seems that they are flagged as invalid after a JGit GC cycle.
+The problem is that I do use the retention of packfiles during GC (1 day) and thus the old packfiles are not touched at all.
+
+Checking with git gc and hexdump, the two checksums seems absolutely fine.
+
+Going to abandon this change, because it may not actually solve anything.
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2019-02-23 22:46:46.000000000
+Message: 
+Abandoned
+
+The problem is NOT reloading the list of packs, but the in-memory checksum incorrect.
+----------------------------------------------------------------------------------------------------------------------

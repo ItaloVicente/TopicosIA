@@ -1,0 +1,111 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-53100: Don't register checkpoint cursors in meta only checkpoints
+
+Problem:
+In MB-53100 it was observed that the ActiveStream::curChkSeqno throws
+due to its value becoming non weakly monotonic, while it's processing
+times from the checkpoint manager. Just after vbucket became active due
+to a takeover stream.
+
+Cause:
+The reason for this is due an issue in how we register cursors when the
+checkpoint manager contains an checkpoint that only contains meta items
+(though this can happen with checkpoints that do have non-meta items
+in). A meta only checkpoint can occur during a takeover stream, as the
+initial active node sends a snapshot with just one meta item which is a
+setVbucketState to pending.
+
+Example:
+id:2 [ e:5, cs:5, vbs:5, ce:5]
+id:3 [ e:5, cs:5, m:5, m:6 )
+
+Using the example above. The meta only checkpoint is problematic for
+CheckpointManager::registerCursorBySeqno() as it will walk through the
+meta checkpoint trying to find the seqno 5 requested for. However, if
+the requested seqno 5 was the same seqno as setVbucketState(e.g. vbs:5),
+we would end up walking though the checkpoint without ever finding an
+item with a seqno greater than 5. Thus, getting to the
+checkpoint_end (ce:5) item, who's seqno is 5. We would then return the
+registration seqno as 5 + 1 = 6. This would then set the value of
+ActiveStream::curChkSeqno to 6 from 5.
+
+When the active stream wants to process items using the cursor it will
+then receive the items from the point where the cursor currently sits,
+including the vbucket item but also importantly it will see a non-meta
+item with seqno X. This then caused curChkSeqno to from 6 to 5
+which a violation and thus we throw.
+
+Fix:
+When walking though the checkpoint to find the right item to register
+the cursor against, we need to ensure the item is not a meta item. If it
+is then we should just continue to the next item. If we don't find a
+non-meta item in the checkpoint for the seqno, then we should continue
+to the next checkpoint.
+
+In the situation we reach the end of the open checkpoint we need to
+register at the end of the checkpoint. This means we need to predict
+what the next item's seqno will be. Thus, if the last item isn't a meta
+item then we will set the 'result.seqno' to the end item's bySeqno + 1.
+If it is a meta item then it will just be set to bySeqno. As the meta
+items's seqno hasn't been made visible.
+
+Change-Id: I2fb89a81f506be71991b2a58a9f9a9144d75cad3
+Reviewed-on: https://review.couchbase.org/c/kv_engine/+/178485
+Reviewed-by: Dave Rigby <daver@couchbase.com>
+Tested-by: Build Bot <build@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Richard de Mellow
+Date: 2022-09-02 11:10:36.000000000
+Message: 
+Change has been successfully cherry-picked as dc63b2443868d065e175b93276f5b80bb807eac8
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-09-02 11:10:45.000000000
+Message: 
+Patch Set 14:
+
+Build Started https://cv.jenkins.couchbase.com/job/kv_engine-post-commit-master/11976/ (1/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-09-02 11:10:45.000000000
+Message: 
+Patch Set 14:
+
+Build Started https://cv.jenkins.couchbase.com/job/kv_engine-post-commit-TSan-master/7909/ (2/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-09-02 11:19:11.000000000
+Message: 
+Patch Set 14:
+
+Build Unstable 
+
+https://cv.jenkins.couchbase.com/job/kv_engine-post-commit-master/11976/ : UNSTABLE
+
+ERROR: rebalancein (unittest.loader._FailedTest)
+ ( https://cv.jenkins.couchbase.com/job/kv_engine-post-commit-master/11976/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine-post-commit-TSan-master/7909/ : UNSTABLE
+
+ERROR: rebalancein (unittest.loader._FailedTest)
+ ( https://cv.jenkins.couchbase.com/job/kv_engine-post-commit-TSan-master/7909/ )
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2022-09-02 11:36:59.000000000
+Message: 
+Patch Set 14:
+
+(1 comment)
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-09-02 12:04:11.000000000
+Message: 
+Patch Set 14:
+
+(1 comment)
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,115 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-32712: Don't account spdlog message memory to bucket
+
+Whenever a long (>176 characters) log message from ep-engine is
+printed to the memcached.log, the size of that message is not
+correctly accounted (decremented) against the Bucket's mem_used.
+
+The effect of this is that the amount of available memory for that
+bucket is permanently reduced by the log message size.
+
+(Note this isn't an actual memory leak - all temporary memory is freed
+correctly, it's just the usage is incorrectly accounted
+internally. The process RSS / VSZ does not increase.)
+
+Details
+=======
+
+KV-Engine uses the spdlog library for logging, running in asynchronous
+mode. In ep-engine this is implemented in the BucketLogger class,
+which amongst other things prefixes the log message with the current
+bucket's name.
+
+When a log message is to be printed it is formatted by the calling
+thread, then the formatted message pushed onto a queue, to be _sunk_
+(written to memcached.log / stderr) by a background thread.
+
+Messages which are longer than 176 bytes after formatting must be
+allocated on the heap, which is done in the context of the logging
+thread. These messages are freed by the asynchronous background
+thread, which is shared between all bucket instances (and hence isn't
+associated with any particular bucket).
+
+As such there is a mismatch in the memory accounting for these large
+log messages - when created their memory usage is counted against the
+given bucket (increasing mem_used); but when freed their memory usage
+is essentially ignored as _no_ bucket is associated with the
+background thread.
+
+As a consequence the mem_used}for the bucket grows each time such a
+log message is printed, eating into the available bucket memory.
+
+Solution
+========
+
+Change how memory is tracked in BucketLogger - don't account any
+temporary memory allocations to the current bucket. This means that
+when the memory is subsequently by the background thread (also not
+associated with a bucket), then the alloc / free matches up.
+
+Add new test suite 'ObjectRegistrySpdlogTest' which creates an
+enviroment with an ObjectRegistry alongside an async spdlog instance
+(the same as used in production). This is then used to verify that
+memory is correctly tracked for different log message variants.
+
+Change-Id: Iad963850c2ebb5ae3d00e91f39ce141d777bfb22
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2019-01-22 09:55:28.000000000
+Message: 
+Uploaded patch set 5.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-01-22 11:30:12.000000000
+Message: 
+Patch Set 5: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/16061/ : FAILURE
+
+Link error: fatal error LNK1104: cannot open file "kv_engine\engine_utilities.dll" ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/16061/ )
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/7399/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/15554/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/5067/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/14284/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/7429/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/13897/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-01-22 12:53:27.000000000
+Message: 
+Patch Set 5: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/7399/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/15554/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/5067/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/14284/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/7429/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/13897/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/16088/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2019-01-22 13:05:55.000000000
+Message: 
+Patch Set 5: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------

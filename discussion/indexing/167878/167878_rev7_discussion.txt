@@ -1,0 +1,276 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-45990 (7.1.0 1910) Active indexes reported building in system_indexes
+
+Fixes a problem where metadataClient's cached slice of scheduled plus
+existing indexes can be stale but it does not notice because the cache-
+invalidating changes are not synced with cache invalidation itself. This
+could lead to indexes showing as "building" forever in metadataClient
+output because it missed a cache-invalidating event and kept returning
+a stale cached list of scheduled plus existing indexes.
+
+The replacement algorithm requires all changes to
+  1. indexers.allIndexes[] -- all currently existing indexes
+  2. schedTokenMon.scheduledIndexes[] -- all currently scheduled indexes
+  3. comboIndexes[] -- cached combination of #1 and #2
+to be done inside a new mutex, comboIndexesMut. Additionally, the cache
+must be invalidated (by setting comboIndexes = nil) inside the same
+instance of locking comboIndexesMut as any change to allIndexes or
+scheduledIndexes. These behaviors maintain the cache coherency of
+comboIndexes by ensuring that whenever it is computed, its content is
+in sync with both of its inputs (#1 and #2), and whenever one of its
+inputs is changed, comboIndexes gets set back to nil in the same
+critical section so cache-invalidating changes can never be missed.
+
+Change-Id: I64ab1a743fec76acb2e969089412039337382f33
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Kevin Cherkauer
+Date: 2021-12-21 00:23:00.000000000
+Message: 
+Uploaded patch set 7.
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2021-12-21 00:23:51.000000000
+Message: 
+Description set to "Performance improvement 2"
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2021-12-21 07:15:46.000000000
+Message: 
+Patch Set 7:
+
+Q: As per the race condition explained in the comments of https://issues.couchbase.com/browse/MB-45990,
+
+There need to be two threads performing slow path operations at a time i.e. at step 5 and step 8, that will lead to the problem.
+
+But the for loop implementation in the slow path of reconcileIndexList ensures atomicity of Read-Modify-Write. 
+
+So, is the analysis suggest that the atomicity of Read-Modify-Write is not guaranteed? Or it suggests that the race condition holds even if the atomicity of Read-Modify-Write is guaranteed ?
+
+Q: In the logs, do we see any indexes getting scheduled for background creation? From what I remember, the test case creates the indexes one-after-the-other, but I may be wrong.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2021-12-21 08:17:20.000000000
+Message: 
+Patch Set 7: Code-Review+1
+
+PASS sanity,unit,functional,integration with storage memdb. See http://ci2i-unstable.northscale.in/gsi-21.12.2021-09.30.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2021-12-21 12:29:17.000000000
+Message: 
+Patch Set 7:
+
+PASS sanity,unit,functional,integration with storage fdb. See http://ci2i-unstable.northscale.in/gsi-21.12.2021-13.59.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2021-12-21 17:46:12.000000000
+Message: 
+Patch Set 7:
+
+PASS sanity,unit,functional,integration with storage plasma. See http://ci2i-unstable.northscale.in/gsi-21.12.2021-18.11.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2021-12-21 18:38:12.000000000
+Message: 
+Patch Set 7:
+
+> Patch Set 7:
+> 
+> Q: As per the race condition explained in the comments of https://issues.couchbase.com/browse/MB-45990,
+> 
+> There need to be two threads performing slow path operations at a time i.e. at step 5 and step 8, that will lead to the problem.
+> 
+> But the for loop implementation in the slow path of reconcileIndexList ensures atomicity of Read-Modify-Write. 
+> 
+> So, is the analysis suggest that the atomicity of Read-Modify-Write is not guaranteed? Or it suggests that the race condition holds even if the atomicity of Read-Modify-Write is guaranteed ?
+> 
+> Q: In the logs, do we see any indexes getting scheduled for background creation? From what I remember, the test case creates the indexes one-after-the-other, but I may be wrong.
+
+@amitk Q1: The race condition exists even though read-modify-write atomicity is guaranteed at the fine grain. The problem is that a coarser grain needs to be synchronized.
+
+Q2: The logs actually do not show any scheduled indexes, but they are not needed to hit this bug. I have added "Alternate Simplified Scenario" in a new comment in the MB -- please see that. It is greatly simplified from the original and does not require any indexes to be scheduled.
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2021-12-21 20:34:26.000000000
+Message: 
+Patch Set 7:
+
+> Patch Set 7:
+> 
+> > Patch Set 7:
+> > 
+> > Q: As per the race condition explained in the comments of https://issues.couchbase.com/browse/MB-45990,
+> > 
+> > There need to be two threads performing slow path operations at a time i.e. at step 5 and step 8, that will lead to the problem.
+> > 
+> > But the for loop implementation in the slow path of reconcileIndexList ensures atomicity of Read-Modify-Write. 
+> > 
+> > So, is the analysis suggest that the atomicity of Read-Modify-Write is not guaranteed? Or it suggests that the race condition holds even if the atomicity of Read-Modify-Write is guaranteed ?
+> > 
+> > Q: In the logs, do we see any indexes getting scheduled for background creation? From what I remember, the test case creates the indexes one-after-the-other, but I may be wrong.
+> 
+> @amitk Q1: The race condition exists even though read-modify-write atomicity is guaranteed at the fine grain. The problem is that a coarser grain needs to be synchronized.
+> 
+> Q2: The logs actually do not show any scheduled indexes, but they are not needed to hit this bug. I have added "Alternate Simplified Scenario" in a new comment in the MB -- please see that. It is greatly simplified from the original and does not require any indexes to be scheduled.
+
+Note also multiple concurrent slow paths is not hard to hit as once either schedRefresh or newTokens is greater than zero, all Refresh() calls arriving during that time will go into slow path.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2021-12-21 22:02:21.000000000
+Message: 
+Patch Set 7:
+
+PASS sanity,unit,functional,integration with storage memdb. See http://ci2i-unstable.northscale.in/gsi-21.12.2021-23.28.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2021-12-22 02:14:25.000000000
+Message: 
+Patch Set 7:
+
+PASS sanity,unit,functional,integration with storage fdb. See http://ci2i-unstable.northscale.in/gsi-22.12.2021-03.44.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2021-12-22 09:07:20.000000000
+Message: 
+Patch Set 7:
+
+PASS sanity,unit,functional,integration with storage plasma. See http://ci2i-unstable.northscale.in/gsi-22.12.2021-09.30.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2021-12-22 13:21:35.000000000
+Message: 
+Patch Set 7:
+
+PASS sanity,unit,functional,integration with storage memdb. See http://ci2i-unstable.northscale.in/gsi-22.12.2021-14.49.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2021-12-22 17:33:28.000000000
+Message: 
+Patch Set 7:
+
+PASS sanity,unit,functional,integration with storage fdb. See http://ci2i-unstable.northscale.in/gsi-22.12.2021-19.03.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2021-12-22 22:49:14.000000000
+Message: 
+Patch Set 7:
+
+PASS sanity,unit,functional,integration with storage plasma. See http://ci2i-unstable.northscale.in/gsi-22.12.2021-23.15.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2021-12-23 03:03:23.000000000
+Message: 
+Patch Set 7:
+
+PASS sanity,unit,functional,integration with storage memdb. See http://ci2i-unstable.northscale.in/gsi-23.12.2021-04.30.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2021-12-23 08:00:48.000000000
+Message: 
+Patch Set 7:
+
+PASS sanity,unit,functional,integration with storage fdb. See http://ci2i-unstable.northscale.in/gsi-23.12.2021-09.30.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2021-12-23 11:31:20.000000000
+Message: 
+Patch Set 7:
+
+(4 comments)
+
+Overall approach looks fine to me. Just that if we can use atomics instead of RLock in the fast path, that will be better. 
+
+"Not having any locks in the scan path (esp fast paths - where there are no metadata updates)" was being discussed in the past. Refresh() gets called in scan path.
+Line:186, secondary/queryport/client/meta_client.go -> Minor: queryport.client.listSchedIndexes is true by default. The comment looks confusing.
+
+Line:195, secondary/queryport/client/meta_client.go -> Is it possible to use atomics here? Instead of RLock ?
+
+Line:201, secondary/queryport/client/meta_client.go -> Minor: A general suggestion: It make code future proof if the unlock happens as a defer statement.
+
+Line:2098, secondary/queryport/client/meta_client.go -> This creates a cycling reference between schedTokenMonitor and metadataClient. Not sure if this is a good idea. Is it possible to pass just the comboIndexesMut (and any other required fields) ? Or just create a separate shared object which can share stuff across these two structs ?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2021-12-23 11:32:35.000000000
+Message: 
+Patch Set 7: Code-Review+1
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2021-12-23 13:16:10.000000000
+Message: 
+Patch Set 7:
+
+PASS sanity,unit,functional,integration with storage plasma. See http://ci2i-unstable.northscale.in/gsi-23.12.2021-13.42.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2021-12-23 17:30:28.000000000
+Message: 
+Patch Set 7:
+
+PASS sanity,unit,functional,integration with storage memdb. See http://ci2i-unstable.northscale.in/gsi-23.12.2021-18.57.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2021-12-23 21:41:41.000000000
+Message: 
+Patch Set 7:
+
+PASS sanity,unit,functional,integration with storage fdb. See http://ci2i-unstable.northscale.in/gsi-23.12.2021-23.12.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2021-12-23 19:22:06.000000000
+MISMATCHED INLINE COMMENT
+Line:186, secondary/queryport/client/meta_client.go -> Thanks. For better clarity I changed it to this:
+
+if !b.settings.ListSchedIndexes() {
+    // This case is not normally entered as queryport.client.listSchedIndexes default is false
+    return currmeta.allIndexes, currmeta.version, b.mdClient.GetClusterVersion(), false, nil
+}
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2021-12-23 20:45:28.000000000
+MISMATCHED INLINE COMMENT
+Line:195, secondary/queryport/client/meta_client.go -> Sorry, I was not getting your point when I first read this. I see the danger is that scan will have to wait for the mutex, not that the HW will have to sync stuff. I will revise so the cache contains both the indexes and the metadata version that produced them and thus retrieve a pointer to that object atomically instead of needing the RLock in fast path.
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2021-12-23 22:47:36.000000000
+MISMATCHED INLINE COMMENT
+Line:195, secondary/queryport/client/meta_client.go -> Fixed in patch sets 9 and 11. In patch set 10 I also improved performance by not invalidating the cache in the case where compareAndSwap of one of its inputs actually failed.
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2021-12-23 19:22:06.000000000
+MISMATCHED INLINE COMMENT
+Line:195, secondary/queryport/client/meta_client.go -> This needs a mutex because everything inside it needs to be in the same critical section, and the cache invalidations in other parts of the code also need to use the same mutex, else cache coherence will be violated. Individual fine-grained atomic operations do not achieve that, which was the source of the original bug. (Note that on x86 atomics and mutexes result in the same impact as they are handled by the hardware in the same way. So having to do two atomics is actually worse than one mutex.)
+
+I understand the need for greatest possible performance in scan path, however even more important than performance is that the code has to produce correct results, which fine-grained atomics will not achieve.
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2021-12-23 19:22:06.000000000
+MISMATCHED INLINE COMMENT
+Line:201, secondary/queryport/client/meta_client.go -> Defer has a slight negative performance impact, but specifically here we need to RUnlock where that is done because we need to then Lock this same mutex below if the fast path comes out with comboIndexes == nil and we therefore enter the slow path. There is nothing in the four lines of code inside the RLock critical section that could fail, so there is no need to create an anonymous function wrapper (which would add even more overhead) in order to call defer.
+
+Most languages do not have "defer" -- it is not needed to write correct mutex-using code, while it has a downside of encouraging holding mutexes far longer than necessary. Everything that is changed inside a mutex has to be synchronized by the hardware, so the performance hit can be significant. When writing mutex-using code the developer should self-review very carefully to make sure what they are doing is correct rather than relying on defer as a silver bullet, and most of the time there should be only a few LOC performed inside a mutex. In cases where large bodies of code need to be inside a mutex then defer is an excellent choice.
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2022-01-04 21:46:17.000000000
+MISMATCHED INLINE COMMENT
+Line:2098, secondary/queryport/client/meta_client.go -> Done. I now think you must have been worried about garbage collection. I did not understand that from your original comment, which I had thought was more of a philosophical stance that the code was confusing. FYI Go uses a mark-and-sweep garbage collector so cyclic references do not prevent garbage collection. Once a subgraph becomes detached from all graphs that stem from global variables, the entire subgraph will get garbage collected even if it has cycles in it. (Automatic reference counting garbage collection algorithms are the ones that can have problems with cycles, but Go does not use that approach.) Still it does not hurt anything to nil the references out in the destructors.
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2021-12-23 19:22:06.000000000
+MISMATCHED INLINE COMMENT
+Line:2098, secondary/queryport/client/meta_client.go -> I understand and always support the desire to avoid complicated spaghetti. I did it this way here because this is only for a very simple case (invalidating the comboIndexes cache), while other ways would introduce quite a lot more code. I did consider which object should own this cache, as one input to the cache comes from metaClient and the second input comes from its child schedTokenMonitor. I thought it best for the parent to own the cache as this is the nearest common ancestor of both inputs, and metaClient is really in charge of managing the metadata that subscribers need, but the child still needs a way to invalidate that cache.
+
+This could alternatively be laid out with the cache and its manipulation encapsulated in yet a third class, which is what I actually implemented for getIndexStatus() (requestHandlerCache class), but that is a much more complicated situation with large amounts of caching code, whereas in this case that seems like overkill for a very simple problem as the cache is just a single slice variable. I also thought of moving schedTokenMonitor's cache input (scheduledIndexes[]) up into metaClient but that did not seem very satisfactory as schedTokenMonitor's primary purpose is to build and manage that list.
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2022-01-02 13:14:41.000000000
+MISMATCHED INLINE COMMENT
+Line:2098, secondary/queryport/client/meta_client.go -> If the constructor (i.e. newSchedTokenMonitor) is introducing the cyclic reference, it will be better to make the references "nil" in (preferably both) the destructors (i.e. schedTokenMonitor::Close and metadataClient::Close), so that the object lifecycle will be complete. 
+
+I am having a hard time doing +2 while knowing about the cyclic reference :)
+----------------------------------------------------------------------------------------------------------------------

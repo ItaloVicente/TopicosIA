@@ -1,0 +1,230 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-37546: Introduce the "backup persistence cursor" in CM
+
+We introduce the concept of "backup persistence cursor" for getting rid
+of the (old) broken VBucket::rejectQueue.
+
+The main reason behind the rejectQueue was the way getItemsForCursor()
+works:
+  1) move the cursor forward
+  2) pick-up the item
+  3) repeat (1) until we get all (or up to a limit) items for cursor
+  4) return items
+Given that the cursor has moved, if the flusher fails we cannot rely on
+the CM for retrieving again the same items.
+So, the rejectQueue was used at flush to re-queueing all the items of a
+failed flush-batch and pulling them from the queue when re-attempting
+the flush.
+
+With the new backup pcursor we do exactly the same as before in
+getItemsForCursor(). But (only for persistence) we register a copy of the
+cursor before the cursor move. Then:
+  1) if flush succeeds, we just remove the copy
+  2) if flush fails, we rollback the pcursor to the copy
+
+That allows to rely entirely on the CM for re-attemping the flush after
+failure.
+
+In this patch the backup cursor is already used at
+EPBucket::flushVBucket. That fixes the issue tracked in this MB (ie, new
+persisted vbstate could be lost at re-attempting flush after storage
+failure). The fix is covered by test.
+
+@todo in follow-ups:
+ - test backup pcursor rollback at different queue_op
+ - test backup pcursor and rollback at Checkpoint deduplication
+ - remove all the reject-queue code
+
+Change-Id: Icc03e8c18dd1e5998b384efeff777ffff9699106
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2020-02-05 15:38:30.000000000
+Message: 
+Uploaded patch set 3.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-02-05 15:38:41.000000000
+Message: 
+Patch Set 3: Well-Formed+1
+
+Permission granted to commit: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/167007/artifact/restricted.html : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-02-05 16:01:24.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:40, /COMMIT_MSG -> Proceeding with this first, would be nice to add the tests here but this patch is big enough
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-02-05 16:02:38.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:2474, engines/ep/tests/module_tests/checkpoint_test.cc -> there s no deferred move now, fixing the name
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-02-05 16:07:34.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:2438, engines/ep/tests/module_tests/checkpoint_test.cc -> This one must be done here.
+We must check that the backup copy is placed at the empty item
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-02-05 16:30:49.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:382, engines/ep/src/checkpoint_manager.cc -> I didn't even think of any optimization here, just focus on correctness for now.
+Note that this code is executed only at flush and only in the case of flush failure.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2020-02-05 16:30:52.000000000
+Message: 
+Patch Set 3:
+
+(3 comments)
+
+haven't looked at the tests yet
+Line:25, /COMMIT_MSG -> long line
+
+Line:393, engines/ep/src/checkpoint_manager.cc -> comment about how this is necessary for ref counting
+
+Line:535, engines/ep/src/checkpoint_manager.h -> would be nice do this in getItemsForPersistence()?
+I guess you didn't because we don't take queueLock until getItemsForCursor though
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-02-05 16:34:09.000000000
+Message: 
+Patch Set 3: Code-Review-1
+
+Does all this logic about backup cursors belong in CheckpointManager? It feels like it's probably something which should just be done in flushVBucket(), using primitives provided by CheckpointManager (e.g. copyCursor / assignCursor)
+
+In other words, CheckpointManager shouldn't need to know anything about the whole concept of rollback, just expand some of the things you can do with cursors like copy / reassign them.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-02-05 16:59:08.000000000
+Message: 
+Patch Set 3:
+
+> Does all this logic about backup cursors belong in CheckpointManager? It feels like it's probably something which should just be done in flushVBucket(), using primitives provided by CheckpointManager (e.g. copyCursor / assignCursor)
+In other words, CheckpointManager shouldn't need to know anything about the whole concept of rollback, just expand some of the things you can do with cursors like copy / reassign them.
+
+
+Good point.
+I would say that most of the logic (register/remove cursor) belongs to the CM.
+But I imagine that with "all this logic" you refer to the logic that triggers the creation of the "backup cursor".
+Currently the CM triggers the creation of backup-cursor (every time a move of pcursor is requested)
+
+Actually we have an asymmetry here: the flusher knows about the backup cursor as it has to remove it at some point.. but the creation of the backup cursor is not triggered by the flusher.
+
+Maybe you want to fix the asymmetry by exposing an explicit CM::registerBackupPCursor() ?
+
+At that point the flusher will do:
+1) CM::registerBackupPCursor()
+2) CM::getItemsForPersistence()
+3) CM::removeBackupPCursor() or CM::rollbackPersistenceCursor() (depending on whether the flush succeeds or fails)
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-02-05 17:23:31.000000000
+Message: 
+Patch Set 3:
+
+> In other words, CheckpointManager shouldn't need to know anything about the whole concept of rollback, just expand some of the things you can do with cursors like copy / reassign them.
+
+
+Mmm re-thinking about it, and probably what you described is something that would apply more to DCP than persistence.
+Logically the CM owns the persistence-cursor.
+Technically the CM own every cursor (also the DCP ones). But, ActiveStream triggers the creation of its cursor (eg, AS also provides the name for that cursor), while the persistence-cursor lifetime is entirely managed internally in the CM. The p-cursor is created at CM::ctor.
+
+I think that what you described would be surely the right thing to do if the p-cursor lifetime was managed like the DCP cursor lifetime. Eg, the flusher registers a p-cursor into every CM of vbuckets that it manages (as per sharding), etc..
+
+I'm not saying that what you propose is wrong. Just that what I do in this patch for backup-pcursor follows the same logic of what we do with p-cursor.
+That's true at least at cursor creation. Actually removing the backup cursor needs to be triggered by the flusher as the CM doesn't know what to do otherwise (removing the backup-cursor or rolling back to it?).
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-02-05 17:45:33.000000000
+Message: 
+Patch Set 3: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/849/ : FAILURE
+
+Failure of a CTest test  38/187 Test  #39: ep_testsuite_dcp.full_eviction.comp_passive .................................. ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/849/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/mad-hatter/199/ : FAILURE
+
+Failure of a CTest test [2020-02-05T15:45:25.079Z]  37/190 Test  #37: ep_testsuite_dcp.value_eviction.comp_passive ................................. ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/mad-hatter/199/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/630/ : FAILURE
+
+Failure of a CTest test [2020-02-05T16:30:48.176Z]  37/180 Test  #38: ep_testsuite_dcp.value_eviction.comp_active .................................. ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/630/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/850/ : FAILURE
+
+Failure of a CTest test [2020-02-05T16:42:03.004Z]  26/182 Test  #25: ep-engine_ep_unit_tests ......................................................Child aborted ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/850/ )
+
+AddressSanitizer issue: heap-use-after-free /usr/local/include/c++/7.3.0/bits/refwrap.h:350 in std::reference_wrapper<std::__cxx11::list<SingleThreadedRCPtr<Item, Item*, std::default_delete<Item> >, MemoryTrackingAllocator<SingleThreadedRCPtr<Item, Item*, std::default_delete<Item> > > > >::get() const ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/850/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/775/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/24210/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/854/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/862/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-02-05 17:59:26.000000000
+Message: 
+Patch Set 3:
+
+(6 comments)
+
+Random thoughts during our conversation...
+Line:356, engines/ep/src/checkpoint_manager.cc -> CheckpointCursor* copyPersistenceCursor(std::string name);
+
+Line:380, engines/ep/src/checkpoint_manager.cc -> No longer needed (can use removeCursor).
+
+Line:382, engines/ep/src/checkpoint_manager.cc -> resetPersistenceCursor(std::string cursorName);
+
+Line:936, engines/ep/src/checkpoint_manager.cc -> Remove this, have the caller call copyCursor().
+
+Line:346, engines/ep/src/ep_bucket.cc -> Just before this, call checkpointManager->copyCursor().
+
+Line:381, engines/ep/src/ep_bucket.cc -> This is ok; but enhancement to use RAII
+
+class CursorHolder {
+    ~CursorHolder() {
+        if (cursor) {
+            manager.resetPersistenceCursor(cursor);
+        }
+    }
+    void successfulFlush() {
+        manager.removeCursor(cursor);
+        cursor = nullptr;
+    }
+
+    CheckpointCursor* cursor;
+    CheckpointManager& manager;
+};
+
+----------------------------------------------------------------------------------------------------------------------

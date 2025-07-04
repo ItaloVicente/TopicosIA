@@ -1,0 +1,84 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-48038: Add ability to stop exceution in CheckpointVisitor
+
+This is the first of a set of patches for moving all the checkpoint
+memory-release logic from the CheckpointRemoverTask to the
+VBCBAdaptor/CheckpointVisitor fixture.
+
+While the short-term goal is to get rid of some complexity in the
+CheckpointRemoverTask, our medium-term goal also to remove any
+periodic scheduling of the task for avoiding the current "busy
+polling" model that keeps CPUs busy for nothing. Note that the
+CheckpointRemoverTask is just one among many tasks that follow the same
+model.
+
+So in the short-term (ie, this serie of patches):
+- I move most of the logic that actually releases checkpoint-memory from
+  the CheckpointRemoverTask to the CheckpointVisitor
+- Between CheckpointRemoverTask and VBCBAdaptor/CheckpointVisitor we
+  keep the latter beacuse that already implements the
+  PausableVBucketVisitor execution-yield mechanism that we want to
+  maintain
+- For now we cannot remove completely the CheckpointRemoverTask as we
+  need the periodic scheduling until we implement the proper
+  (event-driven) trigger logic for the CheckpointVisitor.
+- So, after this serie of patches the CheckpointRemoverTask will be
+  responsible only for (1) running periodically and (2) launching a
+  VBCBAdaptor/CheckpointVisitor run.
+
+In this patch I start with adding the logic that allows the
+CheckpointVisitor to stop its execution based on how much memory it has
+to release. For that, I add the CheckpointVisitor::memToRelease
+member that will be updated at every VBucket visit. The Visitor will
+stop when memToRelease=0.
+The behaviour of the Visitor doesn't change yet in this patch as
+memToReleased is initialized but never decremented.
+
+Change-Id: I9670519740a6122dd877a617b2c518bbecd390c3
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2021-08-26 13:22:02.000000000
+Message: 
+Uploaded patch set 5: Patch Set 4 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-08-26 14:23:37.000000000
+Message: 
+Patch Set 5: Code-Review-1
+
+(3 comments)
+Line:20, /COMMIT_MSG -> "series" (I know it's a word we stole from you ;)
+
+Line:41, engines/ep/src/checkpoint_visitor.h -> "stopVisitor" to me sounds like an action to do something - i.e. stop the visitor. Maybe rename to "shouldStopVisitor" or similar?
+
+Line:2322, engines/ep/src/kv_bucket.cc -> In the general case it seems like we should call stopVisitor() before pause - i.e. we don't want to unnecessarily pause if the visitor has already finished.
+
+Along these lines, I actually think it would be better to refactor / rename the existing pauseVisitor method - as at the moment there are 4 possible stats of a visitor, one of which doesn't make sense:
+
+                  \  PauseVisitor
+                   \ False True 
+  StopVisitor False  ✓     ✓
+              True   ✓     ✘
+
+i.e. if stop==true when why should pause also be true?
+
+Suggest we instead have pauseVisitor return a tri-state {Continue, Pause, Stop} and rename to a more suitable name.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2021-08-26 14:49:53.000000000
+Message: 
+Patch Set 5:
+
+(2 comments)
+Line:20, /COMMIT_MSG -> eheh true ! :D but I get confused when typing as you use it always in the plural form !
+
+Line:2322, engines/ep/src/kv_bucket.cc -> Good point. I was thinking the same for visitBucket(vb) to avoiding to add a new method to the API. That didn't seem a good fit though.
+Trying your option, that seems nice. Thanks
+
+----------------------------------------------------------------------------------------------------------------------

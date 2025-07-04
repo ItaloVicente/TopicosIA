@@ -1,0 +1,277 @@
+======================================================================================================================
+DESCRIPTION:
+
+Fix IndexDiffs for git links
+
+After cloning a repo with a submodule, non-recursively, JGit would
+encounter in its TreeWalk in IndexDiff:
+
+* first, a missing gitlink (in index & HEAD, not in working tree)
+* second, the untracked folder (not in index and head, in working tree)
+
+As a result, it would report the submodule as missing. Canonical git
+reports a clean workspace.
+
+The root cause of this is that the path of a gitlink "x" did
+not compare equal to the path of a tree "x" in JGit.
+
+Correct Paths.compare() to account for that. If two paths are otherwise
+equal, then let gitlinks match both trees and files. Matching trees
+solves the bug. Matching files is necessary to handle the case where
+the gitlink directory was replaced by a file; see the new test case
+IndexDiffSubmoduleTest.testSubmoduleReplacedByFile(). Comparisons of
+unequal paths are left untouched, so the sort order is unchanged.
+
+After the fix, another bug(?) in WorkingTreeIterator became apparent:
+with core.dirNoGitLinks = true, if was no longer possible to overwrite
+a gitlink in the index. This is now fixed in WorkingTreeIterator.
+However, I cannot find this config key at [1]...
+
+Add new test cases for the bug itself and for some related cases
+(submodule directory deleted or replaced by a file) in
+IndexDiffSubmoduleTest. Add a test for missing files in IndexDiffTest,
+and adapt the PathsTest to test matching gitlinks.
+
+[1] https://git-scm.com/docs/git-config
+
+Bug: 467631
+Change-Id: I0549d10d46b1858e5eec3cc15095aa9f1d5f5280
+Signed-off-by: Thomas Wolf <thomas.wolf@paranor.ch>
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Thomas Wolf
+Date: 2018-08-25 00:00:22.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-08-25 00:26:39.000000000
+Message: 
+Patch Set 1:
+
+Build Started https://ci.eclipse.org/jgit/job/jgit.gerrit/13774/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-08-25 00:41:58.000000000
+Message: 
+Patch Set 1: Verified-1
+
+Build Failed 
+
+https://ci.eclipse.org/jgit/job/jgit.gerrit/13774/ : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-08-25 08:44:04.000000000
+Message: 
+Patch Set 1: -Verified
+
+Build Started https://ci.eclipse.org/jgit/job/jgit.gerrit/13789/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-08-25 09:14:00.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/jgit.gerrit/13789/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Halstrick
+Date: 2018-08-27 13:06:47.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:162, org.eclipse.jgit.test/tst/org/eclipse/jgit/lib/IndexDiffSubmoduleTest.java -> Is this correct? Native git does't report a diff when you have replaced a submodule with a file and specify --ignore-submodules=all . I think you need a if clause similar to the one in line 142.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Halstrick
+Date: 2018-08-27 13:50:32.000000000
+Message: 
+Patch Set 1:
+
+(3 comments)
+Line:108, org.eclipse.jgit.test/tst/org/eclipse/jgit/util/PathsTest.java -> Should a GITLINK path be equal to a FILE path? Although a TREE path is reported to be different from a FILE path?
+
+Line:109, org.eclipse.jgit/src/org/eclipse/jgit/util/Paths.java -> The old logic was: if the paths are equal by the pathname then both must be TREEs or both must be non TREEs in order to let compare return 0. You have changed that. If one of them is a GITLINK and you'll always return 0. Even if one is a GITLINK and the other one is a regular file. Sounds strange, or? Shouldn't compare on a file and a submodule return false?
+
+What about the idea to let this line in and modify lastPathChar() to return '/' on TREEs and GITLINKs?
+
+Line:189, org.eclipse.jgit/src/org/eclipse/jgit/util/Paths.java -> That means that if either aMode or bMode are a GITLINK then modeCompare() will always tell modes are compatible. If aMode==FILE and bMode==GITLINK shouldn't modeCompare return !=0.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2018-08-27 23:33:00.000000000
+Message: 
+Patch Set 1:
+
+(2 comments)
+Line:29, /COMMIT_MSG -> it
+
+Line:31, /COMMIT_MSG -> see
+https://github.com/git/git/search?q=DIR_NO_GITLINKS&unscoped_q=DIR_NO_GITLINKS
+https://bugs.eclipse.org/bugs/show_bug.cgi?id=436200
+https://git.eclipse.org/r/#/c/69882/
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2018-09-02 15:15:50.000000000
+Message: 
+Patch Set 1:
+
+(5 comments)
+Line:31, /COMMIT_MSG -> Yes, I had found the flag, too. I have _not_ found a config key for it, though.
+
+Line:162, org.eclipse.jgit.test/tst/org/eclipse/jgit/lib/IndexDiffSubmoduleTest.java -> Good question. I don't know. This test actually succeeds without this change, so it just shows what JGit did before and after the change. Whether that behavior is correct is a different thing...
+
+If it should indeed not report the modules/submodule path as modified then some logic in IndexDiff would need to be changed.
+
+Line:108, org.eclipse.jgit.test/tst/org/eclipse/jgit/util/PathsTest.java -> Well, it's what the code before this change did. I kept that behavior.
+
+Line:109, org.eclipse.jgit/src/org/eclipse/jgit/util/Paths.java -> That would make that IndexDiffSubmoduleTest.testSubmoduleReplacedByFile test fail; i.e., it would change behavior.
+
+At this point the paths are identical, and yes, with the new implementation, GITLINKs will be equal to TREEs and FILEs. Before the change, GITLINKs also did match FILEs.
+
+We can't make lastPathChar() return '/' for GITLINKs; that would change the sorting order, making CleanCommandTest.testCleanDirsWithSubmodule fail. In fact, I tried that first, and it's the reason for the new test in CleanCommandTest. If we do this, the order in the WorkingTreeIterator will be different from the other iterators, and things go really haywire.
+
+Line:189, org.eclipse.jgit/src/org/eclipse/jgit/util/Paths.java -> > If aMode==FILE and bMode==GITLINK shouldn't modeCompare return !=0.
+
+It didn't do so before. I kept that behavior. I think it's also correct. If we want to ignore such FILE-GITLINK conflicts when ignoreSubmodules=all, I think we would need to add that case in IndexDiff somewhere.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2018-09-02 16:28:10.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:29, /COMMIT_MSG -> Done
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2018-09-02 20:44:34.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:162, org.eclipse.jgit.test/tst/org/eclipse/jgit/lib/IndexDiffSubmoduleTest.java -> BTW, if I do this (replace the submodule directory with a file) and then run "git status --ignore-submodules=all", git still reports "typechange:path" for the path. (Tried with git 2.13.1.)
+
+So I think this is actually correct.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Halstrick
+Date: 2018-09-03 06:51:46.000000000
+Message: 
+Patch Set 1:
+
+(2 comments)
+Line:162, org.eclipse.jgit.test/tst/org/eclipse/jgit/lib/IndexDiffSubmoduleTest.java -> Really? That's interesting. That may be a change in native git. My very new version of native git (2.18.0) is behaving like this. Could you try
+this on your version?
+
+  > git --version
+  git version 2.18.0
+  > git init submodule
+  Initialized empty Git repository in /private/tmp/x/submodule/.git/
+  > cd submodule/
+  > touch fileInSubmodule
+  > git add fileInSubmodule
+  > git commit -m "add file to submodule"
+  [master (root-commit) 8a9e189] add file to submodule
+  1 file changed, 0 insertions(+), 0 deletions(-)
+  create mode 100644 fileInSubmodule
+  > cd ..
+  > git init toplevel
+  Initialized empty Git repository in /private/tmp/x/toplevel/.git/
+  > cd toplevel/
+  > git submodule add ../submodule modules/submodule
+  Cloning into '/private/tmp/x/toplevel/modules/submodule'...
+  done.
+  > touch fileInRoot
+  > git add fileInRoot
+  > git commit -m "add submodule and root file"
+  [master (root-commit) 5562fab] add submodule and root file
+  3 files changed, 4 insertions(+)
+  create mode 100644 .gitmodules
+  create mode 100644 fileInRoot
+  create mode 160000 modules/submodule
+  > rm -fr modules/submodule
+  > echo "nonsense" >modules/submodule
+  > git status
+  On branch master
+  Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git checkout -- <file>..." to discard changes in working directory)
+  
+  typechange: modules/submodule
+  
+  no changes added to commit (use "git add" and/or "git commit -a")
+  > git status --ignore-submodules=all
+  On branch master
+  nothing to commit, working tree clean
+  >
+
+Line:109, org.eclipse.jgit/src/org/eclipse/jgit/util/Paths.java -> > We can't make lastPathChar() return '/' for GITLINKs; that would
+ > change the sorting order, making CleanCommandTest.testCleanDirsWithSubmodule
+ > fail. In fact, I tried that first, and it's the reason for the new
+ > test in CleanCommandTest. If we do this, the order in the
+ > WorkingTreeIterator will be different from the other iterators, and
+ > things go really haywire.
+
+Ok, got that. +1
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2018-09-03 19:45:02.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:162, org.eclipse.jgit.test/tst/org/eclipse/jgit/lib/IndexDiffSubmoduleTest.java -> You're right. Also with git 2.13.1. I forgot to init the submodule. And without the init, it's a normal TREE-FILE mode conflict, which of course is always reported.
+
+Anyway: this behavior of JGit is _unchanged_ by this change. The fix would need to be in IndexDiff, line 512ff.[1]
+
+[1] https://git.eclipse.org/r/plugins/gitiles/jgit/jgit/+/master/org.eclipse.jgit/src/org/eclipse/jgit/lib/IndexDiff.java#512
+
+The condition there triggers when either of index or working tree is not a GITLINK. I guess that should be instead (pseudo-code)
+
+  (index != GITLINK && workingtree != GITLINK)
+  || (ignoreSubmodules != ALL && ignoreSubmodules != DIRTY)
+
+But that would be a fix unrelated to this change, and would need more testing anyway. (For instance, before fixing this, I'd also like to verify what git reports when I replace a FILE by a GITLINK.)
+
+I've filed follow-up bug 538563 for this.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2018-09-10 11:03:56.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:162, org.eclipse.jgit.test/tst/org/eclipse/jgit/lib/IndexDiffSubmoduleTest.java -> > I've filed follow-up bug 538563 for this.
+
+See follow-up in https://git.eclipse.org/r/#/c/128953/ .
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Halstrick
+Date: 2018-11-27 12:25:42.000000000
+Message: 
+Patch Set 1:
+
+(2 comments)
+Line:108, org.eclipse.jgit.test/tst/org/eclipse/jgit/util/PathsTest.java -> I think we should only add tests for behaviour which we think is correct. Just adding tests for the current behaviour of JGit but not being sure whether its the correct behaviour does not make so much sense. I would simply remove this single test. We can add a test that a gitlink is different from a regular file path in a subsequent change and fix coding.
+
+Line:189, org.eclipse.jgit/src/org/eclipse/jgit/util/Paths.java -> I still find it strange that the mode GITLINK should be compatible with the mode FILE. But since this isn't changed in this change and was like that before I give my +1 here.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Halstrick
+Date: 2018-11-28 11:09:02.000000000
+MISMATCHED INLINE COMMENT
+Line:108, org.eclipse.jgit.test/tst/org/eclipse/jgit/util/PathsTest.java -> Ok, thats new info. Your previous comment made me think you just tested existing behaviour without having a specific demand for that behaviour. I you really need that regular files are compare equal to gitlinks ... then +1 for this test
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2018-11-27 16:42:10.000000000
+MISMATCHED INLINE COMMENT
+Line:108, org.eclipse.jgit.test/tst/org/eclipse/jgit/util/PathsTest.java -> A gitlink must compare equal to a file, and it did so before my change. All I did is add an explicit test for this. And I think this is correct.
+----------------------------------------------------------------------------------------------------------------------

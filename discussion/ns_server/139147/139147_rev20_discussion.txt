@@ -1,0 +1,289 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-41730 Prune prometheus stats
+
+As prometheus stats age they should be pruned in order to save storage.
+
+For low-cardinality stats we'll increase their coarseness as they
+get older.
+
+For high-cardinality stats we'll truncate any stats older than a
+specified age.
+
+Change-Id: I227399c94e754f143f5aecd3f31140c65f61ac10
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Steve Watanabe
+Date: 2020-11-30 21:23:37.000000000
+Message: 
+Patch Set 20: Patch Set 19 was rebased
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-11-30 21:23:47.000000000
+Message: 
+Patch Set 20: -Well-Formed
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-test/20423/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-11-30 21:28:26.000000000
+Message: 
+Patch Set 20: Well-Formed+1
+
+Permission granted to commit to restricted branch
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2020-12-01 17:23:18.000000000
+Message: 
+Patch Set 20: Verified+1
+
+The decimation intervals are still TBD.
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2020-12-03 02:39:47.000000000
+Message: 
+Patch Set 20:
+
+(18 comments)
+Line:66, src/prometheus.erl -> Isn't the interface a bit odd? Why not
+
+delete_series(MatchPattern, Start, End, Timeout, Settings) ->
+    Body = [{"match[]", MatchPattern}, {"start", Start}, {"end", End}],
+
+?
+
+Line:51, src/prometheus_cfg.erl -> I think it should be configurable
+
+Line:54, src/prometheus_cfg.erl -> I think it should be configurable
+
+Line:1095, src/prometheus_cfg.erl -> What happens with data that is older than 1 year?
+
+Line:1116, src/prometheus_cfg.erl -> 1) What happens if it is changed in ns_config?
+2) Not sure that "per node" configuration is good. Will work well for workarounds (if something goes wrong) but not for regular configuration. What do you think?
+
+Line:1122, src/prometheus_cfg.erl -> Please consider using mapfoldl for that. Looks like it should fit better.
+
+Line:1129, src/prometheus_cfg.erl -> Something is wrong with indentation here
+
+Line:1184, src/prometheus_cfg.erl -> We definitely need unit tests for this kind of functions (ideally randomized). In order to do that the algorithm should be implemented as a pure function.
+In your case this function should look something like the following:
+
+decimate_stats(Levels, LastDecimationTimes, Now) -> ListOfIntervalsToRemove :: [{StartTimestamp, EndTimestamp}].
+
+Besides basic unit tests for such function I recommend also writing randomized tests. This test should execute that function with random (but sane) arguments and make sure the result makes sense.
+
+Line:1193, src/prometheus_cfg.erl -> I guess LastTime can be undefined in case if Level have changes since last start prometheus_cfg process, but I don't see you handle this case
+
+Line:1207, src/prometheus_cfg.erl -> Looks like you forgot to remove it here and in other places
+
+Line:1215, src/prometheus_cfg.erl -> I might not understand the algorithm completely but it doesn't look correct to me.
+Say StartTime is 0, EndTime is 14, AmountToDecimate is 14, and LevelInterval is 10
+Since  round(14/10) == 1 decimation will be done for one interval and real time of the last decimation will be 10, instead if 14.
+
+Line:1233, src/prometheus_cfg.erl -> Looks like it should never be called with 'skip', because you're comparing it with number in the previous function and an atom is always greater than a number. Looks like it's not intentional, so I want to draw your attention to this fact.
+
+Line:1245, src/prometheus_cfg.erl -> It is not clear how it is possible that double scrape interval might not contain any samples. Looks like it always should contain samples.
+Actually, even the fact that we take double interval seems questionable to me. I would take something like Interval*110%. Looks like double interval is a huge overkill and will almost always contain 2 samples, which means we will have 2x more samples then we assume we should have with any particular settings.
+For the same reason the necessity of INTERVAL_RETENTION_PERCENT also seems unclear for me.
+
+Line:1266, src/prometheus_cfg.erl -> I might be wrong but I was under impression that clean_tombstone is rather heavy procedure and we might want it as rare as possible. Hence the question: do you think it makes sense to call it only once?
+
+Line:1268, src/prometheus_cfg.erl -> Coarseness doesn't seem to be used anywhere
+
+Line:1282, src/prometheus_cfg.erl -> It doesn't look possible to disable this procedure. Since we've never used it in production before, I think it makes sense to have an ability to disable it in case of any trouble with it (deletion of stats leads to latency spikes or something like that).
+
+Line:1293, src/prometheus_cfg.erl -> Looks like we don't want to pass Start time in this case, isn't it correct? Looks like API allows you to not pass StartTime at all.
+
+Line:1322, src/prometheus_cfg.erl -> AFAIR prometheus.erl logs error in case of unsuccessful post. Probably doesn't make sense to duplicate it here and in clean_tombstones.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2020-12-04 19:05:05.000000000
+Message: 
+Patch Set 20: -Verified
+
+(18 comments)
+Line:66, src/prometheus.erl -> Good idea.
+
+Line:51, src/prometheus_cfg.erl -> Done. We may wish to consider this again (and other existing) params when the REST configuration interface is done.
+
+Line:54, src/prometheus_cfg.erl -> Done
+
+Line:1095, src/prometheus_cfg.erl -> I was thinking it would get truncated. But I was leaving it until we have decided how we want decimation to work...perhaps we leave it and let the prometheus data size management take care of it.
+
+Line:1116, src/prometheus_cfg.erl -> 1) There's an open bug (on my list) for this issue. During testing I found that adding new levels would lead to crashes as the new levels wouldn't have existing stats_last_decimation_times. I'd like to address this in a follow on patch.
+
+2) Good point. This should be a cluster configuration item.
+
+Line:1122, src/prometheus_cfg.erl -> Ok, I'll look at lists:mapfoldl
+
+Line:1129, src/prometheus_cfg.erl -> Done
+
+Line:1184, src/prometheus_cfg.erl -> Ok, I'll look into this.
+
+Line:1193, src/prometheus_cfg.erl -> Yes, this is the bug I cited above that I found during testing.
+
+Line:1207, src/prometheus_cfg.erl -> I'll remove this before submitting. It's useful while this code is under development.
+
+Line:1215, src/prometheus_cfg.erl -> Good catch. It should be something like:
+
+   Acc ++ [{Coarseness,
+            StartTime + round(Amount2Decimate / LevelInterval) * LevelInterval}];
+
+Line:1233, src/prometheus_cfg.erl -> The above should make a call to decimate_stats_level using the table entry built from this
+
+decimation_definitions_default() ->
+    [%% No decimation for the first 3 days
+     {low, 3 * ?SECS_IN_DAY, skip},
+
+but I'll double check to confirm.
+
+Line:1245, src/prometheus_cfg.erl -> Here's the case I envisioned...
+* A scrape is done every 10 seconds so there should be six samples in each minute
+* When we decimate to 1 per minute I keep whatever is in the first ten seconds and throw out whatever is in the remaining 50 seconds. So there should be 60 samples in each hour.
+* When we decimate to 1 per hour, we keep the first 10 seconds of the first minute and throw out whatever is in the remaining 59 minutes and 50 seconds.
+
+The worry is the "start" time for the hour decimation is skewed wrt the "start" time for minute decimation such that the 10 second window used by the hour decimation would not align with the minute decimation and so by doubling it there was a better chance.
+
+This was done based on observations during testing. It could be the "bug" you cited above:
+
+   Acc ++ [{Coarseness,
+            StartTime + round(Amount2Decimate / LevelInterval) * LevelInterval}];
+
+may have lead to this.
+
+Line:1266, src/prometheus_cfg.erl -> That's the reason it is called only when the Count goes to zero. If there's a case where the amount to decimate is 100 and the interval is 10 then we decimate the 100 in chunks of 10 but only clean the tombstones once.
+
+Line:1268, src/prometheus_cfg.erl -> I was using it in ?log_debug messages and will remove it here...and maybe elsewhere.
+
+Line:1282, src/prometheus_cfg.erl -> Making HIGH_CARD_MAX_AGE configurable will allow disabling it by setting the age to a large value.
+
+Line:1293, src/prometheus_cfg.erl -> LastTruncationTime is the "start".  For example:
+
+Say LastTruncationTime is 8 days ago.
+End = Now - 3 days (so End is 3 days ago).
+
+We then want to truncate stats starting 8 days ago and end 3 days ago).
+
+Line:1322, src/prometheus_cfg.erl -> I'd like to leave this for now as the failures should be rare and it's more likely (IMO) someone will notice an error in the ns_server log compared with the prometheus log.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2020-12-11 01:30:22.000000000
+MISMATCHED INLINE COMMENT
+Line:51, src/prometheus_cfg.erl -> We keep all stats configuration in stats_settings in ns_config. Not sure it makes sense to break it and configure these particular param differently. 
+Just add pruning_interval to the list returned from default() function and extract it from Settings later when you need to use it.
+The same for HIGH_CARD_MAX_AGE.
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2020-12-11 19:10:48.000000000
+MISMATCHED INLINE COMMENT
+Line:51, src/prometheus_cfg.erl -> Added both to stats_settings.
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2020-12-11 19:10:48.000000000
+MISMATCHED INLINE COMMENT
+Line:54, src/prometheus_cfg.erl -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2020-12-11 01:30:22.000000000
+MISMATCHED INLINE COMMENT
+Line:54, src/prometheus_cfg.erl -> See comment about PRUNING_INTERVAL
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2020-12-11 19:10:48.000000000
+MISMATCHED INLINE COMMENT
+Line:1095, src/prometheus_cfg.erl -> Using these current settings, after 7 days stats will get decimated to one sample per hour. The 359 days could be 1000000 days as once the retention_time hits 2 years prometheus will truncate the stats.  Or if there is no retention_time then the stats will remain until the prometheus storage size limitation is reached.
+
+We could truncate stats after the 3+4+259 days but then again as long as we're within the prometheus retention time/size there may not be a need to do so.
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2020-12-11 01:30:22.000000000
+MISMATCHED INLINE COMMENT
+Line:1095, src/prometheus_cfg.erl -> The problem is that this setting highly depends on retention_time setting. If I set retention_time = 2 years, will it break decimation? I don't have clear understanding of what stats will look like in this case.
+I understand that particular numbers for decimation are to be decided, but I don't want to think about decimation every time I modify retention_time setting.
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2020-12-04 23:54:39.000000000
+MISMATCHED INLINE COMMENT
+Line:1184, src/prometheus_cfg.erl -> I'm going to do this in the next update.
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2020-12-04 23:54:39.000000000
+MISMATCHED INLINE COMMENT
+Line:1245, src/prometheus_cfg.erl -> I've removed this code for now due to the finding of the above bug.
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2020-12-19 03:13:38.000000000
+MISMATCHED INLINE COMMENT
+Line:1266, src/prometheus_cfg.erl -> Currently it looks like you call clean_tombstones 2 times on each iteration (two times per minute basically): once per truncation and once per decimation. I suggest we call it only one time and only when we really removed something. We probably always truncate something, though. Anyway, I think it makes sense to do x2 times less of those calls.
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2020-12-22 01:10:46.000000000
+MISMATCHED INLINE COMMENT
+Line:1266, src/prometheus_cfg.erl -> I'll now only clean tombstones if data has been deleted.
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2020-12-21 18:02:41.000000000
+MISMATCHED INLINE COMMENT
+Line:1266, src/prometheus_cfg.erl -> I've changed it to only call once.
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2020-12-11 19:10:48.000000000
+MISMATCHED INLINE COMMENT
+Line:1266, src/prometheus_cfg.erl -> I'm not understanding this comment. decimate_stats_interval is called for each interval that is being decimated.  After all have been done (Count is zero) then the clean_tombstones is done.
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2020-12-11 01:30:22.000000000
+MISMATCHED INLINE COMMENT
+Line:1266, src/prometheus_cfg.erl -> Why don't we call it once for the whole procedure then? decimating and truncating
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2020-12-11 19:10:48.000000000
+MISMATCHED INLINE COMMENT
+Line:1282, src/prometheus_cfg.erl -> I've added an explicit enable/disable decimation setting.
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2020-12-11 01:30:22.000000000
+MISMATCHED INLINE COMMENT
+Line:1282, src/prometheus_cfg.erl -> In case if the code has a bug, we want to be able to disable this code completely. If we set it to a large value when we want to disable the feature, we will still assume that the code is working, which contradicts the assumption that the code has a bug.
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2020-12-11 01:30:22.000000000
+MISMATCHED INLINE COMMENT
+Line:1293, src/prometheus_cfg.erl -> I think this contradicts your description for HIGH_CARD_MAX_AGE
+
+%% Age after which high cardinality stats are pruned. (3 days in seconds)
+
+In init you set LastTruncationTime to Now. So you will not remove everything that is older than that "Now".
+
+It seems like you are making it more complicated by adding start date and it's easier to simply remove everything that is older than 3 days every time. You don't even need to save anything to ns_config in this case. Could you please share the reasons why you think it makes sense to do the way you implemented it?
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2020-12-19 03:13:38.000000000
+MISMATCHED INLINE COMMENT
+Line:1293, src/prometheus_cfg.erl -> It seems like you don't need to remember the previous point. The api allows you to remove everything before End. In order to do that you just don't pass Start param.
+If you do it this way, there will be no need to memorize anything truncation related in ns_config. The code will be simpler.
+Please look at the doc: https://prometheus.io/docs/prometheus/latest/querying/api/#delete-series
+start=<rfc3339 | unix_timestamp>: Start timestamp. Optional and defaults to minimum possible time.
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2020-12-21 18:02:41.000000000
+MISMATCHED INLINE COMMENT
+Line:1293, src/prometheus_cfg.erl -> My thought was that minimum possible time could be years ago we would want to re-visiting the same time frames over and over again every one minute. But maybe prometheus is smarter than that? If you don't mind I've made a note in the code and would like to address this issue in a subsequent change.
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2020-12-11 19:10:48.000000000
+MISMATCHED INLINE COMMENT
+Line:1293, src/prometheus_cfg.erl -> I don't think there's a contradiction...anything older than 3 days is pruned. The "last time" is an optimization to remember the point in time to which you've already done this.  If this isn't kept we wouldn't know how far back to start the pruning.
+
+The initialization to "Now" in init_pruning_timer will be done the first time the node is booted and so there won't be any stats prior to "Now" as the node didn't exist prior to that time.
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2020-12-11 01:30:22.000000000
+MISMATCHED INLINE COMMENT
+Line:1322, src/prometheus_cfg.erl -> Errors from prometheus.erl will get to the same log files as errors logged here. So I don't think it makes much sense, but I don't insist on removing it. Up to you.
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,103 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-41510: Fix infinite loop due to HdrHistogram being reset
+
+Currently if a HdrHistogram has its reset() method called by one thread
+(T1) and is being read by another (T2) using an HdrHistoram::Iterator.
+There is the race that could cause the HdrHistoram::Iterator() to enter
+an infinite loop.
+
+This occurs as HdrHistogram's getNextValue() methods use HdrHistogam_c's
+hdr_iter_next() which intern uses the following function:
+static bool has_next(struct hdr_iter* iter)
+{
+        return iter->cumulative_count < iter->total_count;
+}
+Which logically checks that the total count the Iterator was
+initialize with is > than the sum of all the counts its read from the
+buckets in the histogram. The trouble is, that the reset() method
+changes the bucket counts back to 0. Thus, meaning the condition
+cumulative_count >= total_count may never be met.
+
+To fix this wrap the std::unique_ptr<struct hdr_histogram> with a
+folly::Synchronized<>. This allows us to take an exclusive lock on the
+pointer when performing a reset() of the histogram and allows us to
+ensure that no iterator is reading from the histogram, as the iterator
+takes a non exclusive read lock for the lifetime of the
+HdrHistogram::Iterator struct. This also ensures that
+HdrHistogram::resize() is thread safe as we now take a write lock.
+
+Change-Id: I8cf5eeb0ac3107ce20e915463be3db245c68c8b9
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Richard de Mellow
+Date: 2020-10-01 13:49:55.000000000
+Message: 
+Uploaded patch set 11.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-10-01 13:57:24.000000000
+Message: 
+Patch Set 11: Code-Review-1
+
+(1 comment)
+Line:139, utilities/hdrhistogram.cc -> I think this is a little bit of an abuse of the type system. You define a subclass of a class (LinearIterator <- Iterator), but then slice it away back to an Iterator in the return.
+
+*Currently* this is safe, but if one added any member variables to LinearIterator et al then they would essentially be discarded silently.
+
+I think a better way to solve this is to simply call hdr_iter_linear_init / hdr_iter_log_init etc from the main Iterator constructor, based on the IterMode.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2020-10-01 14:04:01.000000000
+Message: 
+Patch Set 11:
+
+(1 comment)
+Line:139, utilities/hdrhistogram.cc -> I think really what we want is different types of iterators, but these make functions should return the true type rather than base type. If we put the init functions inside the Iterator constructor then we'll also need to pass the different args to it e.g. valueUnitsPerBucket which could get messy.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-10-01 14:08:38.000000000
+Message: 
+Patch Set 11:
+
+(1 comment)
+Line:139, utilities/hdrhistogram.cc -> Perhaps, but you already have an IterMode member variable in Iterator, implying a single Iterator "type" supports multiple modes (and which should be initialised in different ways).
+
+Certainly what I suggest keeps the same data model you had before and addresses the constructor issues (I assume because you'd made the lock protected)?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-10-01 14:12:54.000000000
+Message: 
+Patch Set 11: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/6343/ : FAILURE
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/3350/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/4823/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/26620/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/30789/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/5195/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/6115/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/6235/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/14010/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2020-10-01 14:28:31.000000000
+MISMATCHED INLINE COMMENT
+Line:139, utilities/hdrhistogram.cc -> Done
+----------------------------------------------------------------------------------------------------------------------

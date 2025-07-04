@@ -1,0 +1,188 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-41257: Don't enable traffic if Warmup can't write vb state to disk
+
+Currently during warmup we will try and persist a new vbucket state to
+disk during Warmup::populateVBucketMap(). This is to ensure we enqueue
+any new failover uuid in the checkpoint manager, before we add the
+vbucket to vbucket map (allowing us to accept DCP connections). So its
+the first thing that written to disk. This gives us a good place to
+ensure that we can write to the files of a vbucket or not, to ensure
+our storage is in a good state. However, currently we don't take
+advantage of this. Waiting for the flusher task to persist the state
+to disk without reporting its success.
+
+To help ensure we don't try and use vbuckets that we can't reliably
+read/write to. We have modified the Warmup::populateVBucketMap() to call
+the flush of the vbucket state to disk immediately after enqueuing it in
+the checkpoint manager. Then based on the success of the flush of the
+vbucket state we will add the vbucket to the vbucket map so that it can
+be access by DCP. We will also set a flag, if the flush fails to ensure
+we don't accept any front end writes if it fails. This is to ensure we
+don't accept writes that we will be unable to persist to disk.
+
+To enable this change this patch adds a success flag to
+EPBucket::FlushResult, so that EPBucket::flushVBucket() can explicitly
+state if it failed or succeeded and Warmup::populateVBucketMap() can
+make a decision based on this. We also introduced an unlocked version
+of EPBucket::flushVBucket() so that Warmup::populateVBucketMap() can
+call the flush functionality as we take a vbucket lock before enqueuing
+the vbucket state in the checkpoint manager.
+
+This patch also makes a small refactor to EPBucket::FlushResult{} to
+reduce the size from 24bytes to 16bytes.
+
+Change-Id: Ibc83fa850ea08b4ab10c32953f2225c0bdfd5753
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Richard de Mellow
+Date: 2021-03-24 16:23:34.000000000
+Message: 
+Patch Set 14: Patch Set 13 was rebased
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-03-24 17:30:10.000000000
+Message: 
+Patch Set 14: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/34516/ : FAILURE
+
+Timeout of a CTest test 189/405 Test #179: ep-engine_ep_unit_tests.AllBucketTypes/ActiveDurabilityMonitorTest ............................................................} ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/34516/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/8535/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/8535/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/9466/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/9466/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/29620/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/7892/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/6434/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/17378/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/9609/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/9829/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-03-25 09:18:27.000000000
+Message: 
+Patch Set 14: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/29620/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/7892/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/6434/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/17378/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/8543/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/9609/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/9476/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/9829/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/34527/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-03-25 11:18:06.000000000
+Message: 
+Patch Set 14: Code-Review-1
+
+(7 comments)
+
+If it turns out we _do_ need the flusher refactor to return an explicit status, I would suggest pulling that into it's own patch given the impact it has on unrelated tests etc.
+Line:24, /COMMIT_MSG -> This seems a little misleading - you imply the success of the flush affects if the vbucket is put in the map, but the code always puts it in the map.
+
+Line:58, engines/ep/src/ep_bucket.h -> You don't really need this ctor given this is just a pod struct - you could remove it and rely on brace-initialisation.
+
+Line:62, engines/ep/src/ep_bucket.h -> Not sure you actually need 'success' here - doesn't moreAvailable==true mean the same thing in the context of setvbState?
+
+Line:75, engines/ep/src/ep_bucket.h -> Suggest using another strongly-typed enum here like MoreAvailable / WakeCkptRemover, given in isolation it's not clear what the bool is for.
+
+Line:1325, engines/ep/src/warmup.cc -> Suggest expanding this error message to tell people the effect of this - i.e. writes will be disabled.
+
+Line:1327, engines/ep/src/warmup.cc -> "write fails before" - not sure how useful this will be; given you'll see the previous log entries telling you exactly which vbuckets failed.
+
+Line:2429, engines/ep/tests/module_tests/evp_store_warmup_test.cc -> Should check we can successfully read data though.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2021-03-25 14:27:49.000000000
+Message: 
+Patch Set 14:
+
+(6 comments)
+Line:58, engines/ep/src/ep_bucket.h -> Done
+
+Line:62, engines/ep/src/ep_bucket.h -> const auto moreAvailable =
+            toFlush.moreAvailable ? MoreAvailable::Yes : MoreAvailable::No;
+.....
+    // Are we flushing only a new vbstate?
+    if (mustPersistVBState && (flushBatchSize == 0)) {
+        if (!rwUnderlying->snapshotVBucket(vbid, commitData.proposedVBState)) {
+            flushFailureEpilogue(*vb, toFlush);
+
+            return {false, 0, MoreAvailable::Yes, WakeCkptRemover::No};
+        }
+
+        // The new vbstate was the only thing to flush. All done.
+        flushSuccessEpilogue(*vb,
+                             flushStart,
+                             0 /*itemsFlushed*/,
+                             aggStats,
+                             commitData.collections);
+
+        return {true, 0, moreAvailable, wakeupCheckpointRemover};
+    }
+The above code is the section of code we would hit if flushing the vbucket in the warmup code. And given there's probably nothing else that will be in this flush or queued up we could probably piggy back on the  MoreAvailable value. My problem with it is that it reposenting if theres more data to flush which is slightly different to a saying that flusher function finished successfully, hance it could be bug prone further down the line.
+
+Line:75, engines/ep/src/ep_bucket.h -> Ack
+
+Line:1325, engines/ep/src/warmup.cc -> Done
+
+Line:1327, engines/ep/src/warmup.cc -> Done
+
+Line:2429, engines/ep/tests/module_tests/evp_store_warmup_test.cc -> Ack
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-03-25 14:41:36.000000000
+Message: 
+Patch Set 14:
+
+(1 comment)
+Line:62, engines/ep/src/ep_bucket.h -> Well, we already use "MoreAvailable::Yes" to basically flag the flusher needs to run again - generally speaking failures are just retired. 
+
+If we need to have an explicit success/fail flag then fine, but (a) I think it's redundant and (b) it requires a bunch of refactoring all over the place.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2021-03-25 15:09:55.000000000
+Message: 
+Patch Set 14:
+
+(1 comment)
+Line:62, engines/ep/src/ep_bucket.h -> Okay for the sake of being overly verbose I'll remove the success flag then :).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2021-03-25 17:01:38.000000000
+MISMATCHED INLINE COMMENT
+Line:62, engines/ep/src/ep_bucket.h -> Done
+----------------------------------------------------------------------------------------------------------------------

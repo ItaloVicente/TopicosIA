@@ -1,0 +1,181 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-37546: Allow to retrieve Checkpoint items without moving the cursor
+
+With this patch CM::getItemsForCursor() takes a new CursorMove param in
+input. CursorMove allows the caller to specify if the cursor must move
+when the function executes (CursorMove::SYNC, the default and usual
+behaviour) or not (CursorMove::DEFERRED).
+The returned result of the function is the same in both cases.
+
+The new DEFERRED mode is added and tested in this patch, but not used
+yet.
+
+Change-Id: I3954253210935aa53819e5a3d904cd6022ea99b5
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2020-01-30 10:00:21.000000000
+Message: 
+Uploaded patch set 4.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-01-30 10:00:31.000000000
+Message: 
+Patch Set 4: Well-Formed+1
+
+Permission granted to commit: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/166148/artifact/restricted.html : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-01-30 10:47:06.000000000
+Message: 
+Patch Set 4: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/24019/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/795/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/726/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/mad-hatter/146/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/575/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/800/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/793/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/805/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-01-30 11:46:34.000000000
+Message: 
+Patch Set 4: Code-Review-1
+
+(2 comments)
+Line:83, engines/ep/src/checkpoint.cc -> if one were to do:
+
+ CheckpointCursor a = ....;
+ CheckpointCursor b = std::move(a);
+
+Cursor `a` would still prevent e.g., checkpoint removal/expelling - it's still sort of "holding resources" after being moved out of.
+
+It's fine in the sense that when `a` is destroyed it will still be released, but that might be a gotcha people don't expect given normal move semantics - the move is acting a like a copy.
+
+In contrast, if the move constructor set
+
+ other.isValid = false;
+
+but did not do
+
+ (*currentCheckpoint)->incNumOfCursorsInCheckpoint();
+
+then after moving out of `a`, you can forget about it and it won't act like an valid cursor while it is in scope.
+
+Also saves incr/decr-ing the counter for every move.
+
+Not sure that what I suggested is necessarily a good idea, there might be guidelines in the area though :shrug:
+
+Line:895, engines/ep/src/checkpoint_manager.cc -> copy.emplace(*cursorPtr);
+
+Might be better for in-place copy construction.
+
+I think that currently would read as a copy then a move?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-01-30 11:56:13.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:83, engines/ep/src/checkpoint.cc -> Actually given that this is move construction the example I gave isn't quite right. I think the point stands, just with
+
+ CheckpointCursor b{std::move(a)};
+
+or
+
+ CheckpointCursor(std::move(a))
+
+rather than the assignment? (I think).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-01-30 11:59:16.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:83, engines/ep/src/checkpoint.cc -> Also could add move assignment too while you're there? :)
+
+https://isocpp.github.io/CppCoreGuidelines/CppCoreGuidelines#c21-if-you-define-or-delete-any-default-operation-define-or-delete-them-all
+
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-01-30 12:21:49.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:83, engines/ep/src/checkpoint.cc -> Also, we don't have a clang tidy job for mad-hatter currently but I'd guess it will advise marking move construction as noexcept?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-01-31 10:15:05.000000000
+Message: 
+Patch Set 4:
+
+(2 comments)
+Line:83, engines/ep/src/checkpoint.cc -> Couple of points:
+
+
+1) The only reason why I added the move-ctor is for avoding the double copy of string:name when doing an assignment.
+Which is probably minor/unnecessary given that the new logic is executed only at persistence.
+Also, I think that we can rely on copy-elision when optimization is on.
+Also, the boost::emplace that you suggested avoids the double-copy.
+So just using boost::emplace and removing this.
+
+
+2) We do need to perform incNum/decNum. That is very important for preventing the checkpoint remover from releasing checkpoints before the cursor is re-placed at the right position (ie, the deferred moved).
+If we fail to do that, then the execution of CM::incrCursor(cursorCopy) could wrongly set numCursor=0 for checkpoints that we have not persisted yet.. you already know the consequence.
+
+
+Obviously here I'm proceeding under the assumption that we don't want to touch the cursor-move logic in CM under this MB.
+
+Line:895, engines/ep/src/checkpoint_manager.cc -> Good suggestion for boost::emplace, thanks.
+And yes, currently is copy + move
+
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-01-31 16:00:15.000000000
+MISMATCHED INLINE COMMENT
+Line:83, engines/ep/src/checkpoint.cc -> :roger: sounds good.
+
+Regarding 2) - as this was the move constructor, it would have been reasonable to make it so the moved-out-of cursor ceases to be counted in the checkpoint, and the moved-into cursor _starts_ being counted in the checkpoint.
+The counter itself wouldn't need to be incr'd then decr'd if the moved-out-of cursor were made invalid; there would still be the same number of valid cursors in that checkpoint, the cursor has logically "moved" from one place to another.
+
+As the move constructor stood, it was indeed necessary to incr, because the moved-out-of cursor *did not* become invalid - when it was destroyed it would have decr'd, so the incr was as you mentioned needed to prevent the counter being made too low.
+
+It was fine as it was, I was just noting that that might be a "gotcha" if someone later used the move constructor without reading it. :)
+
+As a toy example imagine someone writes
+
+ CheckpointCursor a = ...; // create 1 cursor (only one in the checkpoint)
+ {
+  CheckpointCursor b(std::move(a)); // move a into b
+  // b goes out of scope, destroying the cursor
+ }
+ // how many cursors are in the checkpoint now?
+
+Following normal move semantics, someone might assume numCursors=0 at the end, where in reality it would be numCursors=1, because `a` is still in scope. `a` might have an invalid name but it is still "referencing" the checkpoint.
+If it conveys it better imagine doing that example with a std::shared_ptr instead of CheckpointCursor - at the end you would expect `a` to be empty, and whatever it pointed to to have been destroyed when `b` went out of scope, because you explicitly moved a, rather than copying.
+
+Not necessarily important, just seemed worth noting. Doesn't matter now that the move ctor is gone :P
+----------------------------------------------------------------------------------------------------------------------

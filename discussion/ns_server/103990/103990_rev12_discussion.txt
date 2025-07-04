@@ -1,0 +1,137 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-32776: Retry rebalance upon failure.
+
+Change-Id: Iee10d6d4bdc20f5b011ee88d8446651c6f7dbc84
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Poonam Dhavale
+Date: 2019-02-26 22:22:32.000000000
+Message: 
+Uploaded patch set 12: Patch Set 11 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-02-26 22:22:42.000000000
+Message: 
+Patch Set 12: -Well-Formed
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-test/8688/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-02-26 22:28:20.000000000
+Message: 
+Patch Set 12: Well-Formed+1
+
+Permission granted to commit to restricted branch
+----------------------------------------------------------------------------------------------------------------------
+Author: Poonam Dhavale
+Date: 2019-02-26 22:31:59.000000000
+Message: 
+Patch Set 12:
+
+run simple-test
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-02-26 22:32:07.000000000
+Message: 
+Patch Set 12:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-simple-test/512/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-02-26 23:05:13.000000000
+Message: 
+Patch Set 12: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/ns-server-simple-test/512/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Poonam Dhavale
+Date: 2019-02-26 23:08:10.000000000
+Message: 
+Patch Set 12: Verified+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Artamonau
+Date: 2019-03-02 02:29:17.000000000
+Message: 
+Patch Set 12:
+
+1. The interaction between ns_orchestrator and auto_rebalance is still broken.
+
+Let's say there's a pending rebalance retry about to kick in. Meanwhile, ns_orchestrator is ordered to do an autofailover. Now, auto_rebalance makes a call to ns_orchestrator to retry the rebalance and gets blocked while ns_orchestrator is doing the autofailover. As part of it, ns_orchestrator does attempt to cancel the pending rebalance retry, but those messages are too late: auto_rebalance is already waiting for its chance to start the rebalance. Now autofailover completes and auto_rebalance successfully triggers the rebalance with a wrong configuration.
+
+2. I still don't think that calling auto_rebalance:cancel_any_pending_retry everywhere (with the exception of an explicit user request, where it should also probably take an ID of the rebalance to cancel) where pieces of configuration get changed is a good idea. 
+
+It's not clear if what was meant to be canceled was actually canceled due to name resolution as I described before. But even assuming that everybody is talking to the correct auto_rebalance process, many non-trivial interleavings of the events are possible. Let's say a failover is triggered (by the user) close to the end of a rebalance that is destined to fail and schedule a retry. While the UI indeed disables lots of operations during rebalance, the rebalance detection is just a best effort and is not guaranteed to protect you from anything. But even this sort of best-effort protection is not applied to plain REST API calls. So failover REST API will indeed successfully make sure that there was no pending rebalance retry at some point, but it may be re-added by the rebalance about to complete.
+
+These are the reasons why I prefer a solution where it's ns_orchestrator and auto_rebalance processes themselves that decide which operations can be retried in current configuration and which can't. That way we don't have to think about all possible interleavings of concurrent configuration changes/topology changes requests and if they work well together.
+----------------------------------------------------------------------------------------------------------------------
+Author: Poonam Dhavale
+Date: 2019-03-04 17:43:09.000000000
+Message: 
+Patch Set 12:
+
+Hi Aliaksey,
+
+Won’t the phash2 check I mentioned in the TODO comment in the code take care of this issue? 
+
+Basically, what we want is that if the configuration changes between the start of a rebalance and the start of its retry, we want the retry to fail. 
+
+As indicated in the TODO comment:
+
+At the start of a rebalance, ns_orchestrator will save phash2 of configuration such as buckets, node membership, server group that 
+are relevant to rebalance.
+If the rebalance fails, this phash2 will be passed to the auto-rebalance in the retry request. 
+When the retry is triggered, it will pass this phash2 back to the orchestrator in the rebalance request.
+ ns_orchestrator will compute new phash2 based on current config and compare it with the one that was passed by auto-rebalance. 
+If the phash2 does not match, then the retry request will fail.
+
+If any other operation such as auto-failover manage to sneak in between the rebalance and its retry, the phash2 check will fail the retry.
+
+Once I have added the phash2 check, I will remove the cancel_any_pending_retry calls that are in the code as those will no longer be needed.
+
+After the above change, pending retry can be canceled only by an explicit user request. And, as you have suggested, we can add the rebalance ID as a parameter to this call.
+----------------------------------------------------------------------------------------------------------------------
+Author: Poonam Dhavale
+Date: 2019-03-04 18:10:03.000000000
+Message: 
+Patch Set 12:
+
+Also, the phash2 check I mentioned earlier will take into account that rebalance itself may change some of the config. These are legitimate config changes which should not prevent the retry. These will not be included in the check.
+
+E.g. rebalance may have changed vBucket map before it failed. Or, changed node membership to active and so on. Those will not be checked.
+
+It will check for things such as new node failovers, creation of new buckets, server group  configuration changes and few other things.
+----------------------------------------------------------------------------------------------------------------------
+Author: Poonam Dhavale
+Date: 2019-03-04 18:16:47.000000000
+Message: 
+Patch Set 12:
+
+And, by "new node failovers", I do not mean failovers of "new nodes". I mean new failovers that occurred between the rebalance and its retry.
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Artamonau
+Date: 2019-03-05 00:38:21.000000000
+Message: 
+Patch Set 12:
+
+> Won’t the phash2 check I mentioned in the TODO comment in the code take care of this issue?
+
+Yes more or less. phash2 is not collision resistant and doesn't protect against ABA problem (which might or might not be a real problem).
+
+It wasn't clear from the TODO or your previous comments that you planned to remove all the cancel_any_pending_retry-s. I assumed that you didn't, so I reviewed the patch on its own merits. Now that I know that you do, I would prefer not to submit this patch with its issues knowing that it will be reworked substantially. Can I ask you to prepare that patch for review?
+----------------------------------------------------------------------------------------------------------------------
+Author: Poonam Dhavale
+Date: 2019-03-05 01:50:16.000000000
+Message: 
+Patch Set 12:
+
+> Can
+ > I ask you to prepare that patch for review?
+
+Yes, I can update this patch itself instead of a separate commit.
+----------------------------------------------------------------------------------------------------------------------

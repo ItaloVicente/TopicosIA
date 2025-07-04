@@ -1,0 +1,171 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-55011: Append user-agent with user (service) name for _cbauth/_metakv requests
+
+In http_access_internal.log, requests to /_cbauth or /_metakv
+now contain a User Agent of the form: "Go-http-client/1.1-@goxdcr"
+instead of just "Go-http-client/1.1". The User info may be redacted so
+the user is appended to the User-Agent for cbauth/metakv requests.
+
+Change-Id: Iee3627ff89d7a5adf13616c7d46e1062d55513cf
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Neelima Premsankar
+Date: 2023-03-14 19:44:45.000000000
+Message: 
+Uploaded patch set 4.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2023-03-14 19:44:56.000000000
+Message: 
+Patch Set 4:
+
+Build Started https://cv.jenkins.couchbase.com/job/ns-server-test/35311/ (1/3)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2023-03-14 19:44:57.000000000
+Message: 
+Patch Set 4:
+
+Build Started https://cv.jenkins.couchbase.com/job/ns-server-ns-test/2664/ (2/3)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2023-03-14 19:44:58.000000000
+Message: 
+Patch Set 4:
+
+Build Started https://cv.jenkins.couchbase.com/job/ns-server-api-test/330/ (3/3)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2023-03-14 20:15:12.000000000
+Message: 
+Patch Set 4: Well-Formed+1
+
+Build Successful 
+
+https://cv.jenkins.couchbase.com/job/ns-server-test/35311/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/ns-server-ns-test/2664/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/ns-server-api-test/330/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Neelima Premsankar
+Date: 2023-03-14 21:16:40.000000000
+Message: 
+Patch Set 4: Verified+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Finlay
+Date: 2023-03-14 21:38:40.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:85, src/menelaus_access_log_formatter.erl -> As it stands, I don't think this is safe from a redaction point of view. A highly privileged user could invoke the _cbauth endpoint and now the users name will get emitted in the user agent and won't get redacted. 
+
+You'd at least need to check that it's a special user (begins with @) and only do this user agent swizzling in this case.
+
+Curious: why did you decide to approach the fix this way by doing this manipulation in the access log formatter rather than change the user agent at source in cbauth? It seems to not be the simplest way to solve the problem. Is there some advantage to doing it this way?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2023-03-14 23:47:29.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:7, /COMMIT_MSG -> NIT: I think this line is too long.. I forget what our exact standards are but I have them coded into my emacs (can't seem to find it now) and it appears you have about 68 chars on that first line, then you need to skip a line, and then the line length is ~70..
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Neelima Premsankar
+Date: 2023-03-15 00:10:27.000000000
+Message: 
+Patch Set 4: -Verified
+
+(1 comment)
+Line:85, src/menelaus_access_log_formatter.erl -> I see. I may have misunderstood the comment about doing this is in ns_server as "instead of cbauth".
+
+I started off in cbauth by modifying every place we create an HTTP req. If creds is already populated, its easy but I wasn't sure whether this is always the case.
+
+If I wish to modify AuthWebCreds/AuthWebCredsGeneric, the user name is sometimes in the "Authorization" header. FastHTTP does not have calls to parse this header, so I ended up duplicating code from the net/http library to retrieve it. Also, for the MaybeGetCredsFromCert(), I wasn't sure where to get the service name from. For _metakv, I wasn't sure which of the Url.Values contained the service name (I think its User).
+
+The net/http defaultUserAgent isn't exported so in cbauth I used a static "Go-http-client/1.1" + username (although the default may change).
+
+So I ended up in ns_server because it was easier to confirm that all requests that are logged by the _cbauth/_metakv endpoints are modified, that the user name I suffix is correct. I couldn't tell off the bat where the service name should come from for some requests in _cbauth/_metakv. Since the main concern seems to be about the information being missing in these logs, I moved here. If the other requests (non _cbauth/_metakv requests) are modified at the source though, this is inconsistent.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Neelima Premsankar
+Date: 2023-03-15 02:21:43.000000000
+MISMATCHED INLINE COMMENT
+Line:7, /COMMIT_MSG -> It shows me a warning for anything longer than 50 characters, so I truncated it.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Finlay
+Date: 2023-03-15 03:22:37.000000000
+MISMATCHED INLINE COMMENT
+Line:85, src/menelaus_access_log_formatter.erl -> > I may have misunderstood the comment about doing this is in ns_server as 
+> "instead of cbauth".
+
+Sorry if I wasn't clear. I did intend that cbauth should change its user agent.
+
+> If I wish to modify AuthWebCreds/AuthWebCredsGeneric, the user name 
+> is sometimes in the "Authorization" header.
+
+In a sense this is the problem. When a user calls AuthWebCreds if we don't get a hit in the authentication cache, we proxy the request to ns_server -- including the authorization header. 
+
+In any case, I think all we need to do in cbauth is add the special user name to the user agent. The user name will remain in the authorization header and this will ultimately get redacted which is as it should be. The special user name will get appended to the user agent, which will satisfy Patrick's requirement so it all should work. 
+
+> FastHTTP does not have calls to parse this header, so I ended up duplicating 
+> code from the net/http library to retrieve it.
+
+I don't think you'll need to parse the authorization header. If you do it seems that something has gone wrong someplace. I think you just need to set the user agent by appending the special user name to the user agent. 
+
+> Also, for the MaybeGetCredsFromCert(), I wasn't sure where to get the service
+> name from.
+
+I think you just use db.specialUser that's available in that function.
+
+> For _metakv, I wasn't sure which of the Url.Values contained the service name 
+> (I think its User).
+
+MetaKV uses a wrapper around the HTTP client to inject the authorization header. This 
+
+https://github.com/couchbase/cbauth/blob/master/convenience.go#L82
+
+The authorization header gets added here:
+
+https://github.com/couchbase/cbauth/blob/master/convenience.go#L29 
+
+I think we could maybe modify this this to also update the user agent. 
+
+> The net/http defaultUserAgent isn't exported so in cbauth I used a static 
+> "Go-http-client/1.1" + username (although the default may change).
+
+Yes, it's unfortunate and annoying that there isn't a static function that returns this value. I figured that you'd have to do what you did and that we'd be vulnerable to it changing.
+
+> If creds is already populated, its easy but I wasn't sure whether this is
+> always the case.
+
+I think it's always the case. Certainly in VerifyOnServer() the request will not even be proxied to ns_server if the creds db isn't populated. 
+
+https://github.com/couchbase/cbauth/blob/master/cbauthimpl/impl.go#L682
+
+Hmm.
+
+Let me think a little. On balance I think I prefer making this change in cbauth. I'm not crazy about this very specific manipulation happening on the ns_server side with hardcode _cbauth and _metakv strings. In cbauth I'm not crazy about the fact we have to hardcode the default user agent string.
+
+I would be interested in what others think about the change.
+----------------------------------------------------------------------------------------------------------------------
+Author: Neelima Premsankar
+Date: 2023-03-15 02:52:33.000000000
+MISMATCHED INLINE COMMENT
+Line:85, src/menelaus_access_log_formatter.erl -> Addressed the internal user filtering.
+
+I'll look again at modifying all requests at source next - it was easier for me to do this at the logs. (I'm not sure if this information is needed in sniffed packets for debug, or the sole intent is to be able to determine the service from User-Agent contained in cbcollect logs.).
+----------------------------------------------------------------------------------------------------------------------
+Author: Neelima Premsankar
+Date: 2023-03-15 04:22:05.000000000
+MISMATCHED INLINE COMMENT
+Line:85, src/menelaus_access_log_formatter.erl -> Ah I see, thanks. I think I lean towards cbauth too - because its consistent with modifying at the source as is done by query (instead of isolating only cbauth/metakv here). The one other reason for doing it here was its a one place change, as opposed to ensuring all _cbauth/_metakv requests (and new ones) modify the User-Agent, if necessary.
+----------------------------------------------------------------------------------------------------------------------

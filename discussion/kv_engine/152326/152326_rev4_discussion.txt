@@ -1,0 +1,82 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-45378: Fix static init fiasco with ExecutorPool & phosphor
+
+When converting platform to be statically linked, a crash is seen
+during shutdown of ep-engine_ep_unit_tests.DcpConnMapTest tests on
+macOS:
+
+(lldb) bt
+* thread #22, name = 'NonIoPool2', stop reason = signal SIGABRT
+  * frame #0: 0x00007fff693f733a libsystem_kernel.dylib` __pthread_kill  + 10
+    frame #1: 0x00007fff694b3e60 libsystem_pthread.dylib` pthread_kill  + 430
+    frame #2: 0x00007fff6937e808 libsystem_c.dylib` abort  + 120
+    frame #3: 0x00007fff665dd458 libc++abi.dylib` abort_message  + 231
+    frame #4: 0x00007fff665ce8a7 libc++abi.dylib` demangling_terminate_handler()  + 238
+    frame #5: 0x00007fff681095b1 libobjc.A.dylib` _objc_terminate()  + 104
+    frame #6: 0x00007fff665dc887 libc++abi.dylib` std::__terminate(void (*)())  + 8
+    frame #7: 0x00007fff665df1a2 libc++abi.dylib` __cxxabiv1::failed_throw(__cxxabiv1::__cxa_exception*)  + 27
+    frame #8: 0x00007fff665df169 libc++abi.dylib` __cxa_throw  + 113
+    frame #9: 0x00007fff665b955b libc++.1.dylib` std::__1::__throw_system_error(int, char const*)  + 77
+    frame #10: 0x00007fff665b054d libc++.1.dylib` std::__1::mutex::lock()  + 29
+    frame #11: 0x000000010a78af00 libphosphor.dylib` phosphor::TraceLog::lock(this=0x000000010a797b30)  + 16 at trace_log.h:250
+    frame #12: 0x000000010a78aedf libphosphor.dylib` std::__1::lock_guard<phosphor::TraceLog>::lock_guard(this=0x000070000b00be98, __m=0x000000010a797b30)  + 15 at __mutex_base:91
+    frame #13: 0x000000010a787c49 libphosphor.dylib` std::__1::lock_guard<phosphor::TraceLog>::lock_guard(this=0x000070000b00be98, __m=0x000000010a797b30)  + 9 at __mutex_base:91
+    frame #14: 0x000000010a788a2c libphosphor.dylib` phosphor::TraceLog::deregisterThread(this=0x000000010a797b30)  + 28 at trace_log.cc:222
+    frame #15: 0x000000010023ec6d ep-engine_ep_unit_tests` CBRegisteredThreadFactory::newThread(this=0x000000010ddc3c00)>&&)::'lambda'()::operator()()  + 93 at folly_executorpool.cc:49
+
+The ExecutorPool is shutting down all its background threads, during
+which each thread calls phosphor::TraceLog::deregisterThread() to
+remove this thread from the set folly is tracking. However TraceLog is
+a singleton and it has already been destructed, so accessing it's
+mutex member variable results in an exception being thrown.
+
+This is due to a change in the static initialisation (and
+deinitialization) order between ExecutorPool and
+phosphor::TraceLog. Both are Mayer singletons, but phosphor::TraceLog
+is first accessed (and hence initialised) _after_ ExecutorPool - when
+the ExecutorPool threads first register their threads. As such,
+TraceLog will be destroyed before ExecutorPool (destruction is in
+reverse construction order).
+
+Solve by explicilty accessing (and hence initializing) TraceLog before
+ExecutorPool is created in ep_unit_tests_main.cc.
+
+(Note this problem doesn't occur in memcached as we explicilty
+initialise tracing before any buckets are created.)
+
+Change-Id: I1953129cce0d05a42f0790724c470e38b2dd0701
+Reviewed-on: http://review.couchbase.org/c/kv_engine/+/152326
+Tested-by: Build Bot <build@couchbase.com>
+Reviewed-by: Paolo Cocchi <paolo.cocchi@couchbase.com>
+Reviewed-by: Trond Norbye <trond.norbye@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Trond Norbye
+Date: 2021-04-29 06:18:57.000000000
+Message: 
+Change has been successfully cherry-picked as 5b78cd95c0e5326c470de223378ec41b57acb92b by Trond Norbye
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-04-29 06:19:05.000000000
+Message: 
+Patch Set 4:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/7498/ (1/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-04-29 08:17:45.000000000
+Message: 
+Patch Set 4:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv-engine-master-perf/4768/ : FAILURE
+
+CMake error: tlm/cmake/Modules/FindCouchbaseErlang.cmake:68 (MESSAGE) ( http://cv.jenkins.couchbase.com/job/kv-engine-master-perf/4768/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/7498/ : SUCCESS'
+----------------------------------------------------------------------------------------------------------------------

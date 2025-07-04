@@ -1,0 +1,126 @@
+======================================================================================================================
+DESCRIPTION:
+
+[Refactor] Shrink ServerCookieApi with cookie members
+
+Now that we use a Class for the Cookies and link everything
+static we can might as well use virtual getter methods to
+check for cookie/connection properties instead of going through
+the full "Server API" call chain (which also toggled the memory
+domain for allocations; but we didn't allocate anything)
+
+Change-Id: I5760da40be207c631e76df7dc69ce6e279f1ced9
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Trond Norbye
+Date: 2021-08-10 12:00:50.000000000
+Message: 
+Uploaded patch set 4: Patch Set 3 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-08-10 13:16:49.000000000
+Message: 
+Patch Set 4: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/13346/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [0016/0093]: test dcp replica stream one collection...../kv_engine/engines/ep/tests/ep_testsuite_dcp.cc:717 Test failed: `" (Expected `118", got `94" - Buffer Size did not get set correctly)
+[2021-08-10T13:09:38.421Z] (27623 ms) FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/13346/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/20891/ : FAILURE
+
+One of more core files found at the end of the build. Data for post-mortem saved to archived_core_dumps.tar.bz2 under "Build Artifacts". ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/20891/ )
+
+Timeout of a CTest test [2021-08-10T13:14:43.836Z] 404/404 Test #231: ep-engine_ep_unit_tests.KVStoreParam/KVStoreParamTest .......................................................} ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/20891/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/9892/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/38456/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/11197/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/32794/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/830/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/12798/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/12987/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/835/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/11915/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-08-10 13:42:35.000000000
+Message: 
+Patch Set 4: Code-Review-1
+
+(1 comment)
+Line:1821, engines/ep/src/ep_engine.cc -> Do we have a guarantee that none of these cookie methods will allocate (or free) memory? If not then I think we need to leave the NonBucketAllocationGuard in place.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2021-08-10 13:58:51.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:1821, engines/ep/src/ep_engine.cc -> None of the ones I've changed do any memory allocation. This one is implemented like:
+
+    void setEngineStorage(void* value) override {
+        engine_storage = value;
+    }
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-08-10 14:05:41.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:1821, engines/ep/src/ep_engine.cc -> Ok. Just trying to think of the best way to handle this. You're correct in that NonBucketAllocationGuard is currently redundant, but _if_ we did add memory allocation behind any of these we'd get a potentially hard-to-track accounting bug. 
+
+I think we probably want to add some tests to memory_tracking_test.cc which instantiate a Cookie and call these methods; checking that `alloc_size` is the same before / after the call, and that no additional allocations / frees occurred.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2021-08-10 14:28:53.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:1821, engines/ep/src/ep_engine.cc -> I think the best solution to this would be to make sure that all of the jumping between memory domains happens in the implementation of the callback (in the Cookie class) and not inside the engine. The engine won't know if an allocation will happen; but the implementation of the method knows (and when we change it))
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-08-10 14:42:12.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:1821, engines/ep/src/ep_engine.cc -> That seems sensible.
+
+Note for reference that historically the core (daemon) knew nothing about memory tracking; hence it had to be done in ep-engine when "leaving" the current bucket. That's not really the case anymore, so indeed performing any switching in the Cookie (if necessary) is probably a better solution.
+
+Suggest we document that in CookieIface (that any methods which allocate memory need to call an appropriate memory tracking guard) and then I'm happy with the current patch :)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2021-08-10 16:23:48.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:1821, engines/ep/src/ep_engine.cc -> I'll add back the allocation guard for the set-method for now (the other methods are const and "cannot allocate memory" (well they can in theory; but ...) and address all of the mutators later on (with such a description)
+
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,117 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-34217: Add support for dropping collections with prepares
+
+Add support for dropping collections with prepares. When we remove a
+prepare we need to cleanup the ADM and PDM. We need to remove the
+prepares without updating the HCS or HPS. All iterators have to be
+moved back to their previous position (if valid).
+
+Change-Id: I597c888a6b7e4790639d0ab8246f39723f2a0e41
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Ben Huddleston
+Date: 2020-06-12 15:47:03.000000000
+Message: 
+Uploaded patch set 8: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2020-06-12 15:47:08.000000000
+Message: 
+Removed Code-Review-1 by Ben Huddleston <ben.huddleston@couchbase.com>
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2020-06-12 16:26:11.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:908, engines/ep/src/durability/active_durability_monitor.cc -> This might be the cause of some issues
+
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-06-12 18:38:47.000000000
+Message: 
+Patch Set 8: Code-Review-1
+
+(7 comments)
+
+Some of the questions are Friday evening ones that Monday morning brain could probably have thought through a little more, but hey, mo' questions, mo' betta.
+Line:905, engines/ep/src/durability/active_durability_monitor.cc -> Is this equivalent to `std::find_if` with the condition `toErase->getKey() == key`?
+
+Though this might be just as clear/clearer as-is :shrug:
+
+Line:908, engines/ep/src/durability/active_durability_monitor.cc -> :notawesome:
+
+Line:420, engines/ep/src/durability/passive_durability_monitor.cc -> Do we need to drop them by key? Would it be unsafe/inconvenient to scan trackedWrites once and remove any for a given cid?
+
+Line:428, engines/ep/src/durability/passive_durability_monitor.cc -> Another dumb question: I may be misremembering, but can't we end up with multiple prepares for the same key in the PDM in some cases?
+If compaction only calls droppedKeyCb for the one instance on disk, we will remove the earlier prepare,
+but when do we remove the other(s)?
+Or can we not get into that state and also be dropping a collection?
+
+Line:429, engines/ep/src/durability/passive_durability_monitor.cc -> Dumb question for my understanding - if we've not persisted a prepare yet, when does dropKey() get called?
+Before I'd assumed they'd just be dropped at the eventual next compaction, but I guess the prepare can't sit in the PDM till then because of in-order commit, but I've not spotted how they'd get removed before then yet?
+
+Line:457, engines/ep/src/durability/passive_durability_monitor.cc -> Could you comment why toErase definitely won't be end()? Is dropKey() not called for prepares that could have been removed?
+Actually, on that note, why will trackedWrites definitely not be empty?
+Tired brain needs help :badpokerface:
+
+Line:4031, engines/ep/src/vbucket.cc -> So we deffo don't need to do anything for pending?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2020-06-15 08:34:25.000000000
+Message: 
+Patch Set 8: Code-Review-1
+
+(6 comments)
+
+One thing to check is when we have a prepare at the start of trackedWrites on the active for an invalid collection what happens if we try to complete it? We shouldn't block the completion or this will impact the latency of non-persist level prepares due to disk related tasks, but we need to skip the completion I guess.
+
+Thought of one PITA issue we might hit. Collection erasing compaction needs to be scheduled and could be inhibited temporarily by flushes or other compactions on that vBucket. We could probably end up in a situation where the active node drops and erases a collection then completes a prepares for another collection. The replicas need to be able to accept this even if they have not run the collection eraser yet (currently the OoO checks will probably catch this).
+Line:905, engines/ep/src/durability/active_durability_monitor.cc -> Yeah, I just copied what we did in the other iterator touching functions so std::find_if would be simpler
+
+Line:420, engines/ep/src/durability/passive_durability_monitor.cc -> Technically no, we don't need to drop them by key. Given that the collections eraser is basically a hook in the document visiting part of a compaction I think it makes more sense to drop them by key when we remove the corresponding items from the HashTable. We could just drop everything by cid at the start or end of a collection erasing compaction though.
+
+Line:428, engines/ep/src/durability/passive_durability_monitor.cc -> Yes! We can end up with multiple prepares for the same key in the PDM. However, I believe this requires that they are in different snapshots and the snap ends have not been persisted. See the below comment for why we need to have persisted things/everything.
+
+Line:429, engines/ep/src/durability/passive_durability_monitor.cc -> It doesn't get called. A collection dropping compaction should be trigger after the persistence of a collection deletion. See Collections::VB::Flush::checkAndTriggerPurge. If we are persisting the deletion of a colleciton then we must have persisted all the prepares in it already (as we wouldn't accept any more after the collection deletion).
+
+Line:457, engines/ep/src/durability/passive_durability_monitor.cc -> Think you're right here. Need to double check but we could have a prepare and commit for the same key on disk and not have the prepare in the ADM. We could (should?) actually narrow down the range of things that call into the ADM by checking PCS vs PPS. Similarly I think trackedWrites can be empty. I think things can still race a bit for magma with concurrent flushing so we shouldn't be too strict with the assertions here.
+
+Line:4031, engines/ep/src/vbucket.cc -> Will fix, we deffo do
+
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-06-15 09:04:29.000000000
+Message: 
+Patch Set 8: -Code-Review
+
+(3 comments)
+
+> Thought of one PITA issue we might hit. Collection erasing compaction needs to be scheduled and could be inhibited temporarily by flushes or other compactions on that vBucket. We could probably end up in a situation where the active node drops and erases a collection then completes a prepares for another collection. The replicas need to be able to accept this even if they have not run the collection eraser yet (currently the OoO checks will probably catch this).
+
+Heh, it sounds a bit gross, but if the PDM were informed of the dropped collection id as the replica receives the drop, maybe it could "lazily" skip over (and maybe remove?) prepares that are orphaned. Except that would be even more devilry dumped into the iterator-advancing-party, so :donotwant:
+Line:420, engines/ep/src/durability/passive_durability_monitor.cc -> Roger. I was just pondering the worst case of iterating a long trackedWrites each time for a large number of prepares, though I guess the overhead of this isn't going to be monumental, especially in comparison to the disk parts of compaction.
+
+I guess the worst-worst case would be dropping N prepares, with M prepares in tracked writes, but none of them are for the dropped collection :shrug:
+
+Line:428, engines/ep/src/durability/passive_durability_monitor.cc -> Ahhh :indeed:
+
+Line:429, engines/ep/src/durability/passive_durability_monitor.cc -> Oh duh yeah makes sense, I knew these were friday-evening-level questions :P
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2020-06-15 09:28:20.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:420, engines/ep/src/durability/passive_durability_monitor.cc -> Could add a PCS/PPS condition to only drop prepares that /should/ still exist in trackedWrites
+
+----------------------------------------------------------------------------------------------------------------------

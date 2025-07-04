@@ -1,0 +1,58 @@
+======================================================================================================================
+DESCRIPTION:
+
+Fix TSAN race when destroying a MockCookie
+
+Fix race of more than one thread trying to free a MockCookie. This is due to
+MockServerCookieApi::release() and destroy_mock_cookie() racing with
+each other. For instance, T1 could dec the ref count then pause. T2 gets
+run which decs the ref count, reads the ref count as 0 and frees the
+MockCookie. Then T1 gets run again, it tries to call getRefcount() which
+causes it to deref an invalid pointer as the MockCookie has been freed.
+To fix this make the read+write of the ref count atomic.
+
+RNING: ThreadSanitizer: data race on vptr (ctor/dtor vs virtual call) (pid=107468)
+  Write of size 8 at 0x7b4800030a80 by thread T2 (mutexes: write M1121813589057925128):
+    #0 cb::tracing::Traceable::~Traceable() ../kv_engine/include/memcached/tracer.h:132 (ep_testsuite_dcp+0x5aab16)
+    #1 MockCookie::~MockCookie() ../kv_engine/programs/engine_testapp/mock_cookie.cc:22 (ep_testsuite_dcp+0x5a9ddd)
+    #2 MockCookie::~MockCookie() ../kv_engine/programs/engine_testapp/mock_cookie.cc:18 (ep_testsuite_dcp+0x5a9e45)
+    #3 MockServerCookieApi::release(CookieIface const&) ../kv_engine/programs/engine_testapp/mock_server.cc:235 (ep_testsuite_dcp+0x5b86c4)
+    #4 EventuallyPersistentEngine::releaseCookie(CookieIface const*) /home/couchbase/jenkins/workspace/kv_engine.threadsanitizer_master/kv_engine/engines/ep/src/ep_engine.cc:1793 (ep_testsuite_dcp+0x765c89)
+    #5 ConnHandler::releaseReference() /home/couchbase/jenkins/workspace/kv_engine.threadsanitizer_master/kv_engine/engines/ep/src/connhandler.cc:343 (ep_testsuite_dcp+0x86cb6d)
+    #6 DcpConnMap::manageConnections() /home/couchbase/jenkins/workspace/kv_engine.threadsanitizer_master/kv_engine/engines/ep/src/dcp/dcpconnmap.cc:392 (ep_testsuite_dcp+0x7f415e)
+    ...
+
+  Previous read of size 8 at 0x7b4800030a80 by main thread:
+    #0 destroy_mock_cookie(CookieIface*) ../kv_engine/programs/engine_testapp/mock_cookie.cc:48 (ep_testsuite_dcp+0x5a9fa6)
+    #1 MockTestHarness::destroy_cookie(CookieIface*) /home/couchbase/jenkins/workspace/kv_engine.threadsanitizer_master/kv_engine/programs/engine_testapp/engine_testapp.cc:159 (ep_testsuite_dcp+0x490ae5)
+    #2 test_dcp_producer_stream_req_backfill(EngineIface*) ../kv_engine/engines/ep/tests/ep_testsuite_dcp.cc:2306 (ep_testsuite_dcp+0x4d3e3f)
+    ...
+
+  Location is heap block of size 336 at 0x7b4800030a80 allocated by main thread:
+    #0 operator new(unsigned long) <null> (libtsan.so.0+0x87c5c)
+    #1 create_mock_cookie(EngineIface*) ../kv_engine/programs/engine_testapp/mock_cookie.cc:32 (ep_testsuite_dcp+0x5a9f0a)
+    #2 MockTestHarness::create_cookie(EngineIface*) /home/couchbase/jenkins/workspace/kv_engine.threadsanitizer_master/kv_engine/programs/engine_testapp/engine_testapp.cc:155 (ep_testsuite_dcp+0x490aa5)
+    #3 test_dcp_producer_stream_req_backfill(EngineIface*) ../kv_engine/engines/ep/tests/ep_testsuite_dcp.cc:2287 (ep_testsuite_dcp+0x4d3d31)
+    #4 execute_test(test, char const*, char const*)::$_1::operator()() const /home/couchbase/jenkins/workspace/kv_engine.threadsanitizer_master/kv_engine/programs/engine_testapp/engine_testapp.cc:445 (ep_testsuite_dcp+0x48f988)
+    #5 test_result std::__invoke_impl<test_result, execute_test(test, char const*, char const*)::$_1&>(std::__invoke_other, execute_test(test, char const*, char const*)::$_1&) /opt/gcc-10.2.0/lib/gcc/x86_64-pc-linux-gnu/10.2.0/../../../../include/c++/10.2.0/bits/invoke.h:60 (ep_testsuite_dcp+0x48f90d)
+    #6 std::enable_if<is_invocable_r_v<test_result, execute_test(test, char const*, char const*)::$_1&>, test_result>::type std::__invoke_r<test_result, execute_test(test, char const*, char const*)::$_1&>(execute_test(test, char const*, char const*)::$_1&) /opt/gcc-10.2.0/lib/gcc/x86_64-pc-linux-gnu/10.2.0/../../../../include/c++/10.2.0/bits/invoke.h:113 (ep_testsuite_dcp+0x48f89d)
+    #7 std::_Function_handler<test_result (), execute_test(test, char const*, char const*)::$_1>::_M_invoke(std::_Any_data const&) /opt/gcc-10.2.0/lib/gcc/x86_64-pc-linux-gnu/10.2.0/../../../../include/c++/10.2.0/bits/std_function.h:291 (ep_testsuite_dcp+0x48f78d)
+    #8 std::function<test_result ()>::operator()() const /opt/gcc-10.2.0/lib/gcc/x86_64-pc-linux-gnu/10.2.0/../../../../include/c++/10.2.0/bits/std_function.h:622 (ep_testsuite_dcp+0x4900d8)
+    #9 try_run_test(std::function<test_result ()>) /home/couchbase/jenkins/workspace/kv_engine.threadsanitizer_master/kv_engine/programs/engine_testapp/engine_testapp.cc:288 (ep_testsuite_dcp+0x48d368)
+    #10 execute_test(test, char const*, char const*) /home/couchbase/jenkins/workspace/kv_engine.threadsanitizer_master/kv_engine/programs/engine_testapp/engine_testapp.cc:445 (ep_testsuite_dcp+0x48ea37)
+    #11 main /home/couchbase/jenkins/workspace/kv_engine.threadsanitizer_master/kv_engine/programs/engine_testapp/engine_testapp.cc:698 (ep_testsuite_dcp+0x48dbfb)
+
+  Mutex M1121813589057925128 is already destroyed.
+
+SUMMARY: ThreadSanitizer: data race on vptr (ctor/dtor vs virtual call) ../kv_engine/include/memcached/tracer.h:132 in cb::tracing::Traceable::~Traceable()
+
+Change-Id: I5cc6959ee9644c8c780b239cd63a6071c10c6c45
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Richard de Mellow
+Date: 2021-06-30 14:17:14.000000000
+Message: 
+Patch Set 7: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------

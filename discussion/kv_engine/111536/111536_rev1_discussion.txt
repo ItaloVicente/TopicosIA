@@ -1,0 +1,188 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-34780: Clear the pending sync writes during bucket shutdown WIP
+
+During bucket deletion all of the pending sync writes needs
+to be terminated for bucket deletion to complete. As part
+of bucket deletion we tear down all of the DCP streams so
+there is no way for the ack/nack's from the replicas to
+arrive and unblock the cookie and continue bucket deletion.
+
+Change-Id: I1f2801c69cb1ee35cd0cfa4622d7ab5dc847f1e4
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Trond Norbye
+Date: 2019-07-03 08:56:39.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-07-03 09:22:47.000000000
+Message: 
+Patch Set 1: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/18545/ : FAILURE
+
+Compile error at /home/couchbase/jenkins/workspace/kv_engine-clang_analyzer-master/kv_engine/engines/ep/src/kv_bucket.cc:858:46:
+error: non-constant-expression cannot be narrowed from type "size_t" (aka "unsigned long") to "Vbid::id_type" (aka "unsigned short") in initializer list [-Wc++11-narrowing]
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/18545/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/12614/ : FAILURE
+
+The warnings threshold for this job was exceeded - <a href="warningsResult">1 warnings</a> found. ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/12614/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/21654/ : FAILURE
+
+Compile error at ..\kv_engine\engines\ep\src\kv_bucket.cc(858): error C2398: Element "1": conversion from "size_t" to "Vbid::id_type" requires a narrowing conversion ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/21654/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/5410/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/5410/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/20827/ : UNSTABLE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/20827/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/2490/ : UNSTABLE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/2490/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/19478/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/11861/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-07-03 10:53:28.000000000
+Message: 
+Patch Set 1: Code-Review-1
+
+(3 comments)
+Line:407, engines/ep/src/durability/active_durability_monitor.cc -> We probably have to change this a little - EDurabilityImpossible means that the current replica topology cannot accept the SyncWrite - and the client could interpret that as nodes being down etc.
+
+In this case I think you're just trying to stop accepting any more during shutdown; it feels like we should be handling that at a higher level - for example maybe changing the enableTraffic flag back to false to put ep-engine back into degraded mode (similar to warmup) and block any mutation attempts.
+
+Line:958, engines/ep/src/durability/active_durability_monitor.cc -> Not sure this does what you expect - write is a copy of the element in trackedWrites.
+
+Line:860, engines/ep/src/kv_bucket.cc -> As per previous comment, suggest this re-uses the enableTraffic method.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2019-07-03 14:43:53.000000000
+Message: 
+Patch Set 1:
+
+(3 comments)
+Line:407, engines/ep/src/durability/active_durability_monitor.cc -> Yeah.. 
+
+Btw. I think this code (when used at line 425-430 isn't safe either.. as we should be holding the write-lock while performing this check _AND_ adding it at the same time without releasing the lock...
+
+As of fiddling with enable-traffic... we only do a single call to the bucket to tell it that we're about to shut down the bucket, and we might have multiple threads running in parallell at that time adding sync requests. The intent was to not add acquiring of new locks to the check that state during shutdown, but reuse the ones we've got.
+
+As of the return code... If the client sends this request _and_ it is racing with a bucket deletion, I don't think "durability impossible" is such a bad error code returned from the master (it can't accept the durable write, as it has no one to replicate it to... The bucket is going away on this node (we could have used ENGINE_TMPFAIL, but not sure if it _really_ matters in the real world..)
+
+Line:958, engines/ep/src/durability/active_durability_monitor.cc -> Oh... I see it now.. I read it as auto& write : s->trackedWrites (why would we have made a copy to look at the cookie :S )
+
+Line:860, engines/ep/src/kv_bucket.cc -> The only thing would be: how do I synchronize all front end worker threads with that check (so that no one is adding any cookies to the internal sync write lists _after_ I go through and notify all of them with ambiguous notification (or we would just end up in the same situation again, just a harder race to find)..
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-07-04 08:31:54.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:860, engines/ep/src/kv_bucket.cc -> You could effectively move `trafficEnabled` under the vbucket state lock (vb->getStateLock), and then require taking a write lock on that to change trafficEnabled back to false.
+
+That will ensure no other threads are performing operations.
+
+(TBH we should probably do something like that before SyncWrites - what's stopping a bunch of client threads today performing continuous GETs which require BGFetch and keep the connections open?)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2019-07-04 08:42:10.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:860, engines/ep/src/kv_bucket.cc -> I'll look into refactoring to use trafficEnabled instead. At least I've got something working _WITH_ a unit test as a fallback to not block the beta..
+
+As of the second comment, these "bg-fetches" will "eventually" complete, and we there won't be that many of these being added during bucket deletion (only 1 per worker thread which was scheduled before we marked the bucket as being deleted).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-07-04 09:05:47.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:860, engines/ep/src/kv_bucket.cc -> > As of the second comment, these "bg-fetches" will "eventually" complete, and we there won't be that many of these being added during bucket deletion (only 1 per worker thread which was scheduled before we marked the bucket as being deleted).
+
+Ah - so arn't the SyncWrites the same? Can't we just mark the bucket as deleted (to prevent any more front-end ops), then respond to any in-flight SyncWrites with ambiguous?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2019-07-04 09:15:54.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:860, engines/ep/src/kv_bucket.cc -> As I (poorly) tried to explain elsewhere: the sync write operations never completes or get aborted from the other end, we have to wait for all of them to time out before the bucket deletion completes (if the timeout code works, otherwise we'll hang forever). The reason for that is that all of the DCP connections gets torn down immediately as part of bucket deletion.
+
+What I've added now was trying to get the logic in there to terminate the outstanding sync write requests (as we won't get any notifications over DCP).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-07-04 10:06:09.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:860, engines/ep/src/kv_bucket.cc -> Sure, I get that we need to cancel (as ambiguous) anything *currently* in progress - which I agree we want to use the RespondAmbiguousNotification task you have here.
+
+The part I was asking about was was how we ensure no more SyncWrites arrive (which could again block connection teardown).
+
+I assumed that nothing in the memcached frontend was stopping requests, hence your initial change to ActiveDurabilityMonitor to have it block new SyncWrites. However, from your above comment about bgfetches it sounds like once the front-end marks the bucket as being deleted, no more client operations are allowed down to the engine.
+
+So my question is - why do we need the "extra" guard on ActiveDurabilityMonitor to stop incoming syncWrites?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2019-07-04 11:13:11.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:860, engines/ep/src/kv_bucket.cc -> Because this happens async..
+
+Thread 1 checks bucket state and is allowed to proceed.. then goes all the way down to checking all of the durability stuff and right before it acquire the lock to insert the new entry it is taken off the CPU
+
+Thread 2 handles the Delete bucket call and put the bucket in the state where no new operations will be executed. It then calls initiate_shutdown which then fetch the list of cookies registered in Durability Manager and "interrupts" them (the code I just added. It then returns and start waiting for all cookies to be "released".
+
+Thread 1 gets scheduled again, grabs the lock to the list and puts the cookie in there. This cookie will _never_ receive a notification from DCP (as there are no DCP streams, and it'll never be any). We have to time out, and bucket deletion will hang until it is timed out.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-07-04 11:22:13.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:860, engines/ep/src/kv_bucket.cc -> Ok, makes sense - I didn't know if deleting the bucket required taking an exclusive lock or similar.
+
+So the suggestion I had about taking the vb->getStateLock in exclusive mode wile setting enableTraffic to false should avoid this - a client which wants to perform a SyncWrite (or any other operation) needs shared access to that lock to proceed.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2019-07-04 11:29:54.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:860, engines/ep/src/kv_bucket.cc -> Will look at that in a minute (looking at something else for the moment)... Btw. we're sure that it won't introduce any unexpected side effects?
+
+----------------------------------------------------------------------------------------------------------------------

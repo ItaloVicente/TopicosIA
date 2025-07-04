@@ -1,0 +1,121 @@
+======================================================================================================================
+DESCRIPTION:
+
+NCBC-2362: Avoid thread blocking in ConfigHandler
+
+Motivation
+----------
+The current approach to monitoring for configuration changes appears to
+permanently use a thread from the thread pool, including blocking while
+waiting on other thread pool tasks. This could cause thread pool
+depletion problems.
+
+Modifications
+-------------
+Add the TPL Dataflow library, and use a BufferBlock instead of a
+ConcurrentQueue to provide an awaitable queue.
+
+Change from synchronous event handlers on BucketBase to an asynchronous
+event sink. Fire these in parallel for all buckets.
+
+Results
+-------
+No thread on the thread pool is blocked while awaiting outside signals.
+
+Change-Id: I680ec562e8d39d73618a2d464b626f11b8aeb5d6
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Brant Burnett
+Date: 2020-02-09 14:36:23.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-02-09 14:36:31.000000000
+Message: 
+Patch Set 1:
+
+Build Started http://sdk.jenkins.couchbase.com/job/dotnet-sdk/job/couchbase-net-client-gerrit-trigger/1411/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-02-09 14:38:38.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+http://sdk.jenkins.couchbase.com/job/dotnet-sdk/job/couchbase-net-client-gerrit-trigger/1411/ : success
+----------------------------------------------------------------------------------------------------------------------
+Author: Jeffry Morris
+Date: 2020-02-09 19:21:37.000000000
+Message: 
+Patch Set 1: Code-Review-2
+
+I am not 100% here; I understand the portion of the commit for dealing with thread depletion but not sure about the switch from BlockingCollection to BufferBlock because the pattern using GetConsumingEnumerable fits nicely with rebalance and confi update semantics. 
+
+Configs can come from the server in different ways: a) via dedicated polling (why not use a dedicated background thread?) and b) from any K/V operation on any thread. There is a pattern for consuming configs: any thread can publish but only a dedicated thread sequentially process each config - note there is no order to the config.Rev because each server maybe publishing a different version, but we don't want to duplicate processing because of the cost, we just want the latest as best we can.
+
+The BlockingCollection fits this nicely, because any thread (poll or via CCCP from KV NMVB) can publish, but each published config is synchronously handled by GetConsumerableEnumerable - because of this all of the buggy locking and state management is avoided. We added this to SDK2 somewhere along and it improved thing dramatically. It also easily allows us to skip duplicate configs by keeping a latest config.Rev and tossing any older configs without incurring the cost of processing.
+
+A lot of thought, testing, and QE resources went into validating this and I don't see a reason to change it ATM. That being said, I am open to debate or any superior solution that satisfies the scenario described above.
+
+-Jeff
+----------------------------------------------------------------------------------------------------------------------
+Author: Brant Burnett
+Date: 2020-02-09 20:53:03.000000000
+Message: 
+Patch Set 1:
+
+> Patch Set 1: Code-Review-2
+> 
+> I am not 100% here; I understand the portion of the commit for dealing with thread depletion but not sure about the switch from BlockingCollection to BufferBlock because the pattern using GetConsumingEnumerable fits nicely with rebalance and confi update semantics. 
+> 
+> Configs can come from the server in different ways: a) via dedicated polling (why not use a dedicated background thread?) and b) from any K/V operation on any thread. There is a pattern for consuming configs: any thread can publish but only a dedicated thread sequentially process each config - note there is no order to the config.Rev because each server maybe publishing a different version, but we don't want to duplicate processing because of the cost, we just want the latest as best we can.
+> 
+> The BlockingCollection fits this nicely, because any thread (poll or via CCCP from KV NMVB) can publish, but each published config is synchronously handled by GetConsumerableEnumerable - because of this all of the buggy locking and state management is avoided. We added this to SDK2 somewhere along and it improved thing dramatically. It also easily allows us to skip duplicate configs by keeping a latest config.Rev and tossing any older configs without incurring the cost of processing.
+> 
+> A lot of thought, testing, and QE resources went into validating this and I don't see a reason to change it ATM. That being said, I am open to debate or any superior solution that satisfies the scenario described above.
+> 
+> -Jeff
+
+The BufferBlock still offers the same semantics for processing the configurations that the ConcurrentQueue does. As each configuration is received, regardless of source, it is fully and completely processed in the order it was received before the next item is processed. The only difference I am aware of is that instead of blocking the thread to await an item to appear in the queue, we can await, release the thread, and have the work to process the item queued back onto a new thread when available.
+
+That said, if you feel changing it is too high-risk, the other option is to drop the use of Task.Run(Process) and instead spin up a dedicated thread. Since this is for the lifetime of the Cluster object, the cost shouldn't be a major problem.
+
+I'll go ahead and work on this approach.
+----------------------------------------------------------------------------------------------------------------------
+Author: Jeffry Morris
+Date: 2020-02-10 03:15:03.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+
+> Patch Set 1:
+> 
+> > Patch Set 1: Code-Review-2
+> > 
+> > I am not 100% here; I understand the portion of the commit for dealing with thread depletion but not sure about the switch from BlockingCollection to BufferBlock because the pattern using GetConsumingEnumerable fits nicely with rebalance and confi update semantics. 
+> > 
+> > Configs can come from the server in different ways: a) via dedicated polling (why not use a dedicated background thread?) and b) from any K/V operation on any thread. There is a pattern for consuming configs: any thread can publish but only a dedicated thread sequentially process each config - note there is no order to the config.Rev because each server maybe publishing a different version, but we don't want to duplicate processing because of the cost, we just want the latest as best we can.
+> > 
+> > The BlockingCollection fits this nicely, because any thread (poll or via CCCP from KV NMVB) can publish, but each published config is synchronously handled by GetConsumerableEnumerable - because of this all of the buggy locking and state management is avoided. We added this to SDK2 somewhere along and it improved thing dramatically. It also easily allows us to skip duplicate configs by keeping a latest config.Rev and tossing any older configs without incurring the cost of processing.
+> > 
+> > A lot of thought, testing, and QE resources went into validating this and I don't see a reason to change it ATM. That being said, I am open to debate or any superior solution that satisfies the scenario described above.
+> > 
+> > -Jeff
+> 
+> The BufferBlock still offers the same semantics for processing the configurations that the ConcurrentQueue does. As each configuration is received, regardless of source, it is fully and completely processed in the order it was received before the next item is processed. The only difference I am aware of is that instead of blocking the thread to await an item to appear in the queue, we can await, release the thread, and have the work to process the item queued back onto a new thread when available.
+> 
+> That said, if you feel changing it is too high-risk, the other option is to drop the use of Task.Run(Process) and instead spin up a dedicated thread. Since this is for the lifetime of the Cluster object, the cost shouldn't be a major problem.
+> 
+> I'll go ahead and work on this approach.
+
+Spinning single background thread/task was intentional to keep the locking minimum while dealing with a highly multi-threaded scenario and keep thread handling complexity low (less potential for hard to recreate bugs). Indeed, it keeps one thread (and only one thread) dedicated for the lifetime of the process, but seems like a good trade-off. Rebalancing and the potential for every single thread to publish a config rev is a multithreading nightmare full of reentrency potential. It would be a different story if we were hap-haphazardly dedicating threads which would definitely case thread pool depletion issues because we would be "leaking".
+
+Dunno, I could be wrong of course. IConfigHandler can vary by implementation, so we could spin up both solutions and test, just not sure its worth it atm given some of the other pending items for myself.
+Line:93, src/Couchbase/Core/Configuration/Server/ConfigHandler.cs -> Doesn't RecieveAsync throw an exception if the buffer block is empty?  Or because the token has no timeout await forever until an item is added or the token is canceled directly?
+
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,118 @@
+======================================================================================================================
+DESCRIPTION:
+
+Mutual exclusion for reading config files
+
+On Windows we have to be more careful about concurrent accesses to the
+same files; we may get a FileNotFoundException when the file is
+currently open.
+
+Add a LockFile.lockAndWait() method, and use it in FileBasedConfig to
+
+* lock the file also when reading, and
+* retry a few times if the file is currently locked.
+
+Additionally, wrap file accesses in synchronized blocks to already
+ensure mutual exclusion among the threads of one Java process that
+might try to access the file.
+
+Bug: 529522
+Change-Id: I456b0afe4c0033cf4376dc4a303e57ad52c50158
+Signed-off-by: Thomas Wolf <thomas.wolf@paranor.ch>
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Thomas Wolf
+Date: 2018-12-11 19:38:35.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-12-11 19:38:42.000000000
+Message: 
+Patch Set 2:
+
+Build Started https://ci.eclipse.org/jgit/job/jgit.gerrit/15055/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-12-11 19:40:49.000000000
+Message: 
+Patch Set 2: Verified-1
+
+Build Failed 
+
+https://ci.eclipse.org/jgit/job/jgit.gerrit/15055/ : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Michael Keppler
+Date: 2018-12-11 20:01:48.000000000
+Message: 
+Patch Set 2: Code-Review-1
+
+(1 comment)
+Line:173, org.eclipse.jgit/src/org/eclipse/jgit/storage/file/FileBasedConfig.java -> I had done some experiments in this area in this change: https://git.eclipse.org/r/#/c/126730/2/org.eclipse.jgit/src/org/eclipse/jgit/storage/file/FileBasedConfig.java
+
+My finding was that a "locked by other process" issue would be signaled by a FileNotFoundException. And in that case this code still throws the noFile exception and does not continue with the while loop, right? Or do I read the control flow wrong?
+
+At least that is how I remember why I had explicitly taken out the rethrowing in my experimental change linked above. I had forcefully locked the file from outside while debugging, and without my change there was no re-trying.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2018-12-11 20:10:21.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:173, org.eclipse.jgit/src/org/eclipse/jgit/storage/file/FileBasedConfig.java -> > My finding was that a "locked by other process" issue would be
+ > signaled by a FileNotFoundException. And in that case this code
+ > still throws the noFile exception and does not continue with the
+ > while loop, right? Or do I read the control flow wrong?
+
+That's quite right. However, all those FileNotFoundException we get look like "the other process" is Eclipse itself! So our threads stomp on each others feet. That alone would be handled by a synchronized block around reading the file.
+
+The LockFile should handle multiple processes. So if we get a FileNotFoundException here while the file actually exists something is definitely wrong, like "No permission".
+
+Except that the lockAndWait doesn't really work; a simple Thread.sleep() is probably not a good idea there. The build failed because it forks several tests that do not mock the user config, so they all failed because of contention on the real Jenkins user's .gitconfig!
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Michael Keppler
+Date: 2018-12-11 20:20:58.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:173, org.eclipse.jgit/src/org/eclipse/jgit/storage/file/FileBasedConfig.java -> > So if we get a
+ > FileNotFoundException here while the file actually exists something
+ > is definitely wrong, like "No permission".
+
+No, sorry. We are on Windows in this scenario. A typical cause is a virus scanner, which will just deny access to the file as long as it has not scanned the content itself after the last change to the file. So the inaccessibility is really for a short time only, not permanent. That is why we need to retry.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2018-12-11 20:39:53.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:173, org.eclipse.jgit/src/org/eclipse/jgit/storage/file/FileBasedConfig.java -> If you think it's a virus scanner, then let's not bother with mutual exclusion at all -- it won't help.
+
+If you add a short sleep() before the retries in your attempt, we could use that, and I'd abandon this one.
+
+If we then still get bug reports about such exceptions, we can try this locking idea again.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2018-12-11 22:31:43.000000000
+Message: 
+Patch Set 2: Code-Review-2
+
+This is by no means ready. We should try Michael's simpler re-try in https://git.eclipse.org/r/#/c/126730/ first. (Once it has a short sleep between re-tries.)
+
+The new LockFile.lockAndWait() isn't good enough, and if we can resolve this without a lock file for reading it'd be better.
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2019-06-30 11:38:46.000000000
+Message: 
+Abandoned
+
+Obsoleted by https://git.eclipse.org/r/#/c/126730/
+----------------------------------------------------------------------------------------------------------------------

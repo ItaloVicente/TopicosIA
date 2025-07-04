@@ -1,0 +1,75 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-54801: Avoid purging stale items while referenced by older items
+
+In ephemeral buckets, old versions of documents may briefly be retained
+in memory (in the sequence list) if they are required by a ongoing
+backfill.
+
+Stale items may have a "replacement" pointer set, pointing
+to the newer version of the value.
+
+This is used to determine if the replacement appears in the range of
+seqnos the backfill covers. This prevents multiple versions of a value
+being sent in a given backfill.  Stale items can't be unconditionally
+skipped, as that could lead to _no_ version of a value being sent in a
+backfill.
+
+The pointed-to value can itself be made stale if the document is
+updated again. This leads to:
+
+ V1(Stale) -> V2(Stale) -> V3(New)
+
+This is fine. _However_, the stale item purger may pause, releasing its
+range lock (to avoid blocking backfills for a long time). If it
+happened to pause between the seqnos of V1 and V2, once it resumes it
+may purge V2.
+
+This would leave V1 with a dangling replacement ptr:
+
+V1(Stale) -> XXXXX      ... V3(New)
+
+This is unsafe; a subsequent backfill would read from garbage memory,
+potentially leading to a crash or an incorrect backfill.
+
+In _principle_, this could be fixed by updating the replacement ptr to
+point V1->V3.
+This might appear to risk consistency issues e.g., "what if a new
+backfill covered seqnos including V1 and V2, but not V3? It would
+incorrectly see an older version V1, the document would appear to have
+reverted". However, that particular scenario would not be possible;
+backfills will always end at the high seqno at the time of their
+creation; a new backfill would always include V3 as well.
+
+Stale items can not be purged while there are ongoing backfills
+locking a range of seqnos including the stale item, so there is no
+concern for existing backfills.
+
+However, locating the _previous_ version of a document in the seqlist
+would be costly.
+
+A simpler approach (which is the one taken in this patch) is to forbid
+purging stale items while an older stale version still points to them.
+
+This patch achieves this by adding a bit flag indicating if _this_
+OrderedStoredValue is the replacement for an older version.  This is
+set when the new OSV is appended to the seqlist, and is cleared when
+the older stale version is purged (the old version holds a pointer to
+its replacement, so it is easy to find the new value and clear this
+flag).
+
+In the above case, that would make V2 ineligible for purging until
+after V1 is purged; this ensures versions of a value are purged in
+the order they were created.
+
+Change-Id: I78c3e60809bc3ce865f8ff8871cbf0fc4ac6b09e
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: James H
+Date: 2023-01-12 17:29:58.000000000
+Message: 
+Uploaded patch set 2: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------

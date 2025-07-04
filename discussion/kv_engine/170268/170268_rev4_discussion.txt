@@ -1,0 +1,229 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-50874: Reset snap start if less than lastSeqno on new checkpoint creation
+
++Problem+
+
+If a replica vBucket is promoted to active, and the last DCP message
+it received was a Snapshot Marker which had the first mutation
+de-duplicated, then the snapshot start of the newly-promoted active
+ends up greater than the active.
+
+Upon the next Flusher run (i.e. next mutation to the vBucket), the
+Flusher throws an exception when trying to fetch items which
+terminates KV-Engine (as exception is thrown on BG thread):
+
+    CheckpointManager::queueDirty: lastBySeqno not in snapshot range. vb:0 state:active snapshotStart:12 lastBySeqno:11 snapshotEnd:11 genSeqno:Yes checkpointList.size():2
+
++Details+
+
+When streaming data from an Active to Replica vBucket, the extent of
+the Checkpoint is sent via DCP using a SnapshotMarker message,
+followed by N Mutation / Deletion messages. The snapshot marker may be
+discontinuous compared to the previous if any de-duplication occurred
+within the Checkpoint - for example if document "key" was written
+sufficient times in quick succession, one could end up with the
+following two Checkpoints on the active and subsequent DCP
+SnapshotMarker sent to the replica:
+
+    CheckpointManager[0x108a03080] with numItems:6 checkpoints:2
+        Checkpoint[0x10891f000] with id:2 seqno:{1,10} snap:{0,10, visible:10} state:CHECKPOINT_CLOSED numCursors:1 type:Memory hcs:-- items:[
+            {10,mutation,cid:0x0: deduplicated_key,119,}
+            {11,checkpoint_end,cid:0x1:checkpoint_end,119,[m]}
+        ]
+        Checkpoint[0x10891fa00] with id:3 seqno:{11,12} snap:{10,12, visible:12} state:CHECKPOINT_OPEN numCursors:1 type:Memory hcs:-- items:[
+            {11,checkpoint_start,cid:0x1:checkpoint_start,121,[m]}
+            {12,mutation,cid:0x0:deduplicated_key,130,}
+        ]
+
+Note how there are just two mutations remaining (at seqnos 10 and 12),
+and that there is a seqno "gap" at 11 (ignore meta-items which are not
+send over DCP).
+
+When this is replicated over DCP it will be sent as:
+
+* DCP_SNAPSHOT_MARKER(start:0, end:10, flags=CHK)
+* DCP_MUTATION(seqno:10, ...)
+* DCP_SNAPSHOT_MARKER(start:12, end:12, flags=CHK)
+* DCP_MUTATION(seqno:12, ...)
+
+Note that the second SnapshotMarker being flagged as "CHK"
+(Checkpoint) is essential - we need the replica to end up creating a
+new Checkpoint with the start and end controlled by the active - a
+SnapshotMarker without that flag is insufficient as it just extends
+the existing checkpoint, increasing the checkpoint end but leaving
+start unaffected.
+
+Once these messages are replicated over DCP the replica vBucket should
+have equivalent state as the active.
+
+However; if the last DCP_MUTATION is not received - for example if the
+active node is being failed over and the stream is closed before the
+DCP_MUTATION, then the state of the replica - crucially the Open
+checkpoint is as follows:
+
+    Checkpoint[0x10cecde00] with id:2 seqno:{11,11} snap:{12,12, visible:12} state:CHECKPOINT_OPEN numCursors:0 type:Memory hcs:-- items:[
+	{11,checkpoint_start,cid:0x1:checkpoint_start,121,[m]}
+    ]
+
+When this sequence occurs, the seqno range (11,11) in the open
+Checkpoint is less than the snapshot range (12,12). This is
+problematic as we have essentially broken an invariant on Checkpoints
+- that all items within them are between the snapshot start and end.
+
+This doesn't immediately cause a problem, but if this vBucket is
+converted to Active and starts accepting mutations itself, it will
+start generating seqnos from the last seqno received - 10 in this
+case. This results in the next mutation being assigned seqno 11, which
+when the flusher is woken and attempts to flush throws an exception on
+the BG thread and crashes KV-Engine.
+
++Solution+
+
+The cleanest way to solve this would be to ensure that the
+SnapshotMarker has a start equal to the start of the source Checkpoint
+- i.e. 11 instead of 12. That is indeed what has been done to address
+MB-50333 which is a SyncWrite variant of this issue. However that is a
+medium-sized change and affects the actual data sent over the wire, so
+more risky for a maitenance fix.
+
+Instead this patch takes a more targetted approach - when we create a
+new Checkpoint during the setvBucketState, we modify the start seqno
+if it is less than the lastSeqno.
+
+Change-Id: Icc6176a3634944800271be0d9d05949c63b29bf4
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2022-02-10 17:15:57.000000000
+Message: 
+Uploaded patch set 4.
+----------------------------------------------------------------------------------------------------------------------
+Author: Restriction Checker
+Date: 2022-02-10 17:16:08.000000000
+Message: 
+Patch Set 4:
+
+Branch restricted. PLEASE READ this URL: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/286659/artifact/restricted.html : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-02-10 18:08:54.000000000
+Message: 
+Patch Set 4: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/1961/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/1961/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/2199/ : FAILURE
+
+Failure of GoogleTest "AuditConfigTest.TestGetSetSanitizeLogPath":
+
+<pre>
+[ RUN      ] AuditConfigTest.TestGetSetSanitizeLogPath
+..\kv_engine\auditd\tests\auditconfig_test.cc(281): error: Value of: config.get_log_directory()
+  Actual: "auditconfig-test-086901/"
+Expected: testdir
+Which is: "auditconfig-test-086901"
+[  FAILED  ] AuditConfigTest.TestGetSetSanitizeLogPath (1 ms)
+AuditConfigTest.TestGetSetSanitizeLogPath
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/2199/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/26573/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/mad-hatter/114/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/mad-hatter/1410/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/2062/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/2061/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/2043/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/1840/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-02-11 09:04:43.000000000
+Message: 
+Patch Set 4:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/2200/ : FAILURE
+
+Failure of GoogleTest "AuditConfigTest.TestGetSetSanitizeLogPath":
+
+<pre>
+[ RUN      ] AuditConfigTest.TestGetSetSanitizeLogPath
+..\kv_engine\auditd\tests\auditconfig_test.cc(281): error: Value of: config.get_log_directory()
+  Actual: "auditconfig-test-851201/"
+Expected: testdir
+Which is: "auditconfig-test-851201"
+[  FAILED  ] AuditConfigTest.TestGetSetSanitizeLogPath (1 ms)
+AuditConfigTest.TestGetSetSanitizeLogPath
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/2200/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/26573/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/mad-hatter/114/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/mad-hatter/1410/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/2062/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/2061/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/2043/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/1840/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/1962/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-02-11 10:38:35.000000000
+Message: 
+Patch Set 4:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/2201/ : FAILURE
+
+Failure of GoogleTest "AuditConfigTest.TestGetSetSanitizeLogPath":
+
+<pre>
+[ RUN      ] AuditConfigTest.TestGetSetSanitizeLogPath
+..\kv_engine\auditd\tests\auditconfig_test.cc(281): error: Value of: config.get_log_directory()
+  Actual: "auditconfig-test-058701/"
+Expected: testdir
+Which is: "auditconfig-test-058701"
+[  FAILED  ] AuditConfigTest.TestGetSetSanitizeLogPath (0 ms)
+AuditConfigTest.TestGetSetSanitizeLogPath
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/2201/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/26573/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/mad-hatter/114/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/mad-hatter/1410/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/2062/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/2061/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/2043/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/1840/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/1962/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

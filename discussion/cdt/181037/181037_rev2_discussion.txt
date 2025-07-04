@@ -1,0 +1,101 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 573764 - Ambiguous conversion on numeric type
+
+Change-Id: Ia7ffd1169a867f7e05de36f5e278b4141af55b62
+Signed-off-by: Michael Uhl <Michael.Uhl@NashTech.Com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Michael Uhl
+Date: 2021-05-27 11:41:29.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: CDT Bot
+Date: 2021-05-27 12:25:31.000000000
+Message: 
+Patch Set 2: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-other-pipeline/3462/ : SUCCESS. p2 repository available on https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-other-pipeline/3462/artifact/releng/org.eclipse.cdt.repo/target/repository/ - please mark build as "Keep this build forever" if the p2 repo is needed for testing. Otherwise it will be deleted shortly.
+
+https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-ui-only-pipeline/3260/ : SUCCESS
+
+https://ci.eclipse.org/cdt/job/cdt-verify-code-cleanliness-pipeline/2995/ : SUCCESS. Formatting, whitespace, version numbers and other checks appear to be correct. See https://github.com/eclipse-cdt/cdt-infra/tree/master/jenkins/pipelines/cdt/verify#cdt-verify-code-cleanliness for documentation on what is checked.
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc-André Laperle
+Date: 2021-05-27 17:51:53.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:382, core/org.eclipse.cdt.core.tests/parser/org/eclipse/cdt/core/parser/tests/ast2/cxx14/VariableTemplateTests.java -> I see something different in clang
+clang++ main.cpp 
+main.cpp:10:5: error: call to 'function' is ambiguous
+                  function((((0x0UL)&0xFUL)<<16));
+                  ^~~~~~~~
+main.cpp:2:8: note: candidate function
+                void function(signed int *pElementId) { }
+                     ^
+main.cpp:4:8: note: candidate function
+                void function(unsigned int configCmd) { }
+                     ^
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc-André Laperle
+Date: 2021-05-28 06:09:02.000000000
+Message: 
+Patch Set 2:
+
+(2 comments)
+Line:382, core/org.eclipse.cdt.core.tests/parser/org/eclipse/cdt/core/parser/tests/ast2/cxx14/VariableTemplateTests.java -> Ah sorry, it seemed to be dependent on the std. I don't get it with -std=c++11 and up.
+
+Line:385, core/org.eclipse.cdt.core.tests/parser/org/eclipse/cdt/core/parser/tests/ast2/cxx14/VariableTemplateTests.java -> we should probably check that the call resolves to the correct function, not just that there are no errors.
+
+In fact, if I use this code:
+
+#include <iostream>
+void function(signed int *pElementId) { std::cout << 1 << std::endl;}
+void function(unsigned int configCmd) { std::cout << 2 << std::endl;}
+
+int main()
+{
+	function(0&1);
+}
+
+With this change, it resolves to the first function declaration but if I run it, it outputs "2"
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc-André Laperle
+Date: 2021-05-29 04:07:29.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:385, core/org.eclipse.cdt.core.tests/parser/org/eclipse/cdt/core/parser/tests/ast2/cxx14/VariableTemplateTests.java -> I investigated this bug some more. I was confused by the difference of behavior in C++11 (testing with Clang). Then I noticed the behavior is also different in C++11 when calling function(0) instead of function(0 & 1). The answer is that it's a difference in the handling of the "null pointer constant"
+
+Notice the C++11 difference here https://en.cppreference.com/w/cpp/types/NULL
+"The macro NULL is an implementation-defined null pointer constant, which may be
+* an integral constant expression rvalue of integer type that evaluates to zero
+(until C++11)
+* an integer literal with value zero, or a prvalue of type std::nullptr_t
+(since C++11)
+
+A null pointer constant may be implicitly converted to any pointer and pointer to member type; such conversion results in the null pointer value of that type."
+
+So in C++11, it has to be specifically an integer literal of 0 and not any constant expression in order to be considered a null pointer constant. Indeed, the CDT code follows the old way if you check in Conversions.isNullPointerConstant. With (0 & 1) wrongly being considered a null pointer constant, it can implicitly convert to a pointer type (like int *) which leads to the ambiguity with the other function in the example.
+
+So the proper fix involves modifying Conversions.isNullPointerConstant so that it checks for zero only for a basic (integer) type that comes from an integer literal. I'd also be worried of breaking conversions for pre C++11 which I'm sure is still widely used in embedded world so ideally there should be a version check (is that even done anywhere in CDT semantic code?).
+
+Adding a flag to track whether a CPPBasicType comes from an integer literal is easy. The problem is that when evaluating the type of an expression, like binary expression above (0 & 1), it can return directly the types of one of the operands without creating a new type so we still wrongly have the flag indicating that it comes from a literal. Updating all code paths in order to create new types that wouldn't have the flag seems error prone and clients (implementers of ICCPPEvaluation) would also be affected in an error-prone way. Perhaps you have a idea how to do this more safely.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc-André Laperle
+Date: 2021-05-29 04:09:45.000000000
+Message: 
+Patch Set 2: Verified-1 Code-Review-1
+----------------------------------------------------------------------------------------------------------------------

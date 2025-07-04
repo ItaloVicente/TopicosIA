@@ -1,0 +1,136 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-26887: Add new methods to copy or chain data to send pipe [3/7]
+
+Add two new methods to McbpConnection to either copy the data to
+the send buffer, or add a reference to the buffer with a cleanup
+function to call when libevent is done with the data.
+
+Change-Id: I1f396bb905687d4ce7a7e7e5c84b1da3576bc64e
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Trond Norbye
+Date: 2019-10-25 05:17:36.000000000
+Message: 
+Patch Set 105: Patch Set 104 was rebased
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-10-25 05:52:17.000000000
+Message: 
+Patch Set 105: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/100/ : FAILURE
+
+Failure of a CTest test [2019-10-25T05:39:48.953Z] 163/188 Test #141: memcached_testapp.ep.TestappTest ............................................. ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/100/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/24367/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/20764/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/13996/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/22009/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/7956/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/60/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/60/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-10-25 06:37:53.000000000
+Message: 
+Patch Set 105: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/24367/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/20764/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/13996/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/22009/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/7956/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/60/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/60/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/101/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-10-25 11:21:10.000000000
+Message: 
+Patch Set 105: Code-Review-1
+
+(8 comments)
+Line:778, daemon/connection.cc -> Should this function be called with an empty data element? Would it not be better to simply throw std::invalid_argument if a user tries to call in this way (if they accidentally tried to chain an empty buffer then it's probably better to flag flag instead of silently ignoring it).
+
+Line:785, daemon/connection.cc -> I think std::bad_alloc is too generic an exception here - if the caller if expected to do something about the exception, it should probably be something differerent they can explicitly catch.
+
+Line:805, daemon/connection.cc -> If you change the prototype of the function to be an by-value unique_ptr, then that will enforce that this function assumes ownership (see http://isocpp.github.io/CppCoreGuidelines/CppCoreGuidelines#Rr-uniqueptrparam).
+
+Line:21, daemon/connection.h -> Do we need the full sendbuffer.h header here? It looks like a forward definition of SendBuffer would suffice...
+
+Line:30, daemon/sendbuffer.cc -> Suspect this might become a bottleneck. Could you replace it with an atomic increment of clients ? - Or maybe use std::shared_ptr which already handles the increment / decrement & safe destruction.
+
+Line:56, daemon/sendbuffer.h -> As per previous comment, change to by-value then it enforces this object now owns `itm`.
+
+Line:57, daemon/sendbuffer.h -> Do we need this? Isn't the view always going to be the same?
+
+Line:103, daemon/sendbuffer.h -> Suggest you replace this with a StringSendBuffer which sends std::string.
+
+I say this because it'll likely be easier to use, and also for small strings (less than ~20 bytes) you don't need the extra heap allocation due to the Small String Optimisation.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2019-10-25 13:10:43.000000000
+Message: 
+Patch Set 105:
+
+(8 comments)
+Line:778, daemon/connection.cc -> Done
+
+Line:785, daemon/connection.cc -> Lets look into that at a later time (if we want to try to add "graceful" recover in this case). We currently always tear down the connection for "write failures"
+
+Line:805, daemon/connection.cc -> Sure (note that we'd still need to manually release the reference here instead of letting the unique_ptr do that as libevent is the one calling the C callback method when its done sending it)
+
+Line:21, daemon/connection.h -> Done
+
+Line:30, daemon/sendbuffer.cc -> Flipping to shared_ptr is a huge task and not something I'd like to do right now.
+
+I'd like to postpone changing this logic until the end of the refactor.
+
+Line:56, daemon/sendbuffer.h -> Done
+
+Line:57, daemon/sendbuffer.h -> Without this the class would need to call down into the engine in order to figure it out. In most of the use cases we've already done that. 
+
+As we evolve the engine interface to be more C++ we could use a real Item class passed along and we could have member functions to do this.
+
+Line:103, daemon/sendbuffer.h -> I believe that the reason I added this was that I had a use case for it somewhere (where the data was already stored in a std::unique_ptr<char[]>..
+
+Lets just keep it along for now and get rid of it at a later time.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-10-25 13:25:39.000000000
+Message: 
+Patch Set 105:
+
+(4 comments)
+Line:785, daemon/connection.cc -> ok
+
+Line:30, daemon/sendbuffer.cc -> That's fine. I suggest we make a note of this code however, as I suspect it'll end up having a notable performance impact when we come to tune things.
+
+Line:57, daemon/sendbuffer.h -> ok
+
+Line:103, daemon/sendbuffer.h -> Sure, but if we end up using it a bunch a think we should consider replacing with StringSendBuffer to potentially save an allocation (and make easier to interoperate).
+
+----------------------------------------------------------------------------------------------------------------------

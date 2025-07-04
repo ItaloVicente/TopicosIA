@@ -1,0 +1,201 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-48816: Avoid unsafe use of cookie from background tasks
+
+Previously, StatCheckpointTask and StatDCPTask immediately wrote
+responses when collecting stats while on a background thread.
+
+TSAN reported this as unsafe; no locks prevent potential racing with a
+frontend thread manipulating the cookie.
+
+Change both tasks to accumulate task values, but leave the frontend
+thread to actually write the responses when it resumes the
+ewouldblock'ed operation.
+
+TSAN Report:
+WARNING: ThreadSanitizer: data race (pid=24371)
+  Read of size 8 at 0x7b54000a2df0 by thread T62:
+    #0 Cookie::getHeader() const kv_engine/daemon/cookie.cc:201 (memcached+0x6508ac)
+    #1 append_stats kv_engine/daemon/protocol/mcbp/stats_context.cc:95 (memcached+0x71fd6c)
+    ....
+    #19 void StatCollector::addStat<cb::stats::Key, unsigned long const&>(cb::stats::Key&&, unsigned long const&) const ../kv_engine/include/statistics/collector.h:336 (memcached+0x7e50e5)
+    #20 EventuallyPersistentEngine::addAggregatedProducerStats(BucketStatCollector const&, ConnCounter const&) kv_engine/engines/ep/src/ep_engine.cc:4038 (memcached+0x7e50e5)
+    #21 EventuallyPersistentEngine::doDcpStatsInner(CookieIface const*, std::function<void (std::basic_string_view<char, std::char_traits<char> >, std::basic_string_view<char, std::char_traits<char> >, void const*)> const&, std::basic_string_view<char, std::char_traits<char> >) kv_engine/engines/ep/src/ep_engine.cc:4030 (memcached+0x81bd05)
+
+  Previous write of size 8 at 0x7b54000a2df0 by thread T21 (mutexes: write M3843):
+    #0 Cookie::setPacket(cb::mcbp::Header const&, bool) kv_engine/daemon/cookie.cc:186 (memcached+0x65080e)
+    #1 Cookie::preserveRequest() kv_engine/daemon/cookie.h:225 (memcached+0x696aa7)
+    #2 Connection::executeCommandPipeline() kv_engine/daemon/connection.cc:581 (memcached+0x696aa7)
+    #3 Connection::executeCommandsCallback() kv_engine/daemon/connection.cc:793 (memcached+0x696be8)
+    #4 Connection::rw_callback(bufferevent*, void*) kv_engine/daemon/connection.cc:942 (memcached+0x697851)
+    #5 bufferevent_run_deferred_callbacks_unlocked /home/couchbase/jenkins/workspace/cbdeps-platform-build-old/deps/packages/build/libevent/libevent-prefix/src/libevent/bufferevent.c:208 (libevent_core-2.1.so.7+0xf71d)
+    #6 folly::EventBase::loopBody(int, bool) folly/io/async/EventBase.cpp:397 (memcached+0xfc9b52)
+    #7 folly::EventBase::loop() folly/io/async/EventBase.cpp:315 (memcached+0xfcb06b)
+    #8 folly::EventBase::loopForever() folly/io/async/EventBase.cpp:538 (memcached+0xfcb06b)
+    #9 worker_libevent kv_engine/daemon/thread.cc:115 (memcached+0x6c16af)
+    #10 CouchbaseThread::run() platform/src/cb_pthreads.cc:51 (memcached+0xf217d5)
+    #11 platform_thread_wrap platform/src/cb_pthreads.cc:64 (memcached+0xf217d5)
+
+Change-Id: I3fbd8d51e174a7d19c5cb608a969795e445b8e86
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: James H
+Date: 2021-10-21 11:05:46.000000000
+Message: 
+Uploaded patch set 11.
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2021-10-21 11:06:32.000000000
+Message: 
+Patch Set 11: -Code-Review
+
+Deferring std::any, avoiding leak by always notifyingIOComplete with success
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-10-21 11:30:13.000000000
+Message: 
+Patch Set 11: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/41294/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [0023/0093]: test producer stream request (backfill)...(92 ms) OK
+
+
+99% tests passed, 1 tests failed out of 413
+
+Total Test time (real) = 355.59 sec
+
+The following tests FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/41294/ )
+
+Timeout of a CTest test 413/413 Test #284: ep_testsuite_dcp.ephemeral.comp_passive .......................................................................................} ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/41294/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/16151/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [0016/0093]: test dcp replica stream one collection...../kv_engine/engines/ep/tests/ep_testsuite_dcp.cc:715 Test failed: `" (Expected `118", got `94" - Buffer Size did not get set correctly)
+[2021-10-21T11:25:13.208Z] (36914 ms) FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/16151/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/35083/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/13594/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/12393/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/3299/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/23533/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/3229/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/14365/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/15206/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/15485/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-10-21 12:11:09.000000000
+Message: 
+Patch Set 11:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/16158/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [0016/0093]: test dcp replica stream one collection...../kv_engine/engines/ep/tests/ep_testsuite_dcp.cc:715 Test failed: `" (Expected `118", got `94" - Buffer Size did not get set correctly)
+[2021-10-21T11:59:39.841Z] (20641 ms) FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/16158/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/35083/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/41301/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/13594/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/12393/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/3299/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/23533/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/3229/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/14365/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/15206/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/15485/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-10-21 12:13:01.000000000
+Message: 
+Patch Set 11:
+
+Any idea what is up with the cv-perf job?
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-10-21 12:16:12.000000000
+Message: 
+Patch Set 11: Code-Review-1
+
+(2 comments)
+Line:3825, engines/ep/src/ep_engine.cc -> Does this need to be public?
+
+Line:3854, engines/ep/src/ep_engine.cc -> Does this need to be public?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2021-10-21 12:33:08.000000000
+Message: 
+Patch Set 11:
+
+(2 comments)
+
+> Patch Set 11:
+> 
+> Any idea what is up with the cv-perf job?
+
+Matching stuff up to logs from the container
+
+[2021-10-21 11:12:04 +0000] [13] [CRITICAL] WORKER TIMEOUT (pid:9773)
+Request http://172.23.104.96/submitRun took 30.6557710171s
+[2021-10-21 11:12:04 +0000] [9773] [INFO] Worker exiting (pid: 9773)
+Logging to : lnt.log
+Running process cleanup.
+[2021-10-21 11:12:04 +0000] [9788] [INFO] Booting worker with pid: 9788
+Started file logging.
+[2021-10-21 11:19:04 +0000] [13] [CRITICAL] WORKER TIMEOUT (pid:9777)
+Request http://172.23.104.96/submitRun took 30.5501039028s
+[2021-10-21 11:19:04 +0000] [9777] [INFO] Worker exiting (pid: 9777)
+Logging to : lnt.log
+Running process cleanup.
+[2021-10-21 11:19:04 +0000] [9790] [INFO] Booting worker with pid: 9790
+Started file logging.
+[2021-10-21 11:28:06 +0000] [13] [CRITICAL] WORKER TIMEOUT (pid:9788)
+Request http://172.23.104.96/submitRun took 30.0466029644s
+[2021-10-21 11:28:06 +0000] [9788] [INFO] Worker exiting (pid: 9788)
+
+Doesn't look to be a lot more detail in lnt.log either
+Line:3825, engines/ep/src/ep_engine.cc -> Done
+
+Line:3854, engines/ep/src/ep_engine.cc -> Done
+
+----------------------------------------------------------------------------------------------------------------------

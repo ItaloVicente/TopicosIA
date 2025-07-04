@@ -1,0 +1,158 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-29928: Switch fragmentation scoring/weighting to use high-water mark
+
+The justification for this change is based on current KV behaviour
+and some input from a few 'random' real life log snapshots.
+
+1) Current behaviour of KV's item-pager is to try and keep memory
+below the high-water mark, at times of memory pressure it will attempt
+to move memory to the low-water mark. The defragmenter cannot affect
+mem_used, but it can affect the bucket's resident memory. Here we
+allow the defragmenter's sleep to become most aggressive when
+the resident memory is close/above the high-water mark.
+
+2) It's not uncommon for users to have their mem_used between
+the low and high water marks. This change means that the defragmenter
+won't just be at it's most 'aggressive' for the users that are happily
+between the two, only when they approach the high-water mark will
+the scoring/weighting become higher.
+Change-Id: Id942db14fe76ca6e18265fb66e379c18eecb6fab
+
+Change-Id: I1f8d9098edf38dbd780b746a85da6a1177850482
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jim Walker
+Date: 2021-06-29 16:10:46.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-06-29 16:42:57.000000000
+Message: 
+Patch Set 1: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/12026/ : FAILURE
+
+Compile error at [2021-06-29T16:15:05.062Z] ../kv_engine/engines/ep/src/collections/vbucket_manifest_entry.h:17:10:
+fatal error: platform/non_negative_counter.h: No such file or directory
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/12026/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/12360/ : FAILURE
+
+ThreadSanitizer issue: data race on vptr (ctor/dtor vs virtual call) ../kv_engine/include/memcached/tracer.h:132 in cb::tracing::Traceable::~Traceable()  ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/12360/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/10305/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/37407/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/31905/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/8908/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/10956/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/11875/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/19918/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-06-30 10:02:24.000000000
+Message: 
+Patch Set 1:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/12377/ : FAILURE
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/10305/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/37407/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/31905/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/8908/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/12043/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/10956/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/11875/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/19918/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-06-30 12:55:45.000000000
+Message: 
+Patch Set 1: Code-Review-1
+
+(1 comment)
+Line:230, engines/ep/src/defragmenter.cc -> Looking at this again, why is are the watermarks relevant to fragmentation? Shouldn't this just be the ratio of RSS to mem_used ?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-06-30 13:17:45.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/10305/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/37407/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/31905/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/8908/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/12043/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/10956/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/11875/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/19918/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/12387/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2021-06-30 13:22:12.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:230, engines/ep/src/defragmenter.cc -> I observed that fragmentation alone is not ideal, I had an empty bucket with greater than 20% and both auto modes just started running the defragger aggresively, yet they have no impact on fragmentation.
+
+So I looked at the water-mark 'weighting' for a couple of reasons
+
+1) It's indicative of there being something to defragment, raw resident item count could also be something here, but point 2 was considered as well.
+2) When the bucket has plenty of free-space, the defragmenter just doesn't really need to be so aggressive, e.g. if we're 20% fragmented but using only 10% of quota, it doesn't seem like we have a need for the ramping up of fragmentation rate. However if mem_used (and RSS) approach the water mark (currently low), then 'reclamation' via aggressive defragmentation is more worthy use of our time.
+
+Switching from low to high here seems more in-keeping with how we use those water marks for mem_used managment (and how some users also make use of their quota).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-06-30 13:35:14.000000000
+Message: 
+Patch Set 1: Code-Review+1
+
+(1 comment)
+Line:230, engines/ep/src/defragmenter.cc -> Thanks for the detailed explanation - I was reading over the code and just wondered why mem_used / RSS was insufficient - makes sense.
+
+Might be worth adding your above comment into the code - I think that would help any futures readers of this function.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2021-07-01 08:13:12.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:230, engines/ep/src/defragmenter.cc -> Roger that
+
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,62 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-32655 Propagate mutation arrival time from projector to indexer
+
+The mutation arrival time is propagated every minute. The latency is
+calculated per stream per host.
+
+To identify from which host a mutation is being received, a map is
+maintained (per bucket) between a vbucket and the host on which the
+vbucket is active. This map is updated during stream_begin messages
+and stream_end messages.
+
+Change-Id: Ibe2da0bd9de4eb938e3445986a4236a00d74b1de
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: VarunVelamuri
+Date: 2019-06-27 10:47:37.000000000
+Message: 
+Uploaded patch set 3.
+----------------------------------------------------------------------------------------------------------------------
+Author: VarunVelamuri
+Date: 2019-06-27 10:59:15.000000000
+Message: 
+Patch Set 3:
+
+Hi Deep, Thanks for the comments.
+
+I have updated the patch to use processing duration from projector rather than moving average as this gives us a better insight into min and max processing durations.
+----------------------------------------------------------------------------------------------------------------------
+Author: Deepkaran Salooja
+Date: 2019-06-28 21:57:32.000000000
+Message: 
+Patch Set 3:
+
+(3 comments)
+Line:73, secondary/dataport/endpoint_buffer.go -> Thinking more about this, sending the moving average itself over to indexer is a better option. In case of multiple buckets with low mutation traffic, if one of the bucket is processing large document and taking much longer than others, it would be better captured by the moving average as it gets computed for every mutation. Sending the duration may miss that depending on which bucket's mutation gets picked up randomly.
+
+Line:527, secondary/indexer/stream_reader.go -> It seems there is lot of extra bookeeping/processing being done here. We can do the following:
+1. Stream worker can maintain vbmap and a holder to the latency map(similar to stats manager). 
+2. Mutation Manager gets all StreamBegins. It should init/allocate the latency obj for any new host based on the stream begin and update the new map, which stream worker can see by doing an atomic get on the holding pointer when it is processing a mutation.
+3. There is no need to do anything on StreamEnd. StreamBegins should remove the entry for a host which no longer own any vbucket.
+4. The communication message between stream reader and mutation manager is not required.
+
+Line:86, secondary/protobuf/data/mutation.proto -> I think we may not need the rtime. It doesn't matter much how much time is spent in the dataport queue. If the time is longer, it means the queues downstream are blocked, which avg_ts_interval will capture anyways.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: VarunVelamuri
+Date: 2019-07-01 19:27:30.000000000
+Message: 
+Patch Set 3:
+
+(3 comments)
+Line:73, secondary/dataport/endpoint_buffer.go -> Done. In the latest patch, projector sends its moving average value to indexer. Indexer adds its latency and returns the overall latency to stats manager
+
+Line:527, secondary/indexer/stream_reader.go -> Done. Instead of using a separate message, the STREAM_BEGIN message itself is used for communication between stream reader and mutation manager. The book-keeping is also moved to mutation manager
+
+Line:86, secondary/protobuf/data/mutation.proto -> Ok. Removed this. The mutation arrival time in indexer is now calculated at stream worker's handleKeyVersions()
+
+----------------------------------------------------------------------------------------------------------------------

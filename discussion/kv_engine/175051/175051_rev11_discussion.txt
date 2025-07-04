@@ -1,0 +1,131 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-39344: Allow expelling all non-meta items in checkpoint
+
+The historical problem of unrecoverable OOM on replica checkpoints has
+been highly releaved in Neo compared to the previous releases, but not
+totally solved.
+
+In particular, low-end envs with low memory quotas might experience
+hard OOM in scenarios like simple data loads or rebalance-in. That
+happens in cases where the doc size is high enough to eat the CMQuota
+by a few docs spread across multiple vbucekts, eg:
+ 1. BucketQuota 100MB, CMQuota 30MB
+ 2. Doc size 10MB
+ 3. 4 vbuckets
+ 4. Load 10 docs on Node1 - no replica yet
+ 5. RebIn Node2
+
+At (5) Node2 might receive ~ 3 docs across multiple replica vbuckets,
+1 doc per vbucket. That allocates ~ 30MB in checkpoints (ie CMQuota
+full), but:
+ a. Replica checkpoints are open and won't close unless the node
+    receives some new snapshots over those streams immediately. So
+    checkpoints can't be released by CheckpointRemoval.
+ b. We can't Expel the items in those checkpoints as we can't remove
+    the last item in a checkpoint
+
+We fix the problem by solving (b). With this patch ItemExpel is
+capable to remove all the items in a checkpoint if memory recovery
+requires so. With all items we refer to non-meta items only, so the
+integrity of the checkpoint is preserved.
+
+Change-Id: I21f0efdc94c709575a6f1a105f2e58408f5e46f3
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2022-05-23 06:45:36.000000000
+Message: 
+Uploaded patch set 11.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-05-23 06:52:28.000000000
+Message: 
+Patch Set 11: Verified-1 Code-Review-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/46287/ : FAILURE
+
+Compile error at C:/Jenkins/workspace/kv_engine-windows-master/kv_engine/engines/ep/src/checkpoint_cursor.cc(75): error C2065: "cursor": undeclared identifier ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/46287/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/17630/ : FAILURE
+
+clang-tidy found the following problems:
+
+<pre>
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy-master/kv_engine/engines/ep/src/checkpoint_cursor.cc:75:33: error: use of undeclared identifier "cursor" [clang-diagnostic-error]
+    repositionAtCheckpointBegin(cursor->getCheckpoint());
+                                ^
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy-master/kv_engine/engines/ep/src/checkpoint_cursor.cc:77:25: error: no member named "getOperation" in "SingleThreadedRCPtr<Item, Item *, std::default_delete<Item> >" [clang-diagnostic-error]
+    Ensures(currentPos->getOperation() == queue_op::checkpoint_start);
+                        ^
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy-master/third_party/gsl-lite/include/gsl/gsl-lite.hpp:1736:47: note: expanded from macro "Ensures"
+#define   Ensures( x )           gsl_Ensures( x )
+                                              ^
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy-master/third_party/gsl-lite/include/gsl/gsl-lite.hpp:1734:85: note: expanded from macro "gsl_Ensures"
+# define  gsl_Ensures( x )       gsl_CONTRACT_CHECK_( "GSL: Postcondition failure", x )
+                                                                                    ^
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy-master/third_party/gsl-lite/include/gsl/gsl-lite.hpp:1712:47: note: expanded from macro "gsl_CONTRACT_CHECK_"
+# define   gsl_CONTRACT_CHECK_( str, x )  ( ( x ) ? static_cast<void>(0) : ::gsl::detail::fail_fast_throw( str ": "" #x "" at " __FILE__ ":" gsl_STRINGIFY(__LINE__) ) )
+                                              ^
+
+</pre> ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/17630/ )
+
+Compile error at /home/couchbase/jenkins/workspace/kv_engine-clang_tidy-master/kv_engine/engines/ep/src/checkpoint_cursor.cc:75:33:
+error: use of undeclared identifier "cursor" [clang-diagnostic-error]
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/17630/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/38892/ : FAILURE
+
+Compile error at /home/couchbase/jenkins/workspace/kv_engine-clang_analyzer-master/kv_engine/engines/ep/src/checkpoint_cursor.cc:75:33:
+error: use of undeclared identifier "cursor"
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/38892/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/7241/ : FAILURE
+
+Compile error at [2022-05-23T06:46:30.981Z] /home/couchbase/jenkins/workspace/kv_engine.libFuzzer_master/kv_engine/engines/ep/src/checkpoint_cursor.cc:75:33:
+error: use of undeclared identifier "cursor"
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/7241/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/19400/ : FAILURE
+
+Compile error at [2022-05-23T06:47:48.556Z] /home/couchbase/jenkins/workspace/kv_engine.linux-CE_master/kv_engine/engines/ep/src/checkpoint_cursor.cc:75:33:
+error: ?cursor? was not declared in this scope; did you mean ?Cursor??
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/19400/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/20418/ : FAILURE
+
+Compile error at [2022-05-23T06:47:26.205Z] /home/couchbase/jenkins/workspace/kv_engine.threadsanitizer_master/kv_engine/engines/ep/src/checkpoint_cursor.cc:75:33:
+error: use of undeclared identifier "cursor"
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/20418/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/19751/ : FAILURE
+
+Compile error at [2022-05-23T06:47:32.946Z] /home/couchbase/jenkins/workspace/kv_engine.linux_master/kv_engine/engines/ep/src/checkpoint_cursor.cc:75:33:
+error: ?cursor? was not declared in this scope; did you mean ?Cursor??
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/19751/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/18605/ : FAILURE
+
+Compile error at [2022-05-23T06:49:26.257Z] /Users/couchbase/workspace/workspace/kv_engine.macos_master/kv_engine/engines/ep/src/checkpoint_cursor.cc:75:33:
+error: use of undeclared identifier "cursor"
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/18605/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/27801/ : FAILURE
+
+Compile error at [2022-05-23T06:46:53.332Z] /home/couchbase/jenkins/workspace/kv_engine.ASan-UBSan_master/kv_engine/engines/ep/src/checkpoint_cursor.cc:75:33:
+error: use of undeclared identifier "cursor"
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/27801/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/7342/ : FAILURE
+
+Compile error at [2022-05-23T06:51:07.949Z] /home/couchbase/jenkins/workspace/kv_engine.aarch64-linux_master/kv_engine/engines/ep/src/checkpoint_cursor.cc:75:33:
+error: ?cursor? was not declared in this scope; did you mean ?Cursor??
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/7342/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/16654/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

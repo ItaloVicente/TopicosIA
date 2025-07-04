@@ -1,0 +1,312 @@
+======================================================================================================================
+DESCRIPTION:
+
+linux: introduce execution contexts in resources view
+
+The original implementation made sense only one single core systems. An IRQ
+and softirq would block the whole system and not just a single core. This
+patch adds the notion of execution contexts to the interrupts.
+
+This allows better understanding of the current state of the system as
+the resources view now shows what the state of each processor is.
+
+Expect a _SLIGHT_ performance degradation during the building of the
+state system as an additional lookup is required for each interrupt event.
+
+This updates the state system model so the testvalues are updated and the
+generator is updated to work again.
+
+Starts to fix bugs: bug 381497 and bug 481855
+
+Change-Id: I2f0f2093344f51caaf08500181cf90400a081f7c
+Signed-off-by: Matthew Khouzam <matthew.khouzam@ericsson.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Matthew Khouzam
+Date: 2016-02-19 23:06:50.000000000
+Message: 
+Uploaded patch set 7.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2016-02-19 23:06:56.000000000
+Message: 
+Patch Set 7:
+
+Build Started https://hudson.eclipse.org/tracecompass/job/tracecompass-gerrit/6381/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2016-02-19 23:44:08.000000000
+Message: 
+Patch Set 7: Code-Review+1
+
+Build Successful 
+
+https://hudson.eclipse.org/tracecompass/job/tracecompass-gerrit/6381/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2016-02-22 19:09:17.000000000
+Message: 
+Patch Set 7:
+
+Just to be sure, the (new) plan is to introduce the Interrupts view first, along with related state provider changes, and then afterwards add the per-CPU information to the Resource view, correct?
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2016-02-22 19:11:59.000000000
+Message: 
+Patch Set 7: -Code-Review
+
+Build Started https://hudson.eclipse.org/tracecompass/job/tracecompass-gerrit/6392/
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthew Khouzam
+Date: 2016-02-22 19:13:27.000000000
+Message: 
+Patch Set 7:
+
+The endgame is that we have an interrupts view and an execution context view. I am not calling it resources view because it is not displaying resources, but that is yet another debate.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthew Khouzam
+Date: 2016-02-22 19:39:37.000000000
+Message: 
+Patch Set 7:
+
+In terms of order, the second the state system is modified, everything breaks, we can add extra patches to try to add glue logic to emulate the old and flawed behavior, this would be a vector for bugs.
+
+The way forward I think is:
+1- fix the state system so it reflects reality.
+  AND update the resources view
+2- introduce an IRQ view
+3- remove IRQ aggregation from resources view.
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2016-02-22 20:57:13.000000000
+Message: 
+Patch Set 7:
+
+Yeah, ultimately the order of the patches is not that important. But it's important that the model updates done in step 1) allow showing the information in the upcoming Interrupts view.
+
+Right now, this patch removes the IRQ sub-tree in the state provider, and puts all IRQ information under CPUs. Since we will also want the aggregated IRQ information to be shown in the Interrupts view, it is important that this data remains present in the state system (as we said many times previously, it's much easier to do state handling in the state system than in the view). 
+
+This means keeping a IRQ sub-tree to contain the model of the aggregate information. The per-CPU states could then be under either the CPU attributes or the IRQ ones. I would suggest under the IRQ ones, because that attribute tree will then be used as-in in the Interrupts view.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2016-02-22 22:12:07.000000000
+Message: 
+Patch Set 7: Verified-1
+
+Build Failed 
+
+https://hudson.eclipse.org/tracecompass/job/tracecompass-gerrit/6392/ : ABORTED
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthew Khouzam
+Date: 2016-02-23 00:09:46.000000000
+Message: 
+Patch Set 7:
+
+The information is all there, we don't need the resources tree. That would duplicate the information, and not lead to much gain. 
+
+I am assuming you did not try this patch if you are stating that the IRQs are not visible.
+
+As for the debate of how often should we duplicate it? I would strongly suggest as an answer: not much. The performance gain is minimal but the state generation takes much too long already and is honestly quite hard to figure out. This will stop making people think IRQs and SOFTIRQs are magical things that are not code that runs on a CPU. How are we supposed to capitalize softirq anyway?
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2016-02-23 00:22:05.000000000
+Message: 
+Patch Set 7:
+
+> The information is all there, we don't need the resources tree. That would duplicate the information
+
+No, you put them *only* in the "Resources" sub-tree. The attribute tree would look like this (exact names notwithstanding): 
+
+  CPUs
+   +- 1
+   +- 2
+  Resources
+   +- IRQs
+       +- IRQ1
+           +- CPU1
+           +- CPU2
+       +- IRQ2
+           +- CPU1
+           +- CPU2
+
+
+In the Interrupts view, you show the states of attributes IRQ1, IRQ2, etc. and their children, directly. In the Resources/CPUs view, you show the CPUs and to show the IRQ sub-tree elements, you query the appropriate attribute from the Resources sub-tree.
+
+What's very important here, and is missing from the current implementation, and why I'm still holding that -2, is that without the IRQ1, IRQ2, etc. attributes and states in the state system, you do not model the aggregate state properly. If you do not have this you end up with overlapping intervals in the view, like happens in the screenshots I linked in https://git.eclipse.org/r/#/c/66538/ .
+
+If you do it this way, it won't even break the current Resource view, because it will still be looking for those IRQ1, IRQ2 states that will still exist.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthew Khouzam
+Date: 2016-02-23 01:09:56.000000000
+Message: 
+Patch Set 7:
+
+Ok, your solution works, but I don't agree with the model of keeping the resources branch, in other words, I would -2 the design decision.
+
+IRQs and softirqs are not resources. They were added originally since the the dev thought, "hmm, I have one core and one line for a view with 100px height, what can I put in there? Hard disks and network are too complicated, I think I'll do IRQs." 
+
+At this point I don't see this -2 getting solved since I don't think I can convince you that an irq handler is not a resource, I don't think you can convince me to make adapt the model to reflect this erroneous view.
+
+> I'll remove it when it's ready to go in, meaning when https://git.eclipse.org/r/#/c/66538/ is also ready to go in. 
+
+This is ambiguous enough for it to mean anything. At this point I did remove the alleged regression. This is not going to be resolved any time soon until you give me a clear understanding of what measurable metrics I need to meet.
+
+> What's very important here, and is missing from the current implementation, and why I'm still holding that -2, is that without the IRQ1, IRQ2, etc. attributes and states in the state system, you do not model the aggregate state properly. If you do not have this you end up with overlapping intervals in the view, like happens in the screenshots I linked in https://git.eclipse.org/r/#/c/66538/ .
+
+The patch 7 addressed that issue also.
+
+Do you have an idea of a workpath that would lead to a proper model of the cpu execution? will development stop when you have the resources and irqs in it?
+
+I will focus on this patch at a later time.
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2016-02-23 21:12:58.000000000
+Message: 
+Patch Set 7:
+
+The "Resources" name in the attribute tree is irrelevant. You can rename it if you want (or, as Geneviève and I were discussing recently, it could event be moved to its own state system!)
+
+What's important is having attributes for IRQ1, IRQ2, etc. and modeling those properly from the trace events.
+
+I have just re-tried the following patches together:
+
+ https://git.eclipse.org/r/#/c/65609/7
+ https://git.eclipse.org/r/#/c/66538/4
+
+and I still experience the overlapping-intervals problem in the Interrupts view for the "aggregate" states. I have attached a new trace to bug 381497 which has 3-4 SoftIRQs running concurrently throughout the whole trace.
+
+With that trace, in the Interrupts view, the aggregate states are behaving really strangely. The color, highlighting on selection, the places where it stops when clicking Goto Next/Previous Event (in both directions), and even the tooltips, all do not correspond to each other.
+
+I'm still maintaining that this is a modeling problem, and the state system should carry the states of the aggregate attributes.
+----------------------------------------------------------------------------------------------------------------------
+Author: Patrick Tasse
+Date: 2016-02-23 23:28:15.000000000
+Message: 
+Patch Set 7: Code-Review-1
+
+(10 comments)
+Line:72, analysis/org.eclipse.tracecompass.analysis.os.linux.ui/src/org/eclipse/tracecompass/analysis/os/linux/ui/views/resources/ResourcesView.java -> You should add comments to the maps that define what the integers represent.
+
+Line:148, analysis/org.eclipse.tracecompass.analysis.os.linux.ui/src/org/eclipse/tracecompass/analysis/os/linux/ui/views/resources/ResourcesView.java -> This method is called once for each trace in an experiment, from separate threads. Then you really shouldn't be using common instance variables.
+
+Line:194, analysis/org.eclipse.tracecompass.analysis.os.linux.ui/src/org/eclipse/tracecompass/analysis/os/linux/ui/views/resources/ResourcesView.java -> This map doesn't get cleared or rebuilt when you switch traces. Therefore it can hold a list of quarks from a different trace. And for experiments you need separate maps for each trace.
+
+Line:210, analysis/org.eclipse.tracecompass.analysis.os.linux.ui/src/org/eclipse/tracecompass/analysis/os/linux/ui/views/resources/ResourcesView.java -> See comment above for fIrqs.
+
+Line:271, analysis/org.eclipse.tracecompass.analysis.os.linux.ui/src/org/eclipse/tracecompass/analysis/os/linux/ui/views/resources/ResourcesView.java -> This is only called from the zoom thread. So the aggregate entry have no 'entry list', only a 'zoomed entry list'.
+
+Or actually, since you're calling addEvent(), they only have an 'entry list' and no 'zoomed entry list', but the 'entry list' just contains a sample of zoomed events here and there, that never gets cleared.
+
+Line:285, analysis/org.eclipse.tracecompass.analysis.os.linux.ui/src/org/eclipse/tracecompass/analysis/os/linux/ui/views/resources/ResourcesView.java -> This is the aggregate entry without a quark. I would put INVALID_ATTRIBUTE as a quark.
+
+Line:299, analysis/org.eclipse.tracecompass.analysis.os.linux.ui/src/org/eclipse/tracecompass/analysis/os/linux/ui/views/resources/ResourcesView.java -> I haven't quite figured out why, but this is not working as intended. I think that some events that were split are not removed from the remaining navigable set, and therefore it contains overlapping events. It also didn't hold any of the SOFT_IRQ_ACTIVE events that were present in the original sorted list.
+
+Line:343, analysis/org.eclipse.tracecompass.analysis.os.linux.ui/src/org/eclipse/tracecompass/analysis/os/linux/ui/views/resources/ResourcesView.java -> This is the aggregate entry without a quark. I would put INVALID_ATTRIBUTE as a quark.
+
+Line:468, analysis/org.eclipse.tracecompass.analysis.os.linux.ui/src/org/eclipse/tracecompass/analysis/os/linux/ui/views/resources/ResourcesView.java -> I guess this is to skip getting the event list if it's an aggregate entry? I would do this check immediately after or at line 458. Check for INVALID_ATTRIBUTE, unless you want to introduce new values in the Type enum.
+
+Line:480, analysis/org.eclipse.tracecompass.analysis.os.linux.ui/src/org/eclipse/tracecompass/analysis/os/linux/ui/views/resources/ResourcesView.java -> I think the whole thing would be much simpler if you called a method here to 'merge/split' directly this event from the CPUx/IRQy entry into it's aggregate IRQy entry. It seems you already have a map handy to find the correct entry.
+
+The aggregate entry should be created and added to the map at the same time that the CPUx/IRQy entry is created, though.
+
+You would also need to add it to the correct list depending on whether this is called from the zoom thread or not.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Patrick Tasse
+Date: 2016-02-23 23:39:00.000000000
+Message: 
+Patch Set 7:
+
+> What's important is having attributes for IRQ1, IRQ2, etc. and modeling those properly from the trace events.
+
+I think that is a design decision. Either we bloat the state system with redundant information to help the view, or you have the view figure out the aggregate time events by itself as Matthew is trying to do.
+
+We have to consider the limitation that the state system cannot hold contiguous, independent intervals with the same value (e.g soft_irq_exit and soft_irq_entry at the same timestamp on different cpus for the same soft_irq) so whatever value we put must be sure to be different.
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2016-02-24 01:16:37.000000000
+Message: 
+Patch Set 7:
+
+> I think that is a design decision.
+
+It is, indeed. But I thought it was agreed some time ago that when designing new time graph views, as much logic as possible should be put in the state system, so that the view doesn't have to do extra post-processing. This ensures better UI responsiveness (which is much more important than state system building times), and also keeps the complexity in the view in the minimum.
+
+I'm not completely closed to the idea of doing the post-processing in the view though, if the UI responsiveness does not suffer and the behaviour is correct. Right now, in https://git.eclipse.org/r/#/c/66538/4 this is not the case, there are plenty of issues that I pointed out earlier. I'm just thinking that the logic needed to do this correctly will be much more complicated than just putting it in the SS.
+
+> We have to consider the limitation that the state system cannot hold contiguous, independent intervals with the same value
+
+Of course, that would mean modeling a new state for "more than one IRQ currently active". This is very useful to differentiate from the standard "one IRQ active", because then the view can be used with everything collapsed (only showing the aggregate rows) and only expand it when needed.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthew Khouzam
+Date: 2016-02-24 04:50:53.000000000
+Message: 
+Patch Set 7:
+
+> I'm not completely closed to the idea of doing the post-processing in the view though, if the UI responsiveness does not suffer and the behaviour is correct. Right now, in https://git.eclipse.org/r/#/c/66538/4 this is not the case, there are plenty of issues that I pointed out earlier. I'm just thinking that the logic needed to do this correctly will be much more complicated than just putting it in the SS.
+
+I am not maintaining two patches, the interrupts view should not be reviewed here. At this point, all the irqs are in the resources view, as I am certain you have seen.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthew Khouzam
+Date: 2016-02-24 04:57:54.000000000
+Message: 
+Patch Set 7:
+
+To go over the pros and cons of in state system aggregated states vs synthetic aggregated states. I am not saying view aggregated as it is not the viewer doing it but the controller.
+
+in SS
++ easier
+- does not reflect reality, as heuristics need to be applied to make a pivoting table fit a tree.
+
+programatic
++ model can accurately reflect reality
++ model is leaner, easier to understand
+- harder to implement and more bug prone
+- slower, needs to be evaluated.
+
+For the point of being slower, the view calculates 1000 intervals or so per screen, as opposed to the whole trace. Benchmarking is needed. But this is not a performance patch, it is something to fix the model and update the view.
+----------------------------------------------------------------------------------------------------------------------
+Author: Patrick Tasse
+Date: 2016-02-24 18:32:59.000000000
+Message: 
+Patch Set 7:
+
+> - slower, needs to be evaluated.
+
+I'm not so sure, it's possible that piggy-backing the aggregation on the CPUx/IRQy event list creation, it could actually be faster than creating the aggregated event list from its own state system attribute.
+
+> - harder to implement and more bug prone
+
+Maybe not so much, we just need a good merge/aggregate method for the irq/softirq time events.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthew Khouzam
+Date: 2016-02-24 18:42:09.000000000
+Message: 
+Patch Set 7:
+
+Thanks Patrick, I'm really looking to be balanced though, and the fact is that aggregate states on the view side are a larger change and thus have a higher probability of introducing a bug.
+
+If I thought aggregating was not a good idea, I would not be pushing for it though.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthew Khouzam
+Date: 2016-02-24 20:29:29.000000000
+Message: 
+Patch Set 7:
+
+(3 comments)
+
+Patrick, I did not finish doing your changes, but the code was just too big at this point, so I did a cleanup. I will continue working on this soon.
+Line:72, analysis/org.eclipse.tracecompass.analysis.os.linux.ui/src/org/eclipse/tracecompass/analysis/os/linux/ui/views/resources/ResourcesView.java -> Done
+
+Line:285, analysis/org.eclipse.tracecompass.analysis.os.linux.ui/src/org/eclipse/tracecompass/analysis/os/linux/ui/views/resources/ResourcesView.java -> Done
+
+Line:343, analysis/org.eclipse.tracecompass.analysis.os.linux.ui/src/org/eclipse/tracecompass/analysis/os/linux/ui/views/resources/ResourcesView.java -> Done
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Gerrit Code Review
+Date: 2016-03-03 21:19:26.000000000
+Message: 
+Change has been successfully cherry-picked as 19ed65980a00b9d42a7ee8a64809c52ac76bca65 by Matthew Khouzam
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,205 @@
+======================================================================================================================
+DESCRIPTION:
+
+tmf.core: Improve performance of TmfTraceUtils#getPreviousEventMatching
+
+This patch makes the reverse search look back by the cache
+size of the trace doubling each step. It is based on the assumption
+that a seek is much much slower than a getNext.
+
+Testing on an SSD yield an improvement from 5:30 to 4 seconds on a
+1000000 event CTF trace. To seek back by one event is approximately
+the same performance.
+
+Change-Id: Iaed2c2326d5a4939688df7ba6d13696811d1c165
+Signed-off-by: Matthew Khouzam <matthew.khouzam@ericsson.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Matthew Khouzam
+Date: 2016-06-28 20:20:57.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2016-06-28 20:21:04.000000000
+Message: 
+Patch Set 1:
+
+Build Started https://hudson.eclipse.org/tracecompass/job/tracecompass-gerrit/9210/
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2016-06-28 20:28:58.000000000
+Message: 
+Patch Set 1:
+
+(2 comments)
+Line:232, tmf/org.eclipse.tracecompass.tmf.core/src/org/eclipse/tracecompass/tmf/core/trace/TmfTraceUtils.java -> As was mentioned in the initial review, the initial step should not be tied to the cache size: if a trace has a large cache size, even if they are all in cache, you would not want to go through a large number of events if the event you are looking for is very close to the starting one.
+
+Bounding the upper limit of the initial step to the cache size could make sense though.
+
+Line:255, tmf/org.eclipse.tracecompass.tmf.core/src/org/eclipse/tracecompass/tmf/core/trace/TmfTraceUtils.java -> This sounds very good!
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2016-06-28 20:31:17.000000000
+Message: 
+Patch Set 1:
+
+(2 comments)
+Line:11, /COMMIT_MSG -> It's not just a getNext() you also need to parse the event, and potentially resolve arbitrary aspects (that can mean calling things like addr2line, etc.)
+
+Line:14, /COMMIT_MSG -> Is this due to changing the initial step, or doubling the step every loop, or both? And in what proportions?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthew Khouzam
+Date: 2016-06-28 20:55:56.000000000
+Message: 
+Patch Set 1:
+
+(3 comments)
+Line:11, /COMMIT_MSG -> I should have specified "advance". I am talking in broad strokes here.
+
+Line:14, /COMMIT_MSG -> the doubling every time limits the upper bound, the bumping up the initial step decreases the lower bound.
+
+For seeking back by 1 event, we have a similar performance, this shows that the performance of getCacheSize() at least in CTF is similar. The proof is rather simple. 
+
+A seek consists of going to a checkpoint and advancing to where we want to be.
+
+Therefore if we seek by checkpoint sizes, we minimize the overhead of the seek since we need to advance over the events anyway, may as well test them.
+
+Line:232, tmf/org.eclipse.tracecompass.tmf.core/src/org/eclipse/tracecompass/tmf/core/trace/TmfTraceUtils.java -> How about TmfEventProvider.DEFAULT_BLOCK_SIZE?
+
+the problem is as follows.
+
+we seek to the index checkpoint (log(n)) then we do getnext to the event.
+
+so doing it like this would mean for let's say
+
+step == 100,
+
+checkpoint size == 50000
+
+and rank == 25000, so before even getting to the getnexts, you do 1 seek, then 25400 getnexts.
+
+This algorithm has a complexity of O(n2)... we need to address it.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2016-06-28 21:00:23.000000000
+Message: 
+Patch Set 1: Code-Review+1
+
+Build Successful 
+
+https://hudson.eclipse.org/tracecompass/job/tracecompass-gerrit/9210/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2016-06-28 21:05:27.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:14, /COMMIT_MSG -> > you do 1 seek, then 25400 getnexts
+
+Again, it's not necessarily just "25400 getNext()". It's 25400 times running the predicate, which could be very simple (as I suspect your test is doing), or calling arbitrary aspects etc.
+
+Try with a UST trace with debug-info information, and where the Predicate is calling the UstDebugInfoFunctionAspect for example.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Patrick Tasse
+Date: 2016-06-28 21:15:49.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:14, /COMMIT_MSG -> Good point. Then I would suggest to load one cache size's worth of events into an ArrayList, then you can execute the Predicate in the exact reverse order from the starting point.
+
+The list could get progressively larger to minimize seeks but you would need to worry about the memory footprint of your cached events.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2016-06-28 21:22:43.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:14, /COMMIT_MSG -> > Then I would suggest to load one cache size's worth of events into an ArrayList, then you can execute the Predicate in the exact reverse order from the starting point.
+
+Oh, that's a very good idea! With that we get the best of both worlds, seeking/reading that is optimized for the trace, but checking the Predicates in the "correct" order, and being able to stop as soon as we find a match.
+
+In that case then, maybe we wouldn't even need to increase the step every time, we could process one set of cacheSize-length at a time?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthew Khouzam
+Date: 2016-06-28 21:23:57.000000000
+Message: 
+Patch Set 1:
+
+Before
+1-
+99 resolves, 49999 getNext, 1 seek
+2-
+1 m resolves, 500000000 advances ,10000 seeks
+
+after
+1-
+49999 resolves, 49999 getNext, 1 seek
+2-
+1 m resolves, 1000000 advances ,7 seeks
+
+please note, I picked a use case where the current (not proposed) implementation seems like the best. 
+
+In the case 1) we have to pay for 50k resolves.
+
+in the case 2) we need to perform  O(n2) reads and 1400 times more seeks which take btw, O(log(n)) time.
+
+At this moment I am writing this patch to try to help you with what could be considered a _BIG_ problem with the next-prev patch proposed. If you want to try something else, please be my guest, I will gladly review it but we have a real problem and are arguing over hypotheticals.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthew Khouzam
+Date: 2016-06-29 00:32:34.000000000
+Message: 
+Patch Set 1:
+
+real world testing results, I instrumented the request.
+
+current. 
+best case: 0.1s 
+worst case: 680s
+avg: 0.2s
+
+with larger chunk, 
+best case: 0.2s
+worst case: 30s
+avg: 0.2-0.3s 
+
+with step *=2
+min = 0.1
+avg = 0.2
+worst = 6s
+
+with step *=2 and step0 == cache_size
+best case: 0.2s
+avg = 0.4s
+worst case: 3s 
+
+with step *=2 and step0 == cache_size / 2 (to see if we had aliasing)
+best case: 0.2
+average: 0.2
+worst case = 3.8s
+
+I am not continuing on this patch. It was put to try to help Alex. But I have too many tasks to juggle on my side to debate these issues. the fact remains that there is a huge problem and we have a quick way to solve it.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthew Khouzam
+Date: 2016-06-29 00:36:18.000000000
+Message: 
+Patch Set 1:
+
+my test was kernel_vm and stepping through every event on tid 1230 backwards if anyone feels like reproducing the data.
+----------------------------------------------------------------------------------------------------------------------
+Author: Gerrit Code Review
+Date: 2016-06-30 23:52:03.000000000
+Message: 
+Change has been successfully cherry-picked as c93f91d94629ecd8e8bf2e398d22439de59ea428 by Alexandre Montplaisir
+----------------------------------------------------------------------------------------------------------------------

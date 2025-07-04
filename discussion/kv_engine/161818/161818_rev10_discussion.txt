@@ -1,0 +1,139 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-48506: Don't rely on allocator for estimating mem-release at expel
+
+At expel we need to compute an estimate of the memory released.
+There are many ways of doing that, but in our case all is conditioned
+by the fact that we need to use a O(1) call to CheckpointQueue::splice
+for extracting items from CheckpointQueue::toWrite.
+This is how it currently works:
+
+1. We acquire the CM::queueLock and we instantiate a
+   CheckpointQueue(toWrite.get_allocator()) 'expelledItems' container.
+   Ie, we store expelled items in a container that uses the same
+   allocator as Checkpoint::toWrite
+2. The toWrite->expelledItems splice opearation performed in
+   Checkpoint::expelItems() doesn't perform any actual
+   deallocation/allocation on toWrite/expelledItems, so allocators
+   accounting is not updated at this point
+3. The caller of Checkpoint::expelItems() gets 'expelledItems' and
+   copies it into a CheckpointQueue() 'dest'. Note that this
+   destination container uses its own allocator, which computes the
+   actual memory usage of the original 'expelledItems'. That is what
+   allows us to make a dest.get_allocator().gteBytesAllocated() call
+   for computing the exact mem-overedead released by expel.
+4. Also, in step (3) the original 'expelledItems' container goes
+   out-of-scope and deallocations are accounted in the 'toWrite'
+   allocator. That is how we correctly update the 'toWrite' mem-usage
+
+The important point in the description above is that at step (3) we
+need to perform a O(N = toWrite-size) copy for computing the
+mem-overhead released by expel. That copy is performed under
+CM::queueLock and must be avoided.
+
+As collateral (but not completely irrelevant) point, note that the copy
+that we want to remove is O(N) in both time and space, so avoiding the
+copy would also decrease the mem-utilization spike at expel.
+
+This patch removes the needs of relying on that copy for computing the
+mem-overhead deallocation. This is a pre-requirement for then avoiding
+the copy in a follow-up patch.
+
+Note: Currently the call to splice(range) isn't really O(1) as
+CheckpointQueue is a std::list that provides only a O(N) splice(range)
+API. We'll get to a real O(1) splice in a dedicated follow-up patch.
+
+Change-Id: I84e1b813061fd8e55e94c110a84ee8e2be883d30
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2021-09-28 14:39:55.000000000
+Message: 
+Uploaded patch set 10: Patch Set 9 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-09-28 15:18:28.000000000
+Message: 
+Patch Set 10: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/40521/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [0020/0044]: set_with_meta race with concurrent delete...(26 ms) OK
+
+        Start 410: memcached_unsigned_leb128_test
+407/411 Test #410: memcached_unsigned_leb128_test ................................................................................................   Passed    0.04 sec
+        Start 411: memcached-hostutils-test
+408/411 Test #411: memcached-hostutils-test ......................................................................................................   Passed    0.08 sec
+409/411 Test #407: memcached_testapp.ep.TransportProtocols/BucketTest ............................................................................   Passed    6.44 sec
+410/411 Test #406: memcached_testapp.ep.TransportProtocols/AuditTest .............................................................................   Passed   14.57 sec
+411/411 Test #409: cluster_test ..................................................................................................................   Passed   11.84 sec
+
+99% tests passed, 1 tests failed out of 411
+
+Total Test time (real) = 883.40 sec
+
+The following tests FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/40521/ )
+
+Timeout of a CTest test 406/411 Test #296: ep_testsuite_xdcr.ephemeral.comp_passive ......................................................................................} ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/40521/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/14804/ : FAILURE
+
+Timeout of a CTest test [2021-09-28T15:08:08.479Z]   6/431 Test #203: ep-engine_ep_unit_tests.AllBackends/DurabilityEPBucketTest ..................................................} ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/14804/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/34478/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/12931/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/11721/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/2562/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/22817/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/15352/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/13687/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/14540/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/2596/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-09-28 16:01:25.000000000
+Message: 
+Patch Set 10: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/34478/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/12931/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/11721/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/14806/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/2562/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/22817/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/15352/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/13687/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/14540/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/2596/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/40523/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

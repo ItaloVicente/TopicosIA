@@ -1,0 +1,91 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 562838: Allow cloning of repositories containing huge files (> 2 GB)
+
+This change removes a check that prevents cloning of repository with
+files, whose content would not fit a Java byte array. Experiments,
+however, have shown that cloning actually works and hence the check can
+be safely removed.
+
+Change-Id: I165169651cf922e7fb1949eceb418aa6c0f3eacb
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Benjamin Hummel
+Date: 2022-02-03 18:12:46.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2022-02-03 18:13:01.000000000
+Message: 
+Patch Set 1:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline.java11/851/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2022-02-03 18:21:00.000000000
+Message: 
+Patch Set 1: Verified-1
+
+Build Failed 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline.java11/851/ : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2022-02-04 16:47:41.000000000
+Message: 
+Patch Set 1: Code-Review-1
+
+(1 comment)
+Line:720, org.eclipse.jgit/src/org/eclipse/jgit/transport/PackParser.java -> I don't think this is correct. This was added in https://git.eclipse.org/r/c/jgit/jgit/+/111312 which explains in the commit message
+
+  JGit's delta handling code requires the target to be a single byte
+  array. Any attempt to inflate a delta larger than fits in the 2GiB
+  limit will fail with some form of array index exceptions. Check for
+  this overflow early and abort pack parsing.
+
+This statement is correct. If cloning worked in your tests, then probably only because no delta compression was involved.
+
+But the check can probably be limited to typeCode OBJ_OFS_DELTA or OBJ_REFS_DELTA.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Benjamin Hummel
+Date: 2022-02-04 18:45:52.000000000
+Message: 
+Patch Set 1:
+
+Thanks a lot for this input. I can not tell for sure if delta compression was involved, though I tried hard to trigger it.
+
+I was also toying with adjusting the delta handling code to work with larger arrays, using a simple implementation of huge arrays (essentially a wrapper around an array of shorter chunks). From what I have seen, this should be manageable. But before heading into this direction, I would be interested in your assessment, as the changeset will probably grow big. Do you think this is the right direction to work towards? If so, I would be happy to do so.
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2022-02-04 19:45:53.000000000
+Message: 
+Patch Set 1:
+
+> Patch Set 1:
+> 
+> Thanks a lot for this input. I can not tell for sure if delta compression was involved, though I tried hard to trigger it.
+> 
+> I was also toying with adjusting the delta handling code to work with larger arrays, using a simple implementation of huge arrays (essentially a wrapper around an array of shorter chunks). From what I have seen, this should be manageable. But before heading into this direction, I would be interested in your assessment, as the changeset will probably grow big. Do you think this is the right direction to work towards? If so, I would be happy to do so.
+
+Using an array of arrays might work, but will of course require an awful lot of Java heap memory. If the JVM is run with a large enough heap, it might be a way. Just beware if a delta copy instruction falls on several of these internal arrays, though. I _do_ wonder however why a git repository would ever have such large objects. Git just isn't made for this, and people invented LFS because of that. Who keeps objects > 2GB as blobs in git?
+
+The problem with delta inflating is that the delta may have backpointers arbitrarily far back into the base blob. So one needs fast random access to the base blob. The delta itself can be processed sequentially and can be streamed in, and the final result can also be streamed out. I wrote such an implementation for ApplyCommand. Don't know if that implementation could be useful; it's certainly not performance optimized, and in the pack case there's the additional problem that a delta may be based on another delta, so one delta's output becomes the input for the next, and then streaming won't work.
+
+There have been experiments in the past with streaming the base, too; but they couldn't be made to work well reliably for huge inputs. See https://git.eclipse.org/r/c/jgit/jgit/+/25449. I'm not convinced it couldn't be made to work; but it might need a lot of work: combining deltas, pre-analyzing the delta, and an adaptive caching strategy taking into account the structure of the delta (which chunks are copied when).
+
+Final note: I think the check here is about the final result of the delta application being (too) large. What if the base is already large?
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2022-02-04 19:53:09.000000000
+Message: 
+Patch Set 1:
+
+> ... (which chunks are copied when).
+
+And of course, the base can be compressed on top of all that, which might add more complications.
+----------------------------------------------------------------------------------------------------------------------

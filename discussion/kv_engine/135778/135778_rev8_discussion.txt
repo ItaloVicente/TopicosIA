@@ -1,0 +1,86 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-31869: Disable FlowControl for DCP Consumer
+
+FlowControl in EPEngine aims to something that is already enforced by
+the TCP Congestion Control implementation in the OS.
+
+Plus, in memcached we already have some form of additional flow control
+in Connection::executeCommandsCallback(), where we enforce a limit on
+the bufferevent userspace send-buffer (defaulted to 40MB per DCP
+connection, can be updated via memcached config).
+Note that the limit on the userspace send-buffer doesn't enforce any
+limit on the size of the kernel socket outbound buffer. Libevent may
+even drain its send-buffer by writing data to the socket, but the kernel
+may not drain its socket buffer promptly, so the actual memory allocated
+in the system for that connection can be higher then our bufferevent
+limit.
+
+So, we believe that FlowControl in EPE is just redundant.
+
+While it seems that (when introduced) FlowControl had some relation with
+DCP Noop, recent analysis doesn't show any side effect on that side and
+the DCP Noop mechanism is expected to behaves as usual.
+
+The main point on Noop is that we want to make sure that noops can fly
+through and cannot be "delayed" by a full send-buffer that needs to be
+drained first.
+
+I have verified that the current behaviour is that the Consumer sets Noop
+params via DcpControl to the Producer based on configuration. Currently
+by default it takes 360 seconds of "delay" before we see a disconnection.
+For CB <=5.0 the noop-timeout was 180 secs.
+
+Let's consider how Noop works currenlty with FlowControl enabled:
+ - Consumer acks bytes of received DCP messages
+ - Producer receives bytes and drains the BufferLog
+ - Producer can proceed with sending more DCP messages
+ - Producer doesn't send anything because the send-buffer is full
+ - At some point one peer hits the noop-timeout and we disconnect anyway
+
+So essentially Noop triggers a disconnection based on the noop-timeout,
+regardless of FlowControl.
+
+This patch disables FlowControl for DCP replica connections (ie,
+memcached DCP Consumer only).
+
+Change-Id: Iaac1c2083961accd530e1fc1fbb193fe4568eab6
+Reviewed-on: http://review.couchbase.org/c/kv_engine/+/135778
+Reviewed-by: Dave Rigby <daver@couchbase.com>
+Tested-by: Build Bot <build@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2020-09-10 12:17:08.000000000
+Message: 
+Change has been successfully cherry-picked as 7532b05fdb3fe3710ff89c1fc57ea46c86a9f0ec by Dave Rigby
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-09-10 12:57:38.000000000
+Message: 
+Patch Set 8:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/4940/ (2/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-09-10 14:14:58.000000000
+Message: 
+Patch Set 8:
+
+Build Unstable 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/4940/ : UNSTABLE
+
+ERROR: rebalance_in_with_ops (rebalance.rebalancein.RebalanceInTests)
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/4940/ )
+
+http://cv.jenkins.couchbase.com/job/kv-engine-master-perf/3745/ : SUCCESS'
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-09-18 06:40:28.000000000
+Message: 
+Created a revert of this change as I0799a823b1062315093ce0df0f6fd89d41e5f4d0
+----------------------------------------------------------------------------------------------------------------------

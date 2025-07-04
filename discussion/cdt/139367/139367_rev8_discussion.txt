@@ -1,0 +1,203 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 343274 - Added checker for const and static methods check
+
+Change-Id: I83b83f695b1b275476418b278a205b78c1b0a8f9
+Signed-off-by: Marco Stornelli <marco.stornelli@gmail.com>
+Signed-off-by: Anton Gorenkov <xgsa@yandex.ru>
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Marco Stornelli
+Date: 2019-07-13 06:17:17.000000000
+Message: 
+Uploaded patch set 8.
+----------------------------------------------------------------------------------------------------------------------
+Author: CDT Bot
+Date: 2019-07-13 06:17:32.000000000
+Message: 
+Patch Set 8:
+
+Build Started https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-ui-only-pipeline/595/ (1/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: CDT Bot
+Date: 2019-07-13 06:17:33.000000000
+Message: 
+Patch Set 8:
+
+Build Started https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-other-pipeline/615/ (2/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: CDT Bot
+Date: 2019-07-13 06:39:40.000000000
+Message: 
+Patch Set 8: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-ui-only-pipeline/595/ : SUCCESS
+
+https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-other-pipeline/615/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Nathan Ridge
+Date: 2019-07-17 09:39:46.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:338, codan/org.eclipse.cdt.codan.checkers/src/org/eclipse/cdt/codan/internal/checkers/ClassMembersConstChecker.java -> Slightly shorter:
+
+  if (info.isVirtual == null) {
+    info.isVirtual = ClassTypeHelper.isVirtual(info.method);
+  }
+  return info.isVirtual;
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Nathan Ridge
+Date: 2019-07-17 09:41:37.000000000
+Message: 
+Patch Set 8:
+
+So I tried these checkers on a real codebase, and found a number of false-positives that I think we should address before merging this.
+
+For static:
+
+    struct A {
+        // False positive "operator= should be static"
+        A& operator=(const A&) = delete;
+        
+        // False positive "operator= should be static"
+        A& operator=(A&&) = default;
+    };
+
+(This happens because =default and =delete are modelled as function definitions, not declarations.)
+
+For const:
+
+    struct B {
+        int member;
+        
+        // False positive "get_member_ref() should be constant"
+        int& get_member_ref() {
+            return member;
+        }
+    };
+    
+    #include <vector>
+    struct C {
+        std::vector<int> v;
+        
+        // False positive "foo() should be constant"
+        int& foo(int index) {
+            return v[index];
+        }
+    };
+    
+    #include <map>
+    struct D {
+        std::map<int, int> field;
+        
+        // False positive "foo() should be constant"
+        void foo() {
+            field[2] = 3;
+        }
+    };
+----------------------------------------------------------------------------------------------------------------------
+Author: Nathan Ridge
+Date: 2019-07-17 09:50:41.000000000
+Message: 
+Patch Set 8:
+
+I also found some cases where the checker produces diagnostics which are not technically false positives, but are still undesirable.
+
+For the static checker, it triggered a lot on "function object" types:
+
+    struct A {
+        // no fields
+
+        template <typename T>
+        T operator()(T t) {
+            // ...
+        }
+    };
+
+Here, this structure is intended to be used as a function object. While the call operator could be made static and the structure itself would still compile, but call sites that try to use is as a function object would not.
+
+I think we should just except operator() from the "static" analysis.
+----------------------------------------------------------------------------------------------------------------------
+Author: Nathan Ridge
+Date: 2019-07-17 09:57:40.000000000
+Message: 
+Patch Set 8:
+
+For the const checker, I ran into cases like this:
+
+    struct Foo {};
+    struct B {
+        Foo& foo;
+        
+        const Foo& get_foo() const { return foo; }
+
+        // "get_foo" should be constant
+        Foo& get_foo() { return foo; }
+    };
+
+Technically, the diagnostic is accurate: in isolation, the second overload would compile if made 'const'. However, the class as a whole would not compile (because now the two overloads have the same signature). Moreover, conceptually, exposing a non-const reference member is conceptually a modifying operation, even if the language doesn't enforce that.
+
+Similarly:
+
+    struct Impl {
+        void foo();  // not constant
+    };
+    struct C {
+        Impl* impl;
+        
+        // "foo should be constant"
+        void foo() {
+            impl->foo();
+        }
+    };
+
+Again, this will compile if C:foo() is made const. But conceptually, calling a non-const function on a pointer member is conceptually a modifying operation.
+----------------------------------------------------------------------------------------------------------------------
+Author: Marco Stornelli
+Date: 2019-07-20 06:42:12.000000000
+Message: 
+Patch Set 8:
+
+Here a set of possible strategies to cover these cases:
+1) We can check for default and deleted methods, quite easy;
+2) Don't check for "static" if the method is an overload operator, like operator() and so on;
+3) Don't check for const if the method is returning a no-const reference.
+
+In order the latest case from Nathan: calling a no-const method using a pointer is a modifying operation basically but the current code is deeply based on the method CPPVariableReadWriteFlags.getReadWriteFlags and in this case there's no write operation. Are we saying there's anything wrong with this method?
+----------------------------------------------------------------------------------------------------------------------
+Author: Marco Stornelli
+Date: 2019-07-20 07:31:56.000000000
+Message: 
+Patch Set 8:
+
+I tried to reply to myself: maybe yes, there's something strange with that method. This example:
+#include <map>
+    struct D {
+        std::map<int, int> field;
+        
+        // False positive "foo() should be constant"
+        void foo() {
+            field[2] = 3;
+        }
+    };
+
+don't work because the code in VariableReadWriteFlags.java we have:
+
+	protected int rwInExpression(IASTExpression expr, IASTNode node, int indirection) {
+..........
+		if (expr instanceof IASTArraySubscriptExpression) {
+			if (indirection > 0 && node.getPropertyInParent() == IASTArraySubscriptExpression.ARRAY) {
+				return rwAnyNode(expr, indirection - 1);
+			}
+			return READ;
+.........
+
+So the checker thinks we are reading not writing.
+----------------------------------------------------------------------------------------------------------------------

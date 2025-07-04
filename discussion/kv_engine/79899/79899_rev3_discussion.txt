@@ -1,0 +1,94 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-24971: Signal when stuck in conn_send_data state
+
+During bucket deletion if a connection had a full send buffer it was
+possible for it to get into a conn_send_data data due to
+McbpConnection::transmit() returning SoftError.
+
+The solution is to ensure that we raise a 'fake' write event in
+signalIfIdle to ensure the stalled connection has an event delivered.
+
+The patch also modifies the testapp_bucket test
+MB19748TestDeleteWhileConnShipLogAndFullWriteBuffer to
+1) Increase the probablity that the test has to cope with SoftErrors
+(This is achieved increasing the size of the messages being sent).
+2) Ensure that if bucket deletion hangs the test terminates by
+explictly closing the connection.
+
+Change-Id: Ic214e3f293623afc9de83d9c7ec85b19cdecd745
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Daniel Owen
+Date: 2017-06-22 17:34:01.000000000
+Message: 
+Uploaded patch set 3: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2017-06-22 17:54:45.000000000
+Message: 
+Patch Set 3: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master/881/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/805/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/909/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/894/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/906/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Sriram Ganesan
+Date: 2017-06-22 21:24:14.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:1134, engines/ewouldblock_engine/ewouldblock_engine.cc -> I guess you meant to say "probability of transmit"?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2017-06-23 07:49:06.000000000
+Message: 
+Patch Set 3: Code-Review+1
+
+(1 comment)
+
+Mostly looks good, but would be good to get Trond's opinion.
+Line:369, tests/testapp/testapp_bucket.cc -> This is actually an interesting observation - I added more data to the socket (to trigger a READ event) because conn_ship_log has both read and write events enabled - and hence it would wake up the connection.
+
+However in the conn_send_data state we /don't/ have read enabled - which means we /can't/ detect if the peer connection is closed, as that is indicated by a READ event. 
+
+It's probably out of scope of this bug, but we should perhaps consider keeping the READ event enabled in conn_send_data so we can detect dead connections sooner (and hence remove any resources associated with them).
+
+@Trond - what do you think?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Daniel Owen
+Date: 2017-06-23 07:50:50.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:1134, engines/ewouldblock_engine/ewouldblock_engine.cc -> yes - fixed
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2017-06-23 14:14:14.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:369, tests/testapp/testapp_bucket.cc -> I think we should set a timeout instead... 
+
+Problem with read event is that if the connection send a pipeline of requests, and we block on sending the first reply, we'll get notified on the read event but we're not ready to start processing those commands...
+
+With a timeout we could stop "slow" clients which haven't read their data for let's say 30 sec...
+
+----------------------------------------------------------------------------------------------------------------------

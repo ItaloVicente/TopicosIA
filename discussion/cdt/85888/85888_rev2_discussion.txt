@@ -1,0 +1,151 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 367256 - Debugger doesn't handle invalid breakpoints properly
+
+Change-Id: I4a86015c61164edf9a7840acb40b7b74a4cf8e61
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: CI Bot
+Date: 2016-12-12 14:20:31.000000000
+Message: 
+Patch Set 2:
+
+Build Started https://hudson.eclipse.org/cdt/job/cdt-verify/6803/
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc Khouzam
+Date: 2016-12-12 15:23:59.000000000
+Message: 
+Patch Set 2: Code-Review-1
+
+(4 comments)
+
+What change is supposed to be seen with this patch?
+What I see is that the Debug view properly shows the thread as suspended instead of showing it as running (after the -exec-continue failed).
+With the old console, we also see an error message which can help the user know what to fix, since stepping and resuming don't work at all while the breakpoint at *0x0 remains.
+
+However, as Mikhail pointed out on the CDT call, with the new GDB console, we don't see that error message in the console, so the session seems to be hopelessly stuck.  This may be a bug in GDB... I'll have to check.  But I wondered if we should pop-up a dialog in case of such an error?
+
+I've also noticed a couple of other corner cases that I thought I'd mention, although they are not blockers:
+
+1- when running the old GDB console (say with GDB 7.11), once I've set the bp at *0x0, if instead of pressing the resume button, I type 'continue' in the console, the DV goes back to wrongly showing the thread as running.  I believe it is because MIAsyncErrorProcessor checks that we send an MICommand, when in this case, we are sending a CLI command.
+
+2- when running the new GDB console (GDB 7.12 on Linux), once I've set the bp at *0x0, if instead of pressing the resume button, I type 'continue' in the console, the DV goes back to wrongly showing the thread as running. This is because the error is only reported in the console and not on the MI channel at all!  There is nothing we can do about that right now.  I will report this to GDB as I feel this is a limitation in the new console implementation.
+Line:54, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/command/MIAsyncErrorProcessor.java -> For the below map, why not reverse the types?  Make the key the Integer (the command token)
+and the value the IExecDmc.  That way, you can just search for the dmc using the token
+instead of looping over all entries.
+
+Line:55, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/command/MIAsyncErrorProcessor.java -> You can use the <> operator and use new HashMap<>();
+
+Line:113, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/command/MIAsyncErrorProcessor.java -> Wouldn't need to loop if the key was the token instead of the dmc
+
+Line:122, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/command/MIAsyncErrorProcessor.java -> No need to call session.dispatchEvent() on the executor since it is @ThreadSafe. 
+It will make its own call to the executor.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2016-12-12 15:39:52.000000000
+Message: 
+Patch Set 2: Code-Review-1 Verified-1
+
+Build Failed 
+
+https://hudson.eclipse.org/cdt/job/cdt-verify/6803/ : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Anonymous Coward
+Date: 2016-12-12 21:40:00.000000000
+Message: 
+Patch Set 2:
+
+This patch is intended to handle asynchronous errors in GDB. This type of errors appear when an "exec-*" command is successfully issued but something is wrong, the command is aborted and GDB is suspended. Here is the MI output:
+
+842,966 [MI]  40-exec-continue --thread 1
+842,967 [MI]  40^running
+842,969 [MI]  *running,thread-id="1"
+842,969 [MI]  &"Warning:\n"
+842,971 [MI]  &"Cannot insert breakpoint 2.\n"
+842,972 [MI]  &"Cannot access memory at address 0x0\n"
+842,972 [MI]  &"\n"
+842,972 [MI]  40^error,msg="Command aborted."
+842,978 [MI]  (gdb) 
+
+With this patch the corresponding thread will be shown as suspended. The thread's label will include the message from the error event which in this case is "Command aborted". The message is not informative at all but at least thread is not shown as "running" when it is suspended.
+
+I can try storing the log output for the latest "exec-*" command and use a pop-up to show it to the user but I'm not sure it would work in some unknown cases - there is no way to separate the relevant log messages from irrelevant.
+Do you think it would be better? Or we should just try fixing GDB to show a better message instead of "Command aborted".
+In CDI we had a special error mar in the image for threads that are suspended because of an error.
+ 
+I can also look into the CLI command case.
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc Khouzam
+Date: 2016-12-13 15:23:55.000000000
+Message: 
+Patch Set 2:
+
+> With this patch the corresponding thread will be shown as suspended.
+> The thread's label will include the message from the error event
+> which in this case is "Command aborted". The message is not
+> informative at all but at least thread is not shown as "running"
+> when it is suspended.
+
+It is better than what we have now.
+
+> I can try storing the log output for the latest "exec-*" command
+> and use a pop-up to show it to the user but I'm not sure it would
+> work in some unknown cases - there is no way to separate the
+> relevant log messages from irrelevant.
+
+That is probably a larger effort, of showing errors to the user
+more appropriately.  If we could end up with dialogues popping-up
+too often, that would be quite bad.
+
+> Do you think it would be better? Or we should just try fixing GDB
+> to show a better message instead of "Command aborted".
+
+Maybe you can generate the error message yourself, when you find
+one that says "Command aborted"?
+Personally, I didn't even notice this error in the DV, since
+the thread simply stayed suspended.  But again, it is better
+than what we have now.
+
+> In CDI we had a special error mar in the image for threads that
+> are suspended because of an error.
+
+That is nice, but to be honest, I wonder if it will be more noticeable?
+Probably not worth it for this special rare case.
+
+So, in the end, this patch is still a step in the right direction,
+so we might as well go ahead with it.  But there are a couple of
+in-line comments that could be addressed.
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc Khouzam
+Date: 2017-02-08 17:59:58.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:740, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/command/GDBControl.java -> Since this is API, can we make the parameter more generic? ICommandControlService or IMICommandControl
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Anonymous Coward
+Date: 2017-02-13 20:12:53.000000000
+Message: 
+Patch Set 2:
+
+(4 comments)
+Line:54, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/command/MIAsyncErrorProcessor.java -> Using IExecutionDMContext as the key allows us to store only the latest command for an execution context. If the command token is the key the map will grow with every new execution command.
+
+Line:55, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/command/MIAsyncErrorProcessor.java -> Done
+
+Line:113, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/command/MIAsyncErrorProcessor.java -> See my comment above.
+
+Line:122, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/command/MIAsyncErrorProcessor.java -> Done
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Gerrit Code Review
+Date: 2017-03-07 16:35:02.000000000
+Message: 
+Change has been successfully rebased as cf51cb6b13aae738151452197ea40bc5d4927b61 by Mikhail Khodjaiants
+----------------------------------------------------------------------------------------------------------------------

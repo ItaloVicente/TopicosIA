@@ -1,0 +1,233 @@
+======================================================================================================================
+DESCRIPTION:
+
+Improve asynchronous Eclipse workspace refreshes done by EGit
+
+EGit uses two asynchronous workspace refreshes: one to keep the Eclipse
+resource tree in sync with changes made by JGit through the normal
+java.io interfaces, which is particularly important when previously
+deleted files are restored, and a second one to catch changes made in
+a repository outside of Eclipse via git. Both are implemented in the
+EGit UI Activator.
+
+The previous implementation refreshed on index changes. This refreshed
+far too often -- we actually need to refresh only when something in
+the git working tree changes. It also refreshed way too much since it
+did full refreshes of all projects from a repository. And it ran all
+these refreshes in a single workspace operation holding the workspace
+lock.
+
+The net result of all this were very noticeable delays, in particular
+on Windows. For instance, staging and unstaging files in the staging
+view could get blocked on the refresh for many seconds.
+
+Change [1] makes JGit send events when it modifies anything in the git
+working tree. These events contain the precise paths of all modified
+or deleted files. With that information, EGit can figure out much more
+precisely which parts of the Eclipse workspace to refresh, and since
+JGit will never report changes to git-ignored files, EGit will never
+even try to refresh those.
+
+This implementation does away with the global workspace lock for
+refreshes. IResource.refreshLocal() will acquire an appropriate
+scheduling rule on its own.
+
+Tested on Windows with the setup described in bug 500106 (the
+unbearable slowness was most pronounced on Windows): with a git-
+ignored folder containing 50000 files, operations outside of
+that folder (staging/unstaging files, replace with head, ...) are
+now fast on Windows, too.
+
+[1] https://git.eclipse.org/r/#/c/100916/
+
+Bug: 500106
+Change-Id: Ia97df24e7a3b6fbf89bc55cbcce1a61b8ef8d4fb
+Signed-off-by: Thomas Wolf <thomas.wolf@paranor.ch>
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Matthias Sohn
+Date: 2018-05-13 01:01:35.000000000
+Message: 
+Uploaded patch set 5: Patch Set 4 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-05-13 01:01:44.000000000
+Message: 
+Patch Set 5:
+
+Build Started https://ci.eclipse.org/egit/job/egit.gerrit/10466/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-05-13 01:22:47.000000000
+Message: 
+Patch Set 5: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/egit/job/egit.gerrit/10466/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2018-05-13 13:47:22.000000000
+Message: 
+Patch Set 5:
+
+> content provider for the Git Repositories view being slow. I may
+ > revisit that in a later commit.
+
+See https://git.eclipse.org/r/#/c/122529/ .
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2018-05-13 16:29:54.000000000
+Message: 
+Patch Set 5:
+
+I tested this with the following scenario:
+
+* checkout another commit
+* this triggers 2 events:
+
+1. DirCacheCheckout.checkout() fires a WorkingTreeModifiedEvent with fine grained list of files changed by the checkout
+
+    This event triggers a ResourceRefreshJob which calls
+    ResourceRefreshJob.refreshRepository() refreshing all these directories listed in the event
+
+2. DirCache.commit() fires a IndexChangedEvent (coarse grained on index/repo level)
+
+    RepositoryChangeScanner's IndexChangeListener translates that to a list of directories
+    present in the affected repository and fires a WorkingTreeModifiedEvent with this list
+    of directories
+
+    This event triggers a ResourceRefreshJob which calls
+    ResourceRefreshJob.refreshRepository() refreshing all these directories listed in the event
+
+It looks like we could avoid handling the 2. coarse grained event which is refreshing way more resources than necessary. Or do I miss something ?
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2018-05-13 17:45:01.000000000
+Message: 
+Patch Set 5:
+
+> I tested this with the following scenario:
+ > 
+ > * checkout another commit
+ > * this triggers 2 events:
+ > 
+ > 1. DirCacheCheckout.checkout() fires a WorkingTreeModifiedEvent
+ > with fine grained list of files changed by the checkout
+ > 
+ > This event triggers a ResourceRefreshJob which calls
+ > ResourceRefreshJob.refreshRepository() refreshing all these
+ > directories listed in the event
+ > 
+ > 2. DirCache.commit() fires a IndexChangedEvent (coarse grained on
+ > index/repo level)
+ > 
+ > RepositoryChangeScanner's IndexChangeListener translates that to a
+ > list of directories
+ > present in the affected repository and fires a WorkingTreeModifiedEvent
+ > with this list
+ > of directories
+ > 
+ > This event triggers a ResourceRefreshJob which calls
+ > ResourceRefreshJob.refreshRepository() refreshing all these
+ > directories listed in the event
+ > 
+ > It looks like we could avoid handling the 2. coarse grained event
+ > which is refreshing way more resources than necessary. Or do I miss
+ > something ?
+
+As I understand you did the checkout in Eclipse?
+
+The coarse-grained RepositoryChangeScanner runs (by default) every 300 seconds and registers and unregisters its IndexChangeListener.  So normally you shouldn't get (2) for changes done via EGit. It will queue directories for refreshing only if an IndexChangedEvent arrives during repo.scanForChanges().
+
+But you're right, there might be several such events during this time if you do things concurrently. Perhaps we could make that IndexChangeListener unregister itself on the first such event?
+
+Both these mechanisms are very old; the original versions were added on 2008-07-11 by Robin Rosenberg (commits 22d6cfd and 3124ede in the historical Egit repo from git://repo.or.cz/egit.git ). The commit message doesn't explain _why_ these were added. My interpretation is given in the commit message.
+
+I _think_ we might remove the RepositoryChangeScanner, if indeed it serves to pick up external changes, and claim the user was responsible for doing a manual refresh. But that might be a step backwards, and since I don't know for sure what the original intention was, I'm a bit reluctant to do so.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2018-05-13 19:30:31.000000000
+Message: 
+Patch Set 5:
+
+> > I tested this with the following scenario:
+ > >
+ > > * checkout another commit
+ > > * this triggers 2 events:
+ > >
+ > > 1. DirCacheCheckout.checkout() fires a WorkingTreeModifiedEvent
+ > > with fine grained list of files changed by the checkout
+ > >
+ > > This event triggers a ResourceRefreshJob which calls
+ > > ResourceRefreshJob.refreshRepository() refreshing all these
+ > > directories listed in the event
+ > >
+ > > 2. DirCache.commit() fires a IndexChangedEvent (coarse grained on
+ > > index/repo level)
+ > >
+ > > RepositoryChangeScanner's IndexChangeListener translates that to
+ > a
+ > > list of directories
+ > > present in the affected repository and fires a WorkingTreeModifiedEvent
+ > > with this list
+ > > of directories
+ > >
+ > > This event triggers a ResourceRefreshJob which calls
+ > > ResourceRefreshJob.refreshRepository() refreshing all these
+ > > directories listed in the event
+ > >
+ > > It looks like we could avoid handling the 2. coarse grained event
+ > > which is refreshing way more resources than necessary. Or do I
+ > miss
+ > > something ?
+ > 
+ > As I understand you did the checkout in Eclipse?
+
+yes
+
+ > The coarse-grained RepositoryChangeScanner runs (by default) every
+ > 300 seconds and registers and unregisters its IndexChangeListener. 
+ > So normally you shouldn't get (2) for changes done via EGit. It
+ > will queue directories for refreshing only if an IndexChangedEvent
+ > arrives during repo.scanForChanges().
+
+you are right, I didn't see this each time I tried. I used an RepositoryChangeScanner interval of 20 seconds in the debug IDE,
+this explains why I hit this frequently.
+
+ > But you're right, there might be several such events during this
+ > time if you do things concurrently. Perhaps we could make that
+ > IndexChangeListener unregister itself on the first such event?
+ > 
+ > Both these mechanisms are very old; the original versions were
+ > added on 2008-07-11 by Robin Rosenberg (commits 22d6cfd and 3124ede
+ > in the historical Egit repo from git://repo.or.cz/egit.git ). The
+ > commit message doesn't explain _why_ these were added. My
+ > interpretation is given in the commit message.
+ > 
+ > I _think_ we might remove the RepositoryChangeScanner, if indeed it
+ > serves to pick up external changes, and claim the user was
+ > responsible for doing a manual refresh. But that might be a step
+ > backwards, and since I don't know for sure what the original
+ > intention was, I'm a bit reluctant to do so.
+
+yes they are very old. The RepositoryChangeScanner was introduced to pick up the effect of
+git commands executed outside of Eclipse. In the old days this was way more important
+than today since back then JGit/EGit only supported a small subset of git functionality and everyone
+using EGit had to use the git command line for all the features which were missing in JGit/EGit.
+
+I think automatically picking up effects of git commands done outside Eclipse is still valuable.
+RepositoryChangeScanner.run() calls Repository.scanForRepoChanges(). FileRepository's implementation
+of this method checks if the timestamp of the git index has changed and fires an IndexChangedEvent
+when this happened. This also happens when JGit itself modified the index. We could try to fix that
+by only updating the FileRepository.snapshot in FileRepository.notifyIndexChanged() and suppressing
+the IndexChangedEvent if the index was updated by JGit itself. Will push a fix soon.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2018-05-13 19:46:06.000000000
+Message: 
+Patch Set 5:
+
+see https://git.eclipse.org/r/#/c/122548/ and https://git.eclipse.org/r/#/c/122549/
+----------------------------------------------------------------------------------------------------------------------

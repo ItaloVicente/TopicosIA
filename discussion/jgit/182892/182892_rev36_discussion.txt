@@ -1,0 +1,201 @@
+======================================================================================================================
+DESCRIPTION:
+
+CommitGraph: implement commit-graph read
+
+Git introduced a new file storing the topology and some metadata of
+the commits in the repo (commitGraph). With this data, git can browse
+commit history without parsing the pack, speeding up e.g.
+reachability checks.
+
+This change teaches JGit to read commit-graph-format file, following
+the upstream format([1]).
+
+JGit can read a commit-graph file from a buffered stream, which means
+that we can provide this feature for both FileRepository and
+DfsRepository.
+
+[1] https://git-scm.com/docs/commit-graph-format/2.21.0
+
+Bug: 574368
+Change-Id: Ib5c0d6678cb242870a0f5841bd413ad3885e95f6
+Signed-off-by: kylezhao <kylezhao@tencent.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Kyle Zhao
+Date: 2022-12-13 06:45:49.000000000
+Message: 
+Uploaded patch set 36.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2022-12-13 06:46:02.000000000
+Message: 
+Patch Set 36:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline.java11/2506/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2022-12-13 07:14:17.000000000
+Message: 
+Patch Set 36: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline.java11/2506/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2022-12-13 07:15:13.000000000
+Message: 
+Patch Set 36:
+
+(17 comments)
+File Comment: /PATCHSET_LEVEL -> Thanks!
+Based on your suggestions, the code of GraphCommitData looks a lot easier to understand.
+
+Regards,
+Kyle
+----------------------------------------------------------------------------------------------------------------------
+Author: Simon Sohrt
+Date: 2022-12-13 15:52:12.000000000
+Message: 
+Patch Set 36:
+
+(4 comments)
+Line:18, org.eclipse.jgit.test/tst/org/eclipse/jgit/internal/storage/commitgraph/CommitGraphBuilderTest.java -> Add a test that successfully builds a CommitGraph.
+
+Line:25, org.eclipse.jgit.test/tst/org/eclipse/jgit/internal/storage/commitgraph/CommitGraphLoaderTest.java -> Write test cases that trigger the exceptions in CommitGraphLoader.
+
+Line:199, org.eclipse.jgit.test/tst/org/eclipse/jgit/internal/storage/commitgraph/CommitGraphTest.java -> NIT: Rename to writeAndReadCommitGraph
+
+Line:32, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/CommitGraphBuilder.java -> We should switch to two-dimensional arrays for both oidLookup and commitData.
+
+The dimensions for the arrays should be the same as specified by the spec (found here: https://git-scm.com/docs/gitformat-commit-graph#_chunk_data)
+
+byte[N][H] oidLookup; 
+byte[N][H+16] commitData; 
+//N := Number of commits, H := Bytes for commit OIDs (20 bytes for SHA-1)
+
+According to the spec around 1.8 billion commits can be stored in the commit-graph implementation of c-git. 
+
+In the current implementation (with one-dimensional byte arrays) the bottleneck is commitData. With SHA-1 every commit needs 36 bytes. Since the maximum number of elements in a java array is Integer.MAX_VALUE-8, we can only read around 60 million commits ( 2147483639 / 36). If we keep the one dimensional arrays this implementation can only read ~3% of the commits compared to the c-git implementation.
+
+Unfortunately a change here also requires changes in CommitGraphData, GraphObjectIndex and CommitGraphLoader.
+
+The number of commits is further reduced when SHA-256 is used (since SHA-256 commitOIDs use 32 bytes instead of 20).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ivan Frade
+Date: 2022-12-13 18:01:05.000000000
+Message: 
+Patch Set 36:
+
+(8 comments)
+File Comment: /PATCHSET_LEVEL -> Arrays#copyOf can simplify the code in couple places.
+
+I think that @simon comment about number of commits we store is really important, but we can tackle it in a following change (we have tests to rework the code safely).
+Line:18, org.eclipse.jgit.test/tst/org/eclipse/jgit/internal/storage/commitgraph/CommitGraphBuilderTest.java -> Creating successfully a graph is covered with other tests tests: CommitGraphLoaderTest with a cgit graph and CommitGraphTest with JGit-generated graph).
+
+This builder is merely a holder of data for the specific classes inside CommitGraphV1 and its only logic is detecting duplicated/missing chunks, which are tested here.
+
+All in all, I think we have reasonable covered the builder, what do you think?
+
+Line:25, org.eclipse.jgit.test/tst/org/eclipse/jgit/internal/storage/commitgraph/CommitGraphLoaderTest.java -> We could add some test passing raw byte[] { commit-graph header } and byte[] { random bytes}.
+
+Overall, I am reasonably convinced that we generate valid commit-graphs and we are able to read them. We can always tighten the testing in following CLs (patches welcome!).
+
+Line:32, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/CommitGraphBuilder.java -> Great catch! and well explained, thanks!
+
+Not sure if an entry per commit is the optimal implementation as we would pay an array reference per commit... but maybe something in between (big chunks) would give us the scale and the efficiency?
+
+I think we can still submit this change and work on that on a new one. Current code won't do anything wrong with a too-big commit-graph (it throws an exception and we can ignore the graph). Graph layout in memory is a discussion in its own (and an interesting one!), we can adjust it without breaking API and we have tests to refactor the code safely.
+
+Line:106, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/GraphCommitData.java -> We don't use the "4" convention in naming, "findParentsForOctopusMerge" or "findAllParents" would work.
+
+Line:123, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/GraphCommitData.java -> I think here you can just copy pList.length elements (otherwise you add one extra). If so, then probably you can just do: 
+pList = Arrays.copyOf(pList, pList.length+32)
+
+(IIRC we have a test case for this, so it should be easy to verify it is still doing the right thing)
+
+Line:132, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/GraphCommitData.java -> I think here you can just do 
+return Arrays.copyOf(pList, count);
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Simon Sohrt
+Date: 2022-12-14 09:56:41.000000000
+MISMATCHED INLINE COMMENT
+Line:18, org.eclipse.jgit.test/tst/org/eclipse/jgit/internal/storage/commitgraph/CommitGraphBuilderTest.java -> I still believe that a test method that verifies the correct behavior is advantageous because it makes later refactoring easier.
+----------------------------------------------------------------------------------------------------------------------
+Author: Simon Sohrt
+Date: 2022-12-14 09:56:41.000000000
+MISMATCHED INLINE COMMENT
+Line:25, org.eclipse.jgit.test/tst/org/eclipse/jgit/internal/storage/commitgraph/CommitGraphLoaderTest.java -> We should at least test how the CommitGraphLoader reacts when it reads a commit-graph with unknown chunks (since the current implementation of c-git writes chunks that this java implementation does not understand).
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2022-12-14 11:25:07.000000000
+MISMATCHED INLINE COMMENT
+Line:25, org.eclipse.jgit.test/tst/org/eclipse/jgit/internal/storage/commitgraph/CommitGraphLoaderTest.java -> > We should at least test how the CommitGraphLoader reacts when it reads a commit-graph with unknown chunks (since the current implementation of c-git writes chunks that this java implementation does not understand).
+
+May be we can add such a commit-graph file to
+tst-rsrc/org/eclipse/jgit/test/resources, and then test it in CommitGraphLoaderTest like #readCommitGraphV1() in the next patch.
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2022-12-14 03:12:21.000000000
+MISMATCHED INLINE COMMENT
+Line:199, org.eclipse.jgit.test/tst/org/eclipse/jgit/internal/storage/commitgraph/CommitGraphTest.java -> Great eyes! 
+Done.
+----------------------------------------------------------------------------------------------------------------------
+Author: Simon Sohrt
+Date: 2022-12-14 09:56:41.000000000
+MISMATCHED INLINE COMMENT
+Line:32, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/CommitGraphBuilder.java -> I am fine with keeping it as it is, because I think Kyle is right - 60 million commits is enough for now. 
+
+I also realized that only loading the commit data from the commit-graph for 1.8 billion commits will consume ~62GiB of memory. Whereas the current implementation will "only" consume ~68MiB for the commit data of 60 million commits.
+
+If we really want to support 1.8 billion commits we probably have to give up on reading the whole graph into memory.
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2022-12-14 03:12:21.000000000
+MISMATCHED INLINE COMMENT
+Line:32, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/CommitGraphBuilder.java -> Thanks!
+
+It's a known issue, refer to [1].
+
+Cgit uses mmap, so there is no such problem as JGit.
+
+As an active open source repository that has been developed for nearly 30 years, Linux has less than 2 million commits. I'm wondering if it's "over-design" for JGit if it's done like this from the beginning. 
+
+byte[N][H] oidLookup; 
+byte[N][H+16] commitData; 
+
+Such a structure makes us need at least one more search each time we look up.
+
+Of course, this does not mean that we will never consider the limitation of commit-graph reading, we can scale it in the future.
+
+
+[1] https://git.eclipse.org/r/c/jgit/jgit/+/182892/comments/db8916ac_2f9e43a4
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2022-12-14 11:05:14.000000000
+MISMATCHED INLINE COMMENT
+Line:32, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/CommitGraphBuilder.java -> > If we really want to support 1.8 billion commits we probably have to give up on reading the whole graph into memory.
+
+I couldn't agree more. In fact, this problem also exists in JGit's PackIndex.
+We always need to read the entire index into memory. Fortunately, JGit is a background process as a server, so this impact becomes smaller.
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2022-12-14 03:12:21.000000000
+MISMATCHED INLINE COMMENT
+Line:106, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/GraphCommitData.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2022-12-14 03:12:21.000000000
+MISMATCHED INLINE COMMENT
+Line:123, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/GraphCommitData.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2022-12-14 03:12:21.000000000
+MISMATCHED INLINE COMMENT
+Line:132, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/GraphCommitData.java -> Done
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,112 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-40480: Compare seqno at VBucket::deletedOnDiskCbk
+
+Currently at VBucket::deletedOnDiskCbk we check the revision seqno
+of the item to determine if it is the latest version before removing
+it from the HashTable post-persistence if it is also deleted. This
+causes a race condition though when we have deleted prepares and aborts.
+This race condition is as follows:
+    1) Create and flush a prepare
+    2) Create an abort for that prepare
+    3) Run the flusher to the point that it has acquired the mutations
+       from the CheckpointManager but not yet invoked the
+       PersistenceCallback
+    4) Create a deleted prepare with the same key
+    5) Finish running the PersistenceCallback
+
+At step 5 we would then compare the deleted flags and revision seqno of
+the abort with those of the new prepare we created at step 4. These
+values will be the same and at this point we will remove the new
+prepare from the HashTable. This causes errors/exceptions later on
+as we attempt to complete this prepare as we expect that prepares are
+always resident in the HashTable.
+
+Correct this by changing the revision seqno check to an actual seqno
+check which should be different for any non meta items.
+
+Change-Id: Icd498725fab94a0339e6677b4d14c98c5a196b8e
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Ben Huddleston
+Date: 2020-07-21 12:50:39.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-07-21 12:50:56.000000000
+Message: 
+Patch Set 1: Well-Formed+1
+
+Permission granted to commit: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/193007/artifact/restricted.html : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2020-07-21 13:06:18.000000000
+Message: 
+Patch Set 1: Code-Review-1
+
+there's a postFlush hook in couch-kvstore we can use instead
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-07-21 13:15:53.000000000
+Message: 
+Patch Set 1: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/1260/ : ABORTED
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/1462/ : ABORTED
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/25937/ : FAILURE
+
+<p>clang-format suggested the following changes:
+
+<pre>
+cat <<"EOF" | patch -p1
+diff --git a/engines/ep/src/ep_bucket.h b/engines/ep/src/ep_bucket.h
+index 7dceb78..0374072 100644
+--- a/engines/ep/src/ep_bucket.h
++++ b/engines/ep/src/ep_bucket.h
+@@ -80,8 +80,8 @@ public:
+      * @return true if flush succeeds, false otherwise
+      */
+     virtual bool commit(Vbid vbid,
+-                KVStore&amp; kvstore,
+-                Collections::VB::Flush&amp; collectionsFlush);
++                        KVStore&amp; kvstore,
++                        Collections::VB::Flush&amp; collectionsFlush);
+ 
+     /// Start the Flusher for all shards in this bucket.
+     void startFlusher();
+
+EOF
+</pre> ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/25937/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/1492/ : FAILURE
+
+Failure of GoogleTest "TransportProtocols/GetSetTest.TestAdd/Mcbp_XattrYes_JsonYes_SnappyYes":
+
+<pre>
+[ RUN      ] TransportProtocols/GetSetTest.TestAdd/Mcbp_XattrYes_JsonYes_SnappyYes
+unknown file: error: C++ exception with description "create_connect_plain_socket: Can"t connect to port == -1" thrown in SetUp().
+[  FAILED  ] TransportProtocols/GetSetTest.TestAdd/Mcbp_XattrYes_JsonYes_SnappyYes, where GetParam() = (Mcbp, XattrYes, 4-byte object <00-00 00-00>, 4-byte object <00-00 00-00>) (0 ms)
+TransportProtocols/GetSetTest.TestAdd/Mcbp_XattrYes_JsonYes_SnappyYes
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/1492/ )
+
+Failure of a CTest test 103/181 Test  #99: memcached_testapp.default.TransportProtocols/GetSetTest ...................... ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/1492/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/1340/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/mad-hatter/826/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/1482/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/1474/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

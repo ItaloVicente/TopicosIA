@@ -1,0 +1,364 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-35649: Fix lost (delayed) wakeups in ep background tasks
+
++Summary+
+
+The ExecutorPool scheduler which manages all the background tasks
+suffers from a race conditon in task wakeup which results in lost
+task wakeups - i.e. tasks which should be woken immediately are not
+waken until the next ExecutorThread polling interval (default 2s).
+
+Amongst the tasks which suffer from this bug are
+ActiveStreamCheckpointProcessorTask - recall this is the task
+responsible for preparing outbound DCP messages to send to
+replicas. As such, this bug results in intermittent 2s "pauses" in
+SyncWrites completing (for #replicas > 0), as the DCP_PREPARE messages
+are delayed in being sent out by 2s.
+
+By fixing this bug we *significantly* improve the tail scheduler
+wakeup latencies (i.e. how 'late' tasks are run compared to when the
+task wanted to run), by up to 1000x (3 orders of magnitude).  +
+
++Problem+
+
+The bug is related to how an ExecutorThread's sleep time is
+calculated, in the presence of an external caller waking up the task
+after it has completed.
+
+Consider a task like ActiveStreamCheckpointProcessorTask (others
+behave the same).
+
+* In an idle bucket it will be set to sleep forever as there will be
+  no DCP mutations to prepare - the Task will be in the AuxIO
+  futureQueue with a waketime of <FOREVER>.
+
+* When new mutations occur in the frontend, the Task will be woken up
+  (via TaskQueue::_wake()) which:
+
+  a) Updates the Tasks' waketime to <NOW>.
+
+  b) Re-sorts the futureQueue if necessary, ensuring the soonest task
+     (either ActiveStreamCheckpointProcessorTask or another task just
+     woken) is at the front of the queue.
+
+  c) If any threads of the given type (AuxIO) are currently sleeping,
+     then wakes up threads equal to the number of tasks ready to
+     execute.
+
+  d) Those sleeping thread(s) will then check the futureQueue and pick
+     the next task to run.
+
+This works correctly assuming that at least 1 AuxIO thread is sleeping
+(in fact for simplicity it's sufficient to assume there's only 1 AuxIO
+thread) - at (d) the sleeping thread is woken, and the Task is run().
+
+However, consider what happens if the Task has /just/ finished a
+previous run() iteration just before the wake() call occurs - there is
+a race which results in a lost (delayed) wakeup:
+
+<<<AuxIO Thread>>>
+
+1) Assume Task::run() has just returned to ExecutorThread::run().
+
+2) Task is reschedule()'d back in the futureQueue with a waketime of
+   <FOREVER>. Assume no other tasks are in the futureQueue.
+
+3) setWaketime() is called with futureQueue min waketime - <FOREVER>.
+
+4) TaskQueue::_nextTask() called. There are no tasks ready to run, so
+   it is about to call TaskQueue::_sleepThenFetchNextTask()...
+
+                 <<<Waking thread>>>
+
+                 5) TaskQueue::_wake() called, which acquires
+                    TaskQueue::mutex, and performs operations
+                    described above, crucially moving Task to the
+                    front of the futureQueue. FutureQueue min waketime
+                    = <NOW>.  Releases TaskQueue::mutex.
+
+<<<AuxIO Thread>>
+
+6) ... calls TaskQueue::_sleepThenFetchNextTask(), acquires
+   TaskQueue::mutex and calls _doSleep. This reads the threads
+   waketime (as set at 3) which is <FORVER>, then calculates the
+   Thread's sleep time as min(2, minWaketime) - i.e. min(2, FOREVER)
+   or 2 seconds.
+
+7) Thread goes to sleep for 2 seconds, even though there's a task in
+   futureQueue expecting to be run <NOW>.
+
+<END>
+
+While this is a complex scheduling system, arguably the crux of the
+problem is the use of an independent member variable
+(ExecutorThread::waketime) to determine when to wake the thread, which
+is set independently of when the futureQueue is modifed (the
+futureQueue contents ultimately dictate when a thread should be
+woken).
+
++Solution+
+
+Instead of pre-calculating a Thread's waketime and then applying it
+later on, simply calculate the waketime directly from the contents of
+the futureQueue just before we sleep - and crucially with the
+TaskQueue::mutex held (which guards the futureQueue), preventing any
+other threads racing to update it.
+
+(A follow-up patch will remove ExecutorThread::waketime as it is now
+unused).
+
++Alternative Solutions+
+
+- We _could_ possibly extend the scope of the TaskQueue::mutex to also
+  guard ExecutorThread::waketime, however this feels complex and
+  breaks encapsulation - one objects' mutex is guarding state from
+  another. As such this approach wasn't seriously considered.
+
++Results+
+
+Scheduler wait time histograms (i.e. how long a task waited to run after
+it expected to start), ~100,000 samples for each:
+
+Before:
+
+     ActiveStreamCheckpointProcessorTask[auxIO] (101277 total)
+        ...
+          12us -   14us : ( 52.2389%)  7852 ███████████████████▏
+        ...
+          82us -   86us : ( 99.0166%)   142 ▎
+        ...
+         494us -  510us : ( 99.9832%)     1
+         510us - 2031ms : (100.0000%)    17
+        Avg             : (  315us)
+
+    * p50 = 14us, p99 = 86us, p99.99 = 2,031,000us, p100= 2,031,000us
+
+After:
+
+     ActiveStreamCheckpointProcessorTask[auxIO] (100820 total)
+        ...
+          17us -   20us : ( 54.7897%) 13725 █████████████████████████████████▊
+        ...
+         110us -  118us : ( 99.1232%)   218 ▌
+        ...
+         830us -  862us : ( 99.9901%)     1
+        ...
+        1854us - 2302us : (100.0000%)     1
+        Avg             : (   26us)
+
+    * p50 = 20us, p99 = 118us, p99.99 = 862us, p100= 2302us
+
+Note that p99.99 is ~1000x better (862 microseconds vs 2031
+/milli/seconds).
+
+Additionally the op/s observed with SyncWrites(level=majority) are
+much smoother - we no longer see the op/s rate drop to zero for ~2s at
+a time; they are ~constant.
+
++Further Work+
+
+Arguably the only reason this problem has gone unnoticed for so long
+is the 2s "fallback" upper bound applied to an ExecutorThread's
+sleep time - while the wakeup is lost, the problem will self-correct
+itself after 2s. If we hadn't had that "feature" then we would have
+spotted this problem long ago (would have manifested as DCP streams
+stopping forever and never recovering).
+
+In the interests of creating a targetted, minimal fix, and given we've
+have this fallback in place for a long time I'm not removing it in
+this patch, however it _should_ be done in a follow-up.
+
+Change-Id: Ie8569589f521c326b4f357bed1ad27c0790e7e88
+Reviewed-on: http://review.couchbase.org/113769
+Reviewed-by: James Harrison <james.harrison@couchbase.com>
+Tested-by: Build Bot <build@couchbase.com>
+Reviewed-by: Trond Norbye <trond.norbye@couchbase.com>
+Reviewed-by: Jim Walker <jim@couchbase.com>
+(cherry picked from commit 32c0ae9f18a36552761eb307c6fe8ecf349b6f7c)
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2019-09-02 11:11:55.000000000
+Message: 
+Patch Set 1: Cherry Picked from branch master.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-09-02 11:12:02.000000000
+Message: 
+Patch Set 1: Well-Formed-1
+
+Branch restricted. PLEASE READ this URL: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/147159/artifact/restricted.html : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-09-02 11:44:37.000000000
+Message: 
+Patch Set 1: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-alice/165/ : FAILURE
+
+Failure of a CTest test  25/173 Test  #26: ep_testsuite.value_eviction.comp_active ...................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-alice/165/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-alice/194/ : FAILURE
+
+Failure of a GoogleTest test:
+
+TransportProtocols/RemoveTest.RemoveNonexisting/McbpIpv6Ssl_XattrYes_JsonYes_SnappyYes, where GetParam() = (McbpIpv6Ssl, XattrYes, 4-byte object <00-00 00-00>, 4-byte object <00-00 00-00>) (2 ms) ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-alice/194/ )
+
+Failure of a CTest test  48/171 Test  #48: ep_testsuite_dcp.full_eviction.comp_off ...................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-alice/194/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-alice/118/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-undefinedsanitizer-alice/127/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-alice/135/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/20721/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-alice/125/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-09-02 14:05:09.000000000
+Message: 
+Patch Set 1:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-alice/166/ : FAILURE
+
+Failure of a GoogleTest test:
+
+TransportProtocols/XattrTest.Counter_PartialXattrSpec/Mcbp_XattrYes_JsonYes_SnappyYes, where GetParam() = (Mcbp, XattrYes, 4-byte object <00-00 00-00>, 4-byte object <00-00 00-00>) (3982 ms) ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-alice/166/ )
+
+Failure of a CTest test 171/173 Test #170: memcached_testapp.ep.TransportProtocols/XattrTest ............................ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-alice/166/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-alice/118/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-undefinedsanitizer-alice/127/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-alice/135/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/20721/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-alice/125/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-alice/195/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-09-04 08:05:38.000000000
+Message: 
+Patch Set 1:
+
+check approval
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-09-04 08:05:48.000000000
+Message: 
+Patch Set 1: Well-Formed+1
+
+Permission granted to commit: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/147386/artifact/restricted.html : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-09-04 08:48:12.000000000
+Message: 
+Patch Set 1:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-alice/167/ : FAILURE
+
+Failure of a CTest test  26/173 Test  #26: ep_testsuite.value_eviction.comp_active ...................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-alice/167/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-alice/118/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-undefinedsanitizer-alice/127/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-alice/135/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/20721/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-alice/125/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-alice/195/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-09-04 09:43:18.000000000
+Message: 
+Patch Set 1:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-alice/168/ : FAILURE
+
+Failure of a CTest test  24/173 Test  #25: ep_testsuite.value_eviction.comp_passive ..................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-alice/168/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-alice/118/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-undefinedsanitizer-alice/127/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-alice/135/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/20721/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-alice/125/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-alice/195/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-09-04 10:20:22.000000000
+Message: 
+Patch Set 1:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-alice/170/ : FAILURE
+
+Failure of a CTest test 166/173 Test #169: memcached_testapp.ep.TransportProtocols/WithMetaTest ......................... ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-alice/170/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-alice/118/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-undefinedsanitizer-alice/127/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-alice/135/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/20721/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-alice/125/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-alice/195/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-09-04 11:12:25.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-alice/118/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-undefinedsanitizer-alice/127/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-alice/135/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/20721/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-alice/125/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-alice/195/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-alice/171/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2019-09-04 13:47:40.000000000
+Message: 
+Patch Set 1: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------

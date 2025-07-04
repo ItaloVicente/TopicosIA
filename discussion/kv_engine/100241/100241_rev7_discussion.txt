@@ -1,0 +1,59 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-31481: Don't skip STREAM_END msg after cursor drop during backfill
+
+For DCP producers needing backfill, There's an edge-case in handling
+cursor dropping:
+
+- When a backfill is re-scheduled due to a slow stream trigger (cursor
+  dropping), if the second backfill isn't necessary (as the required
+  items are still in the checkpoing manager) then the second backfill
+  is skipped and the stream transition to in-memory.  - If the
+  in-memory stream then doesn't need to fetch anymore data (as no more
+  mutations have occurred), then the stream advances directly to
+  endStream - see ActiveStream::transitionState():
+
+      case StreamState::InMemory:
+          // Check if the producer has sent up till the last requested
+          // sequence number already, if not - move checkpoint items into
+          // the ready queue.
+          if (lastSentSeqno.load() >= end_seqno_) {
+              // Stream transitioning to DEAD state
+              endStream(END_STREAM_OK);         /// <--- HERE
+              notifyStreamReady();
+          }
+
+However, there is a bug where this END_STREAM message is never
+transmitted to the DCP client, resulting in the stream hanging.
+
+The problem is that stream end message gets stuck in the readyQ, as
+the stream is never notified as ready to send it. This is due to the
+expectation of Stream::next() dealing with queued items being broken -
+if next() retuns null then the itemsReady flag is cleared as it
+assumes a null retudn means no more items are available.  However in
+this situation there /are/ items ready, but not until
+transitionState() is called.
+
+Following from this, the stream is never notified so doesnt
+send a closure message, which means that DCP consumers can hang
+waiting for this closure message.
+
+This patch triggers nextQueuedItem inside the pendingBackfill case to
+ensure that the end stream message is notified and executed.  The
+patch also includes a test to follow this problematic sequence.
+
+Change-Id: I28885cca1e853b72cc886f756000190b903d1d53
+Reviewed-on: http://review.couchbase.org/100241
+Tested-by: Build Bot <build@couchbase.com>
+Reviewed-by: Dave Rigby <daver@couchbase.com>
+Well-Formed: Build Bot <build@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Finlay
+Date: 2018-10-08 16:17:41.000000000
+Message: 
+Change has been successfully cherry-picked as 66985a89b3f93c0dc981f5f43fe35055f99f84d0 by Dave Finlay
+----------------------------------------------------------------------------------------------------------------------

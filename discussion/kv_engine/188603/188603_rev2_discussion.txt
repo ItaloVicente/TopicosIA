@@ -1,0 +1,178 @@
+======================================================================================================================
+DESCRIPTION:
+
+Fix missing newlines in allocator stats
+
+jemalloc pre-5.3 used to call the je_malloc_stats_print callback once
+every output line. It has now started to callback with chunks of the
+output, which broke the assumption of the code we had previously and
+hence the format of the output.
+
+Change-Id: Iddd8a54c19fa59b3b76592e783e9466554b1366c
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Vesko Karaganev
+Date: 2023-03-22 15:51:29.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2023-03-22 16:51:07.000000000
+Message: 
+Patch Set 2: Verified-1
+
+Build Failed 
+
+https://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/24693/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( https://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/24693/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/23321/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-windows-master/52506/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/44051/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/23040/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux-debug/job/master/1847/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/12772/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/25108/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/25570/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/26421/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/33522/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/12853/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Vesko Karaganev
+Date: 2023-03-23 09:26:54.000000000
+Message: 
+Patch Set 2: Verified+1
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> Override BuildBot: unrelated failure
+----------------------------------------------------------------------------------------------------------------------
+Author: Vesko Karaganev
+Date: 2023-03-23 09:26:57.000000000
+Message: 
+Removed Verified-1 by <GERRIT_ACCOUNT_1000011>
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2023-03-23 09:58:37.000000000
+Message: 
+Patch Set 2: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2023-03-23 10:46:59.000000000
+Message: 
+Patch Set 2: Code-Review-1
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> Wouldn't it be better to fix this where it is printed? 
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2023-03-23 10:48:09.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> (as this will look pretty horrible if --json is used...)
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2023-03-23 10:56:20.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> > (as this will look pretty horrible if --json is used...)
+
+It's "printed" in jemalloc, so I don't think we can easily fix it.
+
+Note jemalloc actually has a native JSON output format ("J") for stats_print(); we should probably wire that through if we want sensible JSON output from mcstat.
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2023-03-23 11:06:29.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> If it is provided formatted from jemalloc; why can't we return it as a single string back to the client and let the client deal with it?
+
+It seems totally wrong to split it up in lines on the server and return it line by line to the client when it can send everything as a single batch to the client and the client can do whatever it want with it
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2023-03-23 11:52:23.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> You could just change the callback to:
+
+    std::string buffer;
+    buffer.reserve(8192);
+    // je_malloc will return each line of output in multiple callbacks, we will
+    // join those together.
+    static auto callback = [](void* opaque, const char* msg) {
+        auto& str = *reinterpret_cast<std::string*>(opaque);
+        str.append(msg);
+    };
+    cb::ArenaMalloc::getDetailedStats(callback, &buffer);
+    append_stats("allocator", buffer, cookie);
+    return cb::engine_errc::success;
+    
+and mcstat would automatically print it with the lines. It would loose the "allocator " prefix on each line, but if that's _required_ on the output mcstat could always add that.
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2023-03-23 12:02:09.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> (and then change request_stat to do:
+
+            connection.stats(
+                    [](const std::string& key,
+                       const std::string& value) -> void {
+                       auto lines = cb::string::split(content, '\n');
+                       for (const auto l : lines) {
+                         std::cout << key << " " << l << std::endl;
+                       }
+                    },
+                    key,
+                    getFrameInfos);
+----------------------------------------------------------------------------------------------------------------------
+Author: Vesko Karaganev
+Date: 2023-03-23 12:02:45.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> I'd prefer to do that as it is simpler. This patch simply preserves the old behaviour. 
+
+According to the original comment, breaking up the jemalloc output results in nicer output from mcstat. 
+
+Also note this output can be pretty large -- about 2K per arena (1 arena per bucket).
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2023-03-23 13:03:37.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> by sending "line by line" you add a 39 byte overhead per line making this output a lot bigger, and everything will be spooled on the server before sent back to the client making a "line by line" output worse than sending it as a single blob.
+
+In addition to that I'd rather do as little as possible of "formatting" on the server side as it affects the performance of all clients connected to that bucket.
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2023-03-23 13:03:56.000000000
+Message: 
+Patch Set 2: Code-Review-2
+----------------------------------------------------------------------------------------------------------------------

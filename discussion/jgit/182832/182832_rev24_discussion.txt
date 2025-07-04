@@ -1,0 +1,148 @@
+======================================================================================================================
+DESCRIPTION:
+
+CommitGraph: implement commit-graph writer
+
+Teach JGit to write a commit-graph formatted file by walking commit
+graph from specified commit objects.
+
+See: https://git-scm.com/docs/commit-graph-format/2.21.0
+
+Bug: 574368
+Change-Id: I34f9f28f8729080c275f86215ebf30b2d05af41d
+Signed-off-by: kylezhao <kylezhao@tencent.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Kyle Zhao
+Date: 2022-11-18 07:27:38.000000000
+Message: 
+Uploaded patch set 24: Patch Set 23 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2022-11-18 07:27:52.000000000
+Message: 
+Patch Set 24:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline.java11/2158/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2022-11-18 07:40:36.000000000
+Message: 
+Patch Set 24: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline.java11/2158/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Ivan Frade
+Date: 2022-11-22 18:04:35.000000000
+Message: 
+Patch Set 24:
+
+(7 comments)
+File Comment: /PATCHSET_LEVEL -> Sorry for taking this long to take look into this! Now I am fully concentrated on commit-graph and hopefully we can get this in shape and submitted in a reasonable time.
+
+I am suggesting below to refactor the data used by the writer so it becomes immutable during writing and makes clearer when values are set. After that we could see if more code could be better encapsulated?
+
+Thanks a lot for this contribution. I think the important work is all there, it is just about organizing the code in a more maintainable shape.
+Line:70, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/CommitGraphWriter.java -> I am not sure the walking should be inside the CommitGraphWriter. Separating concerns, the writer should take care only of writing a list of commit in commit-graph format. Caller decides what to include.
+
+e.g. the PackWriter (used in GC and many other places) knows already the list of commits in the pack, maybe in some cases we could use that?
+
+Maybe after extracting the data structure (see below) we can see if we can have any sensible API to abstract this (like passing a "RevCommit supplier" or similar)?
+
+Line:74, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/CommitGraphWriter.java -> If I understand correctly:
+
+1. This makes a walk to get all RevCommits, initializing "empty" GraphCommitData (GCD) and setting the numExtraEdges as side effects.
+2. It populates the generation number (v1 = distance from root) iterating the incoming RevCommits. It forgets those RevCommits, now is all GraphCommitData.
+3. The GCD list is sorted by OID just before starting writing the chunks
+4. While writing the OID lookup chunk, it populates the position the GraphCommitData
+5. While writing the commit data chunk, it reparses the objectId to get the parents of the commit (positions are calculated thanks to step #4).
+
+This is a pretty convoluted data flow. At any certain point in the code we don't know what has been populated and changing anything requires full understanding of the flow (not to break assumptions of later code). e.g. We cannot disable generaction number v1 calculations because it is what initializes the GCD.
+
+I think we could do better extracting the "RevCommit -> position" to its own class (e.g. InMemoryOidLookup) and populate it at the beginning (it can keep the extra edge count). This class should offer also to list the commits by OID order. This can be calculated at the beginning and remain immutable the rest of the write. The generation number is NOT in this class.
+
+The generation number calculation could create its own int[] ordered by position. Bonus point: if we disable gen number v1 (because we are going to calculate/use v2), we save that memory.
+
+Line:280, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/CommitGraphWriter.java -> If we keep the original RevCommits, we don't need to reparse them here.
+
+Line:30, org.eclipse.jgit/src/org/eclipse/jgit/lib/CommitGraph.java -> +1 to move this to an .internal package
+
+Is this interface needed in this change? If not, you could move it to a later change. That leaves less things to work on in this change.
+
+Line:123, org.eclipse.jgit/src/org/eclipse/jgit/lib/CommitGraph.java -> We should specify generation number *v1* and the description could explain that is the distance from the root.
+
+Line:125, org.eclipse.jgit/src/org/eclipse/jgit/lib/CommitGraph.java -> This is already in the spec, I don't think we should repeat it here.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2022-11-23 10:21:50.000000000
+MISMATCHED INLINE COMMENT
+Line:70, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/CommitGraphWriter.java -> I have removed it, and set an ObjectReader inside.
+It will be used in the future, such as the calculation of bloom filter[1].
+
+[1] https://git.eclipse.org/r/c/jgit/jgit/+/189100/3/org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/CommitGraphWriter.java#619
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2022-11-23 10:21:50.000000000
+MISMATCHED INLINE COMMENT
+Line:74, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/CommitGraphWriter.java -> > If I understand correctly:
+> 
+> 1. This makes a walk to get all RevCommits, initializing "empty" GraphCommitData (GCD) and setting the numExtraEdges as side effects.
+> 2. It populates the generation number (v1 = distance from root) iterating the incoming RevCommits. It forgets those RevCommits, now is all GraphCommitData.
+> 3. The GCD list is sorted by OID just before starting writing the chunks
+> 4. While writing the OID lookup chunk, it populates the position the GraphCommitData
+> 5. While writing the commit data chunk, it reparses the objectId to get the parents of the commit (positions are calculated thanks to step #4).
+> 
+> This is a pretty convoluted data flow. At any certain point in the code we don't know what has been populated and changing anything requires full understanding of the flow (not to break assumptions of later code). e.g. We cannot disable generaction number v1 calculations because it is what initializes the GCD.
+
+Yeah, I agree.
+
+> 
+> I think we could do better extracting the "RevCommit -> position" to its own class (e.g. InMemoryOidLookup) and populate it at the beginning (it can keep the extra edge count). This class should offer also to list the commits by OID order. This can be calculated at the beginning and remain immutable the rest of the write. The generation number is NOT in this class.
+
+I tried to implement ImMemoryOidLookup according to your advice. It does look much clearer.
+
+> 
+> The generation number calculation could create its own int[] ordered by position. Bonus point: if we disable gen number v1 (because we are going to calculate/use v2), we save that memory.
+
+Done.
+----------------------------------------------------------------------------------------------------------------------
+Author: Ivan Frade
+Date: 2022-11-28 20:55:28.000000000
+MISMATCHED INLINE COMMENT
+Line:74, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/CommitGraphWriter.java -> Thanks a lot!
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2022-11-23 10:21:50.000000000
+MISMATCHED INLINE COMMENT
+Line:280, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/CommitGraphWriter.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2022-11-23 10:21:50.000000000
+MISMATCHED INLINE COMMENT
+Line:30, org.eclipse.jgit/src/org/eclipse/jgit/lib/CommitGraph.java -> > +1 to move this to an .internal package
+> 
+> Is this interface needed in this change? If not, you could move it to a later change. That leaves less things to work on in this change.
+
+This change needed CommitGraph#GENERATION_UNKNOWN and CommitGraph#GENERATION_NOT_COMPUTED, I moved these two constants to o.e.j.lib.Constants in order to move CommitGraph to a later change.
+But didn't move it to an .internal package yet.
+----------------------------------------------------------------------------------------------------------------------
+Author: Ivan Frade
+Date: 2022-12-06 06:05:39.000000000
+MISMATCHED INLINE COMMENT
+Line:30, org.eclipse.jgit/src/org/eclipse/jgit/lib/CommitGraph.java -> This interface is not in this change anymore, we can close this.
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2022-11-23 10:21:50.000000000
+MISMATCHED INLINE COMMENT
+Line:123, org.eclipse.jgit/src/org/eclipse/jgit/lib/CommitGraph.java -> Done.
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2022-11-23 10:21:50.000000000
+MISMATCHED INLINE COMMENT
+Line:125, org.eclipse.jgit/src/org/eclipse/jgit/lib/CommitGraph.java -> Done.
+----------------------------------------------------------------------------------------------------------------------

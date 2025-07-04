@@ -1,0 +1,150 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 578515 - [Navigator] NestedProjectsProblemsModel: Cache removal
+breaks for IResources without location
+
+Use #getFullPath() instead of #getLocation() which is never null.
+
+Change-Id: I16eef7a1580efd95e1bec25df86ee6f75482ffa9
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Sebastian Ratz
+Date: 2022-02-02 09:44:54.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: Platform Bot
+Date: 2022-02-02 10:16:04.000000000
+Message: 
+Patch Set 2:
+
+Build started https://ci.eclipse.org/platform/job/eclipse.platform.ui/job/52%252F190252%252F2/1/
+----------------------------------------------------------------------------------------------------------------------
+Author: Platform Bot
+Date: 2022-02-02 10:47:15.000000000
+Message: 
+Patch Set 2: Verified+1
+
+Build Succcess https://ci.eclipse.org/platform/job/eclipse.platform.ui/job/52%252F190252%252F2/1/
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Becker
+Date: 2022-02-02 12:27:47.000000000
+Message: 
+Patch Set 2: Code-Review+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Mickael Istria
+Date: 2022-02-02 12:53:21.000000000
+Message: 
+Patch Set 2: Code-Review-1
+
+This is not equivalent. What's important here is really to use the *location* from the filesystem to evaluate parency. getLocation() is not taking the filesystem into account and doesn't allow to get information about nesting and hence to purge cache completely.
+So although I didn't have the opportunity to create some example yet, I'm almost certain it does break the feature in some ways.
+That said, it would be good to fix the initial issue by ignoring resources without location.
+----------------------------------------------------------------------------------------------------------------------
+Author: Sebastian Ratz
+Date: 2022-02-03 11:05:49.000000000
+Message: 
+Patch Set 2:
+
+> Patch Set 2: Code-Review-1
+> 
+> This is not equivalent. What's important here is really to use the *location* from the filesystem to evaluate parency. getLocation() is not taking the filesystem into account and doesn't allow to get information about nesting and hence to purge cache completely.
+> So although I didn't have the opportunity to create some example yet, I'm almost certain it does break the feature in some ways.
+> That said, it would be good to fix the initial issue by ignoring resources without location.
+
+I don't understand. Why is the physical location on disk suddenly needed for removing from the cache, if it was not needed to add to the cache before?
+
+This does not feel symmetrical.
+----------------------------------------------------------------------------------------------------------------------
+Author: Mickael Istria
+Date: 2022-02-03 13:23:37.000000000
+Message: 
+Patch Set 2:
+
+> Patch Set 2:
+> I don't understand. Why is the physical location on disk suddenly needed for removing from the cache, if it was not needed to add to the cache before?
+
+This code here is an optimization: imagine that there is a project hierarachy of depth N that is in the workspace; user modifies a child in the leaf project and refreshes everything. Then the removeFromCache method would run its final code that does actually refresh the cache O(N) times for the same resource, while this cleanup here would just keep only 1 resource as "dirty" and process further code only on this resource.
+So this change is likely to reduce performance.
+While this piece of code may have bugs and might still be capable of receiving optimizations, what you're suggesting here is doing much more than fixing the initial issue, and brings the risk of a performance regression.
+I suggest you first implement a simple solution to avoid NPEs, and we can try in other bugs/Gerrit further optimizations and fixes.
+----------------------------------------------------------------------------------------------------------------------
+Author: Sebastian Ratz
+Date: 2022-02-03 14:40:43.000000000
+Message: 
+Patch Set 2:
+
+> Patch Set 2:
+> 
+> > Patch Set 2:
+> > I don't understand. Why is the physical location on disk suddenly needed for removing from the cache, if it was not needed to add to the cache before?
+> 
+> I suggest you first implement a simple solution to avoid NPEs, and we can try in other bugs/Gerrit further optimizations and fixes.
+
+There is no NPE.
+
+The problem is that the error marker simply does not disappear, because the loop exits early in case getLocation() is null.
+
+Can we do both?
+
+			IPath currentLocation = currentContainer.getLocation();
+			if (currentLocation != null) {
+				// we have a physical location on disk.
+				// use this to more efficiently handle nested projects
+				dirtyLeafContainers
+				.removeIf(leafContainer -> {
+					IPath leafLocation = leafContainer.getLocation();
+					return leafLocation != null && leafLocation.isPrefixOf(currentLocation);
+				});
+				if (dirtyLeafContainers.stream().noneMatch(
+						leafContainer -> {
+							IPath leafLocation = leafContainer.getLocation();
+							return leafLocation != null && currentLocation.isPrefixOf(leafLocation);
+						})) {
+					dirtyLeafContainers.add(currentContainer);
+				}
+			} else {
+				// no physical location on disk
+				// use getFullPath(), although this is less efficient in nested project scenarios
+				dirtyLeafContainers.removeIf( //
+						leafContainer -> leafContainer.getFullPath().isPrefixOf(currentContainer.getFullPath()));
+				if (dirtyLeafContainers.stream().noneMatch( //
+						leafContainer -> currentContainer.getFullPath().isPrefixOf(leafContainer.getFullPath()))) {
+					dirtyLeafContainers.add(currentContainer);
+				}
+			}
+----------------------------------------------------------------------------------------------------------------------
+Author: Mickael Istria
+Date: 2022-02-03 14:46:28.000000000
+Message: 
+Patch Set 2:
+
+Can you provide steps to reproduce? I'd really like to have such bugs covered by automated tests.
+----------------------------------------------------------------------------------------------------------------------
+Author: Sebastian Ratz
+Date: 2022-02-03 15:03:17.000000000
+Message: 
+Patch Set 2:
+
+> Patch Set 2:
+> 
+> Can you provide steps to reproduce? I'd really like to have such bugs covered by automated tests.
+
+This happens with non-local org.eclipse.core.filesystem.IFileSystem implementations.
+
+E.g. in the Semantic File System https://wiki.eclipse.org/E4/Resources/Semantic_File_System
+
+This is the basis for our projects in our product.
+
+But since SFS is not part of current Eclipse anymore, this is probably hard to reproduce by other means.
+----------------------------------------------------------------------------------------------------------------------
+Author: Mickael Istria
+Date: 2022-02-03 15:06:43.000000000
+Message: 
+Patch Set 2:
+
+OK, I think your proposal in previous patch set makes sense.
+----------------------------------------------------------------------------------------------------------------------

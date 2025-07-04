@@ -1,0 +1,155 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-24572: Stop Collection aware DCP from sending empty snapshots
+
+If a DCP stream is configured with filtering enabled and the filter
+results in 0 mutations, we still send snapshot markers to the client.
+In a needle/haystack situation, the client looking for needles will
+get frequent traffic (snapshot markers) triggered by the mutations
+made against the haystack.
+
+With this change, filtering is moved earlier in the stream flow, now
+when we build the 'readyQueue' we apply filtering allowing the
+existing empty checkpoint/snapshot logic to prevent an empty snapshot
+being sent.
+
+Change-Id: I3379a9ea4ff11aed4f287f6cb688c8af0eecd8db
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jim Walker
+Date: 2017-11-28 16:36:31.000000000
+Message: 
+Uploaded patch set 19: Patch Set 18 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2017-11-28 17:19:57.000000000
+Message: 
+Patch Set 19: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/3050/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/4109/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master/4303/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/4510/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/4734/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/4462/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2017-11-30 10:55:57.000000000
+Message: 
+Patch Set 19: Code-Review-1
+
+As discussed in person yesterday, I think we should consider if there's any consequences in eliding snapshot markers / changing the end seqno in terms of resuming a stream / rollback.
+
+Let me know when you're happy this is ok, and I'll review it fully :)
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2017-12-05 11:22:20.000000000
+Message: 
+Patch Set 19:
+
+> As discussed in person yesterday, I think we should consider if
+ > there's any consequences in eliding snapshot markers / changing the
+ > end seqno in terms of resuming a stream / rollback.
+ > 
+ > Let me know when you're happy this is ok, and I'll review it fully
+ > :)
+
+As discussed, hopefully a reasonable summary:
+
+A DCP snapshot isn't directly tied to a disk checkpoint (commit). A snapshot
+is defined as "a series of commands that is guaranteed to contain a unique set of keys.".
+
+So when we commit a checkpoint to disk with 10 keys, DCP may have sent 10 
+snapshots each with one mutation, or something in between.
+
+checkpoint:  0   1   2   3   4
+            [a1, b1, a2, a3, b2]
+
+snapshots:  {a1},{b1},{a2},{a3},{b2}
+            {a1,b1},{a2},{a3},{b2]
+            {a1,b1},{a2},{a3,b2}
+            ...
+
+So with this commit, filtering before we build the snapshot the snapshot still
+has the same meaning, a unique set of keys.
+
+filtering for a:
+checkpoint:  0   1   2   3   4
+            [a1, b1, a2, a3, b2]
+
+snapshots:  {a1},{a2},{a3}
+            {a1},{a2,a3}
+            {a1,a2},{a3}
+
+With respect to client rollback, dropping snapshots may just mean that a filtered client
+forces our DcpProducer to backfill further. 
+
+filtering for a:
+checkpoint:  0   1   2   3   4    5   6
+            [a1, b1, a2, a3, b2] [b2, b3]
+            
+snapshots:  {a1},{a2},{a3}
+            
+client never receives 5 and 6 so will always resume from 3 possibly forcing them to rollback to 0 and us to backfill from 0.
+An unfiltered client who received seqno 4 should be able to resume  from 4 (I think).
+
+
+In-terms of our rollback, we never use filtering on our replicas.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2017-12-05 11:33:41.000000000
+Message: 
+Patch Set 19: -Code-Review
+
+> > As discussed in person yesterday, I think we should consider if
+ > > there's any consequences in eliding snapshot markers / changing
+ > the
+ > > end seqno in terms of resuming a stream / rollback.
+ > >
+ > > Let me know when you're happy this is ok, and I'll review it
+ > fully
+ > > :)
+ > 
+ > As discussed, hopefully a reasonable summary:
+ > 
+
+<cut>
+
+Great, thanks for summarising - much clearer :)
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2017-12-05 11:39:26.000000000
+Message: 
+Patch Set 19: Code-Review-1
+
+(3 comments)
+
+Couple of minor things / questions.
+File Comment: /COMMIT_MSG -> What do you think about including your nice examples / diagrams in the commit message itself?
+Line:136, engines/ep/src/collections/vbucket_filter.cc -> If the switch is totally covered, would be preferable to keep the previous behaviour (remove the `default`) so we get a compiler warning if we add new enum values in future.
+
+Line:55, engines/ep/src/collections/vbucket_filter.h -> Nit: Maybe include "error"  /  "exception" / "invalid" or something similar in the name to make it clearer from the name this is an exception?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2017-12-05 12:04:55.000000000
+Message: 
+Patch Set 19:
+
+(3 comments)
+File Comment: /COMMIT_MSG -> Done
+Line:136, engines/ep/src/collections/vbucket_filter.cc -> I was more protective about the cast from flags to SystemEvent producing an invalid value here
+
+Line:55, engines/ep/src/collections/vbucket_filter.h -> Done
+
+----------------------------------------------------------------------------------------------------------------------

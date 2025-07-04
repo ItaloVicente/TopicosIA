@@ -1,0 +1,182 @@
+======================================================================================================================
+DESCRIPTION:
+
+api_tests: Only remove cluster directories before killing nodes
+
+Since we don't need cluster data (logs, data, etc) when the tests pass,
+the temp cluster directories should be removed.
+If we removed the cluster directories before killing the nodes, then we
+could have this fail with the following error:
+
+OSError: [Errno 66] Directory not empty: 'n_0'
+
+This is because the cluster may recreate files if it is still alive,
+which can prevent directory deletion as the directory becomes non-empty
+unexpectedly.
+
+Since we ensure that nodes are killed with atexit.register(kill_nodes),
+we must unregister this, in order to kill the nodes after directory
+deletion, instead of before
+
+Change-Id: I37b35154fc072fe07b595935b7171cb08ddd6598
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Peter Searby
+Date: 2023-03-10 11:51:34.000000000
+Message: 
+Patch Set 2: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2023-03-10 11:51:43.000000000
+Message: 
+Patch Set 2:
+
+Build Started https://cv.jenkins.couchbase.com/job/ns-server-test/35192/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2023-03-10 11:57:27.000000000
+Message: 
+Patch Set 2: Well-Formed+1
+
+Build Successful 
+
+https://cv.jenkins.couchbase.com/job/ns-server-test/35192/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2023-03-10 19:28:31.000000000
+MISMATCHED INLINE COMMENT
+Line:72, api_tests/run.py -> Context: I don't fully understand what we are doing with terminal attrs here. When I was writing it I think I just copypasted it from previous implementation.
+
+New code is doing extraction of terminal attrs from inside the handler, while the original code did it outside the handler. Are you changing it on purpose? are you sure that is ok?
+----------------------------------------------------------------------------------------------------------------------
+Author: Peter Searby
+Date: 2023-03-13 17:22:51.000000000
+MISMATCHED INLINE COMMENT
+Line:72, api_tests/run.py -> Actually not sure if it serves any purpose. I checked the value of termios.tcgetattr inside of and outside of the the atexit handler, and before and after killing the nodes inside the handler. The value was always the same.
+I also tried before starting any nodes, and it gave a different value for `lflag`. I'm not too sure what that flag is for, but it seems we weren't preserving it anyway, since we reset the flags back to the new values, set at some point during starting the clusters.
+I would suggest we just remove this, since it doesn't seem to make any difference as we are currently using it, and it doesn't seem like it should have been making any difference as it is currently implemented.
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2023-03-13 17:59:11.000000000
+MISMATCHED INLINE COMMENT
+Line:72, api_tests/run.py -> Here is the original change: https://review.couchbase.org/c/ns_server/+/4375
+
+And in the following change it was moved to kill_nodes:
+ https://review.couchbase.org/c/ns_server/+/4536
+
+
+Looks like the original attempt was to make sure the attrs are restored all the time.
+Also it seems like it is important that we capture the attrs before the atexit handler. At least it makes sense to me, and original code did it.
+----------------------------------------------------------------------------------------------------------------------
+Author: Peter Searby
+Date: 2023-03-13 15:51:00.000000000
+MISMATCHED INLINE COMMENT
+Line:72, api_tests/run.py -> I wasn't changing it on purpose, thanks for catching that.
+I'll do some testing and see if I can understand why it was added that way originally.
+If not, I'll just assume it was needed and make sure we do it that way still
+----------------------------------------------------------------------------------------------------------------------
+Author: Peter Searby
+Date: 2023-03-15 14:25:40.000000000
+MISMATCHED INLINE COMMENT
+Line:72, api_tests/run.py -> Ok, I've put it back to having the attrs fetched before the atexit handler
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2023-03-10 20:01:39.000000000
+MISMATCHED INLINE COMMENT
+Line:72, api_tests/run.py -> Best I can find to explain is: dbb3506237f1460b50f743e911589503816c08c7
+in which it was introduced and all it says is: "restore terminal attrs in atexit handler ... Otherwise, it's possible that 'damaged' terminal settings from the first erlang node are preserved." Which I don't fully understand..
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2023-03-10 19:28:31.000000000
+MISMATCHED INLINE COMMENT
+Line:212, api_tests/run.py -> Quesitons:
+1. It is not clear why we need to unregister handler: how handler affects ability to remove directories? It looks like kill_nodes should be a noop if nodes are not alive (if it is not correct, maybe we should fix that instead).
+2. If we really need to unregister it, why don't we do it after the killing? Currently you are introducing a possible race: if you kill the test script right between atexit.unregister and kill_nodes, nodes will remain unkilled.
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2023-03-13 17:44:07.000000000
+MISMATCHED INLINE COMMENT
+Line:212, api_tests/run.py -> Seems like moving unregister down will not help us avoid the exception that you mentioned (again if the script is killed between kill_nodes and unregistering).
+
+At first glance it looks like kill_nodes should be made idempotent anyway. Basically it should kill processes if any of them are up, and do nothing if they are already down. After that I think we should leave atexit handler there (do not unregister).
+
+BTW another aspect that might cause the problem with directory removal is the fact that nodes killing is asynchronous (correct me if I am wrong). If you successfully kill the babysitter it doesn't mean all child processes are stopped as well. Maybe some child process is still running and writing to that directory.
+
+This problem might be not that easy to fix properly. If you agree that could be a problem and if you don't have ideas for a proper fix, we can discuss workarounds.
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2023-03-15 19:35:24.000000000
+MISMATCHED INLINE COMMENT
+Line:212, api_tests/run.py -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Peter Searby
+Date: 2023-03-13 17:22:51.000000000
+MISMATCHED INLINE COMMENT
+Line:212, api_tests/run.py -> When I try having kill_nodes called a second time, it gives the following error:
+Error in atexit._run_exitfuncs:
+ Traceback (most recent call last):
+  File "/Users/petersearby/Dev/server/master/ns_server/./api_tests/run.py", line 78, in kill_nodes
+    cluster_run_lib.kill_nodes(c.processes, c.urls)
+  File "/Users/petersearby/Dev/server/master/ns_server/api_tests/../pylib/cluster_run_lib.py", line 540, in kill_nodes
+    os.close(n.write_side)
+OSError: [Errno 9] Bad file descriptor
+
+We could either fix this to make sure that cluster_run_lib's kill_nodes can be called twice without errors (and remove the atexit.unregister), or move the unregister between kill nodes and remove_temp_cluster_directories
+----------------------------------------------------------------------------------------------------------------------
+Author: Peter Searby
+Date: 2023-03-15 14:25:40.000000000
+MISMATCHED INLINE COMMENT
+Line:212, api_tests/run.py -> I've removed the unregister.
+
+> Basically it should kill processes if any of them are up, and do nothing if they are already down
+
+Currently, kill_nodes can't be called twice, as sync_loggers gives an error the second time. I've fixed this by ignoring URLErrors (HTTPErrors are still handled by sleeping an extra second).
+The original kill_nodes was also unable to be called twice, as os.close(n.write_side) fails. I've fixed this by ignoring OSErrors here
+
+> the fact that nodes killing is asynchronous (correct me if I am wrong)
+I don't think that node killing is asynchronous.
+We call n.wait() after telling each node to shutdown, and I tested with a delay in a child process - we continue to wait until every child process has exited.
+----------------------------------------------------------------------------------------------------------------------
+Author: Peter Searby
+Date: 2023-03-13 15:51:00.000000000
+MISMATCHED INLINE COMMENT
+Line:212, api_tests/run.py -> 1. I guess it probably is a noop, and I may have unregistered it unnecessarily. Will double check
+2. That makes sense, hadn't thought about that
+
+I should probably move the unregister after kill_nodes, or just remove it entirely
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2023-03-10 19:28:31.000000000
+MISMATCHED INLINE COMMENT
+Line:213, api_tests/run.py -> I still don't understand why we need to remove it after the test. Why can't we leave it?
+I think I have several reasons for not removing it:
+1. Simplicity (instead of cleaning when we succeed, and not cleaning when we fail, it is simpler to just never clean).
+2. Possible investigations after testing (when run locally I might want to look at it)
+3. Other "make" targets doesn't clean after itself either, so it is consistent with other scripts.
+
+`make clean` should remove it for sure though.
+----------------------------------------------------------------------------------------------------------------------
+Author: Peter Searby
+Date: 2023-03-15 14:33:31.000000000
+MISMATCHED INLINE COMMENT
+Line:213, api_tests/run.py -> I've added a --keep-tmp-dirs option, so we can keep the data if needed, but by default we will still remove the data when the tests pass
+----------------------------------------------------------------------------------------------------------------------
+Author: Peter Searby
+Date: 2023-03-13 15:51:00.000000000
+MISMATCHED INLINE COMMENT
+Line:213, api_tests/run.py -> Considering other make targets, such as the kv tests, I believe they do actually remove data before and after each test.
+I believe that for automated testing, you want to only keep the data around when the tests fail, as a passed test shouldn't require additional investigation (if something about the test needs to be determined, that should be part of the test, and should cause it to fail if something unexpected occurred).
+
+Perhaps your intention for api tests is more than a pass/fail test suite, but a way to perform automated actions on a cluster, which you will want to inspect afterwards. That doesn't really sound much like a test suite though, so unless there's a reason we really want it to be part of api_tests, I would have thought it would be better to separate it out into a simple script.
+If you really needed to inspect the cluster, you could just use an existing cluster instead since that won't be cleared.
+
+I do take your point though, it is simpler to ignore all of the above and only clear the directories before starting the cluster.
+I agree, it should be done by `make clean`, I'll do that in a separate patch
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2023-03-16 18:52:50.000000000
+MISMATCHED INLINE COMMENT
+Line:213, api_tests/run.py -> Done
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,251 @@
+======================================================================================================================
+DESCRIPTION:
+
+lttng: Use exec name time for PPID when handling state dump event
+
+ A state dump event gives the state information about a process that
+ had been created before the tracing was started. The state dump events
+ usually are at the beginning of a trace, but this is not guaranteed.
+ So, it can happen that there are sched_switch events for a given
+ process before the state dump. In the Kernel State Provider the
+ process is added the state system, however, the ppid is not known at
+ that time. It is only known after the state dump event.
+
+Depending on the resulution, this scenario can cause an issue in the
+Control Flow view, where a process can be drawn "parent-less", even
+if a coresponding state dump event exists.
+
+By changing the start time for the PPID attribute, the CFV is able
+to detect the parent all the time.
+
+Change-Id: Ib21e2fd0bb556a1056ec81d52d0e38d17f03420f
+Signed-off-by: Bernd Hufmann <Bernd.Hufmann@ericsson.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Bernd Hufmann
+Date: 2016-01-25 19:45:32.000000000
+Message: 
+Patch Set 2: Published edit on patch set 1
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2016-01-25 19:45:38.000000000
+Message: 
+Patch Set 2:
+
+Build Started https://hudson.eclipse.org/tracecompass/job/tracecompass-gerrit/5887/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2016-01-25 20:18:22.000000000
+Message: 
+Patch Set 2: Verified-1
+
+Build Failed 
+
+https://hudson.eclipse.org/tracecompass/job/tracecompass-gerrit/5887/ : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2016-01-25 20:44:27.000000000
+Message: 
+Patch Set 2: Code-Review-1
+
+(1 comment)
+Line:66, analysis/org.eclipse.tracecompass.analysis.os.linux.core/src/org/eclipse/tracecompass/internal/analysis/os/linux/core/kernel/handlers/StateDumpHandler.java -> Putting aside the potential unknowns of doing insertions "in the past", this is incorrect modeling. If a statedump event happens at "timestamp", it means that at *that* time the PPID of the process is X. It doesn't necessarily means it was the case at the beginning of the trace.
+
+Perhaps what should be done in the view is the same logic used for assigning thread names: while they can technically change throughout the trace, normally they don't. So if you have a null value at trace start, you can look for the first state change and use the new value instead.
+
+This would be safer than "faking" the state value to put it to value X at the start of the trace because the view happens to query at the start time.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2016-01-25 20:49:00.000000000
+Message: 
+Patch Set 2:
+
+> If a statedump event happens at "timestamp", it means that at *that* time the PPID of the process is X.
+
+To be very finicky, this isn't even correct. The states indicated by statedump events should become true and trusted at the timestamp of the *statedump end* event. But since in practice nothing happens between the statedump_* and the statedump end, and it's easier to just assign the state change directly at each event, we do this approximation.
+----------------------------------------------------------------------------------------------------------------------
+Author: Bernd Hufmann
+Date: 2016-01-25 21:20:08.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:66, analysis/org.eclipse.tracecompass.analysis.os.linux.core/src/org/eclipse/tracecompass/internal/analysis/os/linux/core/kernel/handlers/StateDumpHandler.java -> I don't agree with it. The problem is not that the view is querying at the start time. The problem is the query by resolution where not all states are return. To get fix this the view would have to go through all the states of the process and this would kill the performance. 
+
+In this particular case it's alright to update the start time for the PPID, I think. The state dump event is there to provide the correct state information of each process.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2016-01-25 21:27:21.000000000
+Message: 
+Patch Set 2:
+
+> The state dump event is there to provide the correct state information of each process.
+
+Yes but at its timestamp, not before*. Or else you are just faking the model just to make it easier for the view. This is a terrible trade-off to make.
+
+Why are resolution-queries used for this then? Why not do a first pass, like is done for thread names (I think?) to get the thread name, PPID, etc. information you need to label and position the row in the view, and then start doing regular resolution queries to get the states?
+
+* Here's an example: You could have a process with PPID 1000 at the start of a trace. And you hit an event that tells you so, so we write it in the model. Then its parent dies, and it gets adopted by init, so its PPID now becomes 1. *Then* you get the statedump. With this patch, what would happen is that PPID would be set to 1 since the beginning of the trace, which wouldn't be technically correct.
+----------------------------------------------------------------------------------------------------------------------
+Author: Patrick Tasse
+Date: 2016-01-25 22:09:21.000000000
+Message: 
+Patch Set 2:
+
+Let's make sure we understand the patch:
+
+- The state dump handler *never* modifies the 'PPID' attribute if it has already been set by a previous event (see line 101).
+
+- If not set yet, the patch sets the 'PPID' attribute to start at the same start time as the 'Exec_name' attribute, not at the trace start time.
+----------------------------------------------------------------------------------------------------------------------
+Author: Patrick Tasse
+Date: 2016-01-25 22:13:04.000000000
+Message: 
+Patch Set 2:
+
+> at the same start time as the 'Exec_name' attribute
+
+To be more precise, the start time of the current 'Exec_name' interval.
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2016-01-25 22:28:15.000000000
+Message: 
+Patch Set 2:
+
+I was giving an example. The core of the issue is that you assign a state value for a timestamp in the past, whereas the state should only be valid starting at the current timestamp.
+
+The null values between the trace start and the statedump really mean "unknown", it is wrong to assume they have the same value as the one at the statedump.
+
+Again, this seems like a workaround because of an issue in the view, and is really not the right place to fix it.
+----------------------------------------------------------------------------------------------------------------------
+Author: Patrick Tasse
+Date: 2016-01-25 23:09:14.000000000
+Message: 
+Patch Set 2:
+
+> The null values between the trace start and the statedump really mean "unknown", it is wrong to assume they have the same value as the one at the statedump.
+
+Again, we are not talking about the time between the trace start and the statedump.
+
+If you have a trace with these events:
+
+t1: sched_switch (next_tid=777, next_comm=foo, ...)
+t2: lttng_statedump_process_state (tid=777, ppid=123, name=foo, ...)
+
+Then is it possible for the ppid of foo(777) to be anything else than 123 in the interval between t1 and t2?
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2016-01-26 00:07:44.000000000
+Message: 
+Patch Set 2: -Verified
+
+Build Started https://hudson.eclipse.org/tracecompass/job/tracecompass-gerrit/5901/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2016-01-26 00:41:38.000000000
+Message: 
+Patch Set 2: Code-Review+1
+
+Build Successful 
+
+https://hudson.eclipse.org/tracecompass/job/tracecompass-gerrit/5901/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Bernd Hufmann
+Date: 2016-01-26 14:08:19.000000000
+Message: 
+Patch Set 2:
+
+Updating the timestamp for the PPID attribute is ok in my opinion because the PPID has the correct value for that relevant process at that time. 
+
+If the PPID is correct for the process at the updated time then I don't see why this patch can't be merged. It helps the CFV and potentially other analyses or views.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthew Khouzam
+Date: 2016-01-26 18:52:55.000000000
+Message: 
+Patch Set 2: Code-Review+1
+
+(1 comment)
+Line:66, analysis/org.eclipse.tracecompass.analysis.os.linux.core/src/org/eclipse/tracecompass/internal/analysis/os/linux/core/kernel/handlers/StateDumpHandler.java -> The state system cannot handle inserting non-monotonic intervals but to my understanding, this is mostly bad when the state is closing, in this case, as you don't have two state dumps, it is safe for the same thread.
+
+Thread names in the past is another issue... 
+
+"we should have as little logic as possible in the views" - Alexmonthy
+
+Here we are not "faking" the state system as much as filling it in as the information arrives.
+
+I think also the root cause of the objection is that the state system is not quite known in its behaviour. We kinda sorta think that it will work right.
+
+As for the state dump happening in the past, the only case I can think of where this would not work is if we have exactly 32767 + n*(32768) fork/clones all in lost event before the state dump occurs. 
+
+ON THE OTHER HAND, if we have this thread bomb and lost events, everything, especially the threadname will be improperly handled, so basically this is the safest part of the code.
+
+Please reconsider the -1.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthew Khouzam
+Date: 2016-01-26 19:22:43.000000000
+Message: 
+Patch Set 2:
+
+We are able to be convinced otherwise though.
+----------------------------------------------------------------------------------------------------------------------
+Author: Mathieu Desnoyers
+Date: 2016-01-26 19:45:18.000000000
+Message: 
+Patch Set 2: Code-Review-1
+
+There are a few reasons why artificially moving the time of the statedump to the beginning of the trace is a bad idea.
+
+First, it would show an false execution state at the beginning of the trace, instead of the appropriate "unknown" state. This would therefore be misleading to end users, to statistics, and analyses.
+
+Second, the statedump is, by design, done while tracing is active. The final state at the statedump end event is the combination of the statedump events and the traced events recorded concurrently. There may be cases where both statedump content and traced event have effects on the state conveyed by each other. There, the order in which the traced events vs the statedump are performed matter. If the statedump events are all moved to the begin timestamp, this may lead to incorrect state.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthew Khouzam
+Date: 2016-01-26 19:49:29.000000000
+Message: 
+Patch Set 2: -Code-Review
+
+Thanks for the reply! In this case, we should have an UNKNOWN state as well as the null state, the null state also means nothing. We need to differentiate the two.
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2016-01-26 19:55:46.000000000
+Message: 
+Patch Set 2:
+
+> we should have an UNKNOWN state as well as the null state, the null state also means nothing. We need to differentiate the two.
+
+That's a very good point.
+
+However the null state does mean something, in general it means "there is no information for this attribute at this timestamp".
+
+For states related to processes in a state system like lttng's KSP, it normally means "there is no process with this TID active on the system". There is a little nuance between that and "we know don't know jack". Perhaps it'd be good to initialize all new attributes in a new UNKNOWN state, and display those differently. This is how LTTV used to do it iirc.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthew Khouzam
+Date: 2016-01-26 20:18:40.000000000
+Message: 
+Patch Set 2:
+
+So if we have a parent, and the parent dies, our new parant is init.
+----------------------------------------------------------------------------------------------------------------------
+Author: Bernd Hufmann
+Date: 2016-01-26 20:40:34.000000000
+Message: 
+Patch Set 2:
+
+Thanks for the comments. It looked ok for at first.
+
+I'm not pushing for this patch to get in if there so much push back. It's possible to fix the situation in the CFV (and other potential views/analyses, if needed).
+
+One thing though, I would like to ask you guys, is to open a bugzilla bug to describe the short-comings so that we don't forget and we can fix them.
+----------------------------------------------------------------------------------------------------------------------
+Author: Bernd Hufmann
+Date: 2016-02-01 18:35:29.000000000
+Message: 
+Abandoned
+
+State dump should not update previous attribute times
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,132 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-52490: Avoid that a Producer consumes all backfills.maxRunning slots
+
+That is possible in the case where a Producer is busy with many
+backfills. Eg, the current backfill fixture implementation allows the
+follwing:
+
+1. backfills.maxRunning = 4096
+2. Two DcpProducer connections with some active/pending backfills
+   -> Prod1(active:4096, pending:100), Prod2(active:0, pending:1)
+3. Prod1 completes a backfill -> Prod1(active:4095, pending:100)
+4. Prod1 is rescheduled to run immediately
+5. Prod2 keeps being snoozed and rescheduled to run only after its
+   sleep-time (1 sec by default for the BackfillManagerTask)
+
+The consequence is that Prod1 has much more chance to drain its pending
+queue than Prod2.
+
+This patch prevents that by ensuring that the backfills.maxRunning
+slots are more fairly allocated across producers.
+The logic change in this patch is that at step (3) and (4) Prod2 is
+accounted when computing a single connection share. That share is lower
+than backfills.maxRunning, so at step (4) Prod1 is snoozed, same as
+what happens at step (5) for Prod2. That gives Prod2 a much higher
+chance to take its slot in backfills.maxRunning at the next run.
+
+Here the single connection share is computed simply by
+
+    backfills.maxRunning / num-conns-with-queued-backfills
+
+In the example above share = 2048.
+
+The computation is made at runtime after every backfill run. That
+allows a single Producer to allocate all the backfills.maxRunning slots
+if it's the only connection with queued backfill. Again from the above
+example, share for Prod1 will be 4096 again once Prod2 has completed
+its single backfill.
+
+Change-Id: I9bfd733dc000e22f195cbbe9401c91898b976280
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2022-06-15 15:46:32.000000000
+Message: 
+Uploaded patch set 5: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: Restriction Checker
+Date: 2022-06-15 15:46:42.000000000
+Message: 
+Patch Set 5: Well-Formed-1
+
+Branch restricted. PLEASE READ this URL: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/302933/artifact/restricted.html : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2022-06-16 07:29:13.000000000
+Message: 
+Patch Set 5: Code-Review-1
+
+(2 comments)
+Line:397, engines/ep/src/dcp/backfill-manager.cc -> I don't think that this has the desired effect... If we find that we've exceeded some limit of backfills and snooze then we will effectively pause backfilling for this connection for 1 second then when this connection runs again it will still queue up to the current 4096 cap in the movePendingToInitializing() call.
+
+Line:471, engines/ep/src/dcp/dcpconnmap.cc -> Whilst this might be ideal in terms of fairness, it potentially doesn't let us extract the most from the system if we have a scenario like the one that you described in which Prod1 has 4096 backfills and Prod2 has 1. We'd effectively be limiting Prod1 to 2048 backfills even though Prod2 doesn't have 2048 to run, it has 1. In a larger system with say 10 producers with 1 backfill each we'd limit the overall concurrency of a new producer to ~400 backfills.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2022-06-16 07:54:10.000000000
+Message: 
+Patch Set 5:
+
+(1 comment)
+Line:397, engines/ep/src/dcp/backfill-manager.cc -> Imagine that "we" are CBAS here (ie many backfills scheduled).
+The point of snoozing us here is letting some other task (KV replication BackfillTask, that was also snoozed as it couldn't move any pending to initializing) to run first and successfully execute movePendingToInitializing() before CBAS.
+So the expectation is that there will more chance that CBAS will come along after snoozing and find no slot available.
+The call here is essentially just breaking the loop where CBAS (that is just one the possible problematic DCP Client) keeps rescheduling itself immediately while replication its snoozing.
+
+But I strongly agree on that this patch needs verification on a real run, as any other behaviour change in the same area. Giving a toy to QE
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2022-06-16 08:04:30.000000000
+Message: 
+Patch Set 5:
+
+(1 comment)
+Line:471, engines/ep/src/dcp/dcpconnmap.cc -> That's true. Two comments on that:
+
+[1]
+We need to recall from where we come. Ie current behaviour is that it's likely that Prod2 (ie KV replication) doesn't get scheduled until Prod1 (eg, CBAS) doesn't drain its pending backfill. What you describe is suboptimal but it appears to be an improvement from the current behaviour.
+
+[2]
+I think that there's margin to refine the behaviour with low effort. Eg, in your example there's no reason for limiting a Prod to 400 backfills, and that's because we are far from backfills.maxRunning.
+
+Just to clarify, guideline here is for a low risk Neo patch. That's why I've tried to find an alternative from touching the various backfill queues.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2022-06-16 08:59:22.000000000
+Message: 
+Patch Set 5:
+
+(1 comment)
+Line:397, engines/ep/src/dcp/backfill-manager.cc -> Got it. The commit message/comments lead me to believe that this change was splitting the current limit between backfilling connections, whereas it's actually just "yielding" to other connection if it's running more than it's share of backfills. It can still run more than it's share, but the "yield" gives other connections the opportunity to start up their backfills sooner.
+
+I think that this will cause some pretty nasty perf regressions for any DCP consumer backfills that use more than the max number of concurrent backfills (analytics/2i etc). We're now going to sleep for a second after every backfill run which is limited by the connection buffer size.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2022-06-16 09:24:13.000000000
+Message: 
+Patch Set 5:
+
+(1 comment)
+Line:397, engines/ep/src/dcp/backfill-manager.cc -> > Got it. The commit message/comments lead me to believe that this change was splitting the current limit between backfilling connections, whereas it's actually just "yielding" to other connection if it's running more than it's share of backfills. It can still run more than it's share, but the "yield" gives other connections the opportunity to start up their backfills sooner.
+
+Correct 👍
+
+> I think that this will cause some pretty nasty perf regressions for any DCP consumer backfills that use more than the max number of concurrent backfills (analytics/2i etc). We're now going to sleep for a second after every backfill run which is limited by the connection buffer size.
+
+I'm reviewing that part
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2024-02-26 08:25:31.000000000
+MISMATCHED INLINE COMMENT
+File Comment: /PATCHSET_LEVEL -> Removing myself as reviewer due to lack of updates for a few years
+----------------------------------------------------------------------------------------------------------------------

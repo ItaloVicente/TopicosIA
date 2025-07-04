@@ -1,0 +1,111 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-37330: Correct expelling logic for items with same seqno
+
+The checkpoint expelling code can fail to expel an item from a
+Checkpoint if there's only 1 candidate item to expel.
+
+The issue is the logic in the expel code which attempts to ensure that
+items with the same seqno are not partially expelled - i.e. we should
+expel either all or none of items sharing the same seqno.  This is
+done by adjusting the chosen expel cursor backwards (initially set to
+the earliest cursor) if it points to an invalid position - from the
+code:
+
+    /*
+     * Walk backwards over the checkpoint if not yet reached the dummy item,
+     * and pointing to an item that either:
+     * 1. has a seqno equal to the checkpoint's high seqno, or
+     * 2. has a previous entry with the same seqno, or
+     * 3. is pointing to a metadata item.
+     */
+    while ((iterator != oldestCheckpoint->begin()) &&
+            (((*iterator)->getBySeqno() ==
+              int64_t(oldestCheckpoint->getHighSeqno())) ||
+             ((*std::prev(iterator))->getBySeqno() ==
+              (*iterator)->getBySeqno()) ||
+             ((*iterator)->isCheckPointMetaItem()))) {
+        --iterator;
+    }
+
+The intent here is correct, however the specifics are slightly wrong.
+Consider the following example - note the oldest (only) cursor is pointing at mutation:1002:
+
+    empty  checkpoint_start  mutation  mutation
+    1001   1001              1001      1002
+                                       ^
+                                       Cursor
+
+The while loop is executed and the first clause is true - Cursor is
+pointing at the high seqno (we cannot expel the last item in a
+checkpoint, must always leave at least one item). The cursor is
+correctly decremented:
+
+    empty  checkpoint_start  mutation  mutation
+    1001   1001              1001      1002
+                             ^
+                             Cursor
+
+This should be where the cursor stops - it is safe to expel everything
+from the Cursor backwards (inclusive), given that wouldn't leave some
+items with the same seqno expelled.
+
+However, clause (2) checks if the previous item
+(checkpoint_start:1001) shares the same seqno as the current item
+(mutation:1001). This is true, and the cursor _is_ decremented.  The
+same thing happens again for the next position (empty:1001 and
+checkpoint_start:1001) and hence the cursor ends up at the start of
+the checkpoint and nothing is expelled:
+
+    empty  checkpoint_start  mutation  mutation
+    1001   1001              1001      1002
+    ^
+    Cursor
+
+What should have happened is the seqno of the current item should be
+compared with the next item (mutation:1001 and mutation:1002), which
+is false and hence the iterator should have stopped when pointing at
+mutation:1001.
+
+Fix by adjusting the clause in the while loop to compare current with
+next.
+
+However, doing so exposes a previously benign bug in the oldest cursor
+selection.
+
+The oldest cursor is found by using std::min_element() on the list of
+cursors, comparing their checkpointId and seqno:
+
+    const auto compareByCkptAndSeqno = [](const auto& a, const auto& b) {
+        return a.second->getCkptIdAndSeqno() <
+               b.second->getCkptIdAndSeqno();
+    };
+
+    auto earliestCursor = std::min_element(
+            cursors.begin(), cursors.end(), compareByCkptAndSeqno);
+
+The bug is that two cursors which have the same CkptId and Seqno are
+not ordered, so the wrong (not earliest) one could be selected. This
+was benign due to the above next/prev bug - the cursor would be moved
+backwards to the earliest item with the same seqno and so the bug was
+harmless. Howver with the expel issue fixed, that is no longer the case.
+
+Address this by additionally sorting on the cursors' distance from the
+start of the container if their ckptId and seqnos are identical.
+
+Change-Id: I8a12f6018b10aae40a4c6af682b14fe3668e8647
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2019-12-20 16:55:13.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-12-20 16:57:24.000000000
+Message: 
+Abandoned
+----------------------------------------------------------------------------------------------------------------------

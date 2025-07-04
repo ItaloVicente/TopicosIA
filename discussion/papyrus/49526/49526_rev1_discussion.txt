@@ -1,0 +1,153 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 469464: [Language Service] Deadlock in the Language Service when starting Papyrus
+https://bugs.eclipse.org/bugs/show_bug.cgi?id=469464
+
+The workbench creates the user's last opened editors when starting up while the
+Job Manager is suspended.  Consequently, if the UI thread blocks waiting for an
+index job, it is likely to deadlock and make the user sad.
+
+A fix:
+
+Support asynchronous calculation of model languages in the language service.
+Update the Papyrus Editor to schedule a re-load when new languages are added, in case
+a language like UML-RT was detected that requires deep model-set configuration.
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Christian Damus
+Date: 2015-06-05 14:37:57.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2015-06-05 14:48:01.000000000
+Message: 
+Patch Set 1:
+
+Build Started https://hudson.eclipse.org/papyrus/job/Papyrus-Gerrit/3463/
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Damus
+Date: 2015-06-05 14:49:53.000000000
+Message: 
+Patch Set 1:
+
+This patch fixes the problem of the workbench hanging by allowing language providers to compute the languages of a (set of) resource(s) asynchronously.  In the case that the ProfileLanguageProvider doesn't have an immediate answer from the Profile Index Service of what profiles are applied to the resource(s), it now just returns an empty result and asynchronously provides an update to the Language Service later.
+
+The Language Service now accepts listeners for asynchronous language changes.  The Papyrus Editor is changed to add such a listener and, if languages are added, re-load itself using the same mechanism that we use when external changes in loaded resources are detected in the workspace.
+
+So, now when starting up a workbench that has a UML-RT model editor already open, the
+editor opens and the workbench finishes starting, as usual, but then a bit later the
+editor is re-loaded in place.  This is not really a great user experience, but it's
+better than hanging the workbench.
+
+A possible refinement to improve the experience is to have a persistent cache of
+languages per resource stored in the resource metadata (as a persistent property).
+This would allow a cleanly shut down workbench to re-start without having to recompute
+any of these languages.
+
+Other solutions might include:
+
+* asynchronous initialization of the Papyrus Editor.  This is something we'd like to
+  do anyways, because the editor always ties up the UI thread and makes the entire
+  workbench unresponsive, but it's a big undertaking because all of the dependent views
+  (outline, properties, explorer, etc.) need to take this into account
+* scrap the Language Service and find another solution to bug 468030
+
+Ad hoc testing of the following scenarios shows perfectly normal behaviour of the editor
+(no funny re-loads, hangs, etc.):
+
+* create a new UML-RT model
+* open an UML-RT model that wasn't previously open
+* open any non-UML-RT model
+* start a workbench that already has non-UML-RT models open but no UML-RT models
+----------------------------------------------------------------------------------------------------------------------
+Author: Camille Letavernier
+Date: 2015-06-05 14:53:38.000000000
+Message: 
+Patch Set 1:
+
+> Other solutions might include: [...]
+
+Is it possible to use the ModelIndexer synchronously rather than using a Job, for this specific case? That might be a simple solution (If feasible) which doesn't lock the Workbench and doesn't cause later asynchronous refresh
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Damus
+Date: 2015-06-05 14:59:27.000000000
+Message: 
+Patch Set 1:
+
+> > Other solutions might include: [...]
+ > 
+ > Is it possible to use the ModelIndexer synchronously rather than
+ > using a Job, for this specific case? That might be a simple
+ > solution (If feasible) which doesn't lock the Workbench and doesn't
+ > cause later asynchronous refresh
+
+I thought about that.  The problem is that, internally, the indexing system is all based on Jobs because it accesses workspace resources.  It seemed like that would be best to advantage of scheduling rules, etc. (for coordination with builds, resource saves, etc.)
+
+I could try replacing the usage of jobs with an ordinary thread pool.  If it seems to work, I can post another (separate) Gerrit review.
+
+Of course, one consequence of not using jobs is that the user will lose visibility of background indexing work, not only in the Progress view but also in the blocked-jobs dialog when the UI has to wait for indexing ...
+----------------------------------------------------------------------------------------------------------------------
+Author: Camille Letavernier
+Date: 2015-06-05 15:07:25.000000000
+Message: 
+Patch Set 1:
+
+Still naive thoughts:
+
+When polling the Workspace Indexer for a specific URI, if the URI has not been indexed yet, then load it synchronously. Other resources keep being indexed asynchronously using jobs
+
+Maybe the IProfileIndex API could be augmented to support both Sync and Async executions?
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Damus
+Date: 2015-06-05 15:15:54.000000000
+Message: 
+Patch Set 1:
+
+The synchronization within the WorkspaceModelIndex isn't that granular.
+
+Indexing is partitioned into jobs by project:  one project per job.
+
+The future-result of indexing is another kind of job that actually waits for the entire index to be ready before doing its computation.  The reason why it can't just wait for a project or a resource to be indexed is because the information indexed for any given resource comes from (as many as) all of the resources in the workspace.
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Damus
+Date: 2015-06-05 15:18:55.000000000
+Message: 
+Patch Set 1:
+
+*But* in this case, the ProfileLanguageProvider can see that it doesn't yet have a complete asynchronous result from the index, so it could synchronously index just the internal profile applications (not the externalized ones, obviously) and return languages based on those.  Then, maybe later, it will find out from the index about more languages.  But usually not, because most languages are not expected to come from externalized profile applications.
+
+This could work.
+----------------------------------------------------------------------------------------------------------------------
+Author: Camille Letavernier
+Date: 2015-06-05 15:20:04.000000000
+Message: 
+Patch Set 1:
+
+Ah, yes, because of the Decorator Models, simply checking the source URI is not sufficient.
+
+Yet another guess: instead of returning an empty result, do a Sync-check on the source URI *only*, then later update it asynchronously if decorator models are found. In most cases, a profile defining a new 'Language' is mandatory anyway and will be apply directly on the model. So that would reduce the risk of having to reload the editor after the index completes, while still keeping this possibility.
+
+Basically, this would add an optimistic, synchronous check, maybe replaced later on with a complete, asynchronous indexing.
+
+Does this make sense?
+----------------------------------------------------------------------------------------------------------------------
+Author: Camille Letavernier
+Date: 2015-06-05 15:21:19.000000000
+Message: 
+Patch Set 1:
+
+Ah, looks like we had the same idea in Comment 8 and Comment 9 :)
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2015-06-05 15:26:36.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+https://hudson.eclipse.org/papyrus/job/Papyrus-Gerrit/3463/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

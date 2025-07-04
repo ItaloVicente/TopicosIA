@@ -1,0 +1,80 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-29675: Move ObjectRegistry stats to CoreLocalStats
+
+ObjectRegistry updates stats on the number and size of various object
+classes whenever those classes are constructed/destructed. Currently
+it updates a single set of stats per Bucket. However, these statistics
+are highly contended by all the frontend worker threads; as such the
+various functions to update the stats show high in profiling.
+
+For example during 20/80 R/W pillowfight run, a representative worker
+thread shows the following:
+
+    Samples: 205K of event 'cycles:ppp', Event count (approx.): 110332199760, Thread: mc:worker_16
+    Overhead  Command       Shared Object                 Symbol
+       1.52%  mc:worker_16  ep.so                         [.] ObjectRegistry::onCreateBlob
+       1.43%  mc:worker_16  ep.so                         [.] ObjectRegistry::onCreateItem
+       1.04%  mc:worker_16  ep.so                         [.] ObjectRegistry::onDeleteItem
+       0.59%  mc:worker_16  ep.so                         [.] ObjectRegistry::onDeleteBlob
+
+Approx ~4.5% of the thread's runtime is spent in stats
+updating. Examining the asm-level, a significant number of the cycles
+is spent on the atomic updates to those counters; which appears to be
+due to cacheline contention.
+
+Given these stats are frequerntly updated but rarely read, we can
+reduce this cost by moving these hotly-contended counters into the new
+CoreLocalStats class, so each core has it's own instance to write to.
+
+In microbenchmarks this reduces the cost to create/delete a
+StoredValue by ~20%:
+
+Before:
+
+    Run on (8 X 2300 MHz CPU s)
+    2018-05-29 17:00:45
+    ---------------------------------------------------------------------------------------
+    Benchmark                                                Time           CPU Iterations
+    ---------------------------------------------------------------------------------------
+    VBucketBench/CreateDeleteStoredValue/threads:16        229 ns       1954 ns     368128
+
+After:
+
+    Run on (8 X 2300 MHz CPU s)
+    2018-05-29 17:02:54
+    ---------------------------------------------------------------------------------------
+    Benchmark                                                Time           CPU Iterations
+    ---------------------------------------------------------------------------------------
+    VBucketBench/CreateDeleteStoredValue/threads:16        209 ns       1559 ns     461152
+
+Change-Id: I668b4fb54997e32e9cd9229fcfaf5d411b11305d
+Reviewed-on: http://review.couchbase.org/94853
+Reviewed-by: Paolo Cocchi <paolo.cocchi@couchbase.com>
+Tested-by: Build Bot <build@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2018-06-01 15:02:24.000000000
+Message: 
+Change has been successfully cherry-picked as 61b6f9a7c9423b69db2542eddba8833f7e6cfbd8 by Dave Rigby
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-06-01 16:04:32.000000000
+Message: 
+Patch Set 6:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv-engine-vulcan-post-commit/248/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-06-01 17:45:45.000000000
+Message: 
+Patch Set 6:
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv-engine-vulcan-post-commit/248/ : SUCCESS'
+----------------------------------------------------------------------------------------------------------------------

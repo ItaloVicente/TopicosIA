@@ -1,0 +1,85 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-37294: Avoid starvation of low-pri VBs in Flusher::flushVB()
+
++Summary+
+
+Commit 1f64b646719dacba8aa78b1101647a56ae94bbb8 modified the Flusher
+to use VBReadyQueue to manage the low-priority VBuckets waiting to be
+flushed. However, this change introduced a starvation issue for
+low-priority vBuckets if there are outstanding high-priority vBuckets
+which are still awaiting seqno_persisence.
+
++Details+
+
+Consider the following scenario:
+
+1. At least one SEQNO_PERSISTENCE request is outstanding -
+   VBucket::hpVBReqs is non-empty for at least one vBucket.
+
+2. This vbucket does not yet have the seqno requested - for example
+   it's a replica vBucket and memory usage is high and replication to
+   it has been throttled.
+3. At least one other (low priority) vBucket is awaiting flushing.
+
+The consequence is that the low-priority vBucket will never get
+flushed (not until the high priority vBucket completes it's
+seqno_persistence). This can lead to livelock - if we actually _could_
+flush the low-priority vBucket(s) then that would allow
+CheckpointMemory to be freed (expelling / removing closed,
+unreferenced checkpoints).
+
+The actual problem is the logic in Flusher::flushVB(). This is a
+(needlessly?) complex function, but the high level logic involves
+switching between two modes (Flusher::doHighPriority):
+
+A) While there are no outstanding SEQNO_PERSISTENCE vBuckets for this
+   shard, flush the next vBucket in lpVbs (low priority). Reschedule
+   (return true) if there's any more low-priority VBs to flush.
+
+B) If there are outstanding SEQNO_PERSISTENCE vBuckets for this shard:
+   1) If hpVBs (high priority vbs) is empty, populate the hpVBs queue
+      with all vBuckets with outstanding SEQNO_PERSISTENCE requests.
+
+   2) Flush the next vb from hpVBs, Reschdule (return true) if there
+      are any more items in hpVBs.
+
+   3) Once all outstanding SEQNO_PERSISTENCE vBuckets have been
+      flushed, allow an equal number of low-priority vBuckets to be
+      flushed before retrying the outstanding SEQNO_PERSISTENCE vBuckets.
+
+Step B.3 is crucial to avoid starvation of the low-priority queue -
+without this step, then a single slow VBucket with an outstanding
+SEQNO_PERSISTENCE request can prevent _all_ other vBuckets in the
+shard from being flushed.
+
+However, when the aforementioned path to use VBReadyQueue was
+introduced, it inadvertantly prevented step B.3 from actually
+occurring.
+
+This is because when re-entering Flusher::flushVB after flushing the
+last high priority VB from hpVBs (i.e. after step B.2), we incorrectly
+only check if hpVbs.empty() is true, and if so set doHighPriority to
+false - i.e. going back to mode A.
+
+The fix is restore the logic from before the patch - only switch back
+to mode A (doHighPriority=false) when both low and high priority VB
+queues are empty.
+
+Change-Id: Ic8438f33d8905ab2b0f13ff6c6d8b55eb97b8534
+Fixes: 1f64b646719d ("MB-36744: Use VBReadyQueue in Flusher")
+Reviewed-on: http://review.couchbase.org/119657
+Tested-by: Build Bot <build@couchbase.com>
+Reviewed-by: Richard de Mellow <richard.demellow@couchbase.com>
+Reviewed-by: Daniel Owen <owend@couchbase.com>
+Well-Formed: Build Bot <build@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2019-12-20 16:12:59.000000000
+Message: 
+Change has been successfully cherry-picked as 2a368c39481ff4d42c6f755bd7d185b9a57554ca by Dave Rigby
+----------------------------------------------------------------------------------------------------------------------

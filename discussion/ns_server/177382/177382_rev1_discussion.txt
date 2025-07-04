@@ -1,0 +1,177 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-52916 Honor role's permissions for bucketNames
+
+For the bucketNames info returned from /pools/default the
+role/permission of the caller will be used to limit the returned list of
+buckets.
+
+e.g.
+The "traveladmin" user has "Bucket Admin [travel-sample]" role. Note how
+the list of bucket names is filtered based on the role.
+
+$ curl -s -u Administrator:asdasd localhost:9000/pools/default | jq \
+         | grep bucketName
+  "bucketNames": [
+      "bucketName": "beer-sample",
+      "bucketName": "default",
+      "bucketName": "gamesim-sample",
+      "bucketName": "travel-sample",
+
+$ curl -s -u traveladmin:asdasd localhost:9000/pools/default | jq \
+         | grep bucketName
+  "bucketNames": [
+      "bucketName": "travel-sample",
+
+Change-Id: If8647584506b05c7c3410f48074b0558fd36f622
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Steve Watanabe
+Date: 2022-07-12 00:14:38.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-07-12 00:14:47.000000000
+Message: 
+Patch Set 1:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-test/30961/
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2022-07-12 00:15:48.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> make simple-test
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-07-12 00:15:57.000000000
+Message: 
+Patch Set 1:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-simple-test/3701/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-07-12 00:19:29.000000000
+Message: 
+Patch Set 1: Well-Formed+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/ns-server-test/30961/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-07-12 01:02:20.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/ns-server-simple-test/3701/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Finlay
+Date: 2022-07-12 04:04:43.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:109, src/menelaus_web_pools.erl -> I don't this this change is correct. If the user has the bucket[bucket-name].settings!read privilege, they can read the pools/default/buckets/default endpoint - and are sufficiently privileged to know the existence of the bucket. 
+
+I believe the code is correct as it stands. 
+
+I think we should fix MB-52916 by changing the way the bucketNames attribute is computed in the pools/default response to take into account whether the user has the bucket[bucket-name].settings!read privilege. Since this REST API is cached, this value needs to be computed and added to the payload after the value is looked up in the cache.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2022-07-12 18:02:11.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:109, src/menelaus_web_pools.erl -> The bucket_admin role has this permission:
+
+{[{bucket, any}, settings], [read]},
+
+which allows any bucket_admin, even if specified to manage a single bucket, to see all the buckets. 
+
+I'm not understanding how the suggestion would limit access in this case [1]: "changing the way the bucketNames attribute is computed in the pools/default response to take into account whether the user has the bucket[bucket-name].settings!read privilege. ".
+
+[1] Bucket Admin[travel-sample] doing a /pools/default only sees "travel-sample"  in the returned bucketNames field.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Finlay
+Date: 2022-07-12 18:07:13.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:109, src/menelaus_web_pools.erl -> As mentioned bucket_admin is not the problem and we are not going to change it. It has permission to read the configuration for all buckets. 
+
+The problem may be other users who don't have permission to see the configuration of all buckets. The privilege required to read pools/default is pools!read - which almost everyone user has. This means all users basically can discover all buckets. (data_reader for instance) if the following things happen:
+
+(1) bucket_admin reads pools/default first and the pools/default payload gets put in the cache
+(2) data_reader reads pools/default second and sees the cached payload from the bucket_admin
+
+Also the reveres is possible where bucket_admin may think that buckets have been deleted.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2022-07-12 19:10:38.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:109, src/menelaus_web_pools.erl -> Dave said
+> I believe the code is correct as it stands. 
+
+Yes. I went back to unchanged code and see that we may not need any changes (or I'm still confused). Roles that have this permission
+
+{[{bucket, bucket_name}, settings], [read]},
+
+have results that only include the allowed buckets. For example, 
+
+$ curl -s -u qsc:asdasd localhost:9000/pools/default | jq | grep bucketName
+  "bucketNames": [
+      "bucketName": "beer-sample",
+      "bucketName": "default",
+      "bucketName": "gamesim-sample",
+      "bucketName": "travel-sample",
+$ curl -s -u datareader:asdasd localhost:9000/pools/default | jq | grep bucketName
+  "bucketNames": [
+      "bucketName": "travel-sample",
+
+The views_admin role also has the same leak as the bucket_admin. Should this also be left as is?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Finlay
+Date: 2022-07-12 19:24:04.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:109, src/menelaus_web_pools.erl -> Oh yes, you're right Steve. The code is correct as it stands. The bucketNames list is updated after the cached payload is read. 
+
+> The views_admin role also has the same leak as the bucket_admin. Should this also be left as is?
+
+Yes.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2022-07-12 19:54:13.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:109, src/menelaus_web_pools.erl -> Done
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2022-07-12 19:54:17.000000000
+Message: 
+Abandoned
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,157 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-33276 [SR]: Never leave iterators invalid at SyncWrite removal
+
+DurabilityMonitor::removeSyncWrite could make ReplicatinChain's
+itrerators invalid. Details follow.
+
+The following scenario may happens when multiple clients issue durable
+writes with mixed Majority and PersistToMajority concerns (example with
+1-replica, majority=2):
+
+Caption:
+sX(L) -> seqno X, Level L [M]ajority / [P]ersistToMajority
+N(T) -> node N, Tracking for [m]emory / [d]isk
+
+1) s1(P) and s2(M) added for tracking into the DurabilityMonitor
+
+End        s1(P)        s2(M)
+^^
+A(m)/A(d)
+^^
+R(m)/R(d)
+
+2) both Active and Replica ack memSeqno:2
+
+End        s1(P)        s2(M)
+^                       ^
+A(d)                    A(m)
+^                       ^
+R(d)                    R(m)
+
+3) s2(M) is satisfied, committed and removed from tracking; iterators
+A(m) and R(m) are repositioned to 'prev' (i.e., s1(P))
+
+End        s1(P)        x
+^          ^
+A(d)       A(m)
+^          ^
+R(d)       R(m)
+
+4) both Active and Replica ack diskSeqno:1
+
+End        s1(P)        x
+           ^^
+           A(m)/A(d)
+           ^^
+           R(m)/R(d)
+
+5) s1(P) is satisfied, committed and removed from tracking; /all/
+iterators should be repositined to 'prev' (i.e., End), but actually A(m)
+and R(m) are invalidated:
+
+End        x        x
+^          ^
+A(d)       A(m)
+^          ^
+R(d)       R(m)
+
+At this point any call to DurabilityMonitor::addSyncWrite could lead to
+crash caused by actions on A(m) (dereferencing/moving/etc..).
+Note that dereferencing/moving and invalid iterator is undefined
+behaviour, so the way we crash is not deterministic.
+
+The root cause of this issue is that at step (5) we reposition only
+iterators that satisfy the (lastWriteSeqno == removeSeqno) condition.
+While the condition is satisfied for A(d) and R(d), it is not for A(m)
+and R(m) as their lastWriteSeqno is 2 (that is because they originally
+pointed to s2; note that lastWriteSeqno is the "highest SyncWrite seqno
+pointed by a ReplicationChain iterator").
+
+Note that the scenario described above is what we call Out-of-Order
+Commit. Fixed here but already planned for removing as it breaks the
+Sync Replication consistency model.
+
+Change-Id: I70bbb473351294d7c8001d06172a59fd720e45f1
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2019-03-12 08:21:16.000000000
+Message: 
+Uploaded patch set 12.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-03-12 09:09:54.000000000
+Message: 
+Patch Set 12: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/2167/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/2167/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/9442/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/9025/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/16215/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/17634/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/18318/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/15668/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-03-12 09:46:26.000000000
+Message: 
+Patch Set 12:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/2169/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/2169/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/9442/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/9025/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/16215/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/17634/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/18318/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/15668/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-03-12 11:17:52.000000000
+Message: 
+Patch Set 12: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-03-12 11:19:57.000000000
+Message: 
+Patch Set 12: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/9442/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/9025/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/16215/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/17634/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/18318/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/15668/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/2171/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

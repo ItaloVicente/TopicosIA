@@ -1,0 +1,134 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-49388: Avoid repeated memmove in AsyncReadCallback
+
+A regression in the time taken to retrieve `collections-details` stats
+with `mcstats` was noted. For 1000 collections in a cluster run on a
+2019 macbook, master took ~5 minutes, vs 7.0.2 ~30s.
+
+Perf investigation showed that this was not a server side regression,
+rather a regression in `mcstats` itself - CC `mcstat` against a master
+node did not demonstrate the regression, while master `mcstat` against
+CC node did.
+
+Profiling found the a large amount of time was spent in memmove,
+shuffling unread bytes to the start of a buffer in
+AsyncReadCallback::drain.
+
+To avoid this, switch to using folly:IOBuf, which handles head/tail
+pointers into a buffer, and only memmove data to the start of the
+buffer if absolutely necessary (or when reallocating the buffer).
+
+This change brings the average (n=5) time taken to 25s - similar to the
+pre-regression value.
+
+Change-Id: Ic06336ce638ec1afed54b000e44a587173108e06
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: James H
+Date: 2021-11-05 16:30:30.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-11-05 16:47:24.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:113, protocol/connection/client_connection.cc -> You _could_ possibly be a bit smarter here - IOBufs can be arranged in a (circular) chain, so it should be possible to setup a circular buffer to read into; which is consumed once the data has been drained. You would only need to resize (reserve) if you ever need to read more data in a single read than the available capacity of the IOBuf chain - i.e. memmove should not be necessary in steady-state.
+
+Have a look at IOBufQueue which might already do the hard work for you.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-11-05 17:04:40.000000000
+Message: 
+Patch Set 1: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/41592/ : FAILURE
+
+Failure of GoogleTest "TransportProtocols/AuditTest.splitJsonData/Mcbp":
+
+<pre>
+[ RUN      ] TransportProtocols/AuditTest.splitJsonData/Mcbp
+unknown file: error: C++ exception with description "MemcachedConnection::recvFrame(): Timed out after waiting 0ms for a response for AUDIT_CONFIG_RELOAD" thrown in TearDown().
+[  FAILED  ] TransportProtocols/AuditTest.splitJsonData/Mcbp, where GetParam() = Mcbp (2605 ms)
+TransportProtocols/AuditTest.splitJsonData/Mcbp
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/41592/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/16418/ : FAILURE
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/35315/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/13833/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/12634/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/3467/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/15448/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/14610/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/15733/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/3539/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/23787/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2021-11-05 17:19:57.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:113, protocol/connection/client_connection.cc -> I did look into that, but at the time of getReadBuffer it doesn't appear we know how much will be read into the buffer (or I've missed something).
+
+So we wouldn't know ahead of time if a full request would fit, and splitting requests across two IOBufs would probably mean having to copy/coalesce to reinterpret as a header - which might not actually be too bad, if it's infrequent...
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-11-08 09:28:49.000000000
+Message: 
+Patch Set 1: Code-Review+2
+
+(1 comment)
+Line:113, protocol/connection/client_connection.cc -> Roger. Given we are already faster than the CC version, I think what we have is fine.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-11-08 10:02:59.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/35315/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/13833/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/12634/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/3467/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/15448/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/14610/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/15733/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/3539/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/16425/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/23787/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/41599/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

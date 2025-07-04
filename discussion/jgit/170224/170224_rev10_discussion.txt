@@ -1,0 +1,205 @@
+======================================================================================================================
+DESCRIPTION:
+
+Added check for null on DirCacheEntry in checkoutEntry method
+
+Observed the error when trying to force checkout from a branch
+that had no changes on it. When the 'keep()' method from 'DirCacheCheckout'
+method was called the 'DirCacheEntry e' was null and was passed like
+this to the 'checkoutEntry()' method where the 'getObjectId()' is
+being called on the 'e' object
+
+Change-Id: If3a9b9e60064459d187c7db04eb4471a72c6cece
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Tudor Matrescu
+Date: 2020-12-03 07:59:10.000000000
+Message: 
+Patch Set 10: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2020-12-03 07:59:20.000000000
+Message: 
+Patch Set 10:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/4026/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2020-12-03 08:42:08.000000000
+Message: 
+Patch Set 10: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/4026/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Tudor Matrescu
+Date: 2020-12-28 16:31:11.000000000
+Message: 
+Assignee added: Matthias Sohn <matthias.sohn@sap.com>
+----------------------------------------------------------------------------------------------------------------------
+Author: Tudor Matrescu
+Date: 2020-12-28 16:31:54.000000000
+Message: 
+Patch Set 10:
+
+Hi there. By any chance do you have any updates regarding this? Thanks and happy holidays!
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Halstrick
+Date: 2020-12-30 08:04:51.000000000
+Message: 
+Patch Set 10: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Halstrick
+Date: 2020-12-30 08:05:00.000000000
+Message: 
+Change has been successfully merged by Christian Halstrick
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2020-12-30 08:10:23.000000000
+Message: 
+Patch Set 10:
+
+(3 comments)
+
+Oh well, I see Christian has just merged this. Too bad. I was just writing these comments and would have -1'ed this. So I guess I'll have to clean this up in a follow-up commit. :-(
+Line:2155, org.eclipse.jgit.test/tst/org/eclipse/jgit/lib/DirCacheCheckoutTest.java -> That test case does indeed check that there is no NPE, but:
+
+1. It's strange to have a test without assertion.
+2. It's a case that should never occur like that in practice.
+
+Much better and much more interesting is to identify the cases that can provoke an NPE in real-life usage. Here's a test case for CheckoutCommandTest that reproduces the NPE in keep():
+
+  @Test
+  public void testCheckoutForcedNoChangeNotInIndex() throws Exception {
+    git.checkout().setCreateBranch(true).setName("test2").call();
+    File f = writeTrashFile("NewFile.txt", "New file");
+    git.add().addFilepattern("NewFile.txt").call();
+    git.commit().setMessage("New file created").call();
+    git.checkout().setName("test").call();
+    assertFalse(f.exists());
+    writeTrashFile("NewFile.txt", "New file");
+    git.add().addFilepattern("NewFile.txt").call();
+    git.commit().setMessage("New file created again with same content")
+        .call();
+    // Now remove the file from the index only. So it exists in both
+    // commits, and in the working tree, but not in the index.
+    git.rm().addFilepattern("NewFile.txt").setCached(true).call();
+    assertTrue(f.isFile());
+    git.checkout().setForced(true).setName("test2").call();
+    assertTrue(f.isFile());
+    assertEquals(Constants.R_HEADS + "test2", git.getRepository()
+        .exactRef(Constants.HEAD).getTarget().getName());
+  }
+
+Please add this test case to CheckoutCommandTest; and create a bug in bugzilla for it.
+
+Line:1216, org.eclipse.jgit/src/org/eclipse/jgit/dircache/DirCacheCheckout.java -> Why not return early here?
+
+  if (e == null) {
+    return;
+  }
+
+Then remove the null checks from the two if-statements below.
+
+Line:1453, org.eclipse.jgit/src/org/eclipse/jgit/dircache/DirCacheCheckout.java -> Why is this needed? This might hide bugs.
+
+If checkoutEntry() is called from user code with a null DirCacheEntry, throwing an NPE is fine. Is there any place in the code (other than the keep() above, which is already handled?) where checkoutEntry() is called internally with a null DirCacheEntry? If not, remove this null check. If so, where, and why does this occur at all?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Halstrick
+Date: 2020-12-30 08:26:27.000000000
+Message: 
+Patch Set 10:
+
+> Patch Set 10:
+> 
+> (3 comments)
+> 
+> Oh well, I see Christian has just merged this. Too bad. I was just writing these comments and would have -1'ed this. So I guess I'll have to clean this up in a follow-up commit. :-(
+
+Ah, sorry. After a month of silence on this change I thought nobody else is interested.
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2020-12-30 08:32:58.000000000
+Message: 
+Patch Set 10:
+
+> Ah, sorry. After a month of silence on this change I thought nobody else is interested.
+
+Nothing to be sorry about. Just an unfortunate coincidence.
+
+Moreover, this fix is incorrect. If I do the steps from my proposed test case with C git, I end up with a clean status (the force checkout undoes the git rm --cached). With JGit including this fix, the git rm is not undone.
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2020-12-30 09:19:10.000000000
+Message: 
+Patch Set 10:
+
+How did this commit get through without a Signed-off-by footer? I thought that was required for non-committers?
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2020-12-30 09:22:37.000000000
+Message: 
+Patch Set 10:
+
+Follow-up with better test case and hopefully correct fix in https://git.eclipse.org/r/c/jgit/jgit/+/174143 .
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Halstrick
+Date: 2020-12-30 09:43:26.000000000
+Message: 
+Patch Set 10:
+
+> Patch Set 10:
+> 
+> How did this commit get through without a Signed-off-by footer? I thought that was required for non-committers?
+
+I just forgot this footer :-(
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2020-12-30 10:14:18.000000000
+Message: 
+Patch Set 10:
+
+> > How did this commit get through without a Signed-off-by footer? I thought that was required for non-committers?
+> 
+> I just forgot this footer :-(
+
+I thought the Genie or some server-side hook verified the commit when it was pushed, and would have rejected a push of a commit with a non-committer as author without Signed-off-by footer already.
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Halstrick
+Date: 2020-12-30 14:08:54.000000000
+Message: 
+Patch Set 10:
+
+> Patch Set 10:
+> 
+> > > How did this commit get through without a Signed-off-by footer? I thought that was required for non-committers?
+> > 
+> > I just forgot this footer :-(
+> 
+> I thought the Genie or some server-side hook verified the commit when it was pushed, and would have rejected a push of a commit with a non-committer as author without Signed-off-by footer already.
+
+I talked with Matthias about this mystery. He told me that this could be because he helped Tudor to upload this change. But on the other hand: When I look at the history of this change I only see Tudor as uploader. Matthias?
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2020-12-30 15:51:00.000000000
+Message: 
+Patch Set 10:
+
+> Patch Set 10:
+> 
+> > Patch Set 10:
+> > 
+> > > > How did this commit get through without a Signed-off-by footer? I thought that was required for non-committers?
+> > > 
+> > > I just forgot this footer :-(
+> > 
+> > I thought the Genie or some server-side hook verified the commit when it was pushed, and would have rejected a push of a commit with a non-committer as author without Signed-off-by footer already.
+> 
+> I talked with Matthias about this mystery. He told me that this could be because he helped Tudor to upload this change. But on the other hand: When I look at the history of this change I only see Tudor as uploader. Matthias?
+
+I was wrong, I confused this change with https://git.eclipse.org/r/c/jgit/jgit/+/173947
+----------------------------------------------------------------------------------------------------------------------

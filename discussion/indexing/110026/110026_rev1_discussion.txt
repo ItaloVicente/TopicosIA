@@ -1,0 +1,124 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-30141 Projector race conditions between feed.reqch and feed.backch
+
+Kvdata's uuid is sent along with ControlStreamBegin, ControStreamEnd and
+ControlFinKVData messages. When feed.backch processes these messages, it
+compares the kvdata's uuid in the message with that of the uuid of kvdata
+instance in the bucket. If there is a mismatch, then the bucket was already
+cleaned-up. In that case, we ignore the message on backch
+
+Change-Id: I05e466068e24657a9b8d0c23f0a31c30a29006e0
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: VarunVelamuri
+Date: 2019-06-03 06:50:00.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Jeelan Basha Poola
+Date: 2019-06-04 10:25:29.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:554, secondary/projector/feed.go -> Should this be "exits"?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2019-06-04 10:38:02.000000000
+Message: 
+Patch Set 1:
+
+(2 comments)
+Line:505, secondary/projector/feed.go -> In which case this can happen, and what is the impact ? If this is unlikely, we should at least log it as a Error or Fatal message.
+
+Line:607, secondary/projector/feed.go -> This will skip feed.cleanupBucket() call on Lin e 622. Is it okay ?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: VarunVelamuri
+Date: 2019-06-04 12:02:46.000000000
+Message: 
+Patch Set 1:
+
+(2 comments)
+Line:505, secondary/projector/feed.go -> It can happen during the following scenario:
+
+a. A MTR is received from indexer and projector puts stream_begin messages in backch
+b. While the messages are in backch, projector can trigger feed.cleanupBucket() (Say because of timeout error)
+c. Now, if indexer sends an MTR and If the messages in reqch are processed before backch, then the stream_begin message in backch will be processed against new kvdata instance
+
+The happening of this race is very unlikely like other 2 cases but this patch is only a safe-guard measure.
+
+I will change the severity to Error
+
+Line:607, secondary/projector/feed.go -> Yes. That's the intention. Because, if the UUID's do not match, it means that a new kvdata instance has been initialized and the old one is cleaned up. The ControlFinKVData message was intended for the clean-up of old kvdata instance. So, we ignore the clean-up for the new instance
+
+----------------------------------------------------------------------------------------------------------------------
+Author: prataprc
+Date: 2019-06-04 13:26:40.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+
+If I remember correctly, KVDT is per bucket. And there can be any number of vbuckets start/stop for an existing bucket, atleast that is the original design.
+Line:505, secondary/projector/feed.go -> The Opaque of (a) and Opaque value of (c) will be different. I believe we check against opaque value to make sure that the response is for an ongoing request. So in this particular case, won't the STREAM_BEGIN from (a) be ignored in the original code ?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: VarunVelamuri
+Date: 2019-06-05 03:51:13.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+
+Hi Pratap, Thanks for the review.
+
+KVDT is per bucket and there can be any number of start/stops
+Line:505, secondary/projector/feed.go -> Hi Pratap, Thanks for the review.
+
+You are right. When we wait for stream requests (in feed.waitStreamRequests()), we check the opaque value. Therefore, this check is un-necessary.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: VarunVelamuri
+Date: 2019-06-08 15:21:49.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:505, secondary/projector/feed.go -> @Pratap, @Amit
+
+I see one scenario where a race can happen with stream begin messages.
+
+1. Indexer sends fCmdStart, feed opens connections with DCP upstream and starts sending DCP_STREAMREQ messages for each of the vb's
+2. Due to a slow memcached, the streamreq message for one vb timesout
+3. DCPP sends stream begin messages for successful DCP_STREAMREQ messages and kvdata puts them in feed.backch
+4. Due to the timeout error while starting dcp streams, feed.cleanupBucket() is invoked
+5. This would clean-up the KVData instance and indexer sends MTR again
+6. In this MTR, the stream begin messages from earlier MTR would not be processed (in feed.waitStreamRequests()) as the opaque values differ and these stream begin messages will be read here
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Deepkaran Salooja
+Date: 2019-06-14 15:35:44.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+
+I think it worth considering to avoid generating streamEnd, FinKVData from the kvdata and memcached.DcpFeed in case for fCmdClose. When a graceful close has been requested by the supervisor, these message are not required and only add to the pressure on the back channel.
+Line:514, secondary/projector/feed.go -> If cleanupBucket has happened and controlStreamRequest reaches here, this will panic as reqTs == nil. Let's fix that as well. Also, it would be better to add a safeguard by adding an else block to the newly added code and skipping the message if there is no kvdata to prevent future bugs in the code which processes the message.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: VarunVelamuri
+Date: 2019-06-17 04:31:01.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:514, secondary/projector/feed.go -> Done
+
+----------------------------------------------------------------------------------------------------------------------

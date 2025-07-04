@@ -1,0 +1,285 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-29928: Implement auto controller logic for the defragmenter
+
+With changes in 7.0 to memory tracking, we now have visibility of
+an individual bucket's fragmentation, whereas pre 7.0 we only had
+visibility of the entire process.
+
+This commit makes use of the bucket fragmentation to calculate
+the sleep interval of the defragger, the overall idea being that
+as a bucket's defragmentation gets worse, the sleep time reduces.
+The defragger is then running more frequently, visiting more items
+and bringing the fragmentation down.
+
+The commit introduces two new modes of automatic calculation. The reason
+for this is that the second, PID mode, is more experimental. Ultimately
+once it's had some soak time, one mode can remain in code.
+
+The two modes are as follows and can be selected in the bucket config
+(a future patch makes them runtime switchable via cbepctl).
+
+1) auto - Use a 'static' and predictable calculation for converting
+fragmentation into a reduction in sleep time.
+
+2) auto_pid - Use a PID controller to calculate reductions in
+fragmentation. This is less predictable as real time is a factor
+in the calculation, scheduling delays etc... results in unpredictable
+outputs.
+
+The existing mode (just use defragmenter_interval) is named "static".
+
+Both modes of auto controller work by taking the bucket fragmentation
+as a percentage and then using the bucket's low-water mark creating
+a 'score' which is then used for determining how the sleep interval
+maybe calculated. The result is that when fragmentation maybe high,
+but rss is actually small (lots of headroom before low-water mark)
+the score is low, whilst as we approach the low-water mark the score
+increases.
+
+E.g.
+
+fragmentation 23% (allocated:500, rss:650), then with a low-water
+mark of n the value used in calculations (score):
+
+    n    | score
+    600  | 23   (rss > low-water)
+    1000 | 14.95
+    2000 | 7.4
+    3000 | 4.98
+    5000 | 2.99
+
+A spreadsheet with numerous scenarios and the score can be found here:
+
+https://docs.google.com/spreadsheets/d/1W72N2vbrfa5xOVFmS0e3tpFCcEyd8kPk8fqMNmuM1k8/edit#gid=0
+
+auto: This mode takes the score and a range. Below the range
+and the maximum sleep is used, above the range and the minimum sleep is
+used. When the score is within the range we find how far in the range
+the score is, e.g. 20% and map that to be 20% between min and max sleep.
+
+Here the following configuration parameters are being used:
+
+* defragmenter_auto_min_sleep 0.75
+* defragmenter_auto_max_sleep 10.0
+* defragmenter_auto_lower_threshold 7
+* defragmenter_auto_upper_threshold 25
+
+auto_pid: This mode uses a single configurable threshold and when the
+score exceeds that threshold the PID calculates an output. The returned
+sleep time is the maximum - output, but capped at the configuration
+minimum. The PID itself is configured at runtime and the commit uses
+values for P, I, D and dt based on examination of the "pathogen"
+performance test and use of the `pid_runner` program which allows for
+some examination of P, I and D. The assumption is that fragmentation
+doesn't increase quickly, hence the I and dt term forces the PID to
+only recalculate every 10 seconds with a 'slow' output.
+
+Here the following configuration parameters are being used:
+
+* defragmenter_auto_min_sleep 0.75
+* defragmenter_auto_max_sleep 10.0
+* defragmenter_auto_lower_threshold 7
+* defragmenter_auto_pid_p 0.3
+* defragmenter_auto_pid_i 0.00000018
+* defragmenter_auto_pid_d 0.0
+* defragmenter_auto_pid_dt 30000
+
+These values have been used in the pid_runner test and wer chosen based
+on the observation that fragmentation in real workloads increases
+slowly. The pathogen test is useful for testing defragmentation, but
+may not be truly representative of real fragmentation growth, for
+example that test achieves fragmentation greater than 35% in a very
+short time, but is operating on a small amount of data (where mem_used
+ranges from ~200MB to ~600MB).
+
+First dt: With the observation that fragmentation generally increases
+slowly The dt term controls the rate at which the PID reads the Process
+Variable (PV or in our case scored fragmentation) and reacts. Thus 30
+seconds will elapse before the PID computes a new output value. If the
+PV were changing at faster rates, the dt term would be reduced.
+
+P I D values:
+
+Using pid_runner (in its committed state) a number of scenarios were
+compared where the PV is at a fixed percentage above the SP. These
+scenarios guided the current values of P I and D.
+
+For example when the PV is 1.1x of SP it would take the PID 20 hours to
+reduce the sleep interval to min (0.75).
+
+When the PV is 2.5x of SP it would take the PID 54 minutes to reduce the
+sleep interval to min.
+
+    PV x | time to min sleep
+    1.1  | 19h:56m:1s
+    1.4  | 4h:38m:31s
+    1.8  | 2h:5m:31s
+    2.0  | 1h:35m:1s
+    2.5  | 0h:54m:1s
+
+A final note on the use of a PID. Typical use of a PID would be in
+systems where the 'process variable' can be influenced in positive and
+negative ways. E.g. a temperature could be controlled by heating or not
+heating (or forced cooling). In our use-case we can influence
+fragmentation down (by running the defragger), but we cannot raise
+fragmentation to the set-point. i.e. our use of a PID cannot maintain
+a level of fragmentation. This is why in the code, once the
+fragmentation (score) drops below the lower threshold, the PID just
+resets and the max sleep is used.
+
+Change-Id: Ia67d789dc38e0c649d2e7cf8cea945f8f67b711e
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jim Walker
+Date: 2021-06-24 13:41:40.000000000
+Message: 
+Uploaded patch set 10.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-06-24 13:55:38.000000000
+Message: 
+Patch Set 10: Code-Review-1
+
+(6 comments)
+Line:67, /COMMIT_MSG -> Have you experimented with a min sleep close to - or possibly equal - zero?
+
+Certainly customers have had scenarios where they've ended up _very_ fragmented somehow, seems like in those situations it should be fine to run the defragmenter ~constantly; assuming it's still yielding every 25ms to let other tasks run...
+
+Line:364, engines/ep/configuration.json -> Given the pid mode is named "auto_pid", perhaps name this mode "auto_linear" given (I believe) it's a linear scaling of sleep time based on how fragmented the bucket is (with clamping on either end)?
+
+Line:157, engines/ep/src/defragmenter.h -> Is it possible to define this score in more concrete terms, or is it just "some floating point number"?
+
+At least it might be helpful for people's intuition to give some example values here (based on fragmentation / closeness to watermarks) as listed in the commit message?
+
+Line:162, engines/ep/src/defragmenter.h -> Can this method be const?
+
+Line:13, engines/ep/src/pid_controller.h -> Can we get away with <iosfwd> here (ostream is costly)...
+
+Line:54, engines/ep/src/pid_controller.h -> Possibly nicer to just specify the clock as part of the PIDController constructor (dependancy injection) - that prevents one PIDController instance having different clocks used for different step() calls which feels error-prone...
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-06-24 14:05:19.000000000
+Message: 
+Patch Set 10: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/37308/ : ABORTED
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/37308/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/11943/ : ABORTED
+
+Failure of GoogleTest "SDPerf/SubdocPerfTest.Array_Replace_Fulldoc/Mcbp_JsonNo":
+
+<pre>
+[ RUN      ] SDPerf/SubdocPerfTest.Array_Replace_Fulldoc/Mcbp_JsonNo
+[2021-06-24T14:04:22.898Z] /home/couchbase/jenkins/workspace/kv_engine.linux_master/kv_engine/tests/testapp/testapp.cc:903: Failure
+[2021-06-24T14:04:22.898Z] Expected: (0u) != (nr), actual: 0 vs 0
+[2021-06-24T14:04:22.898Z] unknown file: Failure
+[2021-06-24T14:04:22.898Z] C++ exception with description "to_string(cb::mcbp::Magic magic): Invalid value: 0" thrown in the test body.
+[2021-06-24T14:04:22.898Z] [  FAILED  ] SDPerf/SubdocPerfTest.Array_Replace_Fulldoc/Mcbp_JsonNo, where GetParam() = (Mcbp, 4-byte object <01-00 00-00>) (1749 ms)
+SDPerf/SubdocPerfTest.Array_Replace_Fulldoc/Mcbp_JsonNo
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/11943/ )
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/11943/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/10875/ : FAILURE
+
+Failure of GoogleTest "DefragmenterTaskTest.autoCalculateSleep_PID":
+
+<pre>
+[ RUN      ] DefragmenterTaskTest.autoCalculateSleep_PID
+[2021-06-24T13:54:31.759Z] ../kv_engine/engines/ep/tests/module_tests/defragmenter_test.cc:467: Failure
+[2021-06-24T13:54:31.759Z] Expected equality of these values:
+[2021-06-24T13:54:31.759Z]   iterations
+[2021-06-24T13:54:31.759Z]     Which is: 1
+[2021-06-24T13:54:31.759Z]   5
+[2021-06-24T13:54:31.759Z] [  FAILED  ] DefragmenterTaskTest.autoCalculateSleep_PID (9 ms)
+DefragmenterTaskTest.autoCalculateSleep_PID
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/10875/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/11793/ : FAILURE
+
+Failure of GoogleTest "DefragmenterTaskTest.autoCalculateSleep_PID":
+
+<pre>
+[ RUN      ] DefragmenterTaskTest.autoCalculateSleep_PID
+[2021-06-24T13:50:37.717Z] ../kv_engine/engines/ep/tests/module_tests/defragmenter_test.cc:467: Failure
+[2021-06-24T13:50:37.717Z] Expected equality of these values:
+[2021-06-24T13:50:37.717Z]   iterations
+[2021-06-24T13:50:37.717Z]     Which is: 1
+[2021-06-24T13:50:37.717Z]   5
+[2021-06-24T13:50:37.717Z] [  FAILED  ] DefragmenterTaskTest.autoCalculateSleep_PID (4 ms)
+DefragmenterTaskTest.autoCalculateSleep_PID
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/11793/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/12266/ : FAILURE
+
+Failure of GoogleTest "TransportProtocols/SaslTest.CollectionsConnectionSetup/Mcbp":
+
+<pre>
+[ RUN      ] TransportProtocols/SaslTest.CollectionsConnectionSetup/Mcbp
+[2021-06-24T13:52:27.976Z] /home/couchbase/jenkins/workspace/kv_engine.threadsanitizer_master/kv_engine/tests/testapp/testapp_sasl.cc:325: Failure
+[2021-06-24T13:52:27.976Z] Expected equality of these values:
+[2021-06-24T13:52:27.976Z]   cb::mcbp::Status::NotMyVbucket
+[2021-06-24T13:52:27.976Z]     Which is: I"m not responsible for this vbucket
+[2021-06-24T13:52:27.976Z]   getRsp.getStatus()
+[2021-06-24T13:52:27.976Z]     Which is: Not found
+[2021-06-24T13:52:27.976Z] [  FAILED  ] TransportProtocols/SaslTest.CollectionsConnectionSetup/Mcbp, where GetParam() = Mcbp (329 ms)
+TransportProtocols/SaslTest.CollectionsConnectionSetup/Mcbp
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/12266/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/19831/ : FAILURE
+
+Failure of GoogleTest "KVStoreParam/KVStoreParamTest.CompactAndScan/magma":
+
+<pre>
+[ RUN      ] KVStoreParam/KVStoreParamTest.CompactAndScan/magma
+[2021-06-24T13:52:37.399Z] ../kv_engine/engines/ep/tests/module_tests/kvstore_test.cc:855: Failure
+[2021-06-24T13:52:37.399Z] Failed
+[2021-06-24T13:52:37.399Z] initBySeqnoScanContext returned nullptr
+[2021-06-24T13:52:37.399Z] [  FAILED  ] KVStoreParam/KVStoreParamTest.CompactAndScan/magma, where GetParam() = "magma" (658 ms)
+KVStoreParam/KVStoreParamTest.CompactAndScan/magma
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/19831/ )
+
+One of more core files found at the end of the build. Data for post-mortem saved to archived_core_dumps.tar.bz2 under "Build Artifacts". ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/19831/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/10222/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/31827/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/8820/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2021-06-25 10:59:05.000000000
+MISMATCHED INLINE COMMENT
+Line:67, /COMMIT_MSG -> Simple comparison of 0s interval http://cbmonitor.sc.couchbase.com/reports/html/?snapshot=ares_710-1027_access_9e9a&label=0s&snapshot=ares_710-1027_access_a6e1&label=10s 
+
+Doesn't seem to problematic in this test (1 data point) not so sure on some of the differences observed though are down to the 0s interval
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2021-06-24 14:08:15.000000000
+MISMATCHED INLINE COMMENT
+Line:67, /COMMIT_MSG -> only experiments really have been showfast, which has limited visibility - certainly can drop the min (may need to tweak the PID numbers)
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2021-06-24 14:28:14.000000000
+MISMATCHED INLINE COMMENT
+Line:364, engines/ep/configuration.json -> yep, it's linear
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2021-06-25 10:05:31.000000000
+MISMATCHED INLINE COMMENT
+Line:54, engines/ep/src/pid_controller.h -> Yeah can do, aim was to avoid having entire class in header - but can achieve that with some other tweaks
+----------------------------------------------------------------------------------------------------------------------

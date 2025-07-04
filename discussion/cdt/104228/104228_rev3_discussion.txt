@@ -1,0 +1,210 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 456224 - CPPDeferredClassInstance not bound to partial template
+specialization
+
+
+Change-Id: I91482bf3f27becaea796a2c20875f97d92157644
+Signed-off-by: Michael Woski <woskimi@yahoo.de>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Michael Woski
+Date: 2017-09-04 15:42:07.000000000
+Message: 
+Uploaded patch set 3.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2017-09-04 15:42:12.000000000
+Message: 
+Patch Set 3:
+
+Build Started https://hudson.eclipse.org/cdt/job/cdt-verify-test-dsf-gdb-only/469/ (1/3)
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2017-09-04 15:42:13.000000000
+Message: 
+Patch Set 3:
+
+Build Started https://hudson.eclipse.org/cdt/job/cdt-verify-test-cdt-other/472/ (3/3)
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2017-09-04 15:42:13.000000000
+Message: 
+Patch Set 3:
+
+Build Started https://hudson.eclipse.org/cdt/job/cdt-verify-test-cdt-ui-only/468/ (2/3)
+----------------------------------------------------------------------------------------------------------------------
+Author: Michael Woski
+Date: 2017-09-04 15:47:44.000000000
+Message: 
+Patch Set 3:
+
+Nathan, I added the test case from the other bug and fixed HeuristicResolver accordingly.
+However, one thing remains that I can't wrap my head around just yet. When you use the -> operator on the returned iterator I don't know where I should do the dereferencing; that would get us the template parameter for which we can't add proposals of course. Right now we also get the iterator bindings.
+----------------------------------------------------------------------------------------------------------------------
+Author: Michael Woski
+Date: 2017-09-04 15:54:58.000000000
+Message: 
+Patch Set 3:
+
+the test case also reveals one ugly leftover from bug 520913, if you hover over auto it will give you that cryptic text sequence, assuming the expression is a.begin()
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2017-09-04 16:01:51.000000000
+Message: 
+Patch Set 3: Verified-1
+
+Build Unstable 
+
+https://hudson.eclipse.org/cdt/job/cdt-verify-test-dsf-gdb-only/469/ : SUCCESS
+
+https://hudson.eclipse.org/cdt/job/cdt-verify-test-cdt-ui-only/468/ : UNSTABLE
+
+https://hudson.eclipse.org/cdt/job/cdt-verify-test-cdt-other/472/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Michael Woski
+Date: 2017-09-04 16:10:16.000000000
+Message: 
+Patch Set 3:
+
+> https://hudson.eclipse.org/cdt/job/cdt-verify-test-cdt-ui-only/468/
+ > : UNSTABLE
+I guess I can't use #include <vector>, right?
+----------------------------------------------------------------------------------------------------------------------
+Author: Nathan Ridge
+Date: 2017-09-05 02:23:47.000000000
+Message: 
+Patch Set 3:
+
+> the test case also reveals one ugly leftover from bug 520913, if
+ > you hover over auto it will give you that cryptic text sequence,
+ > assuming the expression is a.begin()
+
+This is a pre-existing issue with the pretty-printing of TypeOfDependentExpression, tracked in bug 509187.
+----------------------------------------------------------------------------------------------------------------------
+Author: Nathan Ridge
+Date: 2017-09-05 03:05:40.000000000
+Message: 
+Patch Set 3:
+
+> Nathan, I added the test case from the other bug and fixed
+ > HeuristicResolver accordingly.
+ > However, one thing remains that I can't wrap my head around just
+ > yet. When you use the -> operator on the returned iterator I don't
+ > know where I should do the dereferencing; that would get us the
+ > template parameter for which we can't add proposals of course.
+ > Right now we also get the iterator bindings.
+
+The dereferencing is handled in EvalMemberAccess.getFieldOwnerType().
+
+Notice the function has an early exit if "scope instanceof ICPPInternalUnknownScope", which is what happens in this case.
+
+We'd somehow have to propagate an "isPrefixLookup" flag there, and if so, get into CPPSemantics.findOverloadedOperator(), and have it call setPrefixLookup(true) on the LookupData it creates. (That will ensure we get into the "lookup.isPrefixLookup()" branch of CPPUnknownTypeScope.getBindings(), which will use HeuristicResolver to get us useful results from the unknown type scope.)
+----------------------------------------------------------------------------------------------------------------------
+Author: Nathan Ridge
+Date: 2017-09-05 03:10:34.000000000
+Message: 
+Patch Set 3:
+
+> We'd somehow have to propagate an "isPrefixLookup" flag [into EvalMemberAccess.getFieldOwnerType()]
+
+... which is not easy beacuse the path by which it is called is:
+
+   CPPSemantics.lookup()
+-> CPPSemantics.getLookupScope()
+-> CPPVisitor.getContainingScope()
+-> CPPVisitor.getContainingScopeOrNull()
+-> CPPASTFieldReference.getFieldOwnerType()
+-> EvalMemberAccess.getFieldOwnerType()
+
+CPPSemantics.lookup() has the isPrefixLookup flag (in its LookupData argument), but the other functions on the path do not.
+----------------------------------------------------------------------------------------------------------------------
+Author: Nathan Ridge
+Date: 2017-09-05 03:29:48.000000000
+Message: 
+Patch Set 3:
+
+> I guess I can't use #include <vector>, right?
+
+Right.
+
+Does the test case work for you in the editor? With what compiler version?
+----------------------------------------------------------------------------------------------------------------------
+Author: Nathan Ridge
+Date: 2017-09-05 03:40:10.000000000
+Message: 
+Patch Set 3:
+
+> > I guess I can't use #include <vector>, right?
+
+Here's a reduced testcase that your patch makes work:
+
+==========================================================
+template<typename _Tp>
+class allocator {
+public:
+	typedef _Tp& reference;
+	typedef const _Tp& const_reference;
+
+	template<typename _Tp1>
+	struct rebind {
+		typedef allocator<_Tp1> other;
+	};
+};
+
+template<typename _Alloc>
+struct __alloc_traits {
+	typedef typename _Alloc::reference reference;
+	typedef typename _Alloc::const_reference const_reference;
+
+	template<typename _Tp>
+	struct rebind {
+		typedef typename _Alloc::template rebind<_Tp>::other other;
+	};
+};
+
+template<typename _Tp, typename _Alloc>
+struct _Vector_base {
+	typedef typename __alloc_traits<_Alloc>::template
+	rebind<_Tp>::other _Tp_alloc_type;
+};
+
+template<typename _Tp, typename _Alloc = allocator<_Tp> >
+class vector {
+	typedef _Vector_base<_Tp, _Alloc> _Base;
+	typedef typename _Base::_Tp_alloc_type _Tp_alloc_type;
+	typedef __alloc_traits <_Tp_alloc_type> _Alloc_traits;
+	typedef typename _Alloc_traits::reference reference;
+	typedef typename _Alloc_traits::const_reference const_reference;
+public:
+	reference front();
+	const_reference front() const;
+
+};
+
+template<typename T>
+void foo(vector<vector<T>> v) {
+	v.front()./*cursor*/
+}
+======================================================================
+
+There are some more advanced things it doesn't handle, like the case in https://bugs.eclipse.org/bugs/attachment.cgi?id=259509, but we can leave that for another bug.
+----------------------------------------------------------------------------------------------------------------------
+Author: Nathan Ridge
+Date: 2017-09-05 04:21:14.000000000
+Message: 
+Patch Set 3:
+
+(3 comments)
+Line:434, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/semantics/HeuristicResolver.java -> This change doesn't look right. If we get the type of the expression inside the op_star without unwrapping a pointer type, we no longer have the correct type of the original expression: we have the type inside the op_star.
+
+Line:444, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/semantics/HeuristicResolver.java -> Please add a comment similar to:
+
+  // If there is more than one candidate, for now just
+  // choose the first one. A better thing to do would
+  // be to perform heuristic overload resolution (TODO).
+
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,194 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-52311: [7/n] Pause / Resume Bucket: Add cancellation support
+
+If a Resume() request is made while a previous Pause() request is
+still executing, we don't want to have to wait until the Pause()
+completes before resuming. This is particulary important when
+considering failover - if ns_server decides it needs to failover a
+node it needs to being the Bucket back to the Ready state asap so it
+can examine and/or set vBucket state to perform the failover.
+
+As such, we want to be able to cancel a running Pause() operation if a
+Resume() request arrives.
+
+We do this using Cancellation Tokens - which Folly provides an
+implementation. Quoting from folly/CancellationToken.h:
+
+    A CancellationToken is an object that can be passed into an
+    function or operation that allows the caller to later request that
+    the operation be cancelled.
+
+    A CancellationToken object can be obtained by calling the
+    .getToken() method on a CancellationSource or by copying another
+    CancellationToken object. All CancellationToken objects obtained
+    from the same original CancellationSource object all reference the
+    same underlying cancellation state and will all be cancelled
+    together.
+
+    If your function needs to be cancellable but does not need to
+    request cancellation then you should take a CancellationToken as a
+    parameter.  If your function needs to be able to request
+    cancellation then you should instead take a CancellationSource as
+    a parameter.
+
+In terms of how this maps to kv_engine, we add a CancellationSource to
+each Bucket object, and whenever a Pause() operation occurs we create
+a CancellationToken from the Bucket's CancellationSource and pass the
+token into the BucketManager (and later further down into the
+engine). At suitable points in the pause process (typically before
+some long-lived / blocking operation) the CancellationToken can be
+checked to see if cancellation has been requested, if so then we
+cancel the pause, undoing any steps in the Pause process which have
+already been performed.
+
+Note that one can also register CancellationCallbacks with the
+CancellationToken (multiple callbacks can be registered). Each
+callback can perform whatever necessary "undo" logic to revert the
+back to the unpaused state.
+
+To trigger cancellation, the Resume() method checks to see if
+Cancellation is possible (i.e. a Pause request is in progress), and if
+so requests cancellation and returns early - the cancelled Pause()
+request is responsible for undoing any pause steps already executed.
+
+Change-Id: I1125b6d96d215989b975eda3a4fa81837cd9ea5f
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2022-10-18 13:11:33.000000000
+Message: 
+Uploaded patch set 4.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-10-18 13:58:16.000000000
+Message: 
+Patch Set 4: Verified-1 Code-Review-1
+
+Build Failed 
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/20490/ : FAILURE
+
+<p>clang-format suggested the following changes:
+
+<pre>
+cat <<"EOF" | patch -p1
+diff --git a/daemon/buckets_test.cc b/daemon/buckets_test.cc
+index cbdf2634f..e69f7ebe1 100644
+--- a/daemon/buckets_test.cc
++++ b/daemon/buckets_test.cc
+@@ -434,7 +434,7 @@ void BucketManagerTest::testPauseBucketCancellable(bool threaded) {
+                 baton2.post();
+             }};
+ 
+-    bucketPausingListenerFunc = [&amp;testFixture = *this,
++    bucketPausingListenerFunc = [&amp; testFixture = *this,
+                                  threaded,
+                                  &amp;baton1,
+                                  &amp;baton2](std::string_view name) {
+
+EOF
+</pre> ( https://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/20490/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine-windows-master/50462/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [46/48]: test max_ttl_setWithMeta...(146 ms) OK
+
+441/441 Test #439: serverless_test_magma ...................................................................................   Passed   33.22 sec
+
+99% tests passed, 1 tests failed out of 441
+
+Total Test time (real) = 745.87 sec
+
+The following tests FAIL
+</pre>
+ ( https://cv.jenkins.couchbase.com/job/kv_engine-windows-master/50462/ )
+
+Timeout of a CTest test 440/441 Test #302: ep_testsuite_basic.full_eviction.magma ..................................................................} ( https://cv.jenkins.couchbase.com/job/kv_engine-windows-master/50462/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/24505/ : FAILURE
+
+Failure of GoogleTest "BucketTest.Reset":
+
+<pre>
+[ RUN      ] BucketTest.Reset
+[2022-10-18T13:44:54.820Z] /home/couchbase/jenkins/workspace/kv_engine.threadsanitizer_master/kv_engine/daemon/buckets_test.cc:27: Failure
+[2022-10-18T13:44:54.820Z] Expected equality of these values:
+[2022-10-18T13:44:54.820Z]   5760
+[2022-10-18T13:44:54.820Z]   sizeof(Bucket)
+[2022-10-18T13:44:54.820Z]     Which is: 5768
+[2022-10-18T13:44:54.820Z] Bucket size changed, the reset test must be updated with the new members
+[2022-10-18T13:44:54.820Z] [  FAILED  ] BucketTest.Reset (0 ms)
+BucketTest.Reset
+</pre>
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/24505/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/31687/ : FAILURE
+
+Failure of GoogleTest "BucketTest.Reset":
+
+<pre>
+[ RUN      ] BucketTest.Reset
+[2022-10-18T13:58:09.349Z] /home/couchbase/jenkins/workspace/kv_engine.ASan-UBSan_master/kv_engine/daemon/buckets_test.cc:27: Failure
+[2022-10-18T13:58:09.349Z] Expected equality of these values:
+[2022-10-18T13:58:09.349Z]   5760
+[2022-10-18T13:58:09.349Z]   sizeof(Bucket)
+[2022-10-18T13:58:09.349Z]     Which is: 5768
+[2022-10-18T13:58:09.349Z] Bucket size changed, the reset test must be updated with the new members
+[2022-10-18T13:58:09.349Z] [  FAILED  ] BucketTest.Reset (0 ms)
+BucketTest.Reset
+</pre>
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/31687/ )
+
+Timeout of a CTest test [2022-10-18T13:51:52.894Z]   9/444 Test #264: ep-engine_ep_unit_tests.Nexus/NexusKVStoreTest ..........................................................} ( https://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/31687/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/23269/ : FAILURE
+
+Failure of GoogleTest "BucketTest.Reset":
+
+<pre>
+[ RUN      ] BucketTest.Reset
+[2022-10-18T13:37:03.989Z] /home/couchbase/jenkins/workspace/kv_engine.linux-CE_master/kv_engine/daemon/buckets_test.cc:27: Failure
+[2022-10-18T13:37:03.989Z] Expected equality of these values:
+[2022-10-18T13:37:03.989Z]   5760
+[2022-10-18T13:37:03.989Z]   sizeof(Bucket)
+[2022-10-18T13:37:03.989Z]     Which is: 5768
+[2022-10-18T13:37:03.989Z] Bucket size changed, the reset test must be updated with the new members
+[2022-10-18T13:37:03.989Z] [  FAILED  ] BucketTest.Reset (0 ms)
+BucketTest.Reset
+</pre>
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/23269/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/23670/ : FAILURE
+
+Failure of GoogleTest "BucketTest.Reset":
+
+<pre>
+[ RUN      ] BucketTest.Reset
+[2022-10-18T13:38:30.477Z] ../kv_engine/daemon/buckets_test.cc:27: Failure
+[2022-10-18T13:38:30.477Z] Expected equality of these values:
+[2022-10-18T13:38:30.477Z]   5760
+[2022-10-18T13:38:30.477Z]   sizeof(Bucket)
+[2022-10-18T13:38:30.477Z]     Which is: 5768
+[2022-10-18T13:38:30.477Z] Bucket size changed, the reset test must be updated with the new members
+[2022-10-18T13:38:30.477Z] [  FAILED  ] BucketTest.Reset (0 ms)
+BucketTest.Reset
+</pre>
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/23670/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/21239/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/42327/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/11069/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/10973/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/22690/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

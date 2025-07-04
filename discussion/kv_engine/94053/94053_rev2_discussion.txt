@@ -1,0 +1,70 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-25822: Create separate mutex for pending_io
+
+The LIBEVENT_THREAD::mutex currently guards the whole state of the
+worker thread - as such it is acquired by the worker thread when it
+starts processing event(s) for a connection, and only unlocked when it
+finishes with that connection.
+
+The state guarded includes the pending_io set; which is (primarily):
+
+a) Read at the start of the event loop (to re-register connections in
+   libevent).
+
+b) Written by notify_io_complete when background threads want to
+   wakeup frontend threads.
+
+Profiling of the LIBEVENT_THREAD::mutex wait/lock times shows that
+callers of notify_io_complete (notably ConnManager and DCP
+ConnNotifier task) can end up waiting for long periods (~100ms in
+local testing) to simply add a connection to the pending set.
+
+To improve this, add a separate mutex which is only used for the
+pending_io set. This also requires a change to the data structure for
+the pending_io - we need to additionally record the pending status
+code against each connection.
+
+This is because previously this status (aiostat) was updated with
+LIBEVENT_THREAD::mutex held; therefore no worker thread could possibly
+be running. With the separate mutex this is no longer the case and we
+cannot simply write to aiostat as it may be being accessed by the
+worker. We obviously don't want to have to acquire
+LIBEVENT_THREAD::mutex to update it as that introduces the same
+problem. Instead we record the pending status with the connection in
+pending_io; and when we come to process pending_io in the worker
+thread (which already holds LIBEVENT_THREAD::mutex) we update aiostat
+with the pending status before running it's event loop).
+
+Change-Id: I89104af841c9e9c002315a5be954150b8867c3bd
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Trond Norbye
+Date: 2018-05-14 08:20:08.000000000
+Message: 
+Patch Set 2: Patch Set 1 was rebased
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-05-14 08:48:02.000000000
+Message: 
+Patch Set 2: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/7945/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-vulcan/277/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-vulcan/379/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-vulcan/319/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-vulcan/288/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-vulcan/367/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-undefinedsanitizer-vulcan/320/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

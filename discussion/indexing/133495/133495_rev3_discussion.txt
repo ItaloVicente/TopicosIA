@@ -1,0 +1,78 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-40699: Ensure mutual exclusion among the threads updating scan clients
+
+Change-Id: I3169567bd5189203827105594d9298282b743795
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: amithk
+Date: 2020-08-07 07:39:48.000000000
+Message: 
+Uploaded patch set 3: Patch Set 2 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: VarunVelamuri
+Date: 2020-08-08 16:04:38.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:1383, secondary/queryport/client/client.go -> Minor: 
+
+I think this code is a duplicate of code form lines 1412-1423. I would do the following:
+
+a. Avoid needsRefresh method and restrict locking for lines 1426 to 1442
+b. Close the query port client at 1421 in the if condition at 1428
+c. Add the if condition from 1367 before 1412
+
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2020-08-10 04:05:52.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:1383, secondary/queryport/client/client.go -> Thanks Varun, for the comments. I can see one problem in restricting the lock for lines 1426 to 1442. 
+
+a. This is a Read-Modify-Write operation. We modify based on the value we read. So, if we cannot/shouldn't take the lock only for write operation. Line 1409 has to be in the lock. Also, this operation has a side effects (e.g. new client getting created if required). Although there is no problem in having multiple clients, I won't like to leak the clients. Two thread, who read line 1409 and decided to create a new client will create new client on line 1435 despite of a lock as they are looking at local variables. 
+
+b, c. given my thought process (a) above, I don't think (b) and (c) still hold.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Deepkaran Salooja
+Date: 2020-08-11 22:52:34.000000000
+Message: 
+Patch Set 3:
+
+(2 comments)
+Line:1401, secondary/queryport/client/client.go -> The other option is to use CompareAndSwapPointer instead of StorePointer. If CAS fails, retry the whole thing. qc.Close() is the only other side effect, which doesn't look thread safe. That function should be a no-op if qc is already closed(based on checking the the closed flag). If perf is not a concern, this approach should be fine.
+
+Line:1404, secondary/queryport/client/client.go -> if the code below determines any refresh is required(or qc.Close has been called), it will be stored in newclients/staleclients. And the actual refresh only happens based on that(due to if condition). So, in a way, needsRefresh is implicitly happening. Probably doesn't need to be called again here.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2020-08-17 09:19:44.000000000
+Message: 
+Patch Set 3:
+
+(2 comments)
+Line:1401, secondary/queryport/client/client.go -> My initial approach was CAS based, but the closed qc is not the only problem. If multiple replica retries trigger this at the same time, and there is a new indexer in the cluster, each thread will spawn a new scan client. Due to releaseConnsRountine, these objects will get leaked in CAS based approach.
+
+Yes, there is a way to handle that as well, by ensuring each thread will close the scan client that are spawned by that thread - on CAS failure. But overall CAS based approach looked like redundant work was happening due to CAS based mechanism.
+
+As I said in the code comments, this doesn't get called for all scan requests. This gets called only in case of replica retry and topology change. So, with respect to performance, this looks fine for now.
+
+Please let me know if you still think CAS based approach should be better here.
+
+Thanks.
+
+Line:1404, secondary/queryport/client/client.go -> Yes. This can be avoided. I will do needful.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2020-08-17 09:32:32.000000000
+MISMATCHED INLINE COMMENT
+Line:1404, secondary/queryport/client/client.go -> Done.
+----------------------------------------------------------------------------------------------------------------------

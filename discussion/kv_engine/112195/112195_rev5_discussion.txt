@@ -1,0 +1,154 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-35135: Deal with old PRE in trackedWrites due to partial snapshot
+
+Consider the following scenario:
+1) Replica is streaming from the active and receives a partial
+   snapshot:
+       [1:PRE(k1), 2:NOT RECEIVED(k2)]
+   Importantly, not receiving the item at seqno 2 means that we do not
+   move the HPS as we never received the snapshot end so this blocks
+   us from removing 1:PRE at step 3a. It does not matter what sort of
+   item we have at seqno 2.
+
+2) Replica disconnects and reconnects which sets the
+   allowedDuplicatePrepareSeqnos window to 1
+
+3) Replica receives the following disk snapshot:
+       [4:PRE(k1), 5:MUT(k1)]
+   We have deduped the initial prepare and the commit at seqno 3.
+
+   a) 4:PRE(k1)
+      We replace 1:PRE in the HashTable with 4:PRE and add 4:PRE to
+      trackedWrites in the PDM.
+      This prepare logically completes 1:PRE in the PDM but 1:PRE is
+      not removed from trackedWrites as the HPS used in the fence to
+      remove the SyncWrites is still 0 and won't be moved until the
+      snapshot end.
+   b) 5:MUT(k1)
+      We find 4:PRE in the HashTable and use this seqno when we attempt
+      to complete the SyncWrite in the PDM. The PDM starts searching
+      for the SyncWrite to complete at the beginning of trackedWrites
+      as we are in a disk snapshot and must allow out of order
+      completion. We then find the trackedWrite for 1:PRE that still
+      exists in the PDM.
+
+Due to out of order completion of prepares, we must start searching
+for a SyncWrite to complete in trackedWrites from the beginning of
+the list as opposed to the HighCompletedSeqno. If we have not
+received a full snapshot before disconnect then we can have a
+prepare in the PDM that has a seqno high than the HPS as we only
+move the HPS on snapshot boundary. If we then receive a disk
+snapshot containing both a prepare and a commit for the same key
+as the prepare before the disconnect then we will throw an exception
+as we have two prepares in the PDM for the same key but only the
+first is found which will have a different seqno to the one that we
+are trying to complete.
+
+Fix this by removing the original SyncWrite when we add an
+overwriting prepare.
+
+Change-Id: Ie27b9073faea79c8b2737d7751521a67e66ad5c9
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Ben Huddleston
+Date: 2019-07-19 14:44:00.000000000
+Message: 
+Uploaded patch set 5.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-07-19 14:50:43.000000000
+Message: 
+Patch Set 5: Code-Review-1
+
+(3 comments)
+Line:52, /COMMIT_MSG -> "... from the trackedWrites in ActiveDM" ?
+
+(I'm possibly being picky, but someone might read that as removing the original SyncWrite from the HT or similar)...
+
+Line:118, engines/ep/src/durability/passive_durability_monitor.cc -> Don't we know the seqno of the prepare to be overwritten - given we just found it in the HashTable?
+
+Line:289, engines/ep/src/durability/passive_durability_monitor.cc -> Can you adjust this message so it's not identical to the above one (so we can tell the cases apart)?
+
+Aslo - `key` needs tagging as user data.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-07-19 14:53:59.000000000
+Message: 
+Patch Set 5:
+
+(1 comment)
+Line:148, engines/ep/src/durability/passive_durability_monitor.cc -> Suggest printing the details of the mismatch (the SyncWrites with the same key).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2019-07-19 14:56:48.000000000
+Message: 
+Patch Set 5:
+
+(1 comment)
+Line:44, /COMMIT_MSG -> nit: higher
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-07-19 15:11:56.000000000
+Message: 
+Patch Set 5: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/18900/ : ABORTED
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/18900/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/13036/ : ABORTED
+
+ThreadSanitizer issue: data race (/home/couchbase/jenkins/workspace/kv_engine-threadsanitizer-master/install/lib/libtsan.so.0+0x6a7b4) in operator delete(void*)  ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/13036/ )
+
+Failure of a CTest test  24/180 Test  #25: ep-engine-persistence-unit-tests.rocksdb ..................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/13036/ )
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/13036/ )
+
+Failure of a GoogleTest test:
+
+TransportProtocols/XattrTest.mb25928_UserCantExceedDocumentLimit/Mcbp_XattrYes_JsonNo_SnappyYes, where GetParam() = (Mcbp, XattrYes, 4-byte object <01-00 00-00>, 4-byte object <00-00 00-00>) (281 ms) ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/13036/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/22040/ : ABORTED
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/22040/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/5794/ : ABORTED
+
+Failure of a CTest test [2019-07-19T15:11:54.726Z]  53/181 Test  #55: ep_testsuite_xdcr.full_eviction.comp_passive .................................Child terminated ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/5794/ )
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/5794/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/19868/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/12207/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/21225/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/2886/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2019-07-19 15:11:59.000000000
+Message: 
+Patch Set 5:
+
+(5 comments)
+Line:44, /COMMIT_MSG -> Done
+
+Line:52, /COMMIT_MSG -> Done
+
+Line:118, engines/ep/src/durability/passive_durability_monitor.cc -> Done
+
+Line:148, engines/ep/src/durability/passive_durability_monitor.cc -> Done
+
+Line:289, engines/ep/src/durability/passive_durability_monitor.cc -> Done
+
+----------------------------------------------------------------------------------------------------------------------

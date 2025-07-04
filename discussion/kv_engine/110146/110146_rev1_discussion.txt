@@ -1,0 +1,95 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-34445: Do not schedule async vBucket deletion at destruction
+
+This causes deadlock due to recursive locking of tMutex in ExecutorPool.
+Fix this by setting the deferredDeletion flag to false which will
+cause all vBucket deletion to be done synchronously. See the below
+backtrace.
+
+Change-Id: I70298a8337967c648280b0d86a96c08bf3a4008a
+15:05:37 #0  __lll_lock_wait () at ../sysdeps/unix/sysv/linux/x86_64/lowlevellock.S:135
+15:05:38 #1  0x00007f551159fdbd in __GI___pthread_mutex_lock (mutex=0x7f5510435b08) at ../nptl/pthread_mutex_lock.c:80
+15:05:38 #2  0x00007f550af2ef9d in __gthread_mutex_lock (__mutex=0x7f5510435b08) at /usr/local/include/c++/7.3.0/x86_64-pc-linux-gnu/bits/gthr-default.h:748
+15:05:38 #3  std::mutex::lock (this=0x7f5510435b08) at /usr/local/include/c++/7.3.0/bits/std_mutex.h:103
+15:05:38 #4  std::lock_guard<std::mutex>::lock_guard (__m=..., this=<synthetic pointer>) at /usr/local/include/c++/7.3.0/bits/std_mutex.h:162
+15:05:38 #5  ExecutorPool::_schedule (this=this@entry=0x7f5510435a00, task=...) at /home/couchbase/jenkins/workspace/kv_engine-linux-master-CE/kv_engine/engines/ep/src/executorpool.cc:420
+15:05:38 #6  0x00007f550af2f13d in ExecutorPool::schedule (this=0x7f5510435a00, task=...) at /home/couchbase/jenkins/workspace/kv_engine-linux-master-CE/kv_engine/engines/ep/src/executorpool.cc:440
+15:05:40 #7  0x00007f550af2ad1d in EphemeralVBucket::scheduleDeferredDeletion (this=<optimized out>, engine=...) at /home/couchbase/jenkins/workspace/kv_engine-linux-master-CE/kv_engine/engines/ep/src/ephemeral_vb.cc:841
+15:05:40 #8  0x00007f550af64dc1 in std::_Sp_counted_base<(__gnu_cxx::_Lock_policy)2>::_M_release (this=0x7f550a3a9060) at /usr/local/include/c++/7.3.0/bits/shared_ptr_base.h:154
+15:05:40 #9  std::__shared_count<(__gnu_cxx::_Lock_policy)2>::~__shared_count (this=<optimized out>, __in_chrg=<optimized out>) at /usr/local/include/c++/7.3.0/bits/shared_ptr_base.h:684
+15:05:40 #10 std::__shared_ptr<VBucket, (__gnu_cxx::_Lock_policy)2>::~__shared_ptr (this=<optimized out>, __in_chrg=<optimized out>) at /usr/local/include/c++/7.3.0/bits/shared_ptr_base.h:1123
+15:05:40 #11 std::shared_ptr<VBucket>::~shared_ptr (this=<optimized out>, __in_chrg=<optimized out>) at /usr/local/include/c++/7.3.0/bits/shared_ptr.h:93
+15:05:40 #12 RespondAmbiguousNotification::~RespondAmbiguousNotification (this=<optimized out>, __in_chrg=<optimized out>) at /home/couchbase/jenkins/workspace/kv_engine-linux-master-CE/kv_engine/engines/ep/src/kv_bucket.cc:226
+15:05:40 #13 0x00007f550af30849 in std::_Sp_counted_base<(__gnu_cxx::_Lock_policy)2>::_M_release (this=0x7f550a41c340) at /usr/local/include/c++/7.3.0/bits/shared_ptr_base.h:154
+15:05:40 #14 std::__shared_count<(__gnu_cxx::_Lock_policy)2>::~__shared_count (this=<optimized out>, __in_chrg=<optimized out>) at /usr/local/include/c++/7.3.0/bits/shared_ptr_base.h:684
+15:05:40 #15 std::__shared_ptr<GlobalTask, (__gnu_cxx::_Lock_policy)2>::~__shared_ptr (this=0x7ffe6ec46730, __in_chrg=<optimized out>) at /usr/local/include/c++/7.3.0/bits/shared_ptr_base.h:1123
+15:05:40 #16 std::shared_ptr<GlobalTask>::~shared_ptr (this=0x7ffe6ec46730, __in_chrg=<optimized out>) at /usr/local/include/c++/7.3.0/bits/shared_ptr.h:93
+15:05:40 #17 ExecutorPool::_stopTaskGroup (this=<optimized out>, taskGID=140003322306560, taskType=<optimized out>, force=<optimized out>) at /home/couchbase/jenkins/workspace/kv_engine-linux-master-CE/kv_engine/engines/ep/src/executorpool.cc:612
+15:05:40 #18 0x00007f550af56cb8 in KVBucket::deinitialize (this=0x7f5510495000) at /home/couchbase/jenkins/workspace/kv_engine-linux-master-CE/kv_engine/engines/ep/src/kv_bucket.cc:466
+15:05:40 #19 0x00007f550af09ee1 in EventuallyPersistentEngine::~EventuallyPersistentEngine (this=0x7f55104b2000, __in_chrg=<optimized out>) at /home/couchbase/jenkins/workspace/kv_engine-linux-master-CE/kv_engine/engines/ep/src/ep_engine.cc:6073
+15:05:40 #20 0x00007f550af0a0e7 in EventuallyPersistentEngine::~EventuallyPersistentEngine (this=0x7f55104b2000, __in_chrg=<optimized out>) at /home/couchbase/jenkins/workspace/kv_engine-linux-master-CE/kv_engine/engines/ep/src/ep_engine.cc:6079
+15:05:40 #21 EventuallyPersistentEngine::destroy (this=0x7f55104b2000, force=<optimized out>) at /home/couchbase/jenkins/workspace/kv_engine-linux-master-CE/kv_engine/engines/ep/src/ep_engine.cc:155
+15:05:40 #22 0x000000000040ff0b in MockTestHarness::destroy_bucket (force=false, handle=0x7f55104f2aa0, this=0x64c740 <harness>) at /home/couchbase/jenkins/workspace/kv_engine-linux-master-CE/kv_engine/programs/engine_testapp/engine_testapp.cc:1178
+15:05:40 #23 execute_test (default_cfg=<optimized out>, engine=<optimized out>, test=...) at /home/couchbase/jenkins/workspace/kv_engine-linux-master-CE/kv_engine/programs/engine_testapp/engine_testapp.cc:1333
+15:05:40 #24 main (argc=<optimized out>, argv=<optimized out>) at /home/couchbase/jenkins/workspace/kv_engine-linux-master-CE/kv_engine/programs/engine_testapp/engine_testapp.cc:1581
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Ben Huddleston
+Date: 2019-06-04 15:47:16.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-06-04 16:58:40.000000000
+Message: 
+Patch Set 1: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/11831/ : FAILURE
+
+ThreadSanitizer issue: data race (/home/couchbase/jenkins/workspace/kv_engine-threadsanitizer-master/install/lib/libtsan.so.0+0x6a7b4) in operator delete(void*)  ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/11831/ )
+
+Failure of a CTest test  24/178 Test  #25: ep-engine-persistence-unit-tests.rocksdb ..................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/11831/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/18661/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/11155/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/17836/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/1715/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/20077/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/20845/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/4637/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-06-04 17:26:12.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/18661/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/11155/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/17836/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/1715/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/20077/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/20845/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/4637/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/11834/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

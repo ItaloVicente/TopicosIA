@@ -1,0 +1,137 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-28042: Return xattrs and meta in get doc list api
+
+Added optional params include_xattrs and include_meta.
+By default both are false.
+How it works:
+    1) retrieve document id's
+    2) if asked retrieve docs, meta and xattrs for those id's
+    3) if some docs are deleted while step (2) is working goto (1)
+    4) return
+The algorithm was not changed in general. Only retrieving of xattrs and meta was
+added.
+
+Change-Id: Ib783ca85781bc2a84c70597846877519812b5d92
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Timofey Barmin
+Date: 2018-02-21 19:41:29.000000000
+Message: 
+Uploaded patch set 4: Patch Set 3 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-02-21 19:41:35.000000000
+Message: 
+Patch Set 4: -Well-Formed
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-test/3683/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-02-21 19:54:31.000000000
+Message: 
+Patch Set 4: Well-Formed+1
+
+Permission granted to commit to restricted branch
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2018-02-21 19:56:09.000000000
+Message: 
+Patch Set 4: Verified+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Artamonau
+Date: 2018-02-22 06:33:07.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+
+See inline.
+
+In general, looks ok. Slight concern is that the old version was pipelined and the new one is not. Would be interesting to see how this behaves in full eviction mode with everything being evicted.
+Line:387, src/mc_binary.erl -> This should be removed, I assume?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2018-02-22 07:25:21.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+
+> Slight concern is that the old version was
+ > pipelined and the new one is not. Would be interesting to see how
+ > this behaves in full eviction mode with everything being evicted.
+Can you elaborate please? I'm not sure I understand correctly what you mean by full eviction
+Line:387, src/mc_binary.erl -> No, unfortunately, internal functions expect ref to be passed (they don't handle undefined correctly).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Artamonau
+Date: 2018-02-22 08:28:08.000000000
+Message: 
+Patch Set 4:
+
+When you create a bucket you can choose either full eviction or value eviction modes. The latter is the default. In this mode ep-engine will keep metadata for all documents in memory and will only evict document bodies when it needs to. In full eviction mode, everything is evicted, including the metadata. So potentially each request results in disk fetch.
+
+That said, you don't even need full-eviction in this case. I don't remember the details about xattrs, but they are probably treated the same way document bodies. That is, they are probably evicted in value-only eviction.
+
+So if include_docs is true and the documents are evicted, the old code would send requests for the doc bodies in batches, hopefully reducing the number of disk latencies the user needs to wait for. The new code Fetches documents one by one. In the worst case, you need to wait for disk read every time.
+
+You can test this by forcefully evicting documents. There's probably a better way, but quick grepping in kv_engine repo pointed me to this script: kv_engine/engines/ep/management/cb_evict_key.py
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2018-02-22 22:51:17.000000000
+Message: 
+Patch Set 4: -Verified
+
+> When you create a bucket you can choose either full eviction or
+ > value eviction modes. The latter is the default. In this mode
+ > ep-engine will keep metadata for all documents in memory and will
+ > only evict document bodies when it needs to. In full eviction mode,
+ > everything is evicted, including the metadata. So potentially each
+ > request results in disk fetch.
+ > 
+ > That said, you don't even need full-eviction in this case. I don't
+ > remember the details about xattrs, but they are probably treated
+ > the same way document bodies. That is, they are probably evicted in
+ > value-only eviction.
+ > 
+ > So if include_docs is true and the documents are evicted, the old
+ > code would send requests for the doc bodies in batches, hopefully
+ > reducing the number of disk latencies the user needs to wait for.
+ > The new code Fetches documents one by one. In the worst case, you
+ > need to wait for disk read every time.
+ > 
+ > You can test this by forcefully evicting documents. There's
+ > probably a better way, but quick grepping in kv_engine repo pointed
+ > me to this script: kv_engine/engines/ep/management/cb_evict_key.py
+
+TL; DR: It's slow. Do not merge. I will fix it.
+
+Well, I performed the test. And I actually don't like the way both versions are working. The old version though is at least ~2 times faster at the same queries (include_docs only). The problem is that working time grows linearly with growing <skip> parameter. It happens because we basically send (<skip>+<limit>) doc bodies to requesting node and then do skipping and leave only <limit> docs as actual result. We need to avoid requesting docs bodies for those <skip> documents in the first place. We will still have linear time because of id's but their contribution in total time is relatively small.
+Another reason in doing that is memory limitation on memcached side. If we request for example 10 docs starting from 10000 position request will fail (in old version) because memcached will receive request for 10010 docs and will respond with enomem.
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Artamonau
+Date: 2018-05-10 03:14:08.000000000
+Message: 
+Patch Set 4:
+
+Timofey, still planning to get back to this change?
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2018-05-10 03:48:48.000000000
+Message: 
+Patch Set 4:
+
+> Timofey, still planning to get back to this change?
+
+yes, it's planned for Mad-Hatter
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2020-04-24 22:15:28.000000000
+Message: 
+Abandoned
+----------------------------------------------------------------------------------------------------------------------

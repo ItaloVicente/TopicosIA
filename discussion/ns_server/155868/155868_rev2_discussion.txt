@@ -1,0 +1,176 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-39514: Fix disk usage analyzer and add alert
+
+Resolved issues related to ns_disksup hanging due to the underlying
+command (df) hanging. Changed the process to be entirely nonblocking,
+and to farm it out to a worker process so that the main process can
+continue to process requests even if the underlying command gets
+stuck. Created a flag to track staleness and alert the user if the
+worker is stuck. Ensure that ns_disksup will not crash in the case
+where the worker gets stuck, and finally not to replace the data in
+the event that the df worker returns an empty value, when we already
+have a legitimate (nonempty) value, even if it's stale. The alert
+notifies the user that the disk usage analyzer worker is stuck, and
+that it may need to be killed and that their mounts may need to be
+checked.
+
+Change-Id: I7b31ad37309b3fe58ee1766ed510376476bb9663
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Bryan McCoid
+Date: 2021-06-15 20:57:52.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2021-06-15 20:58:31.000000000
+Message: 
+Patch Set 2:
+
+make simple-test
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-06-15 20:58:38.000000000
+Message: 
+Patch Set 2:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-simple-test/2437/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-06-15 21:40:49.000000000
+Message: 
+Patch Set 2: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/ns-server-simple-test/2437/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2021-06-15 21:57:57.000000000
+Message: 
+Patch Set 2: Verified+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-06-18 19:41:02.000000000
+Message: 
+Patch Set 2:
+
+(11 comments)
+Line:82, src/menelaus_web_alerts_srv.erl -> Suggest using "disk" (singular) to match the rest of this change.
+
+Line:112, src/menelaus_web_alerts_srv.erl -> The comma isn't needed.
+Is there a way to provide the user info as to what "it" is? e.g. Pid
+
+Line:84, src/ns_disksup.erl -> Would you move this to the function parameters?
+
+handle_info({set_disk_data, Data}, #state{diskdata = DiskData} = State) ->
+
+I understand the prior code already did this but my impression is most of our codebase uses this...I think :-)
+
+Same comment for other places.
+
+Line:88, src/ns_disksup.erl -> Can this be just
+
+   {_, New} when New > 0 ->
+        Data;
+
+If there's any new data you don't care about the old
+
+Line:97, src/ns_disksup.erl -> Will this spam the alert mechanism every timeout period?
+
+Line:107, src/ns_disksup.erl -> set stale_timer_ref to none
+
+Line:114, src/ns_disksup.erl -> Do these need to cancel the stale_timer and set the is_stale and stale_timer_ref in State to none?
+
+Line:152, src/ns_disksup.erl -> Suggest adding
+    flush(set_state),
+
+to handle the window/race where the timer has popped and sent the message.
+
+Line:181, src/ns_disksup.erl -> Please add some comments about this being run in a separate process (to handle the case where the command might hang) and the results are then sent via message back to us.
+
+Line:186, src/ns_disksup.erl -> I'm confused as to what this is doing and why it's needed.
+
+Line:191, src/ns_disksup.erl -> What happens on windows? (I know that's a pre-existing condition but don't see how it's handled).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2021-06-18 21:43:16.000000000
+Message: 
+Patch Set 2:
+
+(11 comments)
+Line:82, src/menelaus_web_alerts_srv.erl -> Good idea -- I'm terrible with coming up with user-facing text.. So PLEASE if you have any better way to word this stuff don't hold back in the slightest!
+
+Line:112, src/menelaus_web_alerts_srv.erl -> Are you suggesting the OS pid or the erlang pid? I'm assuming OS..
+
+Line:84, src/ns_disksup.erl -> Yeah good call -- I have done this other times but was never sure what was correct or idiomatic.
+
+Line:88, src/ns_disksup.erl -> yeah I shouldn't even check the current length.. so I can clean this up
+
+Line:97, src/ns_disksup.erl -> so there is a built-in throttling mechanism for alerts so it will send it every period, but the throttling keeps that from being too often. Wasn't sure it was worth building another mechanism when the throttling already exists and works well.
+
+Line:107, src/ns_disksup.erl -> I need to think about this one.. I'll take a closer look in my next edit.
+
+Line:114, src/ns_disksup.erl -> Let me look into this in my next edit but I'm not sure. It's not originally required for the existing logic but maybe you are correct that it would be clearer or more consistent..
+
+Line:152, src/ns_disksup.erl -> yeah, good thinking.. Better safe than sorry on this one
+
+Line:181, src/ns_disksup.erl -> Good thinking
+
+Line:186, src/ns_disksup.erl -> you need to move ownership of the port.. or we need to only be opening the port in the worker, which would require moving more stuff around (not a problem, but somewhat unnecessary). If you don't transfer the ownership the port will die as this process exits and the next pass will have to re-create it. This was new information to me as well. Ports are weird.
+
+Line:191, src/ns_disksup.erl -> should never be called on windows.. if you look at the entrypoint to all of this at the top there's a check for OS and windows stuff is delegated to the original disksup provided by erlang. This was originally a fork of it but we only handle linux/macos with this. Windows is still handled by erlang.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-06-18 22:24:02.000000000
+Message: 
+Patch Set 2:
+
+(3 comments)
+Line:112, src/menelaus_web_alerts_srv.erl -> The message advises killing "it"...so helping the user do so would be helpful. OS pid, if known, at least tell them it's a "df" command. Maybe leave that part out...
+
+Disk usage worker is stuck. Please ensure all mounts are accessible via "df -alk".
+
+Line:186, src/ns_disksup.erl -> >  If you don't transfer the ownership the port will die as this process exits and the next pass will have to re-create it. 
+
+Good info, please add a comment.
+
+Line:191, src/ns_disksup.erl -> Got it. Thanks.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2021-06-18 23:28:38.000000000
+Message: 
+Patch Set 2:
+
+(2 comments)
+Line:112, src/menelaus_web_alerts_srv.erl -> yeah I like your version and I think I can include the OS pid.. so I'll see if I can make that work. How about:
+
+Disk usage worker is stuck. Please ensure all mounts are accessible via "df" and consider killing stuck process: ~s.  (with the OS pid)
+
+I also removed the '-alk' because that's only on linux so the main df call should be largely the same and good enough in this case I think.
+
+Line:186, src/ns_disksup.erl -> will do
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Artamonau
+Date: 2021-06-21 23:35:14.000000000
+Message: 
+Patch Set 2:
+
+I think most of the same can be achieved with fewer changes (which is a consideration given that ns_disksup is a fork of disksup; although the latter hasn't seen much activity recently, it's probably still a good idea to keep them as close to each other as possible).
+
+1. Continue doing all the work inside ns_disksup process. No worker process need to be spawned, no somewhat complex interaction between the worker and the main process, no need to juggle the port handle around.
+
+2. Publish disksup results in an ets table with a monotonic timestamp attached to it.
+
+3. Serve reads from the ets table. Even if the main process is blocked, that's not a problem.
+
+4. Expose a function (for use by menelaus_web_alerts_srv) that tells if the data is stale based on the current time and the last published data.
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,83 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-36237: Protect against duplicate index in case of with nodes
+
+When with nodes clause is specified during index creation, during
+prepare phase, only specified nodes are used. This can lead to
+duplicate index names when index creation with same name is
+attempted from the different query service, and with different
+with node parameter.
+
+Similar situation (duplicate index name) can also occur due to
+subset of nodes being considered during planning. The "most reliable"
+duplicate index check happens duing planning, and planner working
+on only a subset of nodes can lead to duplicate index creation.
+
+The fix is to:
+Move check for duplicate index to the indexer. During prepare phase,
+lifecycle manager will check for the presence of duplicate index
+in local metadata repo. If duplicate index is present, the prepare
+request will be rejected. Also use all indexer nodes during prepare
+phase, so that the duplicate index check will happen on all nodes.
+
+Note: using only a subset of indexer nodes during prepare phase can
+be used as a workaround to create multiple indexes concurrently. To
+avoid regressing from that behavior, a new setting flag called
+"indexer.allowPartialQuorum" is introduced. To create multiple indexes
+concurrently (using with nodes), this flag has to be set explicitly.
+
+Change-Id: I280cab7192bc9d48643f710355938e9daf4f12a3
+Note: Planner is responsible for checking duplicate index name.
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: amithk
+Date: 2019-10-18 09:48:40.000000000
+Message: 
+Uploaded patch set 6.
+----------------------------------------------------------------------------------------------------------------------
+Author: Deepkaran Salooja
+Date: 2019-10-23 04:08:56.000000000
+Message: 
+Patch Set 6:
+
+(3 comments)
+Line:75, secondary/indexer/ddl_service_manager.go -> typo in quorum. you can remove it from here as well.
+
+Line:475, secondary/manager/lifecycle.go -> need one more format specifier for err
+
+Line:483, secondary/manager/lifecycle.go -> what happens today if a delete state index with same name is present and create index is done without any node list?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2019-10-24 12:32:22.000000000
+MISMATCHED INLINE COMMENT
+Line:75, secondary/indexer/ddl_service_manager.go -> Done.
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2019-10-24 12:32:22.000000000
+MISMATCHED INLINE COMMENT
+Line:475, secondary/manager/lifecycle.go -> Done.
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2019-10-24 12:32:22.000000000
+MISMATCHED INLINE COMMENT
+Line:483, secondary/manager/lifecycle.go -> I did further analysis on this.
+
+As of today, the duplicate index check happens at three places.
+1. Metadata Provider
+2. Planner
+3. Indexer
+
+1. Metadata Provider relaxes the duplicate index check for indexes in NIL, CREATED, DELETED and ERROR states.
+2. Planner relaxes the duplicate index check for indexes in NIL, CREATED, DELETED and ERROR states.
+3. Indexer relaxes the duplicate index check only for DELETED indexes.
+
+Having said that, GetIndexDefnByName uses defnCache to check for duplicate index. defnCache is synchronously updated every time index is created/deleted/updated. On delete index, defnCache cache entry also gets deleted. So, using defnCache is not a problem. Also, the same function GetIndexDefnByName is used by duplicate defnId and instId checks as well. So, prepare request will never get rejected for DELETED indexes. And, we can reject prepare request if the indexDefn (as per defnCache) is in NIL, CREATED and ERROR states (as if we don't allow, the request can get rejected when it reaches indexer).
+
+As per the comment in planner code https://github.com/couchbase/indexing/blob/master/secondary/planner/proxy.go#L288, the indexes in the states NIL, CREATED or ERROR will get cleaned up eventually. So, user retry should succeed eventually.
+
+So, there is no need for code change.
+----------------------------------------------------------------------------------------------------------------------

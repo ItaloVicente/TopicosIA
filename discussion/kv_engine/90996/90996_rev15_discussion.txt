@@ -1,0 +1,131 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-28230: Move active compression to a separate ItemCompressorTask
+
+The DefragmenterTask operates only on a smaller chunk of items at
+a time, so that the hash table lock isn't held for too long that
+will block front-end threads. Also, the defragmenter operates on a
+10 second interval which is not active enough for active compression.
+Moving it to a separate task would also allow for further customizations
+and optimizations on when the task can get scheduled.
+
+Run on (8 X 2500 MHz CPU s)
+2018-03-23 08:58:47
+———————————————————————————————————————————————————————————————————————————————-
+Benchmark                                        Time           CPU Iterations
+ UserCounters…——————————————————————————————————————————————————————————————————
+ItemCompressorBench/Visit_1min/0     84272908 ns   84271125 ns   8 ItemsPerSec=5.65831M ValueOnly
+ItemCompressorBench/Visit_1min/1     80429675 ns   80407625 ns   8 ItemsPerSec=5.92871M FullEviction
+ItemCompressorBench/Visit_25ms/0     77136414 ns   77136571 ns   7 ItemsPerSec=6.18178M ValueOnly
+ItemCompressorBench/Visit_25ms/1     87555805 ns   87551125 ns   8 ItemsPerSec=5.44612M FullEviction
+—————————————————————————————————————————————————————————————————————————————————
+
+Change-Id: Ieed20fc4985936663595c4116504fc8e44c4e043
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Sriram Ganesan
+Date: 2018-03-23 16:05:22.000000000
+Message: 
+Uploaded patch set 15.
+----------------------------------------------------------------------------------------------------------------------
+Author: Tim Bradgate
+Date: 2018-03-23 16:20:10.000000000
+Message: 
+Patch Set 15: Code-Review+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-03-23 16:24:17.000000000
+Message: 
+Patch Set 15: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/8610/ : FAILURE
+
+Failure of a CTest test 104/133 Test #106: memcached-persistence-ep-tests ................... ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/8610/ )
+
+Failure of a GoogleTest  ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/8610/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/6754/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/7564/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/8364/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/1968/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master-gcc7/344/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-03-23 17:03:01.000000000
+Message: 
+Patch Set 15: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/6754/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/7564/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/8364/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/1968/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master-gcc7/344/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/8613/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-03-23 17:34:44.000000000
+Message: 
+Patch Set 15: Code-Review-1
+
+(5 comments)
+Line:24, /COMMIT_MSG -> These numbers look odd - I don't understand why the 25ms visitation (value-only) is faster then full, but then for 1min value-only is slower. 
+
+How stable are these numbers?
+
+I note that GoogleBenchmark only achieved 7 or 8 test iterations, so maybe we are running too few large iterations? 
+
+Couple of things you might want to consider:
+
+1. Maybe restructure so in the "Keep Running" benchmark loop we just perform a single visit (instead of repeating until we get to the end)?
+2. Look at reducing the number of items in the vBucket - note the current (500,000) would equate to 500M items for a bucket with 1024 vBuckets which feels pretty big.
+
+Line:78, engines/ep/benchmarks/item_compressor_bench.cc -> How well does this compress? it feels like it might be too small for snappy to have much of a chance in doing much with it. I recall some testing I did a while ago using snip[1] that Snappy didn't even attempt to compress things less than ~15 bytes or so...
+
+Given we are targeting more like a few hundred or more bytes for when compression should be used, might be worth having variants of a couple of different sizes (compressible, and incompressible). Maybe check with Pavel and see what sizes he was looking at in the system tests?
+
+[1]: https://github.com/kubo/snzip
+
+Line:105, engines/ep/benchmarks/item_compressor_bench.cc -> Note: you shouldn't need to pefrorm your own manual timing - that's exactly what GoogleBenchmark does for you! This might explain the off Item/s numbers you were seeing.
+
+Take a look at vbucket_bench, where it calls state.SetItemsProcessed() to use Google Benchmark's built-in rate calculation.
+
+Line:148, engines/ep/benchmarks/item_compressor_bench.cc -> Note you can use more than one test dimension in GoogleBenchmark (see mem_allocator_stats_bench.cc for an example) - which would avoid the duplication above.
+
+Line:137, engines/ep/src/item_compressor.cc -> I might be wrong, but I don't think this has addressed the problem I mentioned - as you're now essentially discarding the sub-millisecond precision by returning a (scalar) second value.
+
+What happens when you configure the compressor to sleep for say half a second?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Sriram Ganesan
+Date: 2018-03-26 19:20:52.000000000
+Message: 
+Patch Set 15:
+
+(5 comments)
+Line:24, /COMMIT_MSG -> Done. I am just keeping the benchmarks for 20 ms (which is the configured chunk duration for production).
+
+Line:78, engines/ep/benchmarks/item_compressor_bench.cc -> Done. Pavel uses 1K data. Changed accordingly.
+
+Line:105, engines/ep/benchmarks/item_compressor_bench.cc -> Done
+
+Line:148, engines/ep/benchmarks/item_compressor_bench.cc -> Done
+
+Line:137, engines/ep/src/item_compressor.cc -> Done
+
+----------------------------------------------------------------------------------------------------------------------

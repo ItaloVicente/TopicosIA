@@ -1,0 +1,156 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 542701 - NPE at LaunchConfiguration.getLaunchManager
+
+- add new logic to ContainerTypeProvider to store a set of
+  active Jobs that are waiting to check DockerConnection status
+  or responding to change events
+- change ContainerTypeProvider.getStatus() to wait until there are no
+  active checking Jobs before returning
+- change ContainerLaunchConfigurationDelegate.finalLaunchCheck() to
+  create a fake launch target and call LaunchTargetManager.getStatus()
+  which will eventually call the new ContainerTypeProvider.getStatus()
+  and will wait for check Jobs to finish
+- fix NLS warnings in ContainerLaunchConfigurationDelegate
+
+Change-Id: Icad11c5814dd8ee7fac99a41d74329ce65907a38
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jeff Johnston
+Date: 2020-04-20 22:38:53.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: CDT Bot
+Date: 2020-04-20 22:39:06.000000000
+Message: 
+Patch Set 1:
+
+Build Started https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-other-pipeline/1586/ (2/3)
+----------------------------------------------------------------------------------------------------------------------
+Author: CDT Bot
+Date: 2020-04-20 22:39:06.000000000
+Message: 
+Patch Set 1:
+
+Build Started https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-ui-only-pipeline/1511/ (1/3)
+----------------------------------------------------------------------------------------------------------------------
+Author: CDT Bot
+Date: 2020-04-20 22:39:07.000000000
+Message: 
+Patch Set 1:
+
+Build Started https://ci.eclipse.org/cdt/job/cdt-verify-code-cleanliness-pipeline/1149/ (3/3)
+----------------------------------------------------------------------------------------------------------------------
+Author: CDT Bot
+Date: 2020-04-20 23:19:09.000000000
+Message: 
+Patch Set 1: Verified-1 Code-Review-1
+
+Build Failed 
+
+https://ci.eclipse.org/cdt/job/cdt-verify-code-cleanliness-pipeline/1149/ : FAILURE. The code base is not clean. This means one or more of formatting, whitespace, version numbers or other checks appears to have failed. Please see the console output for details and https://github.com/eclipse-cdt/cdt-infra/tree/master/jenkins/pipelines/cdt/verify#cdt-verify-code-cleanliness for documentation on what is checked.
+
+https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-other-pipeline/1586/ : SUCCESS. p2 repository available on https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-other-pipeline/1586/artifact/releng/org.eclipse.cdt.repo/target/repository/ for approximately 7 days.
+
+https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-ui-only-pipeline/1511/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexander Fedorov
+Date: 2020-04-21 07:54:04.000000000
+Message: 
+Patch Set 1:
+
+(8 comments)
+
+@Jeff The approach used in the code should be replaced with org.eclipse.core.runtime.jobs API:
+* Job#belongsTo(Object family)
+* IJobManager#join(Object family, IProgressMonitor monitor)
+and others regarding IShedulingRule and IJobListener
+Line:63, launch/org.eclipse.cdt.docker.launcher/src/org/eclipse/cdt/docker/launcher/ContainerTargetTypeProvider.java -> it should be final
+
+Line:135, launch/org.eclipse.cdt.docker.launcher/src/org/eclipse/cdt/docker/launcher/ContainerTargetTypeProvider.java -> We should not use synchronized inside Job#run
+
+Line:163, launch/org.eclipse.cdt.docker.launcher/src/org/eclipse/cdt/docker/launcher/ContainerTargetTypeProvider.java -> This partially duplicates IJobManager
+
+Line:181, launch/org.eclipse.cdt.docker.launcher/src/org/eclipse/cdt/docker/launcher/ContainerTargetTypeProvider.java -> We should not use synchronized inside Job#run
+
+Line:73, launch/org.eclipse.cdt.docker.launcher/src/org/eclipse/cdt/internal/docker/launcher/ContainerLaunchConfigurationDelegate.java -> It should have semantic name like "NO_ARGS"
+
+Line:469, launch/org.eclipse.cdt.docker.launcher/src/org/eclipse/cdt/internal/docker/launcher/ContainerLaunchConfigurationDelegate.java -> As empty project name is not legal I would inline constant here
+
+Line:642, launch/org.eclipse.cdt.docker.launcher/src/org/eclipse/cdt/internal/docker/launcher/ContainerLaunchConfigurationDelegate.java -> Something is wrong with this approach, we are fighting with our own code
+
+Line:679, launch/org.eclipse.cdt.docker.launcher/src/org/eclipse/cdt/internal/docker/launcher/ContainerLaunchConfigurationDelegate.java -> This should be reworked to avoid null suppression
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jeff Johnston
+Date: 2020-04-21 15:34:10.000000000
+Message: 
+Patch Set 1:
+
+> Patch Set 1:
+> 
+> (8 comments)
+> 
+> @Jeff The approach used in the code should be replaced with org.eclipse.core.runtime.jobs API:
+> * Job#belongsTo(Object family)
+> * IJobManager#join(Object family, IProgressMonitor monitor)
+> and others regarding IShedulingRule and IJobListener
+
+Hi Alexander.  I am trying to avoid join().  There was a deadlock created by the rechecking of image targets so I created jobs to allow the init and changeEvent methods to return.  A spurious problem has been reported once in a while and appears to be impossible (list of targets has a null target in it which should never occur).  I believe this may be caused by the check jobs not being complete and other code accessing the target list.
+
+Add to that, we are doing a point release for 2020-06 so I can't add a new API.  Using the getStatus() call seemed a way to kludge this, however, it is called elsewhere so I was avoiding using a join() in case I caused the deadlock again (much more serious issue).  Anyway, that is the explanation of why I am doing this so weirdly.
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexander Fedorov
+Date: 2020-04-21 17:08:25.000000000
+Message: 
+Patch Set 1:
+
+> > Patch Set 1:
+ > >
+ > > (8 comments)
+ > >
+ > Hi Alexander.  I am trying to avoid join().  There was a deadlock
+ > created by the rechecking of image targets so I created jobs to
+ > allow the init and changeEvent methods to return.  
+
+ok, "join" probably is not what you need, you need to just execute something asynchroniously.
+ 
+ > A spurious
+ > problem has been reported once in a while and appears to be
+ > impossible 
+ > 
+
+"synchronized" inside Job#run looks like a potential deadlock for me. I don't have a proof at the moment, just a feeling that it will happen here. It is much safer to use IJobManager#find(Object family) and job listeners to understand the job end time
+
+ > Add to that, we are doing a point release for 2020-06 so I can't
+ > add a new API.  
+
+We are talking about non-API changes. The implementation problem is the mutability of ContainerTargetTypeProvider. To fix it I would register ILaunchTargetManager as a service to let "Check configs" job use it from a bundle service context - this will allow us to remove the `targetManager` field
+----------------------------------------------------------------------------------------------------------------------
+Author: Jeff Johnston
+Date: 2020-05-22 21:36:10.000000000
+Message: 
+Patch Set 1:
+
+(7 comments)
+
+Hi Alexander, I have replied to your comments.
+Line:63, launch/org.eclipse.cdt.docker.launcher/src/org/eclipse/cdt/docker/launcher/ContainerTargetTypeProvider.java -> I've removed this field.
+
+Line:163, launch/org.eclipse.cdt.docker.launcher/src/org/eclipse/cdt/docker/launcher/ContainerTargetTypeProvider.java -> Agreed.  I have switched to use a JobGroup and look for getState() to be NONE.  I decided against using join() as I added the Jobs to avoid a deadlock we were running into and so am choosing to do the sleep for the time being.
+
+Line:181, launch/org.eclipse.cdt.docker.launcher/src/org/eclipse/cdt/docker/launcher/ContainerTargetTypeProvider.java -> Agreed.  Using a JobGroup with maxThreads 1 accomplishes what I wanted which is to never execute the Jobs simultaneously.
+
+Line:73, launch/org.eclipse.cdt.docker.launcher/src/org/eclipse/cdt/internal/docker/launcher/ContainerLaunchConfigurationDelegate.java -> It is used in two different contexts (for args and for the connection uri).  I have renamed to NONE.
+
+Line:469, launch/org.eclipse.cdt.docker.launcher/src/org/eclipse/cdt/internal/docker/launcher/ContainerLaunchConfigurationDelegate.java -> That is why I am using it as a default.  I check for an empty name just below which means the attribute was not set.
+
+Line:642, launch/org.eclipse.cdt.docker.launcher/src/org/eclipse/cdt/internal/docker/launcher/ContainerLaunchConfigurationDelegate.java -> This is temporary as I cannot add/modify public interfaces until our 2020-09 10.0 release.  I can revisit for then.  I would like this to be tested in the wild by our test team in 2020-06 to see if using the JobGroup and forcing the flush solves the intermittent target problem.  Thiss is a kludge to get around the fact that no new interfaces can be added and I can't get at the ContainerTargetTypeProvider instance being used by the ILaunchTargetManager at the moment except by this workaround.
+
+Line:679, launch/org.eclipse.cdt.docker.launcher/src/org/eclipse/cdt/internal/docker/launcher/ContainerLaunchConfigurationDelegate.java -> Done
+
+----------------------------------------------------------------------------------------------------------------------

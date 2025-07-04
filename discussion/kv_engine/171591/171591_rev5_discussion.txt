@@ -1,0 +1,100 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-51132: Only reset tasks on eventBase during unregisterTaskable
+
+Currently all task pointers are reset on the eventBase
+(scheduler thread) to make the unregistering of a taskable (engine)
+faster as we have to wait for all tasks to be freed before we can
+free the engine. These changes were made as part of MB-49512 as
+we would often see rebalance failures if long running tasks caused
+a delay in execution of the resets of the task pointers. This has
+caused a regression in P99.9 latencies in a SyncWrite Rebalance
+test, and we suspect that that is due to the scheduler thread having
+to do more work which delays the scheduling of other tasks.
+
+To address this regression, we can change the normal method of
+resetting the task pointers back to being run on the cpuPool, and
+only during unregisterTaskable will we reset task pointers on the
+scheduler thread as we do not want to wait for cpuPool workers to
+become available. We need to do a bit more than just that though,
+as it's possible that a reset of a task pointer is currently
+enqueued on the cpuPool when we come to unregister a taskable and
+we do not want to requeue that along with the work for other
+taskables as we will still have to wait for cpuPool workers to
+become available. Instead of requeueing that work, we can identify
+the reset pointer tasks as they are not associated with a GlobalTask
+and manually run them on the scheduler thread.
+
+These changes will restore the old (pre-MB-49512) status quo in
+regards to the normal operation of the ExecutorPool, and only
+negatively impact things during an unregisterTaskable call. Compared
+to current master an unregisterTaskable call may be a bit slower as
+we need to run any pending reset task pointer tasks, and other
+buckets that are not being unregistered may be impacted during this
+call, but only for the duration of the unregisterTaskable.
+
+OneShot benchmarks before change:
+
+ExecutorPoolFixture<FollyExecutorPool>/OneShotScheduleRun_Folly/real_time/threads:1        8955 ns         6542 ns        62425 items_per_second=111.667k/s
+ExecutorPoolFixture<FollyExecutorPool>/OneShotScheduleRun_Folly/real_time/threads:2        6887 ns         9054 ns        96572 items_per_second=145.205k/s
+ExecutorPoolFixture<FollyExecutorPool>/OneShotScheduleRun_Folly/real_time/threads:4        5309 ns         9673 ns       128300 items_per_second=188.359k/s
+ExecutorPoolFixture<FollyExecutorPool>/OneShotScheduleRun_Folly/real_time/threads:8        5076 ns         9758 ns       133704 items_per_second=197.02k/s
+ExecutorPoolFixture<FollyExecutorPool>/OneShotScheduleRun_Folly/real_time/threads:16       5268 ns        10550 ns       116448 items_per_second=189.824k/s
+PureFollyExecutorBench/OneShotScheduleRun/real_time/threads:1                               776 ns          733 ns       709396 items_per_second=1.28818M/s
+PureFollyExecutorBench/OneShotScheduleRun/real_time/threads:2                               527 ns          953 ns      1262504 items_per_second=1.89929M/s
+PureFollyExecutorBench/OneShotScheduleRun/real_time/threads:4                               241 ns          922 ns      2494680 items_per_second=4.1558M/s
+PureFollyExecutorBench/OneShotScheduleRun/real_time/threads:8                              1051 ns         4417 ns       542960 items_per_second=951.094k/s
+PureFollyExecutorBench/OneShotScheduleRun/real_time/threads:16                             2106 ns         9069 ns       532272 items_per_second=474.77k/s
+
+OneShot benchmarks after change:
+
+ExecutorPoolFixture<FollyExecutorPool>/OneShotScheduleRun_Folly/real_time/threads:1        8521 ns         6010 ns        68691 items_per_second=117.358k/s
+ExecutorPoolFixture<FollyExecutorPool>/OneShotScheduleRun_Folly/real_time/threads:2        7851 ns         9177 ns        88440 items_per_second=127.37k/s
+ExecutorPoolFixture<FollyExecutorPool>/OneShotScheduleRun_Folly/real_time/threads:4        6929 ns        10182 ns       100316 items_per_second=144.313k/s
+ExecutorPoolFixture<FollyExecutorPool>/OneShotScheduleRun_Folly/real_time/threads:8        6828 ns        10396 ns        88688 items_per_second=146.45k/s
+ExecutorPoolFixture<FollyExecutorPool>/OneShotScheduleRun_Folly/real_time/threads:16       6749 ns        10592 ns        91696 items_per_second=148.168k/s
+PureFollyExecutorBench/OneShotScheduleRun/real_time/threads:1                               741 ns          699 ns       789389 items_per_second=1.3493M/s
+PureFollyExecutorBench/OneShotScheduleRun/real_time/threads:2                               514 ns          941 ns      1259808 items_per_second=1.94719M/s
+PureFollyExecutorBench/OneShotScheduleRun/real_time/threads:4                               247 ns          937 ns      2327648 items_per_second=4.05459M/s
+PureFollyExecutorBench/OneShotScheduleRun/real_time/threads:8                              1286 ns         5101 ns       410208 items_per_second=777.343k/s
+PureFollyExecutorBench/OneShotScheduleRun/real_time/threads:16                             1577 ns         7508 ns       398416 items_per_second=634.161k/s
+
+Change-Id: Iccc3a3623713a233e9a746d871dfe49c202078e4
+Reviewed-on: https://review.couchbase.org/c/kv_engine/+/171591
+Reviewed-by: Dave Rigby <daver@couchbase.com>
+Tested-by: Build Bot <build@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2022-03-02 14:18:33.000000000
+Message: 
+Change has been successfully cherry-picked as aaf7eff0310cc10f4a9eda68040afb2e381242d4
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-03-02 14:45:02.000000000
+Message: 
+Patch Set 5:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-master/10516/ (1/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-03-02 14:52:44.000000000
+Message: 
+Patch Set 5:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-TSan-master/6897/ (2/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-03-02 15:30:49.000000000
+Message: 
+Patch Set 5:
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-TSan-master/6897/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-master/10516/ : SUCCESS'
+----------------------------------------------------------------------------------------------------------------------

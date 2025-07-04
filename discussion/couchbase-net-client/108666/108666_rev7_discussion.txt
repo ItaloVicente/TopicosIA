@@ -1,0 +1,137 @@
+======================================================================================================================
+DESCRIPTION:
+
+WIP: Create stack based connection pool
+
+- stack allows effecient managment of connections, with active connections staying at top
+- check every minute for inactive connections and remove from connection pool
+- on release of
+
+Change-Id: I8894d78b1bec241a5fa4880bbd14c63148cb443b
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Mike Goldsmith
+Date: 2019-05-08 18:38:23.000000000
+Message: 
+Uploaded patch set 7.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-05-08 18:38:32.000000000
+Message: 
+Patch Set 7:
+
+Build Started http://sdk.jenkins.couchbase.com/job/dotnet/job/couchbase-net-client-gerrit-trigger/215/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-05-08 18:38:58.000000000
+Message: 
+Patch Set 7: Verified+1
+
+Build Successful 
+
+http://sdk.jenkins.couchbase.com/job/dotnet/job/couchbase-net-client-gerrit-trigger/215/ : success
+----------------------------------------------------------------------------------------------------------------------
+Author: Jeffry Morris
+Date: 2019-05-09 05:44:35.000000000
+Message: 
+Patch Set 7:
+
+(3 comments)
+
+Hi Mike -
+
+This is a definite improvement over the basic connection pool, but I am not sure it does exactly what the shared pool does. What I mean is, this isn't a shared pool, where a connection can be used multiple threads at once, but really a connection per operation/thread - you pop a connection to do a write/read and do a push when the read is done. Unless, I am reading this wrong you cannot have two or more threads acting simultaneously on a connection - which is what the shared pool does (rather poorly). Additionally, in high demand situations, pool starvation is imminent - its going to happen.
+
+More importantly, it doesn't seem to fix the flaw in the shared pool where its not able to start at the MinSize and grow on demand or shrink when demand goes down; instead we have to allocate MaxSize connections from initialize (in the shared pool).
+
+Anyways, not trying to be critical, just thinking that there is better solution that uses mux connections correctly and can adjust its active connections size by the amount of demand.
+
+Let's discuss tomorrow.
+
+-Jeff
+Line:92, Src/Couchbase.UnitTests/IO/StackConnectionPoolTests.cs -> ws
+
+Line:102, Src/Couchbase/IO/ConnectionPoolBase.cs -> Couldn't this change break existing implementations? Assume we merge this into release27 and master.
+
+Line:102, Src/Couchbase/IO/StackConnectionPool.cs -> If sockets are shared, this state should never happen in normal operations. I.e. you never have socket/connection exhaustion.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Mike Goldsmith
+Date: 2019-05-09 11:59:04.000000000
+Message: 
+Patch Set 7:
+
+> Patch Set 7:
+> 
+> (3 comments)
+> 
+> Hi Mike -
+> 
+> This is a definite improvement over the basic connection pool, but I am not sure it does exactly what the shared pool does. What I mean is, this isn't a shared pool, where a connection can be used multiple threads at once, but really a connection per operation/thread - you pop a connection to do a write/read and do a push when the read is done. Unless, I am reading this wrong you cannot have two or more threads acting simultaneously on a connection - which is what the shared pool does (rather poorly). Additionally, in high demand situations, pool starvation is imminent - its going to happen.
+> 
+> More importantly, it doesn't seem to fix the flaw in the shared pool where its not able to start at the MinSize and grow on demand or shrink when demand goes down; instead we have to allocate MaxSize connections from initialize (in the shared pool).
+> 
+> Anyways, not trying to be critical, just thinking that there is better solution that uses mux connections correctly and can adjust its active connections size by the amount of demand.
+> 
+> Let's discuss tomorrow.
+> 
+> -Jeff
+
+Thanks for the review.
+
+Currently with MultiplexingConnection there is an internal lock to prevent two operations being written exactly the same time, the lock creates a sort of queue with one thread writing at a time. With this Stack based pool, the locking happens at a higher level where better pool & connection heuristics are available.
+
+I think the problem both with the stack-based and regular connection pool, is that the MultiplexingConnection.Send method blocks to return a result. This means a connection isn't released back to the pool for another operation to be dispatched. If we only used SendAsync, a connection would be released back to the connection pool immediately after dispatching an operation and the result would be handled asynchronously with the CallbackFactory.
+
+Also, connection starvation won't happen with SharedConnectionPool because it always gets assigned a connection to send on. However, in super high contention scenarios, the lock waiting to send an operation can still cause an operation to timeout which I think is effectively the same as ConnectionUnavaialbleException.
+
+The stack-based connection pool allows for a flexible pool size by initialising to Config.MinSize and it can create new connections if the stack is empty, up to Config.MaxSize. The Cleanup task, that is executed in the background periodically, looks for old connections and destroy's them safely and won't go below Config.MinSize.
+----------------------------------------------------------------------------------------------------------------------
+Author: Jeffry Morris
+Date: 2019-05-09 19:00:31.000000000
+Message: 
+Patch Set 7:
+
+> Patch Set 7:
+> 
+> > Patch Set 7:
+> > 
+> > (3 comments)
+> > 
+> > Hi Mike -
+> > 
+> > This is a definite improvement over the basic connection pool, but I am not sure it does exactly what the shared pool does. What I mean is, this isn't a shared pool, where a connection can be used multiple threads at once, but really a connection per operation/thread - you pop a connection to do a write/read and do a push when the read is done. Unless, I am reading this wrong you cannot have two or more threads acting simultaneously on a connection - which is what the shared pool does (rather poorly). Additionally, in high demand situations, pool starvation is imminent - its going to happen.
+> > 
+> > More importantly, it doesn't seem to fix the flaw in the shared pool where its not able to start at the MinSize and grow on demand or shrink when demand goes down; instead we have to allocate MaxSize connections from initialize (in the shared pool).
+> > 
+> > Anyways, not trying to be critical, just thinking that there is better solution that uses mux connections correctly and can adjust its active connections size by the amount of demand.
+> > 
+> > Let's discuss tomorrow.
+> > 
+> > -Jeff
+> 
+> Thanks for the review.
+> 
+> Currently with MultiplexingConnection there is an internal lock to prevent two operations being written exactly the same time, the lock creates a sort of queue with one thread writing at a time. With this Stack based pool, the locking happens at a higher level where better pool & connection heuristics are available.
+>
+
+Yes, I saw that lock and I am questioning why its there - this might be something to refactor out if possible. The problem of course is that the socket is a finite resource; you either use it or you wait or ?
+ 
+> I think the problem both with the stack-based and regular connection pool, is that the MultiplexingConnection.Send method blocks to return a result. This means a connection isn't released back to the pool for another operation to be dispatched. If we only used SendAsync, a connection would be released back to the connection pool immediately after dispatching an operation and the result would be handled asynchronously with the CallbackFactory.
+> 
+
+Note that the synchronous Send method should be obsolete in 3.0; in 2.0 it was only used as a hack to make it work with the existing workflow that was sync (async was added later). IMO we should only be looking to improve on SendAsync.
+
+> Also, connection starvation won't happen with SharedConnectionPool because it always gets assigned a connection to send on. However, in super high contention scenarios, the lock waiting to send an operation can still cause an operation to timeout which I think is effectively the same as ConnectionUnavaialbleException.
+> 
+
+Isn't a ConnectionUnavailableException simply connection starvation - i.e. no connections available to handle a request? Note that in current 2.0 SDK, this cannot happen (with Shared), it was resolved/fixed some time back (but clearly not really because threads queue up instead). I think what you'll see once you put a load on this is that "connection unavailable" will appear and then we'll have to address it again. 
+
+> The stack-based connection pool allows for a flexible pool size by initialising to Config.MinSize and it can create new connections if the stack is empty, up to Config.MaxSize. The Cleanup task, that is executed in the background periodically, looks for old connections and destroy's them safely and won't go below Config.MinSize.
+
+Exactly, that was I meant by "This is a definite improvement over the basic connection pool" - its just not what the goal was with shared.
+
+Ping me, much easier to discuss :)
+----------------------------------------------------------------------------------------------------------------------

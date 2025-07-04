@@ -1,0 +1,172 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-38327: Interpret access logs written before mad-hatter correctly
+
+An issue was encountered during offline upgrade from 5.0.1 to 6.5.0.
+It was found to be while reading the access log for the first time
+after the upgrade.
+
+This process requires 6.5.0 to read a older version of the access log
+format (containing MutationLogEntryV2 rather than the current, V3).
+SerialisedDocKey was changed in 6.5.0 to treat the namespace prefix as
+part of the key, rather than as a separate byte.
+
+This required a compensatory change in MutationLogEntryV2 in 6.5.0,
+however there was a small bug in how this was done; the struct was
+padded by an additional byte, ensuring the key bytes started at the
+same offset in the LogEntry, but this _also_ shifted the offset of the
+length field.
+
+This lead to 6.5.0 expecting to find the key length field one byte
+later than it should - this caused it to read the docNamespace and
+treat it as the length. This was always 0 prior to mad-hatter, so the
+key was treated as zero length.
+
+However - when "upgrading" the V2 struct to V3 to use it, the code
+expected to strip a 1 byte prefix from the key (the docNamespace).
+i.e., start + 1, length - 1. This lead to an underflow, and the V3
+struct constructor copied the key and read/wrote past the end of
+allocated memory.
+
+Fixed by introducing a LegacySerialisedDocKey, which has the previous
+layout.
+
+Change-Id: I53e8491fd8afa7927d069904e19b3502ecbdd072
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: James H
+Date: 2020-03-20 12:29:02.000000000
+Message: 
+Uploaded patch set 7.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-03-20 12:29:13.000000000
+Message: 
+Patch Set 7: Well-Formed+1
+
+Permission granted to commit: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/173241/artifact/restricted.html : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-03-20 13:01:37.000000000
+Message: 
+Patch Set 7: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/1082/ : FAILURE
+
+Failure of a CTest test  39/177 Test  #23: ep-engine_ep_unit_tests ...................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/1082/ )
+
+Failure of a GoogleTest test:
+
+MutationLogTest.readPreMadHatterAccessLog (1 ms) ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/1082/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/1104/ : FAILURE
+
+Failure of a CTest test [2020-03-20T12:51:39.533Z]  27/183 Test  #26: ep-engine_ep_unit_tests ...................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/1104/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/1111/ : FAILURE
+
+Failure of a CTest test [2020-03-20T12:35:08.676Z]  37/183 Test  #26: ep-engine_ep_unit_tests ...................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/1111/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/mad-hatter/432/ : FAILURE
+
+Failure of a CTest test [2020-03-20T12:35:26.273Z]  24/180 Test  #23: ep-engine_ep_unit_tests ...................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/mad-hatter/432/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/890/ : FAILURE
+
+Failure of a CTest test [2020-03-20T12:51:55.352Z]  26/180 Test  #23: ep-engine_ep_unit_tests ...................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/890/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/1097/ : FAILURE
+
+Failure of a CTest test [2020-03-20T12:57:11.567Z]  28/182 Test  #25: ep-engine_ep_unit_tests ...................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/1097/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/998/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/25362/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-03-20 13:27:01.000000000
+Message: 
+Patch Set 7: Code-Review-1
+
+(4 comments)
+
+I also feel we should be able to add some compile-time static_assert() checks in mutation_log to assert the various offset propeties we are relying on.
+Line:282, engines/ep/src/storeddockey.h -> This appears only used by the access log - please move it into that file.
+
+Line:322, engines/ep/src/storeddockey.h -> Seems odd that one method returns DocKeyEncodesCollectionId::Yes, the other returns No. If this is correct suggest some comments explaining why.
+
+Line:345, engines/ep/src/storeddockey.h -> This seems odd - clearly anything pre-6.5 doesn't have any namespace (it's always 0x0, the default collection. Why do we need `docNamespace`?
+
+Line:380, engines/ep/tests/CMakeLists.txt -> This seems a bit pointless - can't we just use it in-place given it's not being modified?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2020-03-20 13:27:25.000000000
+Message: 
+Patch Set 7: Code-Review-1
+
+(1 comment)
+Line:406, engines/ep/src/mutation_log_entry.h -> I don't like that we have +1, then -1 in different functions?
+
+suggest we remove this len function (no one calls it except the new len function?) and just fold the math into the new function.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-03-20 15:09:37.000000000
+Message: 
+Patch Set 7:
+
+(5 comments)
+Line:406, engines/ep/src/mutation_log_entry.h -> Still used by the member len function a little below the new method.
+
+I agree it is a bit messy going up and down like this, but I'm wary of simplifying it away and eventually leading to an off by one (Like MutationLogEntryV2::len seems to have had happen).
+
+I don't mind making the new method do
+
+ sizeof(MutationLogEntryV3) + keylen
+
+with heavy comments indicating that this is only true because the v2 key lacks a prefix, so we are adding one byte but also have one byte of overlap with the MLEV3 struct.
+
+I can also name it something more descriptive like "allocSizeForRecordWithKey" (but maybe less wordy :lol:), or "lenForUnprefixedKey" etc.  if that would improve things?
+
+Line:282, engines/ep/src/storeddockey.h -> Done
+
+Line:322, engines/ep/src/storeddockey.h -> Goof - changed one but not the other. Fixed.
+
+Line:345, engines/ep/src/storeddockey.h -> I can name it whatever you'd prefer, but it's there because that's what pre-mad-hatter wrote to it's access logs, and this class is just modelled to match that because we reinterpret_cast.
+
+I suppose it is padding as we only really need to get the struct layout right, but it seems misleading to just put "padding".
+
+Added a comment :shrug:
+
+Line:380, engines/ep/tests/CMakeLists.txt -> Done
+
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-03-20 15:10:37.000000000
+Message: 
+Patch Set 7:
+
+will add static_asserts :roger:
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-03-23 11:37:03.000000000
+Message: 
+Patch Set 7:
+
+(1 comment)
+Line:406, engines/ep/src/mutation_log_entry.h -> Oop, still a public usage from the MutationLog constructor to allocate the entry buffer.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2020-03-20 19:25:00.000000000
+MISMATCHED INLINE COMMENT
+Line:406, engines/ep/src/mutation_log_entry.h -> move to private then if no external need anymore
+----------------------------------------------------------------------------------------------------------------------

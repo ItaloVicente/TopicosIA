@@ -1,0 +1,304 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-53100: Don't register checkpoint cursors in meta only checkpoints
+
+Problem:
+In MB-53100 it was observed that the ActiveStream::curChkSeqno throws
+due to its value becoming non weakly monotonic, while it's processing
+times from the checkpoint manager. Just after vbucket became active due
+to a takeover stream.
+
+Cause:
+The reason for this is due an issue in how we register cursors when the
+checkpoint manager contains an checkpoint that only contains meta items.
+A meta only checkpoint can occur during a takeover stream, as the
+initial active node sens a snapshot with just one meta item which is a
+setVbucketState to pending.
+
+This meta only checkpoint is problematic for
+CheckpointManager::registerCursorBySeqno() as it will walk thought the
+meta checkpoint trying to find the seqno X requested for. However, if
+the requested seqno X was the same seqno as setVbucketState, we would
+end up walking though the checkpoint without ever finding an item with
+a seqno greater than X. Thus, getting to the checkpoint_end item,
+who's seqno is X. We would then return the registration seqno as X + 1.
+This would then set the value of ActiveStream::curChkSeqno to X + 1
+from X.
+
+When the active stream wants to process items using the cursor it will
+then receive the items from the point where the cursor currently sits,
+including the vbucket item but also importantly it will see a non-meta
+item with seqno X. This then caused curChkSeqno to from (X + 1) to X
+which a violation and thus we throw.
+
+Fix:
+Before we walk though a checkpoint trying to find the right place to put
+the cursor we should consider if the next checkpoint might contain the
+non-meta item with the seqno looking for. We can do this by checking if
+the min cursor seqno of the next checkpoint is the same as the one we're
+looking for. If so, then we should just skip to the next checkpoint.
+
+Also in the situation we reach the end of the open checkpoint we need to
+register at the end of the checkpoint. This means we need to predict
+what the next item's seqno will be. Thus, if the last item isn't a meta
+item then we will set the 'result.seqno' to the end item's bySeqno + 1.
+If it is a meta item then it will just be set to bySeqno. As the meta
+items's seqno hasn't been made visible.
+
+Change-Id: I2fb89a81f506be71991b2a58a9f9a9144d75cad3
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Richard de Mellow
+Date: 2022-08-25 13:34:38.000000000
+Message: 
+Uploaded patch set 7.
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-08-25 13:38:47.000000000
+Message: 
+Patch Set 7:
+
+(5 comments)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-08-25 13:55:49.000000000
+Message: 
+Patch Set 7: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/20941/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [42/161]: file stats post warmup...../kv_engine/engines/ep/tests/ep_testsuite.cc:2322 Test failed: `" (Expected `276480" to be less than or equal to `258048" - Unexpected fileSize for vbucket)
+[2022-08-25T13:48:17.615Z] (184 ms) FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/20941/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/30043/ : FAILURE
+
+Failure of GoogleTest "TransportProtocols/RangeScanTest.CreateCancel/McbpSsl_XattrYes_JsonYes_SnappyYes":
+
+<pre>
+[ RUN      ] TransportProtocols/RangeScanTest.CreateCancel/McbpSsl_XattrYes_JsonYes_SnappyYes
+[2022-08-25T13:45:29.316Z] unknown file: Failure
+[2022-08-25T13:45:29.316Z] C++ exception with description "MemcachedConnection::recvFrame(): Timed out after waiting 2000ms for a response" thrown in the test body.
+[2022-08-25T13:45:29.316Z] [  FAILED  ] TransportProtocols/RangeScanTest.CreateCancel/McbpSsl_XattrYes_JsonYes_SnappyYes, where GetParam() = (McbpSsl, XattrYes, 4-byte object <00-00 00-00>, 4-byte object <00-00 00-00>) (2019 ms)
+TransportProtocols/RangeScanTest.CreateCancel/McbpSsl_XattrYes_JsonYes_SnappyYes
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/30043/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/18938/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/19717/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/48639/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/40882/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/9410/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/21661/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/22017/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/22748/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/9509/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-08-25 14:19:25.000000000
+Message: 
+Patch Set 7:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/20946/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [42/161]: file stats post warmup...../kv_engine/engines/ep/tests/ep_testsuite.cc:2322 Test failed: `" (Expected `401818" to be less than or equal to `372736" - Unexpected fileSize for vbucket)
+[2022-08-25T14:12:04.781Z] (269 ms) FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/20946/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/18938/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/19717/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/48639/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/40882/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/9410/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/21661/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/22017/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/22748/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/30048/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/9509/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-08-25 16:00:12.000000000
+Message: 
+Patch Set 7: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/18938/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/19717/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/48639/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/40882/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/9410/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/21661/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/22017/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/22748/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/30048/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/9509/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/20958/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-08-26 09:14:19.000000000
+Message: 
+Patch Set 7: Code-Review-1
+
+(4 comments)
+Line:19, /COMMIT_MSG -> sends
+
+Line:23, /COMMIT_MSG -> through
+
+Line:30, /COMMIT_MSG -> It might be helpful to include a diagram of the problematic Checkpoint / cursor layout here to aid the reader in following along.
+
+Line:40, /COMMIT_MSG -> This feels overly complex / costly - we shouldn't need to "peek" ahead in the Checkpoint list to find where to register something.
+
+It feels like sequence numbering is broken here - from what you describe; an _earlier_ checkpoint has an item with higher seqno (for a meta item?) than a later checkpoint. If that's the case, we need to fix that.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2022-08-26 09:18:31.000000000
+Message: 
+Patch Set 7: Code-Review-1
+
+(1 comment)
+Line:358, engines/ep/src/checkpoint_manager.cc -> Hmmmmm - having rechecked Checkpoint::getHighSeqno() I'm a little puzzled.
+
+If `en` is the seqno of the last non-meta item (or of the ckpt start, or 0), then a stream request for seqno X where X is also the seqno of a set vbstate at the end of a checkpoint, that shouldn't actually enter the
+
+ } else if (startBySeqno <= en) {
+
+case because en = Checkpoint::getHighSeqno() would be `X-1` as it walks backwards to a non-meta item.
+
+e.g.,
+
+Checkpoint
+[mutation 1, .... mutation 99, setvbstate 100]
+
+checkpoint.getHighSeqno() == 99
+
+stream request for 100 should not try to register a cursor in that checkpoint at all?
+
+In which case, it shouldn't need special handling, won't the loop just advance to the next checkpoint as normal?
+
+
+Caveat: part way through first coffee so I might be having a "duh" moment, but wanted to check anyway :P
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-08-26 09:24:45.000000000
+Message: 
+Patch Set 7:
+
+(1 comment)
+Line:40, /COMMIT_MSG -> It's not really that costly to peak given we're just calling std::next() and checking the min seqno of the next checkpoint which is an O(1) method.
+
+Regarding the seqno value, it's not greater seqno value its equal.
+
+
+id:2 [ e:5, cs:5, vbs:5, ce:5]
+id:3 [ e:5, cs:5, m:5, m:6 )
+
+Using the example above, if we had a stream request from seqno:5 we would currently place our cursor at vbs:5 and tell the ActiveStream that the next seqno is seqno:6. However, when we went to process items we would end up process the mutation at seqno:5. Causing us to observer seqnos out of order, as the stream shouldn't observe seqno:5 as it's request everything from then (not including). 
+
+So instead we need to register the cursor at m:5, so that the next item is m:6.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-08-26 09:30:04.000000000
+Message: 
+Patch Set 7:
+
+(1 comment)
+Line:358, engines/ep/src/checkpoint_manager.cc -> Um so that's not the case I'm trying to cover here, though it does raise an interesting point that I might be able to look into. The issue is when there's a meta only checkpoint that's been closed. See the example in this comment (https://review.couchbase.org/c/kv_engine/+/178485/7//COMMIT_MSG#40).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2022-08-26 09:36:25.000000000
+Message: 
+Patch Set 7:
+
+(1 comment)
+Line:358, engines/ep/src/checkpoint_manager.cc -> Ah yes, greater caffeine is helping this go in
+
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2022-08-26 09:36:36.000000000
+Message: 
+Removed Code-Review-1 by <GERRIT_ACCOUNT_1003828>
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-08-26 10:04:42.000000000
+Message: 
+Patch Set 7:
+
+(1 comment)
+Line:40, /COMMIT_MSG -> Ok, that makes more sense, thanks.
+
+Given meta items mean we can have more than one item with the same seqno, I think what we want to do is ignore meta-items when selecting where to register a cursor.
+
+So in this example we should ignore vbs:5, ce:5 from checkpoint 2, and then also ignore e:5, and cs:5 from checkpoint 3; placing the cursor on m:5. We shouldn't need a "lookahead" for this, we just keep iterating as per the current logic.
+
+
+(In terms of "costly / complex" - it's more the latter - checkpoint management is confusing enough, having special cases where we lookahead complicates the logic.)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-08-31 10:32:20.000000000
+MISMATCHED INLINE COMMENT
+Line:19, /COMMIT_MSG -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-08-31 10:32:20.000000000
+MISMATCHED INLINE COMMENT
+Line:23, /COMMIT_MSG -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-08-31 10:32:20.000000000
+MISMATCHED INLINE COMMENT
+Line:30, /COMMIT_MSG -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-08-31 10:32:20.000000000
+MISMATCHED INLINE COMMENT
+Line:40, /COMMIT_MSG -> Done
+----------------------------------------------------------------------------------------------------------------------

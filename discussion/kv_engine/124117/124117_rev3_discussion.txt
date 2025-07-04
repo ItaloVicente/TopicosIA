@@ -1,0 +1,164 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-38356: Stream request for duplicate vbid stops streaming
+
+If a DCP connection makes a stream request for a vbucket which it is
+already streaming, then the second request should with KEY_EEXISTS,
+and the initial stream remains as-is.
+
+However, as part of changes for Collections to support multiple
+StreamIDs for a single vBucket, this behaviour was regressed - the
+KEY_EEXISTS is sent fine, however the initial stream incorrectly has
+its cursor dropped (as the second essentially "steals" it). This
+results in the initial stream hanging - no further mutations are sent
+on it, even though it it still established.
+
+Fix by splitting updateStreamsMap() into an initial check phase (which
+will return the error /before/ creating a second ActiveStream) and a
+subsequent update map phase.
+
+Change-Id: I2887fabb6092e26da7838416a1edfb9f2c924686
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2020-03-23 22:49:58.000000000
+Message: 
+Uploaded patch set 3.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-03-23 22:50:08.000000000
+Message: 
+Patch Set 3: Well-Formed+1
+
+Permission granted to commit: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/173633/artifact/restricted.html : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-03-23 23:17:55.000000000
+Message: 
+Patch Set 3: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/1088/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/1004/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/25399/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/896/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/1103/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/1117/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/mad-hatter/438/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/1111/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-03-24 09:41:01.000000000
+Message: 
+Patch Set 3: Code-Review+1
+
+(1 comment)
+Line:1309, engines/ep/tests/module_tests/dcp_stream_test.cc -> Is this sentence continued by the comments in the body? It _does_ read correctly if so :lol:
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-03-24 09:45:48.000000000
+Message: 
+Patch Set 3: Code-Review-1
+
+(3 comments)
+Line:10, /COMMIT_MSG -> fail?
+
+Line:372, engines/ep/src/dcp/producer.cc -> second
+
+Line:373, engines/ep/src/dcp/producer.cc -> If we enter this block it means that vbid is already mapped in 'streams'.
+So, don't we have to clear the add_vb_conn_map flag unconditionally here?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-03-24 09:59:12.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:373, engines/ep/src/dcp/producer.cc -> Need to double check if an extra call to 
+
+    (line 577) engine_.getDcpConnMap().addVBConnByVBId(shared_from_this(), vbucket);
+
+could cause any relevant issue, probably better to just avoid the call if unnecessary?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-03-24 10:00:23.000000000
+Message: 
+Patch Set 3:
+
+(2 comments)
+Line:372, engines/ep/src/dcp/producer.cc -> Copy/paste from original ;) I'll fix.
+
+Line:373, engines/ep/src/dcp/producer.cc -> Well, this is the same logic as was present originally - it only clears add_vb_conn_map if a matching stream was found.
+
+Note that "vb conn map" is a little misleading now - it can map multiple Streams for the same VB, which is the case here I believe.
+
+@Ben care to comment?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-03-24 10:09:18.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:373, engines/ep/src/dcp/producer.cc -> Sure on the "multiple Streams for the same VB", that's exactly my point.
+Imagine we already have an entry for {vbid: 0, sid:0}. Then we add {vbid:0, sid:1}.
+In that case we don't clear the flag and we end up with calling DcpConnMap::addVBConnByVBId().
+Not sure yet if that's bad or just a "logical NOP"
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2020-03-24 10:27:26.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:373, engines/ep/src/dcp/producer.cc -> In ConnStore it expects multiple calls and comments as such
+
+   // For collections we will allow many streams for a given vBucket per
+    // Producer. For this, bump the refCount of the VBConn with each new stream.
+    if (itr == list.end()) {
+        vbToConns[vbid.get()].emplace_back(VBConn{conn, 1});
+    } else {
+        itr->refCount++;
+    }
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2020-03-24 10:54:15.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:369, engines/ep/src/dcp/producer.cc -> rename 'callAddVBConnMap' or something?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2020-03-24 10:59:31.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:373, engines/ep/src/dcp/producer.cc -> ConnStore stuff is not present in MadHatter branch (6.5.1 included) so we don't need to worry about that (although it should fully support this).
+
+In the "old" MH and earlier way of doing things it's erquired to call ConnMap::addVBConnByVbid provided we have different stream IDs. Otherwise we will remove weak_ptrs from vbConns and eventually find that one does not exist that we expect to. However, I wouldn't expect that any of this ever happens as no other components support collections (for DP) in MH (and send stream ids).
+
+Looks fine to me.
+
+----------------------------------------------------------------------------------------------------------------------

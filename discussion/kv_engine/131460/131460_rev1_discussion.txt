@@ -1,0 +1,100 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-40162: Allow Add+CreateAsDeleted if no tombstone found after bgfetch
+
+When attempting to create a document directly in the Tombstoned state
+(via CreateAsDeleted), this request would intermittently fail with
+KEY_ENOENT.
+
+This is caused by a bug in the subdoc_fetch code when allowing
+execution to continue even if no existing doc is found (say when using
+CreateAsDeleted), if the check to see if a tombstone is present needs
+to go to disk (i.e. the Bloom filter failed to avoid the
+bgFetch). This explains why this only occurs intermittently.
+
+In that situation, the subdoc state machine sequence for a
+multi-mutation with Add|AccessDeleted|CreateAsDeleted looks like:
+
+1. subdoc_fetch -> bucket_get(AliveOrDeleted) ->
+   EventuallyPersistentEngine::get() -> not found in HT and bloom
+   filter cannot determine -> EWOULDBLOCK, schedule bgFetch.
+
+2. subdoc_fetch returns back to runloop with EWOULDBLOCK, waiting for
+   notify_io_complete
+
+3. bgFetch completes, returns KEY_ENOENT (no tombstone on disk) ->
+   notify_IO_complete(fd, KEY_ENOENT).
+
+4. subdoc_fetch called again, checks AsyncIO status code
+   KEY_ENOENT. CreateAsDeleted specified - Ok, setup empty document
+   and return true (to continue execution).
+
+*** However, the status code ret) is not modified, is still KEY_ENOENT. ***
+
+5. subdoc_execute called, performs requested operations on
+   newly-formed empty doc.
+
+6. subdoc_update called, checks ret. Upon finding non-successful
+result returns early with that same status code (KEY_ENOENT).
+
+Note the problem at step 4. Fix is to ensure that after subdoc_fetch()
+succeeds (i.e. is happy with no tombstone being present), then ret is
+set to SUCCESS.
+
+Change-Id: I6edb5df9f4cdbf986971136c1a3aa4c493c83711
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2020-06-26 16:14:55.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-06-26 16:15:17.000000000
+Message: 
+Patch Set 1: Well-Formed-1
+
+Branch restricted. PLEASE READ this URL: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/189709/artifact/restricted.html : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-06-26 16:27:34.000000000
+Message: 
+Patch Set 1: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/1301/ : ABORTED
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/1301/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/1449/ : ABORTED
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/1449/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/1438/ : ABORTED
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/1419/ : ABORTED
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/1419/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/1431/ : ABORTED
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/1431/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/1217/ : ABORTED
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/1217/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/mad-hatter/772/ : FAILURE
+
+Compile error at [2020-06-26T16:17:40.937Z] ../kv_engine/engines/ep/src/magma-kvstore/magma-kvstore.cc:237:19:
+error: no matching conversion for functional-style cast from "const queued_item" (aka "const SingleThreadedRCPtr<Item, Item *, std::default_delete<Item> >") to "magmakv::MetaData"
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/mad-hatter/772/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/25898/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

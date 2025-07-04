@@ -1,0 +1,124 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 309576 - Memory view doesn't work with 64 bit executables
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Marc Khouzam
+Date: 2013-04-02 11:02:37.000000000
+Message: 
+Patch Set 1: I would prefer that you didn't submit this
+
+(8 inline comments)
+
+Looks good but I have a couple of concerns that I expressed in-line.
+
+I also want to try it with cross-debugging to see if it works properly.
+Line:313, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/internal/memory/GdbMemoryBlock.java -> I'm worried about using a query here.  Are we on the UI thread?  If so, we can lock the UI thread for a long time as we send the request to GDB.  If this is the case, how about doing the following instead:
+
+1- make IGDBMemory.getAddressSize() a synchronous call
+2- each time we add a process to the launch, immediately figure out what the addess size is and put in in the GDBMemory cache.
+3- always use the cache for the IGDBMemory.getAddressSize() call.
+
+I haven't really looked into that idea so I don't know if it actually makes sense.  Maybe there is a better way to address this problem (if there really is a problem).
+
+Line:46, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBMemory.java -> I think we should register the service using the IGDBMemory name here
+
+Line:51, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBMemory.java -> Will need to unregister()
+
+Line:58, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBMemory.java -> This works fine.  But I wonder if for consistency we shouldn't use a CommandCache instead?  Such a cache will remember GDB's answer for each -data-evaluate-expression command sent here, per context.  So, as long as we use a different context (which is a separate comment below), such a cache would work.
+
+Using that cache in our services avoid having to re-implement different caching techniques and will actually make the code a little simpler.  Although the fAddessSize cache is quite simple.
+
+Up to you.
+
+Line:68, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBMemory.java -> I wonder about the context.  We're blindly using the CommandControl context, when we have an IMemoryDMContext, which is associated to an individual process.
+
+I don't know how it works for GDB.  In multi-process, can we debug one 32bit process and one 64bit process?  This patch seems to be prepared for that, except for the use of fCommandControl.getContext().  Maybe we should use IMIContainerDMContext (which is an IExecutionDMContext)?
+
+It would be more elegant to use IMemoryDMContext directly but MIDataEvaluateExpression does not accept that...  Unless you prefer to extend that class.
+
+Line:30, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBMemory_7_0.java -> Although this class will be registered with the name IGDBMemory because it will inherit from GDBMemory, we usually explicitly add the name to the local register() call.
+
+Line:11, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/IGDBMemory.java -> Please add javadoc.  For interfaces, I think we should properly document each mehtod.
+
+Line:12, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/IGDBMemory.java -> Since we're adding a new interface, maybe we should immediately add a method to handle endianess, as needed in Bug 225609.
+
+The method need not be properly implemented in the services or used anywhere, but might as well have it in the interface we don't end up with IGDBMemory2 later on.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Anonymous Coward
+Date: 2013-04-02 17:13:35.000000000
+Message: 
+Patch Set 1: (1 inline comment)
+
+I think we need to address the questions raised in your comment for GdbMemoryBlock first.
+Regarding testing, I have tried this patch with a cross compiler and it works fine.
+Line:313, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/internal/memory/GdbMemoryBlock.java -> You're right. IMemoryBlockExtension.getAddressSize() is called from some dialogs. At that point the size is already in the cache but it's not a good idea to leave as it it is now.
+I considered something similar to your suggestion. The reason I didn't implement it is the possibility of having multiple memory spaces in one process. Is it possible that different spaces have different address sizes?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc Khouzam
+Date: 2013-04-02 17:58:30.000000000
+Message: 
+Patch Set 1: (1 inline comment)
+
+
+Line:313, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/internal/memory/GdbMemoryBlock.java -> I'm not familiar with how we use memory spaces currently, but my guess is that there will be one per process.  However, each process in a multi-process session can have different address sizes as shown below:
+
+> file multi
+multi: ELF 32-bit LSB executable
+> file loopfirst
+loopfirst: ELF 64-bit LSB executable
+> gdb.7.6 multi
+GNU gdb (GDB) 7.6.50.20130326-cvs
+(gdb) add-inferior -exec loopfirst
+(gdb) inferior 2
+[Switching to inferior 2 [<null>] (/home/lmckhou/testing/loopfirst)]
+(gdb) print sizeof(void*)
+$1 = 8
+(gdb) inferior 1
+[Switching to inferior 1 [<null>] (/home/lmckhou/testing/multi)]
+(gdb) print sizeof(void*)
+$2 = 4
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Anonymous Coward
+Date: 2013-04-02 18:55:40.000000000
+Message: 
+Patch Set 1: (1 inline comment)
+
+
+Line:313, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/internal/memory/GdbMemoryBlock.java -> I think I have a solution that would work with memory spaces. The only problem is that I would need to create an IMemorySpaceDMContext in GDBMemory but for some reason MemorySpaceDMContext is defined in GdbMemoryBlock. I'll post the new version of the patch soon.
+BTW, did you try the current patch with your multiprocess example?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc Khouzam
+Date: 2013-04-02 19:14:27.000000000
+Message: 
+Patch Set 1: (1 inline comment)
+
+
+Line:313, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/internal/memory/GdbMemoryBlock.java -> No, I didn't try it with multi-process, or cross-debug directly from eclipse.  I just tried the "print sizeof(void*)" from the gdb command-line in those different scenarios.  Let me know if there is something you prefer I try myself.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Anonymous Coward
+Date: 2013-04-02 19:26:18.000000000
+Message: 
+Patch Set 1: (1 inline comment)
+
+
+Line:313, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/internal/memory/GdbMemoryBlock.java -> I use "data-evaluate-expression sizeof(void*)" instead of "print" What I am interested in is how it works with two inferiors with different address sizes. Unfortunately, I can't try it myself.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc Khouzam
+Date: 2013-04-02 20:02:41.000000000
+Message: 
+Patch Set 1: (1 inline comment)
+
+
+Line:313, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/internal/memory/GdbMemoryBlock.java -> Sure, I can try this for you.  I guess I should wait for a new version of the code?
+
+----------------------------------------------------------------------------------------------------------------------

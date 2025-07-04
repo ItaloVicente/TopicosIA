@@ -1,0 +1,189 @@
+======================================================================================================================
+DESCRIPTION:
+
+os.linux: Do not rely on static initialisation order for layouts
+
+Expose DefaultLayout#getInstance() instead of DefaultLayout#INSTANCE
+
+This solves a weird problem where the layout could be null.
+
+To reproduce this problem, define and run the following test suite:
+@RunWith(Suite.class)
+@Suite.SuiteClasses({
+	VirtualMachineAnalysisTest.class,
+	LttngKernelAnalysisTest.class,
+	PartialStateSystemTest.class,
+	StateSystemInMemoryTest.class,
+	StateSystemFullHistoryTest.class
+})
+public class TestSuite { }
+
+Change-Id: I772ee0944334283d4b36118001a858322921d98a
+Signed-off-by: Matthew Khouzam <matthew.khouzam@ericsson.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Matthew Khouzam
+Date: 2016-04-06 22:29:13.000000000
+Message: 
+Patch Set 5: Published edit on patch set 4
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2016-04-06 22:29:19.000000000
+Message: 
+Patch Set 5:
+
+Build Started https://hudson.eclipse.org/tracecompass/job/tracecompass-gerrit/7458/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2016-04-06 23:08:31.000000000
+Message: 
+Patch Set 5: Code-Review+1
+
+Build Successful 
+
+https://hudson.eclipse.org/tracecompass/job/tracecompass-gerrit/7458/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthew Khouzam
+Date: 2016-04-07 00:55:56.000000000
+Message: 
+Patch Set 5: Code-Review-1
+
+A funny thing, if requirements still worked, this would probably not been an issue due to the initialization order.
+
+The initial commit message did not explain why the patch fixes the problem but only that it is a weird problem. To be frank, if I submitted the patch and you reviewed it, what would you write in this case?
+
+The problem, from my understanding is that there are static functions that is caused by IKernelAnalysisEventLayout initializing INSTANCE before DefaultEventLayout does. The reason being 
+A- a circular dependency, but why does it occur intermittently? 
+B- The load order of statics is undefined in the java spec so technically we should not depend on it.
+
+The patch I put up addresses it directly. It is also not incompatible with a re-design. But it is inherently safer, it is guaranteed to work as it is not relying on the static initialization order.
+
+We still need to know more of how the interface initialization works. Or else this problem will haunt us for a long time.
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc-André Laperle
+Date: 2016-04-07 02:48:49.000000000
+Message: 
+Patch Set 5:
+
+I reduced it:
+
+public class Main {
+
+    public interface IKernelAnalysisEventLayout {
+        IKernelAnalysisEventLayout DEFAULT_LAYOUT = DefaultEventLayout.INSTANCE;
+        default String fieldDiskname() {
+            return "diskname"; //$NON-NLS-1$
+        }
+    }
+
+    public static class DefaultEventLayout implements IKernelAnalysisEventLayout {
+        static final IKernelAnalysisEventLayout INSTANCE = new DefaultEventLayout();
+    }
+
+    public static void main(String[] args) {
+        System.out.println(new DefaultEventLayout());
+        System.out.println(IKernelAnalysisEventLayout.DEFAULT_LAYOUT);
+    }
+}
+
+If you comment-out the default method, it works. If you comment-out the first System.out, it works.
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc-André Laperle
+Date: 2016-04-07 03:10:55.000000000
+Message: 
+Patch Set 5:
+
+> I reduced it:
+ > 
+ > public class Main {
+ > 
+ > public interface IKernelAnalysisEventLayout {
+ > IKernelAnalysisEventLayout DEFAULT_LAYOUT = DefaultEventLayout.INSTANCE;
+ > default String fieldDiskname() {
+ > return "diskname"; //$NON-NLS-1$
+ > }
+ > }
+ > 
+ > public static class DefaultEventLayout implements IKernelAnalysisEventLayout
+ > {
+ > static final IKernelAnalysisEventLayout INSTANCE = new
+ > DefaultEventLayout();
+ > }
+ > 
+ > public static void main(String[] args) {
+ > System.out.println(new DefaultEventLayout());
+ > System.out.println(IKernelAnalysisEventLayout.DEFAULT_LAYOUT);
+ > }
+ > }
+ > 
+ > If you comment-out the default method, it works. If you comment-out
+ > the first System.out, it works.
+
+
+Bug in the Java spec. Yay?
+http://mail.openjdk.java.net/pipermail/compiler-dev/2014-April/008734.html
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc-André Laperle
+Date: 2016-04-07 04:10:52.000000000
+Message: 
+Patch Set 5:
+
+public class Main {
+
+    public interface IKernelAnalysisEventLayout {
+        IKernelAnalysisEventLayout DEFAULT_LAYOUT = DefaultEventLayout.INSTANCE;
+        default String fieldDiskname() {
+            return DEFAULT_LAYOUT.toString();
+        }
+    }
+
+    public static class DefaultEventLayout implements IKernelAnalysisEventLayout {
+        static final IKernelAnalysisEventLayout INSTANCE = new DefaultEventLayout();
+        public DefaultEventLayout() {
+            System.out.println(fieldDiskname());
+        }
+    }
+
+    public static void main(String[] args) {
+        System.out.println(new DefaultEventLayout());
+    }
+}
+
+Exception in thread "main" java.lang.ExceptionInInitializerError
+	at package2.Main.main(Main.java:20)
+Caused by: java.lang.NullPointerException
+	at package2.Main$IKernelAnalysisEventLayout.fieldDiskname(Main.java:8)
+	at package2.Main$DefaultEventLayout.<init>(Main.java:15)
+	at package2.Main$DefaultEventLayout.<clinit>(Main.java:13)
+	... 1 more
+
+
+
+So... the fact that you *could* (and I did in this example) use a static field in a default method forces the interface to instantize. It seems that the spec was updated in Java 8 update 40, see https://bugs.openjdk.java.net/browse/JDK-8043188 and https://docs.oracle.com/javase/specs/jls/se8/html/jls-12.html#jls-12.4.1.
+
+"When a class is initialized, its superclasses are initialized (if they have not been previously initialized), as well as any superinterfaces (§8.1.5) that declare any default methods [...]"
+
+Then it goes on with a vague paragraph:
+
+"The fact that initialization code is unrestricted allows examples to be constructed where the value of a class variable can be observed when it still has its initial default value, before its initializing expression is evaluated, but such examples are rare in practice. (Such examples can be also constructed for instance variable initialization (§12.5).)"
+
+This leads me do believe that in such case where the superinterface is eagerly initialized bacause of a default method as part of a class initialization referring to itself (DefaultEventLayout), it could be null.
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2016-04-07 04:49:02.000000000
+Message: 
+Patch Set 5:
+
+(2 comments)
+Line:34, analysis/org.eclipse.tracecompass.analysis.os.linux.core/src/org/eclipse/tracecompass/analysis/os/linux/core/trace/DefaultEventLayout.java -> it should be = null here no? Or else the getInstance() method does nothing.
+
+Line:45, analysis/org.eclipse.tracecompass.analysis.os.linux.core/src/org/eclipse/tracecompass/analysis/os/linux/core/trace/DefaultEventLayout.java -> Should be "synchronized" too, like we do in other getInstance() methods
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Gerrit Code Review
+Date: 2016-04-07 13:57:20.000000000
+Message: 
+Change has been successfully cherry-picked as 4f2bd079f4adb4349ffab67313d85392b87c759a by Matthew Khouzam
+----------------------------------------------------------------------------------------------------------------------

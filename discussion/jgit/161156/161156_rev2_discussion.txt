@@ -1,0 +1,155 @@
+======================================================================================================================
+DESCRIPTION:
+
+Create parent directories when renaming a file in ApplyCommand
+
+Before this change, applying a patch will fail if the destination directory
+doesn't exist; after, the necessary parent directories are created.
+
+If renaming the file fails, the directories won't be deleted, so this change
+isn't atomic. However, ApplyCommand is already not atomic - if one hunk fails
+to apply, other hunks still get applied - so I don't think that is a blocker.
+
+
+Change-Id: Iea36138b806d4e7012176615bcc673756a82f365
+Signed-off-by: Jack Wickham <jwickham@palantir.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jack Wickham
+Date: 2020-04-20 10:50:49.000000000
+Message: 
+Patch Set 2: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2020-04-20 10:50:59.000000000
+Message: 
+Patch Set 2:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/2933/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2020-04-20 11:08:53.000000000
+Message: 
+Patch Set 2: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/2933/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2020-04-25 13:30:43.000000000
+Message: 
+Patch Set 2:
+
+(2 comments)
+Line:14, /COMMIT_MSG -> I don't think that's true. (At least not for the JGit implementation. Don't know what C git does.)
+
+Line:129, org.eclipse.jgit/src/org/eclipse/jgit/api/ApplyCommand.java -> Looks like this would be needed here, too.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2020-04-25 15:58:24.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:129, org.eclipse.jgit/src/org/eclipse/jgit/api/ApplyCommand.java -> No, getFile() does it already.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jack Wickham
+Date: 2020-04-30 09:55:27.000000000
+Message: 
+Patch Set 2:
+
+> Patch Set 2:
+> 
+> I don't think that's true. (At least not for the JGit implementation. Don't know what C git does.)
+
+Not with ApplyCommand. If you try to apply a patch that fails to apply part way, the work state is left dirty. My test case for that is:
+
+ import static org.assertj.core.api.Assertions.assertThat;
+
+ import java.io.ByteArrayInputStream;
+ import java.io.ByteArrayOutputStream;
+ import java.io.File;
+ import java.nio.charset.StandardCharsets;
+ import org.apache.commons.io.FileUtils;
+ import org.eclipse.jgit.api.Git;
+ import org.eclipse.jgit.api.ResetCommand;
+ import org.eclipse.jgit.diff.DiffFormatter;
+ import org.eclipse.jgit.revwalk.RevCommit;
+ import org.junit.jupiter.api.Test;
+ import org.junit.jupiter.api.io.TempDir;
+
+ public final class JGitTest {
+    @TempDir
+    public File tempDir;
+
+    @Test
+    public void testJGit() throws Exception {
+        Git git = Git.init().setDirectory(tempDir).call();
+
+        File a = tempDir.toPath().resolve("a.txt").toFile();
+        File b = tempDir.toPath().resolve("b.txt").toFile();
+
+        String initialContents = "1\n2\n3\n";
+        FileUtils.write(a, initialContents, StandardCharsets.UTF_8);
+        FileUtils.write(b, initialContents, StandardCharsets.UTF_8);
+
+        git.add().addFilepattern(".").call();
+        RevCommit baseCommit =
+                git.commit().setAll(true).setMessage("Base commit").call();
+
+        FileUtils.write(a, "1\ntwo\n3\n", StandardCharsets.UTF_8);
+        FileUtils.write(b, "1\ntwo\n3\n", StandardCharsets.UTF_8);
+
+        RevCommit newCommit = git.commit().setAll(true).setMessage("New commit").call();
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        try (DiffFormatter formatter = new DiffFormatter(out)) {
+            formatter.setRepository(git.getRepository());
+            formatter.format(baseCommit, newCommit);
+        }
+        byte[] patchFile = out.toByteArray();
+        System.out.println(new String(patchFile, StandardCharsets.UTF_8));
+
+        git.reset()
+                .setMode(ResetCommand.ResetType.HARD)
+                .setRef(baseCommit.getName())
+                .call();
+
+        b.setWritable(false);
+
+        try {
+            git.apply().setPatch(new ByteArrayInputStream(patchFile)).call();
+        } catch (Exception e) {
+            e.printStackTrace();
+            assertThat(b).hasContent(initialContents);
+            // The following assertion fails
+            assertThat(a).hasContent(initialContents);
+        }
+    }
+ }
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2020-04-30 13:43:27.000000000
+Message: 
+Patch Set 2: Code-Review+1
+
+I see what you mean. Hunks in _other_ files may have already been applied.
+
+I agree, should not block this. The copy case also doesn't remove a possibly created directory, so if we wanted that, it should be done in a separate commit.
+
+Please move the RenameNoHunks test case into this commit so that each change has the tests that go with it.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2020-05-06 08:24:43.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:14, /COMMIT_MSG -> it seems there is no rollback in ApplyCommand.call in case applying some of the hunks fails and previous hunks have already been applied
+
+----------------------------------------------------------------------------------------------------------------------

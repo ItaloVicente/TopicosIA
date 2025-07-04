@@ -1,0 +1,195 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-52264: Wait for memory to reduce before setting new quota
+
+To avoid OOM errors during Bucket quota reduction we can first
+reclaim memory such that it is suitable for the new Bucket quota
+before we enforce the new quota.
+
+To deal with Bucket quota decreases we:
+
+1) Set the storage quota to the new value (to kick off any
+   background memory reclamation)
+2) Set the checkpoint manager watermarks
+3) Decrease our memory determined backfill limit
+4) Set the low and high watermark values
+5) Wake the ItemPager to recover memory from the HashTable
+6) Wait until memory is below the high watermark
+7) Enforce the new quota by changing the config and stats values
+
+Change-Id: I0d707b894fa6b7218340c3a86fa93e8f61a80a7b
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Ben Huddleston
+Date: 2022-06-30 08:39:03.000000000
+Message: 
+Uploaded patch set 13.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-06-30 09:28:04.000000000
+Message: 
+Patch Set 13: Verified-1 Code-Review-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/19541/ : ABORTED
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/19541/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/17587/ : FAILURE
+
+<p>clang-format suggested the following changes:
+
+<pre>
+cat <<"EOF" | patch -p1
+diff --git a/engines/ep/src/bucket_quota_change_task.cc b/engines/ep/src/bucket_quota_change_task.cc
+index a3f126034..9f8e66d30 100644
+--- a/engines/ep/src/bucket_quota_change_task.cc
++++ b/engines/ep/src/bucket_quota_change_task.cc
+@@ -66,8 +66,8 @@ bool BucketQuotaChangeTask::run() {
+ 
+             state = ChangeState::WaitingForMemoryReclamation;
+             // Check again soon
+-            snooze(engine-&gt;getConfiguration().getBucketQuotaChangeTaskWaitTime
+-                   ());
++            snooze(engine-&gt;getConfiguration()
++                           .getBucketQuotaChangeTaskWaitTime());
+         }
+         break;
+     case ChangeState::WaitingForMemoryReclamation:
+@@ -80,8 +80,8 @@ bool BucketQuotaChangeTask::run() {
+                     engine-&gt;getEpStats().mem_high_wat);
+ 
+             // Check again soon
+-            snooze(engine-&gt;getConfiguration().getBucketQuotaChangeTaskWaitTime
+-                   ());
++            snooze(engine-&gt;getConfiguration()
++                           .getBucketQuotaChangeTaskWaitTime());
+         }
+         break;
+     case ChangeState::Done:
+diff --git a/engines/ep/tests/module_tests/bucket_quota_change_test.cc b/engines/ep/tests/module_tests/bucket_quota_change_test.cc
+index 190783559..88454438d 100644
+--- a/engines/ep/tests/module_tests/bucket_quota_change_test.cc
++++ b/engines/ep/tests/module_tests/bucket_quota_change_test.cc
+@@ -327,7 +327,8 @@ TEST_P(BucketQuotaChangeTest, QuotaChangeDownMemoryUsageHigh) {
+     flushVBucketToDiskIfPersistent(vbid, 1);
+ 
+     // Poke the item and the pager setting to ensure that we will evict it
+-    store-&gt;getVBucket(vbid)-&gt;ht.findOnlyCommitted(key)
++    store-&gt;getVBucket(vbid)
++            -&gt;ht.findOnlyCommitted(key)
+             .storedValue-&gt;setFreqCounterValue(0);
+     engine-&gt;getConfiguration().setItemEvictionAgePercentage(0);
+     engine-&gt;getConfiguration().setItemEvictionFreqCounterAgeThreshold(255);
+@@ -365,8 +366,8 @@ TEST_P(BucketQuotaChangeTest, QuotaChangeDownMemoryUsageHigh) {
+ 
+     if (STParameterizedBucketTest::isMagma()) {
+         // Allow magma 10 seconds to reduce memory.
+-        auto timeout = std::chrono::steady_clock::now() +
+-                std::chrono::seconds(10);
++        auto timeout =
++                std::chrono::steady_clock::now() + std::chrono::seconds(10);
+         while (engine-&gt;getEpStats().getMaxDataSize() != newQuota) {
+             if (timeout &lt; std::chrono::steady_clock::now()) {
+                 // We waited too long for magma to reduce memory usage. Either
+
+EOF
+</pre> ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/17587/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/47202/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [145/160]: test_MB-19687_fixed...Unexpected stat: ep_bucket_quota_change_task_wait_time from stat group 
+Unexpected stat: ep_bucket_quota_change_task_wait_time from stat group config
+..\kv_engine\engines\ep\tests\ep_testsuite.cc:7834 Test failed: `stats error" (missing stats)
+(37 ms) FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/47202/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/28699/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [2/47]: test max_size - water_mark changes...Exceeded maximum wait time of 60000000us waiting for stat "ep_max_size" to be 100 (last value:1000000) - aborting.
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/28699/ )
+
+One of more core files found at the end of the build. Data for post-mortem saved to archived_core_dumps.tar.bz2 under "Build Artifacts". ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/28699/ )
+
+Test exceeded the timeout:
+[2022-06-30T09:13:18.798Z] /usr/bin/timeout: the monitored command dumped core ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/28699/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/21307/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [145/160]: test_MB-19687_fixed...Unexpected stat: ep_bucket_quota_change_task_wait_time from stat group 
+[2022-06-30T09:16:56.475Z] Unexpected stat: ep_bucket_quota_change_task_wait_time from stat group config
+[2022-06-30T09:16:56.475Z] ../kv_engine/engines/ep/tests/ep_testsuite.cc:7834 Test failed: `stats error" (missing stats)
+[2022-06-30T09:16:56.475Z] (535 ms) FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/21307/ )
+
+ThreadSanitizer issue: signal-unsafe call inside of a signal (/opt/gcc-10.2.0/lib64/libtsan.so.0+0x33081) in __interceptor_malloc  ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/21307/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/20321/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [145/160]: test_MB-19687_fixed...Unexpected stat: ep_bucket_quota_change_task_wait_time from stat group 
+[2022-06-30T08:57:24.479Z] Unexpected stat: ep_bucket_quota_change_task_wait_time from stat group config
+[2022-06-30T08:57:24.479Z] ../kv_engine/engines/ep/tests/ep_testsuite.cc:7834 Test failed: `stats error" (missing stats)
+[2022-06-30T08:57:24.479Z] (64 ms) FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/20321/ )
+
+Test exceeded the timeout:
+[2022-06-30T08:58:50.341Z] /usr/bin/timeout: the monitored command dumped core ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/20321/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/8208/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [145/160]: test_MB-19687_fixed...Unexpected stat: ep_bucket_quota_change_task_wait_time from stat group 
+[2022-06-30T08:47:24.065Z] Unexpected stat: ep_bucket_quota_change_task_wait_time from stat group config
+[2022-06-30T08:47:24.065Z] ../kv_engine/engines/ep/tests/ep_testsuite.cc:7834 Test failed: `stats error" (missing stats)
+[2022-06-30T08:47:24.065Z] (54 ms) FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/8208/ )
+
+Test exceeded the timeout:
+[2022-06-30T08:48:35.899Z] /usr/bin/timeout: the monitored command dumped core ( http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/8208/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/20666/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [145/160]: test_MB-19687_fixed...Unexpected stat: ep_bucket_quota_change_task_wait_time from stat group 
+[2022-06-30T08:56:53.147Z] Unexpected stat: ep_bucket_quota_change_task_wait_time from stat group config
+[2022-06-30T08:56:53.147Z] ../kv_engine/engines/ep/tests/ep_testsuite.cc:7834 Test failed: `stats error" (missing stats)
+[2022-06-30T08:56:53.147Z] (97 ms) FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/20666/ )
+
+One of more core files found at the end of the build. Data for post-mortem saved to archived_core_dumps.tar.bz2 under "Build Artifacts". ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/20666/ )
+
+Test exceeded the timeout:
+[2022-06-30T08:58:04.027Z] /usr/bin/timeout: the monitored command dumped core ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/20666/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/18436/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/39652/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/8109/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

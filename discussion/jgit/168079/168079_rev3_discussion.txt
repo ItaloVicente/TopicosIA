@@ -1,0 +1,142 @@
+======================================================================================================================
+DESCRIPTION:
+
+Added time measurements for reachability checks
+
+Reason why this change is needed:
+Getting this metric will help estimate how much time will be saved once
+the reachability checks get removed
+
+What this patch does:
+Measure time spent by checkNotAvertisedWants() in
+ReachableCommitRequestValidator.checkWants() and
+ReachableCommitTipRequestValidator.checkWants() and save it in an instance
+of PackStatistics.Accumulator.
+
+Signed-off-by: Alexa Panfil <alexapizza@google.com>
+Change-Id: Id7fe4016f96549d9511a2c24052dad93cfbb31a4
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Alexandrina Panfil
+Date: 2020-08-27 14:51:11.000000000
+Message: 
+Uploaded patch set 3.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2020-08-27 14:51:20.000000000
+Message: 
+Patch Set 3:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/3591/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2020-08-27 15:27:51.000000000
+Message: 
+Patch Set 3: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/3591/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Michele Bertasi
+Date: 2020-08-28 07:18:29.000000000
+Message: 
+Patch Set 3:
+
+(3 comments)
+Line:1241, org.eclipse.jgit/src/org/eclipse/jgit/transport/UploadPack.java -> This line makes me think that `lsRefsV2` can be called multiple times with the same UploadPack object, which means that your change would be incorrect, as it reuses the same accumulator for all the calls.
+
+I think it's better to keep the logic as it was before (so, create the accumulator here) and pass it down where it's needed. If `parseWants` is called from different paths and you don't want to update the accumulator from all of them, simply pass a `null` for it:
+
+parseWants(accumulator);  // from the good path.
+
+parseWants(null);  // from the bad path.
+
+In the function you can then update `reachabilityCheck` only if the accumulator is not null:
+
+if (accumulator != null) {
+  statAccumulator.reachabilityCheckDuration = System.currentTimeMillis() -
+      startReachabilityChecking;
+}
+
+Line:1851, org.eclipse.jgit/src/org/eclipse/jgit/transport/UploadPack.java -> nit: Drop the newline here, as it's not a meaningful change.
+
+Line:1888, org.eclipse.jgit/src/org/eclipse/jgit/transport/UploadPack.java -> ditto.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandrina Panfil
+Date: 2020-08-28 10:39:55.000000000
+Message: 
+Patch Set 3:
+
+(2 comments)
+Line:1241, org.eclipse.jgit/src/org/eclipse/jgit/transport/UploadPack.java -> But I updated 'fetchV2' here, not 'lsRefsV2'. 
+I have to pass an accumulator that already has the reachability check metric in it, as after calling the sendPack only statistics about PackWriter will be collected.
+
+Line:1888, org.eclipse.jgit/src/org/eclipse/jgit/transport/UploadPack.java -> Done
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Anna Pologova
+Date: 2020-09-09 13:31:09.000000000
+Message: 
+Patch Set 3:
+
+(2 comments)
+Line:2328, org.eclipse.jgit.test/tst/org/eclipse/jgit/transport/UploadPackTest.java -> Both tests that you added test protocol V2. Can we also add at least one for v0?
+
+Line:2349, org.eclipse.jgit.test/tst/org/eclipse/jgit/transport/UploadPackTest.java -> This assert doesn't really check anything.
+
+What we want to check is: in case a client's request requires a reachability check, does your new field get updated or not. Now let's look at the options:
+(1) your field doesn't get updated => it will stay 0 (default value in Java).
+(2) your field does get updated => reachabilityCheckDuration will be > 0.
+
+so it's >= 0 in both cases.
+
+Can we check if it's strictly > 0?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Anna Pologova
+Date: 2020-09-10 13:41:31.000000000
+Message: 
+Patch Set 3:
+
+(2 comments)
+Line:2349, org.eclipse.jgit.test/tst/org/eclipse/jgit/transport/UploadPackTest.java -> Can you please also add a check for some other field in stats?
+To make sure when we update reachabilityCheckDuration that all the other fields stay filled in?
+
+Line:1791, org.eclipse.jgit/src/org/eclipse/jgit/transport/UploadPack.java -> When we discussed creating a global statAccumulator field, the problem was that requestValidator.checkWants() was a public method, which users might have overridden, and so changing its signature would break everyone.
+
+In case you add measuring the reachability checking in parseWants() method, you can pass the accumulator down as a parameter from service(), when it was previously created, and the equivalent for v2.
+
+With that you'd also address all the Michele's concerns about how having the global variable would break the case of several invocations of fetch.
+
+WDYT?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandrina Panfil
+Date: 2020-09-10 14:24:54.000000000
+MISMATCHED INLINE COMMENT
+Line:2328, org.eclipse.jgit.test/tst/org/eclipse/jgit/transport/UploadPackTest.java -> Added two new tests for protocol v1
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandrina Panfil
+Date: 2020-09-10 14:24:54.000000000
+MISMATCHED INLINE COMMENT
+Line:2349, org.eclipse.jgit.test/tst/org/eclipse/jgit/transport/UploadPackTest.java -> Changed the tests to check the number of not advertised wants.
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandrina Panfil
+Date: 2020-09-10 14:24:54.000000000
+MISMATCHED INLINE COMMENT
+Line:2349, org.eclipse.jgit.test/tst/org/eclipse/jgit/transport/UploadPackTest.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandrina Panfil
+Date: 2020-09-10 14:24:54.000000000
+MISMATCHED INLINE COMMENT
+Line:1791, org.eclipse.jgit/src/org/eclipse/jgit/transport/UploadPack.java -> Added the statAccumulator to be passed through service->negotiate->processHaveLines->parseWants for V1 and through fetchV2->processHaveLines->parseWants for V2. All of the mentioned methods are private.
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandrina Panfil
+Date: 2020-09-10 14:24:54.000000000
+MISMATCHED INLINE COMMENT
+Line:1851, org.eclipse.jgit/src/org/eclipse/jgit/transport/UploadPack.java -> Done
+----------------------------------------------------------------------------------------------------------------------

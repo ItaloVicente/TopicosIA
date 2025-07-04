@@ -1,0 +1,123 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-35331: Update vbucket_state from the flusher items only
+
+In MB-35331 we see a test fail because a vbucket state transition
+appears to be lost. The cause of this issue first begins with two
+set_vbucket_state requests occurring in quick succession. The replica to
+active transition also happens to allow the flusher to run (this is a
+behaviour change due to commit 96baa3b3 where a new checkpoint is
+opened). If the timing of the flusher running happens to mean that the
+checkpoint is empty (only a checkpoint_start) the flusher still cycles
+through and happens to read the VBucket's state (which has been updated
+by the set_vbucket_state requests), the value read now happens to be
+pushed to the KVStore cache only (it is not committed because the
+flusher logic says it should not be). Next the flusher will run again,
+and this time a set_vb_state operation is found, again the VBucket's
+state is read and the flusher proceeds to commit updated state to disk,
+however because the KVStore cache has already been changed to include
+the new state, the commit is skipped. Hence we lose the state change.
+
+This is just one problem that occurs because flushVBucket reads state
+from the VBucket object and reacts to it. In this commit the flusher is
+changed so that all data that flushVBucket reacts to is data derived
+from the items to flush. This fixes the specific MB issue and other
+potential 'race' conditions.
+
+Notes:
+
+The majority of the persisted vbucket data is already derived from the
+items of the flushed batch, only the state, fail-over table and
+replication topology were read from VBucket object.
+
+This commit now "serialises" this VBucket owned data into a JSON
+document during the processing of the set_vbucket_state request (with
+the VBucket lock held). The JSON document is written as the value of the
+queued set_vbucket_state Item allowing the flusher to now read from the
+flushed Item and not the VBucket.
+
+The following lists each vbucket_state field and describes its source.
+
+* highSeqno and purgeSeqno were not stored by the vbucket state document,
+  couch-kvstore removes these fields during CouchKVStore::saveVBState.
+  couchstore maintains these values in the dbinfo part of the vbucket file.
+* state, replicationTopology and fail-over table are updated only when
+  the flusher encounters a set_vbucket_state Item, the value of the
+  Item stores a JSON document containing the values for these fields. A
+  new structure called vbucket_transition_state owns these fields.
+* maxDeletedSeqno - no change, this field was always set from items
+  of the flushed batch.
+* lastSnapStart, lastSnapEnd - no change, these fields were always set
+  from the checkpoint(s) that the flushed batch is derived from.
+* maxCas - no change, always derived by scanning the items of the flush
+* hlcCasEpochSeqno - no change, this field was always set a seqno of
+  the flushed batch.
+* mightContainXattrs - this now set during the flush, if an xattr item
+  is flushed, this field is set (and stays set forever).
+* supportNamespaces - no change, this is never anything other than true
+* version - no change, this is a constant value
+* highCompletedSeqno and highPreparedSeqno - no change, derived by
+  scanning the items of the flushed batch
+* onDiskPrepares - this is set by the flusher from the items, but is
+  actually set by CouchKVStore::saveDocs
+
+Change-Id: I9df00a13b4ee829badb560b874add39cdce8deb1
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jim Walker
+Date: 2019-09-03 20:48:01.000000000
+Message: 
+Uploaded patch set 12.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-09-03 21:01:24.000000000
+Message: 
+Patch Set 12: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/19724/ : FAILURE
+
+Compile error at /home/couchbase/jenkins/workspace/kv_engine-clang_analyzer-master/kv_engine/engines/ep/src/vbucket_state.cc:42:35:
+error: use of undeclared identifier "e"
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/19724/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/23100/ : FAILURE
+
+Compile error at ..\kv_engine\engines\ep\src\vbucket_state.cc(42): error C2065: "e": undeclared identifier ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/23100/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/22133/ : FAILURE
+
+Compile error at /home/couchbase/jenkins/workspace/kv_engine-linux-master/kv_engine/engines/ep/src/vbucket_state.cc:42:35:
+error: ?e? was not declared in this scope
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/22133/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/3810/ : FAILURE
+
+Compile error at /home/couchbase/jenkins/workspace/kv_engine-linux-master-CE/kv_engine/engines/ep/src/vbucket_state.cc:42:35:
+error: ?e? was not declared in this scope
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/3810/ )
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/13023/ : FAILURE
+
+Compile error at /home/couchbase/jenkins/workspace/kv-engine-cv-perf/kv_engine/engines/ep/src/vbucket_state.cc:42:35:
+error: "e" was not declared in this scope
+ ( http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/13023/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/14042/ : FAILURE
+
+Compile error at /home/couchbase/jenkins/workspace/kv_engine-threadsanitizer-master/kv_engine/engines/ep/src/vbucket_state.cc:42:35:
+error: ?e? was not declared in this scope
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/14042/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/6770/ : FAILURE
+
+Compile error at [2019-09-03T20:49:48.717Z] /home/couchbase/jenkins/workspace/kv_engine.ASan-UBSan_master/kv_engine/engines/ep/src/vbucket_state.cc:42:35:
+error: ?e? was not declared in this scope
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/6770/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/20746/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

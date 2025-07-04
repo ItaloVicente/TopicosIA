@@ -1,0 +1,245 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-48925 1/3: Don't extend VBucket lifetime via bg Tasks
+
+During bucket shutdown we intermittently see an exception thrown
+during task scheduling on a background NonIO thread, which crashes the
+memcached process.
+
++Analysis+
+
+Bug is as follows. Starting at the main thread which is deleting the Bucket (Thread 1):
+
+    (gdb) bt
+    ...
+    #10 0x0000000000649bf3 in FollyExecutorPool::schedule(std::shared_ptr<GlobalTask>) () at /c++/10.2.0/new:175
+    #11 0x000000000084271b in EPVBucket::scheduleDeferredDeletion(EventuallyPersistentEngine&) () at /c++/10.2.0/ext/atomicity.h:100
+    #12 0x00000000006dfe7a in VBucket::DeferredDeleter::operator()(VBucket*) const () at kv_engine/engines/ep/src/vbucket.cc:3990
+    #13 0x000000000086f874 in std::_Sp_counted_deleter<EPVBucket*, VBucket::DeferredDeleter, ...>::_M_dispose () at /c++/10.2.0/bits/shared_ptr_base.h:453
+    ...
+    #18 std::shared_ptr<VBucket>::~shared_ptr (this=0x7b44000515d0, __in_chrg=<optimized out>) at /c++/10.2.0/bits/shared_ptr.h:121
+    #19 PagingVisitor::~PagingVisitor (this=0x7b4400051540, __in_chrg=<optimized out>) at kv_engine/engines/ep/src/paging_visitor.h:39
+    ...
+    #31 std::__shared_ptr<GlobalTask, (__gnu_cxx::_Lock_policy)2>::reset () at /c++/10.2.0/bits/shared_ptr_base.h:1301
+    #32 EventuallyPersistentEngine::waitForTasks(std::vector<std::shared_ptr<GlobalTask>, std::allocator<std::shared_ptr<GlobalTask> > >&) () at kv_engine/engines/ep/src/ep_engine.cc:6752
+    #33 0x000000000082396f in EventuallyPersistentEngine::destroyInner(bool) () at kv_engine/engines/ep/src/ep_engine.cc:2135
+
+1. PagingVisitor is still in existence running after
+   `EventuallyPersistentEngine::destroyInner` - see frame #19. This is
+   because all tasks belonging to bucket were returned from
+   unregisterTaskable() just before.
+
+2. PagingVisitor (via VBCBAdaptor) is destroyed, it decrements the
+   refcount on the shared_ptr<VBucket> it owns - see frame #18.
+
+3. That is the last reference to the VBucket, which results in
+   VBucket::DeferredDeleter being invoked which in turn schedules a
+   task to delete the VBucket (disk and memory) in the background -
+   see frame #11.
+
+We see the schedule's lambda happen on the SchedulerPool0 thread (T:35):
+
+    Thread 35 "SchedulerPool0" hit Catchpoint 1 (exception thrown), __cxxabiv1::__cxa_throw (..., tinfo=0x10c4ec8 <typeinfo for std::out_of_range@@GLIBCXX_3.4>, ...) at /tmp/deploy/objdir/../gcc-10.2.0/libstdc++-v3/libsupc++/eh_throw.cc:80
+    (gdb) bt
+    #1  0x00007ffff4cad7d2 in std::__throw_out_of_range (__s=__s@entry=0xcc68e6 "_Map_base::at") at /tmp/deploy/objdir/../gcc-10.2.0/libstdc++-v3/src/c++11/functexcept.cc:82
+    ...
+    #3  0x00000000005504ee in std::unordered_map<...>::at (__k=@0x7fffe83a8f88: 0x7b7400000848, this=0x7b1000005580) at /c++/10.2.0/bits/unordered_map.h:1000
+    #4  FollyExecutorPool::State::scheduleTask (this=..., executor=..., pool=..., task=...) at kv_engine/executor/folly_executorpool.cc:415
+    ...
+    #8  folly::EventBase::runInEventBaseThreadAndWait(...) at folly/io/async/EventBase.cpp:671
+    ...
+
+In FollyExecutorPool::State::scheduleTask (frame #3) we attempt to
+lookup the Taskable (Bucket) in the ExecutorPool's map, however given
+its already been unregistered, the taskable is not found an the
+std::out_of_range exception is thrown.
+
+This is a lifetime issue. We have VBucket objects potentially being
+kept alive longer than their expected lifetime by virtue of background
+tasks having shared ownership of them - and those background tasks
+outlive the lifetime of their parent object (KVBucket), and crucially
+past when the owning Bucket is unregistered with the ExecutorPool and
+can no longer schedule tasks.
+
+When it then _does+ attempt to schedule a task against an unregistered
+(and deleted) Taskable; we see the crash.
+
++Solution+
+
+There's arguably two problems which should be addressed (although
+technically only one of the two is required to encounter this crash):
+
+1. Background tasks owning VBuckets when they are not executing.
+2. Background tasks outliving their associated Taskable (aka Bucket).
+
+This patch addresses the critical issue of (1) - we remove the
+(shared) ownership of VBucket from the background tasks which
+previoulsy had it - both PagingVisitor which is the problematic class
+in this scenario, but also in the other background Tasks which
+potentially have the same problem.
+
+The 2nd patch will tighten up the API for visiting VBuckets, so
+visitors are not passed a VBucketPtr, but instead VBucket& which
+reduces the chance of similar problems happening in future.
+
+The 3rd patch will adddress Background Taks outliving their Taskable.
+
+Change-Id: I340a3e4dc3d9234c4a34866b410fb8295a1c98d1
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2021-10-19 10:18:46.000000000
+Message: 
+Uploaded patch set 3.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-10-19 14:27:39.000000000
+Message: 
+Patch Set 3: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/13557/ : FAILURE
+
+clang-tidy found the following problems:
+
+<pre>
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy-master/build-kv_engine-clang-tidy/tlm/deps/folly.exploded/include/folly/portability/GMock.h:32:10: error: "gmock/gmock.h" file not found [clang-diagnostic-error]
+#include <gmock/gmock.h>
+         ^
+
+</pre> ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/13557/ )
+
+Compile error at /home/couchbase/jenkins/workspace/kv_engine-clang_tidy-master/build-kv_engine-clang-tidy/tlm/deps/folly.exploded/include/folly/portability/GMock.h:32:10:
+error: "gmock/gmock.h" file not found [clang-diagnostic-error]
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/13557/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/16101/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [0016/0093]: test dcp replica stream one collection...../kv_engine/engines/ep/tests/ep_testsuite_dcp.cc:715 Test failed: `" (Expected `118", got `94" - Buffer Size did not get set correctly)
+[2021-10-19T14:12:39.597Z] (23624 ms) FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/16101/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/41249/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [0128/0159]: test add with item_eviction...(9 ms) SKIPPED
+
+
+99% tests passed, 1 tests failed out of 413
+
+Total Test time (real) = 666.31 sec
+
+The following tests FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/41249/ )
+
+Timeout of a CTest test 413/413 Test #264: ep_testsuite.value_eviction.comp_passive ......................................................................................} ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/41249/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/35046/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/12356/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/3189/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/15166/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/14324/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/3258/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/15451/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/23487/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-10-19 14:51:48.000000000
+Message: 
+Patch Set 3:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/13557/ : FAILURE
+
+clang-tidy found the following problems:
+
+<pre>
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy-master/build-kv_engine-clang-tidy/tlm/deps/folly.exploded/include/folly/portability/GMock.h:32:10: error: "gmock/gmock.h" file not found [clang-diagnostic-error]
+#include <gmock/gmock.h>
+         ^
+
+</pre> ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/13557/ )
+
+Compile error at /home/couchbase/jenkins/workspace/kv_engine-clang_tidy-master/build-kv_engine-clang-tidy/tlm/deps/folly.exploded/include/folly/portability/GMock.h:32:10:
+error: "gmock/gmock.h" file not found [clang-diagnostic-error]
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/13557/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/35046/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/12356/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/3189/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/15166/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/14324/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/3258/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/15451/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/23487/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/41251/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/16103/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-10-19 15:27:41.000000000
+Message: 
+Patch Set 3: Verified+1
+
+Overriding Verified - clang_tidy failure is due to header files not handled by clang-tidy.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-10-20 08:13:21.000000000
+Message: 
+Removed Verified-1 by Build Bot <build@couchbase.com>
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2021-10-20 10:08:46.000000000
+Message: 
+Patch Set 3: Code-Review+1
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2021-10-20 16:05:07.000000000
+Message: 
+Patch Set 3: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2021-10-20 16:13:42.000000000
+MISMATCHED INLINE COMMENT
+Line:126, engines/ep/src/paging_visitor.h -> I guess it's more intrusive to change but feels more like this should be a local variable
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2021-10-20 16:19:34.000000000
+MISMATCHED INLINE COMMENT
+Line:126, engines/ep/src/paging_visitor.h -> Fair enough
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-10-20 16:17:48.000000000
+MISMATCHED INLINE COMMENT
+Line:126, engines/ep/src/paging_visitor.h -> Unfortunately it cannot be with current structure - basically the VBuckets-level visitor method visitVBucket() calls the visit() method on KVBucket; which in turn calls back into PagingVisitor::visit(StoredValue&) - it is that method which needs to know the current vBucket.
+
+(I did experiment with changing the signature of visit to be visit(VBucket&, StoredValue&) but it was very invasive for the ~dozen or so visitors we have which don't care about the VBucket, compared to the 2 visitors we have which do.)
+----------------------------------------------------------------------------------------------------------------------

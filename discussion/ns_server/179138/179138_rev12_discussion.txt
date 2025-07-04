@@ -1,0 +1,192 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-53478: Fix saving anonymous functions to disk
+
+Instead of saving a callback to disk and reloading it, we replace it
+while we are loading them to include a dummy value instead of the
+closure that was saved originally. This solves the issue where we get
+stuck with items in the queue with bad continuations between ns_audit
+restarts. On new code, we don't save the closure at all, but instead
+pre-convert the synchronous entries into asynchronous ones, so that we
+don't attempt to reply to a request that has already failed.
+
+Change-Id: If42c622317c7c93ad59d2a9a931e639869e43db0
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Bryan McCoid
+Date: 2022-08-29 20:31:35.000000000
+Message: 
+Uploaded patch set 12.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-08-29 20:31:42.000000000
+Message: 
+Patch Set 12:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-test/31351/
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-08-29 20:35:25.000000000
+Message: 
+Patch Set 12:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> make simple-test
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-08-29 20:35:32.000000000
+Message: 
+Patch Set 12:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-simple-test/3813/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-08-29 20:36:49.000000000
+Message: 
+Patch Set 12: Well-Formed+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/ns-server-test/31351/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-08-29 21:13:07.000000000
+Message: 
+Patch Set 12: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/ns-server-simple-test/3813/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2022-08-30 00:08:22.000000000
+Message: 
+Patch Set 12:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> LGTM
+Steve, Hareen, do you plan to take a look?
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2022-08-30 00:17:35.000000000
+Message: 
+Patch Set 12:
+
+(2 comments)
+File Comment: /PATCHSET_LEVEL -> LGTM, Hareen?
+Line:201, src/ns_audit.erl -> https://www.erlang.org/doc/man/erlang.html#term_to_binary-1 says
+
+This can be used for various purposes, for example, writing a term to a file in an efficient way,
+
+----
+I should have RTFM earlier :-(
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2022-08-30 00:20:17.000000000
+Message: 
+Patch Set 12:
+
+(1 comment)
+Line:948, src/ns_audit.erl -> Actually didn't Hareen mention that exiting isn't being a good neighbor to downstream tests. Is that not the case?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2022-08-30 00:48:32.000000000
+Message: 
+Patch Set 12:
+
+(2 comments)
+Line:948, src/ns_audit.erl -> I verified this (which was an interesting TIL) - interestingly exiting in a test doesn't affect the execution of downstream tests. 
+
+I added the following testcase before the test-case here and maybe_backup_test did run despite exiting in the first test-case. 
+
+maybe_exit_test() ->
+    exit(not_ok).
+
+ns_audit: maybe_exit_test...*failed*
+ns_audit: maybe_backup_test...[ns_server:info,2022-08-29T17:41:37.435-07:00,test-frB7jsR4kEEhbAjz@admins-mbp:<0.128.0>:ns_audit:restore_backup:229]Audit queue was restored from the backup
+
+=======================================================
+  Failed: 1.  Skipped: 0.  Passed: 1.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2022-08-30 01:07:55.000000000
+Message: 
+Patch Set 12:
+
+(1 comment)
+Line:218, src/ns_audit.erl -> One other point about this comment - maybe I am missing something; I do seem to be able to save a pid to disk and was able to send messages to the Pid constructed back by reading it from disk.
+
+cb/src-elixir ~ erl
+Erlang/OTP 24 [erts-12.2] [source] [64-bit] [smp:12:12] [ds:12:12:10] [async-threads:1] [jit]
+
+Eshell V12.2  (abort with ^G)
+1> Pid = spawn(fun() -> receive done -> ok end end).
+<0.85.0>
+2> {ok, F} = file:open("pid.test", [raw, binary, write]).
+{ok,{file_descriptor,prim_file,
+                     #{handle => #Ref<0.3729055071.3691905058.172426>,
+                       owner => <0.83.0>,r_ahead_size => 0,
+                       r_buffer => #Ref<0.3729055071.3691905036.172675>}}}
+3> file:write(F, term_to_binary(Pid)).
+ok
+4> {ok, FileContent} = file:read_file("pid.test").
+{ok,<<131,88,100,0,13,110,111,110,111,100,101,64,110,111,
+      104,111,115,116,0,0,0,85,0,0,0,0,0,...>>}
+5> PidR = binary_to_term(FileContent, [safe]).
+<0.85.0>
+7> is_process_alive(PidR).
+true
+8> PidR ! done.
+done
+9> is_process_alive(PidR).
+false
+10>
+
+I think our issue with using a Pid read from disk was that the "Pid" would have already exited when ns_audit gen_server crashed and therefore we wanted to avoid sending the gen_server:reply using that Pid.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2022-08-30 01:27:19.000000000
+Message: 
+Patch Set 12:
+
+(1 comment)
+Line:218, src/ns_audit.erl -> Hareen, your experiment doesn't mean that it's safe to save pids to disk. For example, if you rename the node the pid will start meaning other node pid.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2022-08-30 15:38:30.000000000
+Message: 
+Patch Set 12:
+
+(1 comment)
+Line:218, src/ns_audit.erl -> oh yeah absolutely - didn't mean to suggest we should save pids to disk; For some reason - I construed Bryan's comment as "any pid saved to disk" can't be re-used and got curious.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-08-30 18:41:05.000000000
+Message: 
+Patch Set 12:
+
+(3 comments)
+Line:218, src/ns_audit.erl -> Hareen, the description you put at the end is exactly what is intended when we've talked about pids not being valid after being saved.. at least that's been my position. It's just that you can't have ns_audit crash and also use it. Not to mention there are other issues like what Timofey mentioned. So it's filled with potential issues, IMO, but doesn't make sense for a process state backup that contains live pids..
+
+Line:948, src/ns_audit.erl -> yeah I think the testrunner runs everything in process' of their own and all that jazz.. it would be a pretty bad testrunner if a simple exit(..) would completely mess it up, it would seem..  so thank goodness that's not the case! haha
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-08-30 18:44:08.000000000
+MISMATCHED INLINE COMMENT
+Line:218, src/ns_audit.erl -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-08-30 18:44:08.000000000
+MISMATCHED INLINE COMMENT
+Line:948, src/ns_audit.erl -> Done
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,290 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 473441: Fix concurrency issue in ThreadedHistoryTreeBackend
+
+We add a blockingPeek() method to the BBQ, which allows blocking
+on the queue without removing elements from it. This allows
+iterating threads doing query to continue seeing the element
+while it is being inserted.
+
+Change-Id: I9e708824748a625010aded82a3198f096c1fc427
+Signed-off-by: Bernd Hufmann <Bernd.Hufmann@ericsson.com>
+Signed-off-by: Alexandre Montplaisir <alexmonthy@voxpopuli.im>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Alexandre Montplaisir
+Date: 2015-07-28 22:17:12.000000000
+Message: 
+Uploaded patch set 5.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2015-07-28 22:17:18.000000000
+Message: 
+Patch Set 5:
+
+Build Started https://hudson.eclipse.org/tracecompass/job/tracecompass-gerrit/3267/
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2015-07-28 22:21:49.000000000
+Message: 
+Patch Set 5:
+
+Finally, here's my proposed take on the problem. It's the same as patch set 1, with some small corrections.
+
+I would have much preferred to not add functionality to BBQ that is not in the standard BlockingQueue so that they can be used interchangeably, but this does not seem to be possible.
+
+I've been wracking my brain at this for the last few hours, and there is really no way around it, we need either a blocking peek (patch sets 1 or 5), or have the queue write the data before removing it (patch set 4). The former seems like a cleaner solution.
+
+I would appreciate if you could test patch set 4 still, it would confirm that the bug really lies where we think it is.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2015-07-28 22:26:00.000000000
+Message: 
+Patch Set 5: Verified-1
+
+Build Failed 
+
+https://hudson.eclipse.org/tracecompass/job/tracecompass-gerrit/3267/ : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2015-07-28 22:27:01.000000000
+Message: 
+Patch Set 5:
+
+(2 comments)
+Line:171, common/org.eclipse.tracecompass.common.core/src/org/eclipse/tracecompass/common/core/collect/BufferedBlockingQueue.java -> Here it is technically the head of the whole queue, even though we are using fOutputBuffer.peekLast(). The output buffer was a input buffer once, so it is "upside down" once it gets here.
+
+Line:174, common/org.eclipse.tracecompass.common.core/src/org/eclipse/tracecompass/common/core/collect/BufferedBlockingQueue.java -> I've used a different name from the methods defined in Queue/Deque, because peek() in those never blocks. We could eventually add a normal peek() here too, it would simply have to be:
+
+  public @Nullable T peek() {
+    return fOutputBuffer.peekLast();
+  }
+
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2015-07-28 22:29:53.000000000
+Message: 
+Patch Set 5: -Verified
+
+Build Started https://hudson.eclipse.org/tracecompass/job/tracecompass-gerrit/3268/
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2015-07-28 22:30:38.000000000
+Message: 
+Patch Set 5:
+
+I'm eluded by this test failure... this is the same as patch set 1, and that one passed??
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2015-07-28 22:58:06.000000000
+Message: 
+Patch Set 5: Verified-1
+
+Build Failed 
+
+https://hudson.eclipse.org/tracecompass/job/tracecompass-gerrit/3268/ : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2015-07-29 00:04:28.000000000
+Message: 
+Patch Set 5: -Verified
+
+Build Started https://hudson.eclipse.org/tracecompass/job/tracecompass-gerrit/3272/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2015-07-29 00:34:05.000000000
+Message: 
+Patch Set 5: Code-Review+1
+
+Build Successful 
+
+https://hudson.eclipse.org/tracecompass/job/tracecompass-gerrit/3272/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Patrick Tasse
+Date: 2015-07-29 19:35:19.000000000
+Message: 
+Patch Set 5: Code-Review-1 Verified-1
+
+(7 comments)
+
+We convinced ourselves looking at patch set 4 that it should work. But then when we tried it, it failed on the first try. We couldn't reproduce the problem with patch set 5. But...
+
+I found an easy way to reproduce the problem somewhat faster: override redraw() in ControlFlowView to blindly query the full state at the current end time.
+
+Then with this method, I was able to reproduce the problem even with patch set 5. So something else is missing.
+
+We now believe that it is a problem with the BufferedBlockingQueue iterator. Look at the file comments, it proves that an element in the queue can be missed by the iterator.
+
+We discussed a bit and had the idea that the singular query, if not found in the history tree on the first pass, could force-flush the interval queue instead of iterating on it. Then it would guarantee that the intervals in the queue would be found in the second pass of the history tree.
+
+This force-flush would need to ensure that not only all elements in the queue have been taken out of the queue, but that they have also been inserted in the history tree (specifically the last one). Otherwise we are back at the problem that patch set 5 is solving (interval lost in between queue and history tree).
+Line:38, common/org.eclipse.tracecompass.common.core/src/org/eclipse/tracecompass/common/core/collect/BufferedBlockingQueue.java -> missing '.'
+
+Line:122, common/org.eclipse.tracecompass.common.core/src/org/eclipse/tracecompass/common/core/collect/BufferedBlockingQueue.java -> fInnerQueue?
+
+Line:165, common/org.eclipse.tracecompass.common.core/src/org/eclipse/tracecompass/common/core/collect/BufferedBlockingQueue.java -> first (head)
+
+Line:169, common/org.eclipse.tracecompass.common.core/src/org/eclipse/tracecompass/common/core/collect/BufferedBlockingQueue.java -> If there is only one consumer thread and it's the thread calling blockingPeek(), it will always be the same.
+
+If there are many consumers, I wouldn't have any expectation of this being true. Even a subsequent call to blockingPeek() could return a different element. Or, isEmpty() could return false but take could still block().
+
+I guess I'm saying, if there are many consumers there are more cases than this one which can have different behavior, I'm not sure it's necessary to highlight just this one.
+
+Line:222, common/org.eclipse.tracecompass.common.core/src/org/eclipse/tracecompass/common/core/collect/BufferedBlockingQueue.java -> This should be called descendingIterator()? Or at least specify the order in the Javadoc, the text could be based on Dequeue.descendingIterator().
+
+Update: Well that is only true for the normal case. If there are concurrent put() and take(), the iteration order is rather undefined, we can get out of order elements, and we can get the same element twice. Some real examples:
+
+[H, G, F, E, L, K, J, I, D]
+
+[J, I, L, K, J, I]
+
+This last one created like this:
+
+new BufferedBlockingQueue<>(2, 4)
+put(A)
+put(B)
+put(C)
+put(D)
+put(E)
+put(F)
+put(G)
+put(H)
+put(I)
+put(J)
+iterator()
+iterator.next()=J
+take()=A
+take()=B
+take()=C
+take()=D
+take()=E
+put(K)
+put(L)
+put(M)
+put(N)
+iterator.next()=I
+iterator.next()=L
+iterator.next()=K
+iterator.next()=J
+iterator.next()=I
+iterator.hasNext()=false
+
+Update to the update:
+
+If you look at the previous example, elements F, G and H are still in the interval queue but the iterator does not return them, and they were in the queue at the time of creation of the iterator. So that's probably the next place where an interval gets missed.
+
+Line:176, statesystem/org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/internal/statesystem/core/backend/historytree/ThreadedHistoryTreeBackend.java -> If this was a constant, the run() method could look for it with an == instead of checking time and quark.
+
+Line:195, statesystem/org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/internal/statesystem/core/backend/historytree/ThreadedHistoryTreeBackend.java -> What is wrong with take()? Any advantage to using remove()?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2015-07-29 20:11:54.000000000
+Message: 
+Patch Set 5:
+
+(3 comments)
+
+Excellent, thanks for trying the two patches, it shows that indeed there was something else!
+
+I'm not too warm on the idea of force-flushing. It would work, but it would completely destroy the performance, especially if queries are sent continually as the state system is built because views want to be updated.
+
+What is more important here? To show the exact, complete data at every moment in time while the history is being built, or would it be to show a "good enough" set of data while it's being built, but emphasize on getting the complete data set ready faster?
+
+Maybe we can rethink what the state system can provide while it is being built. If there is a query on information that is not yet available because it is in transit (not in the current state, but not yet written to disk), maybe either block the caller until it is written to disk, or return "null" to indicate that the data is not available at the moment.
+
+Thoughts?
+Line:222, common/org.eclipse.tracecompass.common.core/src/org/eclipse/tracecompass/common/core/collect/BufferedBlockingQueue.java -> About tail/head ascending/descending nomenclature:
+
+BBQ is (meant to be) a Queue, not a Deque. It's particularly confusing, because the Deque interface specifies First and Last to represent the two ends of the double-ended-queue. So it's intuitive to use First where you insert, and Last where you remove, when you use a Deque as a FIFO.
+
+For Queue however, it only specifies put/insert and take/remove, without the notion of First/Last. But it inserts at the "tail" of the queue and removes from the "head". And here it is confusing, because we use Deques internally for the buffers (I don't remember why exactly, but I'm pretty sure there was a reason).
+
+So yeah, it'd be worth going over all the Javadoc in this class to make sure it's consistent from the external user's point of view.
+
+About iterator items:
+
+It's a concurrent iterator, which means that it can "miss" events as they are inserted or removed. That's the life of concurrent operations. In your example you list specific points where elements are iterated on and removed. But in practice, if you have concurrent operations (which means you are not locking anything for a thread to get exclusive accesses), you can never know in which order the operations actually happen.
+
+The idea here however was that if an interval is missed, it would still get found in the History Tree on disk.
+
+Line:176, statesystem/org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/internal/statesystem/core/backend/historytree/ThreadedHistoryTreeBackend.java -> Very good point, in another place where we use such a queue we've used a static "poison pill" I think.
+
+Line:195, statesystem/org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/internal/statesystem/core/backend/historytree/ThreadedHistoryTreeBackend.java -> remove() would not block, and instead throw an exception (which we can catch + throw illegalstateexception). We'd rather get an exception here rather than it blocking and us not knowing why.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Patrick Tasse
+Date: 2015-07-29 22:40:16.000000000
+Message: 
+Patch Set 5:
+
+(1 comment)
+
+> Maybe we can rethink what the state system can provide while it is being built. If there is a query on information that is not yet available because it is in transit (not in the current state, but not yet written to disk), maybe either block the caller until it is written to disk, or return "null" to indicate that the data is not available at the moment.
+
+For the needs of the time graph, it might be OK if the state system's end time would be only updated to the last interval that is in the history tree (excluding the transient state). I would guess you can't just change that without breaking other things, so maybe it can be an additional information provided by the state system? The state system should be considered complete only once the transient state is all written to the history tree.
+
+I'm not sure if queries for the other attributes than the last one inserted in history tree (those that are still in transient state) could be missed if we query them at the new 'history tree end time'? Could they be in transit from transient state to history tree?
+Line:222, common/org.eclipse.tracecompass.common.core/src/org/eclipse/tracecompass/common/core/collect/BufferedBlockingQueue.java -> > And here it is confusing, because we use Deques internally for the buffers (I don't remember why exactly, but I'm pretty sure there was a reason).
+
+My guess is that:
+
+You use deque because you want to insert first and remove last from the buffers (opposite of the proper sequence), and you do that because the iterator iterates on the inputBuffer (tail) before the outputBuffer (head), and if these were in the proper sequence, it would look weird, for example [I,J,K,L],[[E,F,G,H]],[A,B,C,D].
+
+You could have used the buffers in the proper sequence (insert at tail and remove at head). Then the iterator would need to be a concatenation of the descending iterators. But you'd need a deep descending iterator for the middle queueIterator that uses Iterables, that would be a descending iterator of buffers in the inner queue that concatenates the descending iterator of each buffer...
+
+Already that middle iterator is 'incorrectly' in the proper sequence of the inner queue so it's not a true descending iterator: [P,O,N,M],[[H,G,F,E],[L,K,J,I]],[D,C,B,A]...
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Bernd Hufmann
+Date: 2015-07-30 12:41:01.000000000
+Message: 
+Patch Set 5:
+
+Quite a complex issue that was revealed! Thanks for all your effort Patrick and Alex.
+
+So, there are 2 main concurrency issues:
+1) The interval has been taken out of the queue but hasn't been written by one thread while a state system query happens. This is what this patch tries to fix.
+
+2) Queue iterations while concurrently putting and taking intervals from the queue can cause that some intervals are not returned by the interator even if they are still in the queue.
+
+What I would suggest is to merge the fix for issue 1. With this fix the IllegalStateException happens much less than not having this fix (my observation).
+
+Then we can take the time to implement a fix for issue 2 and provide it in a separate patch.
+
+Any thought?
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2015-07-30 16:46:32.000000000
+Message: 
+Patch Set 5:
+
+Issue 1 is a subset of Issue 2. I'm a bit torn on the idea of merging this patch right now. On one hand, if it helps reducing the impact of a bug, that's great. On the other hand, it introduces behavior in the BBQ that is not present in a standard BlockingQueue (the blockingPeek()). It was a nice thing that those two could be used interchangeably.
+
+The problem as I see it now is the duality between those two points:
+- The views/analyses expect to be able to query the state system as it is being built.
+- The state system cannot reliably return all its data that is "in transit" if we use concurrent iterators.
+
+One solution is to have iterators take locks, which would guarantee data integrity. However, it would destroy performance. Another approach would be to rethink how the state system responds to live queries. If we know data *has* to be there somehwere, maybe retry until you actually find it in the backend, and block the caller in the meantime. This is a larger undertaking however.
+
+By the way, did anyone try by changing the BBQ back to a standard BlockingQueue, and seeing if the problem also happens? Maybe the problem is with BBQ's iterators and we can fix it.
+
+Finally, if you have a small test case or patch that can allow testing this issue, this could make a great unit test.
+----------------------------------------------------------------------------------------------------------------------
+Author: Patrick Tasse
+Date: 2015-07-30 21:02:07.000000000
+Message: 
+Patch Set 5:
+
+(1 comment)
+Line:205, common/org.eclipse.tracecompass.common.core/src/org/eclipse/tracecompass/common/core/collect/BufferedBlockingQueue.java -> This method can give an incorrect result if the last buffer is moved from the inner queue (which is then empty) to the output buffer (which was previously empty) in between those two calls.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Gerrit Code Review
+Date: 2015-08-10 19:17:23.000000000
+Message: 
+Change has been successfully cherry-picked as 49698f83d53b1c99ff8cea7eb8b27066cfa30d3a by Patrick Tasse
+----------------------------------------------------------------------------------------------------------------------

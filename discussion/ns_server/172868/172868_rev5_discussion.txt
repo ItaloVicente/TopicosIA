@@ -1,0 +1,187 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-44611: Minimize cbcollect disk usage and refactor core
+
+Modified the task system to minimize the amount of disk and memory
+being used. There are a few approaches used to accomplish this..
+
+The main goal was: Attempt to write files directly from their source,
+to their output inside the zip file, without copying to a temporary
+directory. This has some challenges and limitations such as:
+
+ 1.) You can only open one file at a time inside the zip for writing.
+ 2.) You cannot reopen or append to a file already written to the zip
+ file.
+ 3.) The current set of tasks are all ran to output in different
+ files, sometimes coming back to files written to before.
+
+To solve this we have changed the runtime model for the task system to
+collect up all tasks at the beginning, categorize them by file output,
+and then run them in those chunks. This way we only open a file one
+time, but can run many tasks that write to it without ever coming back
+to that file later.
+
+Additionally, I attempted to add types to the relevant core functions,
+implemented the correct interfaces to treat the ZipStream,
+RedactStream and DoubleStream as writeable streams and changed the
+platforms to use an enum to represent them instead of just a string.
+
+The main flow is this:
+
+ 1.) Create a bunch of tasks, append them all to a list.
+ 2.) Create a TaskRunner with the relevant arguments, specifically
+ ones that mention the name of the zipfile, and the correct redaction
+ information.
+ 3.) Begin running the tasks:
+   a.) Categorize list of tasks into a dictionary that places all tasks
+   that use a specific output/log file into the same list. This
+   actually creates a mapping between the filename -> MetaTask, where
+   a MetaTask is a new construct to contain other tasks that all write
+   to the same file.
+   b.) Depending on whether or not redaction is turned on, construct
+   one or two ZipStream objects that manage the underlying zipfile for
+   the main output, and potentially the redacted zipfile.
+   c.) If redaction is enabled, construct a DoubleStream that combines
+   the RedactStream and the ZipStream into a single stream that can be
+   written into.
+   d.) Begin running through the MetaTasks. The MetaTask.execute starts
+   running through the subtasks of the MetaTask, passing each one the
+   same output pointer (same file).
+   e.) If artifacts are created while running a task, append it to the
+   artifacts list inside the metatask.
+   f.) Run the CollectFileTask's for each artifact, if any exist on
+   the MetaTask we just ran.
+ 4.) Finish running the task and start on a new one.
+
+The 'artifacts' are the only files written to the temporary directory
+after this patch is applied. This is the best possible scenario, since
+all other file types can be directly written to the zip(s) in one way
+or another.
+
+The next largest change is attempting to use type hints as much as
+possible. They can be checked by installing 'mypy' and doing:
+
+ $ mypy cbcollect_info
+
+The types also work as good documentation for consumers of the
+library.
+
+Finally, the next major task was to upgrade all the implicit instance
+members of a class to be explicitly defined in the class body, and
+properly mentioned in the __init__ function. This is instead of just
+smuggling them in with the **kwargs and directly applying them to the
+class dictionary.
+
+This should ensure that the Task API is better defined and the options
+are known explicitly.
+
+Change-Id: Ica83599ab330863e82b93756c0d153fdf1fd9715
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Bryan McCoid
+Date: 2022-03-30 19:57:56.000000000
+Message: 
+Uploaded patch set 5.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-03-30 19:58:05.000000000
+Message: 
+Patch Set 5:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-test/29988/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-03-30 20:02:56.000000000
+Message: 
+Patch Set 5: Well-Formed+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/ns-server-test/29988/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-03-30 20:06:29.000000000
+Message: 
+Patch Set 5: Verified+1
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> The latest revision fixes some flaws that were causing nutshell to fail, though it's hard to tell what the 100% correct output of nutshell should be (because it's different depending on your cluster, and OS, etc). That said this solves an actual crash of nutshell because the collected files weren't being put into couchbase.log which I didn't know was required explicitly. I admit I had completely forgotten about nutshell until recently so that helped find a few inconsistencies. There are definitely still "differences" (technically) that are kinda tricky to reconcile but I don't think they are a problem anymore. 
+
+This change also moves more processing into the "collection of tasks" phase which seems like a positive change. Also, I have attempted to resolve the differences in CollectFileTask in the runtime itself, but alternatively we could just force users of it to create a LiteralTask if they want that output in couchbase.log .. but this seemed like a foot-gun that wasn't a good idea. 
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Finlay
+Date: 2022-03-30 22:48:24.000000000
+Message: 
+Patch Set 5:
+
+(4 comments)
+File Comment: /PATCHSET_LEVEL -> Still looking. Have looked at the changes to Task and TaskRunner. Want to closely look at how we do redaction and the metatasks yet - and how we watch that we don't push too many bytes at the file system now that FSyncedFile is gone. Just a handful of comments so far.
+Line:829, cbcollect_info -> this is new logic right? (Or did it exist before and I just missed it.) We now write down which files are collected in couchbase.log?
+
+Line:846, cbcollect_info -> This line is redundant. outfile is set to some value regardless.
+
+Suggest removing it as it suggests there's a default, which is not the case.
+
+Line:899, cbcollect_info -> perhaps just: 
+  if self.salt_value
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-03-30 23:40:29.000000000
+Message: 
+Patch Set 5:
+
+(1 comment)
+Line:829, cbcollect_info -> When I compared the output of before and after I realized that we do write what files we collected. For example:
+
+54353   | ==============================================================================
+54354   │ Users storage
+54355   │
+54355   | ==============================================================================
+54357   │ Collected file /opt/couchbase/var/lib/couchbase/config/users.dets
+
+So yeah this is new, but to match the old behavior..
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-03-30 23:52:41.000000000
+Message: 
+Patch Set 5:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> I didn't know that was the purpose of "FSyncedFile" .. so what do you mean "push too many bytes at the file system"? Because we can periodically flush/fsync the zipfiles but we wouldn't be able to use the zipfile without also properly closing the zipfile (on failure). If we run out of space, we will fail to finish creating the zipfiles in the old version, as well. The FSyncFile is only useful for temporary files, of which there aren't any, anymore. Since we removed the situations where we used the FSyncFile(s) -- I removed it as well.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Finlay
+Date: 2022-03-31 03:54:54.000000000
+Message: 
+Patch Set 5:
+
+(2 comments)
+File Comment: /PATCHSET_LEVEL -> The purpose of FSyncedFile was to write bytes in max 16 MB chunks after which an fsync happens. Prior to that the whole file would be written before a potentially monster fsync at the end. There was pretty strong evidence that these monster fsyncs would seriously affect chronicle. We think it's because the device queue would get overwhelmed and fsync latency sensitive processes (like chronicle) would notice. We've seen similar evidence that more frequent fsyncs helps in other cases where there are synchronous interaction with the filesystem (e.g. fetching data from KV and compaction.)
+
+Do you know flushing the open zip stream will result in a fsync at the disk level? My guess is it just flushes the in memory buffer and writes the data to disk. Would be interesting to know. The good news is that in general zipping files is going to be writing a lot fewer bytes to disk, which is good. But we may be opening up some possibility of larger fsyncs with this change. It doesn't invalidate the work, I don't think but is something to be aware of.
+Line:829, cbcollect_info -> Ack
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-03-31 17:14:11.000000000
+Message: 
+Patch Set 5:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> Well I can pretty easily add back the FSyncFile for the final zip. Maybe that's the easiest answer.
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-03-31 19:04:40.000000000
+MISMATCHED INLINE COMMENT
+Line:846, cbcollect_info -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-03-31 19:04:40.000000000
+MISMATCHED INLINE COMMENT
+Line:899, cbcollect_info -> Done
+----------------------------------------------------------------------------------------------------------------------

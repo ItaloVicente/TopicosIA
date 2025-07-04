@@ -1,0 +1,138 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-42224: Fail the node if persistence repeatedly fails header's sync
+
+At http://review.couchbase.org/c/couchstore/+/145098 we allow couchstore
+to auto-retry header's persistence if it fails at fsync.
+
+This patch triggers auto-retry in EPBucket::flushVBucket path. Also, EP
+increments ep_data_write_failed at each failure, which triggers
+ns_server's auto-failover if the user has enabled it.
+
+Change-Id: I4554801cff956f5cc32392705ba51cbc881581a8
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2021-02-15 12:28:07.000000000
+Message: 
+Uploaded patch set 9.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-02-15 13:58:46.000000000
+Message: 
+Patch Set 9: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/33612/ : ABORTED
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/33612/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/5648/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/7111/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/28907/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/7757/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/8842/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/9049/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/8703/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/16601/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-02-15 16:14:52.000000000
+Message: 
+Patch Set 9: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/5648/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/7111/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/28907/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/7757/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/8842/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/9049/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/8703/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/16601/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/33617/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2021-02-16 08:42:33.000000000
+Message: 
+Patch Set 9:
+
+(2 comments)
+Line:432, engines/ep/src/ep_bucket.cc -> Will ns_server always restart the memcached process after a single sync-failure? otherwise we'll only see this the first time, but then never again until memcached gets restarted (if you delete the bucket and create a new one with a different underlying file system etc).
+
+Line:438, engines/ep/src/ep_bucket.cc -> If you had passed the std::system_error you could have just done what() and get it printed in a nice text...
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2021-02-16 09:28:25.000000000
+Message: 
+Patch Set 9:
+
+(2 comments)
+Line:432, engines/ep/src/ep_bucket.cc -> > Will ns_server always restart the memcached process after a single sync-failure
+
+No, certainly not at the first failure.
+
+Here I wanted to (1) log the error and (2) avoid to blow logs with possibly thousands repetitions of the same log-line.
+
+I'm happy to change it if you have a better idea :)
+
+Line:438, engines/ep/src/ep_bucket.cc -> std::errc is the minimal required info (and it’s just an int ), then the user (eg KV here) can use std::make_error_code if they require a nice text. While other users (eg, view-engine) can stick with the raw errcode if they like.
+
+Note that (https://en.cppreference.com/w/cpp/error/error_code/message):
+
+> std::error_code::message is equivalent to category().message(value())
+
+, so std::make_error_code(error).message() will give the text description that you say. I'll add a call to message() here.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2021-02-17 06:25:50.000000000
+MISMATCHED INLINE COMMENT
+Line:432, engines/ep/src/ep_bucket.cc -> I haven't thought about it, but it should probably be a bucket specific variable which cause it to mute? (could be a counter and a timestamp and if they appear rapidly just bump the counter and every now and then print out X commit failures since XYZ and if the previous sync failure was like X minutes ago reset the counter and assume that the underlying issue was fixed? just throwing out ideas..)
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2021-02-17 11:20:37.000000000
+MISMATCHED INLINE COMMENT
+Line:432, engines/ep/src/ep_bucket.cc -> Fixed the scope of the 'logged' flag. Now we log once at every call to EPB::flushVBucket
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2021-02-17 08:37:44.000000000
+MISMATCHED INLINE COMMENT
+Line:432, engines/ep/src/ep_bucket.cc -> Question is: why making it more complex than what it is now? What do we gain?
+This code:
+ 1) will give us evidence of the error on logs
+ 2) will not blow logs, so it will not cause logs wrapping
+ 3) will give us evidence of how many times we have failed by incrementing the EPStats::commitFailed counter
+
+The only problem in case if logs wrap, but we cannot always prevent that. As you know we have already implemented in connectoin.cc something similar to what you suggest, but we have already hit cases where logs have wrapped and lost info.
+
+On resetting the counter, that seems a bad idea as that is an accumulator (at least for now), and other components already used it (eg, ns_server)
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2021-02-17 06:25:50.000000000
+MISMATCHED INLINE COMMENT
+Line:438, engines/ep/src/ep_bucket.cc -> Well, that is only true if the error is from the system_error category. For instance we use the same std::system_error to pass along our own engine error codes (http://src.couchbase.org/source/xref/trunk/kv_engine/include/memcached/engine_error.h#38 and http://src.couchbase.org/source/xref/trunk/kv_engine/include/memcached/engine_error.h#155-162 ) One could imagine that other storage systems would have similar classes (like a mock or magma and we don't know if they would use the same commit pattern).
+
+By using an interface which is so limited as a single int you force everyone to try to map their error down to one of the system error codes without any context (that would have to be logged by someone else and hopefully they have access to the same log system). In my eyes it would allow for better error reporting and less refactoring in the future by starting off allowing a std::system_error which allows you to get the error code, the error category and even an extra text.
+----------------------------------------------------------------------------------------------------------------------

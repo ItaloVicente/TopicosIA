@@ -1,0 +1,234 @@
+======================================================================================================================
+DESCRIPTION:
+
+CommitGraph: implement commit-graph read
+
+This change teaches JGit to use a single commit-graph file to
+accelerate commit graph walks. When new commits are added to the
+repo, the commit-graph gets further and further behind, and then we
+write the whole commit-graph file again to include new commits.
+
+Multiple commit-graph files are not supported in the current
+implementation. With this feature, git will write a commit-graph after
+every git fetch command that downloads a pack-file from a remote.
+
+JGit can read a commit-graph file from a buffered stream, which means
+that we can provide this feature for both FileRepository and
+DfsRepository.
+
+Bug: 574368
+Change-Id: Ib5c0d6678cb242870a0f5841bd413ad3885e95f6
+Signed-off-by: kylezhao <kylezhao@tencent.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Kyle Zhao
+Date: 2021-10-14 04:36:12.000000000
+Message: 
+Uploaded patch set 9: Patch Set 8 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2021-10-14 04:36:23.000000000
+Message: 
+Patch Set 9:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline.java11/181/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2021-10-14 04:47:38.000000000
+Message: 
+Patch Set 9: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline.java11/181/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Martin Fick
+Date: 2021-10-15 16:13:06.000000000
+Message: 
+Patch Set 9: Code-Review-1
+
+(1 comment)
+Line:203, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/CommitGraphDataV1.java -> If I am understanding the code in the class correctly, the constructor loads the entire file in memory upfront? It also looks like this is using a binary search to find objectId positions? I think the file format was designed to make binary searching possible without loading the entire file in memory, and I would expect a binary search to be used with that approach. Since this class seems to be using a load-the-entire-file approach, a binary search is likely not the most efficient approach O(log(n)), using a ObjectIdMap probably makes more sense O(1)?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2021-10-18 02:40:17.000000000
+MISMATCHED INLINE COMMENT
+Line:203, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/CommitGraphDataV1.java -> > If I am understanding the code in the class correctly, the constructor loads the entire file in memory upfront? 
+Yes
+> It also looks like this is using a binary search to find objectId positions? 
+Yes
+
+> I think the file format was designed to make binary searching possible without loading the entire file in memory, and I would expect a binary search to be used with that approach. 
+No, It still requires all files to be mapped into memory. If you have looked at CGit code, you would see that CGit maps the entire file into memory using mmap[1].
+   graph_map = xmmap(NULL, graph_size, PROT_READ, MAP_PRIVATE, fd, 0);
+
+This is very similar to PackIndex, which is an index for binary lookup and fully loaded in memory in JGit.
+
+[1] https://github.com/git/git/commit/2a2e32bdc5a80221981939e77643cec3462b4793
+----------------------------------------------------------------------------------------------------------------------
+Author: Martin Fick
+Date: 2021-10-19 22:17:12.000000000
+MISMATCHED INLINE COMMENT
+Line:203, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/CommitGraphDataV1.java -> > > I think the file format was designed to make binary searching possible without loading the entire file in memory, and I would expect a binary search to be used with that approach. 
+> No, It still requires all files to be mapped into memory. If you have looked at CGit code, you would see that CGit maps the entire file into memory using mmap[1].
+>    graph_map = xmmap(NULL, graph_size, PROT_READ, MAP_PRIVATE, fd, 0);
+
+mmap() is a lazy IO operation, i.e. it will only load those portions of a file which are actually accessed. From what I can tell here: https://github.com/git/git/blob/2a2e32bdc5a80221981939e77643cec3462b4793/commit-graph.c it looks like CGit mmap()s the file to a pointer on line 81, and after that if things go well, it places that pointer along with a "still open" filedescriptor into the 'graph' struct, and then it returns that 'graph' struct on line 174 without closing the file. If the entire file were already read, would they not have closed the file? 
+
+I believe the commit graph (and the .idx file) was designed to be fast for programs which startup, read a few commits, and then exit. This is the typical C Git command line usage. Such programs don't have the benefit of being able to cache an index across many user invocations. This mmap/binary search operation allows a program to avoid reading the whole file which is very expensive for the normal C Git use cases.
+
+However most JGit applications, such as eclipse and Gerrit, can benefit from caching the contents of indexes across many different unrelated user operations. So it certainly would be valuable to have the ability to read the entire commit graph into memory, but that may be expensive in some situations (when only a few commits need to be looked up). We may also eventually want the ability to do an mmap() binary search. However, I am not suggesting that you have to implement both ways to introduce commit graphs to JGit, just that depending on which approach is picked, that we then use the right lookup approach to go with it.
+
+> This is very similar to PackIndex, which is an index for binary lookup and fully loaded in memory in JGit.
+
+If we are going to load the entire commit graph in memory, and then do a binary search, then I think we need to justify why, either because it is faster or because it saves memory. I would not assume that just because PackIndex does things that way (and it does appear to), that it is a good way to do things.
+
+I don't know why PackInded does this, and it probably could be improved to not do that. Although improving PackIndex to have an O(1) lookup may not make much of a difference in practice because usually the index is only used to then do I/O to fetch an object from the pack anyway. However, it might help in the case of not found objects (Bup suffered here), especially/and when there are many packs (which is terribly slow now in jgit). Perhaps the PackIndex code was originally written to do an mmap() and then it turned out not to work well in java, but then the binary lookup code was just left behind? It sure would be nice to be able to improve something this fundamental for JGit!
+
+As for Commit Graphs, the use case that they are intended to improved, is one of accessing many commits without doing I/O. In this case, the extra cost of an O(log(n)) lookup could be significant compared to an O(1) lookup?
+----------------------------------------------------------------------------------------------------------------------
+Author: Martin Fick
+Date: 2021-10-20 04:50:14.000000000
+MISMATCHED INLINE COMMENT
+Line:203, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/CommitGraphDataV1.java -> > I thought about teaching JGit to have the ability to do an mmap() binary search before，but didn't implement it. There are several reasons:
+...
+You make many great points about mmap that I agree with! My point is not so much that we should be mmaping, but rather that the on disk format was designed for this..
+
+> > However, it might help in the case of not found objects (Bup suffered here), especially/and when there are many packs (which is terribly slow now in jgit).
+> 
+> The multi-pack-index[1] can help solve this problem, maybe we can work on that in the future.
+
+Indeed, that would be great!
+
+> > As for Commit Graphs, the use case that they are intended to improved, is one of accessing many commits without doing I/O. In this case, the extra cost of an O(log(n)) lookup could be significant compared to an O(1) lookup?
+> 
+> OID Fanout Chunk and OID Lookup Chunk are designed to provide binary lookup, see [2].
+> These actually serves the same function as .idx file. 
+> Commit-graph currently focuses on these two main costs instead of the complexity of the lookup:
+> 
+>  1. Decompressing and parsing commits.
+> 
+>  2. Walking the entire graph to satisfy topological order constraints.
+> 
+> for more detail:[3].
+
+Yes, agreed.
+
+>> O(1) lookup looks pretty good! If this is implemented, not only commit-graph, but.idx will see significant performance improvements.
+> This means that we need to design an on-disk format to meet this requirement. 
+
+I disagree with this conclusion. Just because the format on disk is designed for binary search, does not mean that once we have the data in memory that we are limited to a binary search. Did you understand my suggestion of using loading a HashMap (better a ObjectIdMaP) with the objectIds on file load?
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2021-10-20 04:27:47.000000000
+MISMATCHED INLINE COMMENT
+Line:203, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/CommitGraphDataV1.java -> Thank you for all your comments.
+
+
+> mmap() is a lazy IO operation, i.e. it will only load those portions of a file which are actually accessed. From what I can tell here: https://github.com/git/git/blob/2a2e32bdc5a80221981939e77643cec3462b4793/commit-graph.c it looks like CGit mmap()s the file to a pointer on line 81, and after that if things go well, it places that pointer along with a "still open" filedescriptor into the 'graph' struct, and then it returns that 'graph' struct on line 174 without closing the file. If the entire file were already read, would they not have closed the file? 
+
+Yes, it's true that mmap doesn't read all into memory. 
+C language's mmap() has a low performance cost and is easy to use, which makes me feel like I'm reading the entire file and storing it in memory.
+
+> I believe the commit graph (and the .idx file) was designed to be fast for programs which startup, read a few commits, and then exit. This is the typical C Git command line usage. Such programs don't have the benefit of being able to cache an index across many user invocations. This mmap/binary search operation allows a program to avoid reading the whole file which is very expensive for the normal C Git use cases.
+
+> However most JGit applications, such as eclipse and Gerrit, can benefit from caching the contents of indexes across many different unrelated user operations. So it certainly would be valuable to have the ability to read the entire commit graph into memory, but that may be expensive in some situations (when only a few commits need to be looked up). We may also eventually want the ability to do an mmap() binary search. However, I am not suggesting that you have to implement both ways to introduce commit graphs to JGit, just that depending on which approach is picked, that we then use the right lookup approach to go with it.
+
+> If we are going to load the entire commit graph in memory, and then do a binary search, then I think we need to justify why, either because it is faster or because it saves memory. I would not assume that just because PackIndex does things that way (and it does appear to), that it is a good way to do things.
+
+I thought about teaching JGit to have the ability to do an mmap() binary search before，but didn't implement it. There are several reasons:
+ 1. Unlike CGit, JGit has a DFSRepository type. As you can see, Jgit use InputStream to read 
+files in many places，such as PackIndex、PackBitmapIndex. Since DFSRepository does not fetch 
+data directly from the file system, mmap() is not available. 
+
+ 2. If we support mmap() only for FileRepository, this means we need to refactor a lot of code because many classes are shared between DFSRepository and FileRepository. This means that we should spend a lot of time doing it, but the benefits don't seem obvious.
+
+ 3. We uses RepositoryCache.open() to get Repository, and in this case, commit-graph will most likely only need to be initialized once without causing a significant performance loss. 
+
+ 4. Java language's mmap library is not as useful as the C language. Before I tried to use mmap() to read the Pack (use WindowCacheConfig.SetPackedGitMMAP), but there doesn't seem to be better, but slower. So I'm not sure if implementing this for commit-Graph would be better.
+
+
+> However, it might help in the case of not found objects (Bup suffered here), especially/and when there are many packs (which is terribly slow now in jgit).
+
+The multi-pack-index[1] can help solve this problem, maybe we can work on that in the future.
+
+> As for Commit Graphs, the use case that they are intended to improved, is one of accessing many commits without doing I/O. In this case, the extra cost of an O(log(n)) lookup could be significant compared to an O(1) lookup?
+
+
+OID Fanout Chunk and OID Lookup Chunk are designed to provide binary lookup, see [2].
+These actually serves the same function as .idx file. 
+Commit-graph currently focuses on these two main costs instead of the complexity of the lookup:
+
+ 1. Decompressing and parsing commits.
+
+ 2. Walking the entire graph to satisfy topological order constraints.
+
+for more detail:[3].
+
+O(1) lookup looks pretty good! If this is implemented, not only commit-graph, but.idx will see significant performance improvements.
+This means that we need to design an on-disk format to meet this requirement. This will be a long-term study, but it may not be urgent :) .
+
+Regards, Kyle.
+
+
+[1] https://bugs.eclipse.org/bugs/show_bug.cgi?id=573675
+
+[2] https://git-scm.com/docs/commit-graph-format/2.21.0
+
+[3] https://git-scm.com/docs/commit-graph
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2022-12-08 11:58:36.000000000
+MISMATCHED INLINE COMMENT
+Line:203, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/CommitGraphDataV1.java -> Since commit-graph search commit meta with O(1) time complexity in most cases as I mentioned above, we can close this.
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2022-01-21 05:25:26.000000000
+MISMATCHED INLINE COMMENT
+Line:203, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/CommitGraphDataV1.java -> > If I am understanding the code in the class correctly, the constructor loads the entire file in memory upfront? It also looks like this is using a binary search to find objectId positions? I think the file format was designed to make binary searching possible without loading the entire file in memory, and I would expect a binary search to be used with that approach. Since this class seems to be using a load-the-entire-file approach, a binary search is likely not the most efficient approach O(log(n)), using a ObjectIdMap probably makes more sense O(1)?
+
+Hi, Martin. After the last discussion, I thought about this comment again.
+
+When we use commit-graph to optimize commit history traversal, we mostly call CommitGraph#getCommitData(int graph) instead of CommitGraph#getCommitData(AnyObjectId commit).
+
+In the process of commit traversal, we can get the graphPos of the commit in advance 
+(CommitData#getParents() and RevCommit#graphPosition, refer to [1].), so that we can avoid O(logN) lookup and use O(1) lookup instead.
+
+I have tested with "git rev-list" and "git merge-base" and found that CommitGraph#getCommitData(AnyObjectId commit) was called no more than 10 times, while CommitGraph#getCommitData(int graph) was called thousands of times.
+
+The optimization of binary search only has obvious effect when "randomly" accessing commits
+(As far as I know, we rarely access commits like this).
+
+
+Creating a hashmap makes CommitGraphData take longer to initialize, but for most common commands(eg. git rev-list, git merge-base, git log filtering...), the optimization is not obvious (as it is called very few times). So I think it's better to keep the original logic.
+
+[1] https://git.eclipse.org/r/c/jgit/jgit/+/183079/11/org.eclipse.jgit/src/org/eclipse/jgit/revwalk/RevCommit.java
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2021-10-20 05:32:27.000000000
+MISMATCHED INLINE COMMENT
+Line:203, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/CommitGraphDataV1.java -> > I disagree with this conclusion. Just because the format on disk is designed for binary search, does not mean that once we have the data in memory that we are limited to a binary search. Did you understand my suggestion of using loading a HashMap (better a ObjectIdMaP) with the objectIds on file load?
+
+Does this mean that when the commit-graph is initialized, we need to iterate over all the commit using binary lookups?
+If there are a lot of commits, initialization can take much time.
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2021-10-20 11:11:05.000000000
+MISMATCHED INLINE COMMENT
+Line:203, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/CommitGraphDataV1.java -> > > I disagree with this conclusion. Just because the format on disk is designed for binary search, does not mean that once we have the data in memory that we are limited to a binary search. Did you understand my suggestion of using loading a HashMap (better a ObjectIdMaP) with the objectIds on file load?
+> 
+> Does this mean that when the commit-graph is initialized, we need to iterate over all the commit using binary lookups?
+
+correct:  don't need to use binary lookups, the comment above is a bit wrong
+
+> If there are a lot of commits, initialization can take much time.
+
+If we were to use hashMap for storage, we would need to iterate through all the commits of OID Lookup Chunk、convert them to objectId、and put it to the map.
+
+This makes loading even more complicated, because there is a lot more computation going on in addition to I/O, and the time of computation depends on the number of commits.The loading time would be easily over 100ms.
+
+I'm not sure that's worth it.
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,142 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-36956: Add ExecutorBenchmarks for Timeouts
+
+Expand the Executor benchmarks to add a second benchmark scenario
+named TimeoutAddCancel - managing a large number of TimoutTasks
+(typically one per VBucket) which in the common case are re-scheduled
+to a later time before triggering.
+
+This models the behaviour of a per-VBucket Task to handle SyncWrite
+timeouts - each Task is scheduled to run when the first tracked
+SyncWrite will timeout, however that typically never happens as the
+SyncWrite will complete beforehand and the Task will be re-scheduled
+to run later (when the next tracked SyncWrite expires.
+
+This is a multi-threaded benchmark - each benchmark thread attempts to
+cancel and reschedule the timeout tasks against a single thread pool.
+
+There are two implemenations of this benchmark:
+
+1. Existing ep-engine ExecutorPool.
+
+2. Folly, using HHWheelTimer::scheduleTimeout(), via an
+   IOThreadPoolExecutor. From folly docs[1]:
+
+       Implementation of a hashed hierarchical wheel timer. Any
+       timeout time can be used, with O(1) insertion, deletion, and
+       callback time. The wheel itself takes up some amount of space,
+       and wheel timers have to have a constant tick, consuming a
+       constant amount of CPU.
+
+Benchmarks run with:
+
+- A range of Timeouts in flight (1000-30000) - modelling one Timeout
+  per VBucket from one to 30 buckets.
+
+- A range of threads assempting to (re-schedule) - modelling a typical
+  system with a number of front-end threads.
+
+Results:
+
+a) MacBookPro 2018, 12 logical cores, macOS 10.15.2:
+
+    Run on (12 X 2900 MHz CPU s)
+    2020-06-12 13:57:44
+    ---------------------------------------------------------------------------------------------------------------
+    Benchmark                                                                        Time           CPU Iterations
+    ---------------------------------------------------------------------------------------------------------------
+    ExecutorBench/TimeoutAddCancel/Timeouts:1000/real_time/threads:1              8815 ns       8800 ns      62846   110.779k items/s
+    ExecutorBench/TimeoutAddCancel/Timeouts:1000/real_time/threads:2              9464 ns      12097 ns      71062   103.188k items/s
+    ExecutorBench/TimeoutAddCancel/Timeouts:1000/real_time/threads:4              8910 ns      16030 ns      61904   109.604k items/s
+    ExecutorBench/TimeoutAddCancel/Timeouts:1000/real_time/threads:8             10251 ns      17720 ns      82448   95.2641k items/s
+    ExecutorBench/TimeoutAddCancel/Timeouts:1000/real_time/threads:16             8373 ns      17341 ns     103696   116.638k items/s
+    ExecutorBench/TimeoutAddCancel/Timeouts:4096/real_time/threads:1             36420 ns      36001 ns      21910   26.8136k items/s
+    ExecutorBench/TimeoutAddCancel/Timeouts:4096/real_time/threads:2             39155 ns      43061 ns      20000   24.9412k items/s
+    ExecutorBench/TimeoutAddCancel/Timeouts:4096/real_time/threads:4             43337 ns      53289 ns      55612   22.5339k items/s
+    ExecutorBench/TimeoutAddCancel/Timeouts:4096/real_time/threads:8             35254 ns      49900 ns      35136   27.7005k items/s
+    ExecutorBench/TimeoutAddCancel/Timeouts:4096/real_time/threads:16            26976 ns      47238 ns      34880   36.2005k items/s
+    ExecutorBench/TimeoutAddCancel/Timeouts:30000/real_time/threads:1            96153 ns      94121 ns      37438   10.1564k items/s
+    ExecutorBench/TimeoutAddCancel/Timeouts:30000/real_time/threads:2            25617 ns      31880 ns      20000   38.1211k items/s
+    ExecutorBench/TimeoutAddCancel/Timeouts:30000/real_time/threads:4            99197 ns     124704 ns      40000    9.8447k items/s
+    ExecutorBench/TimeoutAddCancel/Timeouts:30000/real_time/threads:8           118222 ns     175249 ns      56120   8.26042k items/s
+    ExecutorBench/TimeoutAddCancel/Timeouts:30000/real_time/threads:16           38519 ns      50521 ns      16000   25.3527k items/s
+    FollyExecutorBench/TimeoutAddCancel/Timeouts:1000/real_time/threads:1          250 ns        177 ns    2823382   3.81227M items/s
+    FollyExecutorBench/TimeoutAddCancel/Timeouts:1000/real_time/threads:2          310 ns        365 ns    2314698   3.07755M items/s
+    FollyExecutorBench/TimeoutAddCancel/Timeouts:1000/real_time/threads:4          373 ns        819 ns    1862104   2.55684M items/s
+    FollyExecutorBench/TimeoutAddCancel/Timeouts:1000/real_time/threads:8          463 ns       2119 ns    1495576   2.06017M items/s
+    FollyExecutorBench/TimeoutAddCancel/Timeouts:1000/real_time/threads:16         435 ns       2385 ns    1687616   2.19474M items/s
+    FollyExecutorBench/TimeoutAddCancel/Timeouts:4096/real_time/threads:1          277 ns        193 ns    2640523    3.4484M items/s
+    FollyExecutorBench/TimeoutAddCancel/Timeouts:4096/real_time/threads:2          307 ns        364 ns    2292076   3.10457M items/s
+    FollyExecutorBench/TimeoutAddCancel/Timeouts:4096/real_time/threads:4          401 ns        859 ns    1957972   2.37787M items/s
+    FollyExecutorBench/TimeoutAddCancel/Timeouts:4096/real_time/threads:8          468 ns       2104 ns    1587096   2.03602M items/s
+    FollyExecutorBench/TimeoutAddCancel/Timeouts:4096/real_time/threads:16         472 ns       2357 ns    1661184   2.02176M items/s
+    FollyExecutorBench/TimeoutAddCancel/Timeouts:30000/real_time/threads:1         250 ns        169 ns    2752818   3.81464M items/s
+    FollyExecutorBench/TimeoutAddCancel/Timeouts:30000/real_time/threads:2         290 ns        340 ns    2459988   3.29179M items/s
+    FollyExecutorBench/TimeoutAddCancel/Timeouts:30000/real_time/threads:4         387 ns        822 ns    1986288   2.46199M items/s
+    FollyExecutorBench/TimeoutAddCancel/Timeouts:30000/real_time/threads:8         501 ns       2072 ns    1467272   1.90533M items/s
+    FollyExecutorBench/TimeoutAddCancel/Timeouts:30000/real_time/threads:16        489 ns       2450 ns    1386096   1.95013M items/s
+
+    "items/s": count of Timeout adding then re-adding.
+
+Observations:
+
+* ep-engine ExecutorBench/TimeoutAddCancel can at most schedule ~100k
+  timeouts per second when there is a single Bucket (1000
+  timeouts). The throughput decreases significantly as the number of
+  timeouts increase - at 30,000 timeouts it is as low as 9k schedules
+  per second.
+  The number of threads scheduling timeouts doesn't signifcantly
+  affect throughput.
+
+* FollyExecutorBench/TimeoutAddCancel can schedule over 3.8M timeouts
+  per second when there is a single bucket. That is maintained even up
+  to 30,000 timeouts. The number of threads scheduling timeouts does
+  reduce the throughput - down to ~2M timeouts per second with 8
+  threads. However if necessary that could be alleviated by using more
+  than one IOThread (and associated HHWheelTimer).
+
+To summarise, Folly is ~30x faster in the single bucket case, and
+~300x faster in the 30 bucket case.
+
+Change-Id: I82c7b6e4e1673d366c81bf19222c32ee0cbe426b
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2020-07-02 10:06:31.000000000
+Message: 
+Patch Set 3: Patch Set 2 was rebased
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-07-02 10:38:47.000000000
+Message: 
+Patch Set 3: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/1659/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/24976/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/28965/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/3152/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/4585/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/12410/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/4516/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/3623/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/4683/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2020-07-08 05:07:26.000000000
+Message: 
+Patch Set 3: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------

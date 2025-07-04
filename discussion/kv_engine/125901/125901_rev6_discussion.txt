@@ -1,0 +1,119 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-38673: Add new Privilege failure for no privileges
+
+Add a new failure code to privilege checks which lets the caller
+distinguish between a failure because the privilege wasn't found and a
+failure where not only is the privilege not found but the user has no
+privileges for the scope/collection.
+
+The differing failure is important for returning an appropriate error
+code based on the following:
+
+1) When a user has no privileges for the scope or collection, it
+   makes the scope or collection invisible. Status::FailNoPrivileges
+2) When a user has some privileges for a scope or collection, but not
+   the requested privilege the scope/collection is visible and the
+   current operation can be failed with a no access error. Status::Fail
+
+Internally to the privilege database the following logic is used to
+return Status::Fail or Status::FailNoPrivileges.
+
+The Bucket counts how many privileges in its set are collection
+privileges (the bucket can have both collection privileges e.g. Read
+and non collection e.g. Audit)
+  - A collection privilege at the Bucket means every collection in the
+    system gets that privilege, e.g. Read := you can Read everything.
+  - When Bucket::check cannot find a requested collection privilege and
+    no scope/collection search is possible it decides the error using
+    the count of collection privileges - the rule being, >0 privileges
+    makes collections visible.
+
+The Scope::check now accepts a new parameter, which is the number of
+collection privileges found in the parent (the Bucket)
+  - The Scope can itself have an empty privilege set in the case where
+    it is just a conduit from Bucket to Collection.
+  - If the Scope::check fails it uses the count of its own privileges
+    and the count of the parent privileges to determine Fail or
+    FailNoPrivileges.
+
+The Collection::check is unchanged - the assumption is that the
+Collection privilege set should not be empty (now checked in
+construction)
+  - With the set always storing at least one collection privilege, if
+    you reach Collection::check the only error can be Fail.
+
+Change-Id: I2c8c1cc7bf27a132bb522839f70239d9cff3f029
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jim Walker
+Date: 2020-04-20 13:54:22.000000000
+Message: 
+Uploaded patch set 6: Patch Set 5 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-04-20 15:00:00.000000000
+Message: 
+Patch Set 6: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/27628/ : FAILURE
+
+Failure of a CTest test 379/384 Test #381: cluster_test .................................................................................................................. ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/27628/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/3295/ : FAILURE
+
+Failure of a CTest test [2020-04-20T14:35:04.297Z] 202/379 Test #136: ep-engine_ep_unit_tests.AllBucketTypes/DurabilityActiveStreamTest ........................................... ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/3295/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/1798/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/317/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/23627/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/2279/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/3216/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/3234/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/11084/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2020-04-21 08:35:22.000000000
+Message: 
+Patch Set 6: Code-Review+1
+
+(4 comments)
+
+It is not 100% clear to me all of the various return codes sent to the external client, so I would have appreciated a section in one of our docs (perhaps rbac.md?) on all of this works.
+
+My assumptions would be that it would work similar to how buckets work. If I try to select a bucket which don't exists EACCESS is returned, not "no such bucket". I would have assumed that it would be the same for scopes and collections, but I see we've got unknown scope/collection status codes. 
+
+I recall vaguely that the motivation for the above errors is that clients would need to know if the collection is created on the node yet. To work around that one could alternatively always inject the manifest uid in the EACCESS response (as access to the bucket was checked as part of the select bucket we shouldn't be leaking information the client wouldn't already know).
+Line:115, include/memcached/rbac/privilege_database.h -> Do we really need the "count" and not just a boolean value?
+
+Line:173, include/memcached/rbac/privilege_database.h -> Guess it can't be negative so it should be unsigned...
+
+Line:133, rbac/privilege_database.cc -> alternatively: if (privilegeMask.none())
+
+Line:239, rbac/privilege_database.cc -> looks like we don't really need the _number_ but just if there is any so we could replace with a bool?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2020-04-21 08:55:05.000000000
+Message: 
+Patch Set 6:
+
+(2 comments)
+
+will update rbac.md as appropriate
+Line:115, include/memcached/rbac/privilege_database.h -> no need for a count, just yes/no works 👍
+
+Line:133, rbac/privilege_database.cc -> neater, will change
+
+----------------------------------------------------------------------------------------------------------------------

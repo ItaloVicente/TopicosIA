@@ -1,0 +1,339 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-36572: wip
+
+Currently CouchKVStore opens and closed the underlying couchstore file
+on every call to saveDocs(). Profiling has highlighted that the
+underlying OS close() call (and to a lesser extent the open() call)
+are costly - on Linux with XFS there appears to be non-trivial work to
+release various allocated resources - close() takes around 7% of the
+total flusher runtime.
+
+To improve this, keep the couchstore Db instance for each vBucket open
+across saveDocs() calls. This increases KV-Engine's FD usage
+(potentially 1024 more FDs open at once than before), but should
+reduce the costs associated with open/close.
+
+Results
+-------
+
+* Concurrent SyncWrite workload (pillowfight, 2000 threads)
+
+This change reduces the average persistTo latency from 748ms to
+614ms - 1.2x faster persistence.
+
+Running on mancouch, Samsung PM863 SSD, XFS, with a 2 node
+cluster_run, Assuming already populated with 3.2M items:
+
+    cbc-pillowfight -U couchbase://127.0.0.1:12000/default \
+        -u Administrator -P asdasd --batch-size=1 --num-items=3200000 \
+        --min-size=512 --max-size=512 --random-body --set-pct=100 \
+        --no-population --durability=persist_to_majority --num-threads=2000 \
+        --sequential --num-cycles=100
+
+Baseline (before this patch):
+
+ sync_write_commit_persist_to_majority (100000 total)
+       0us - 3454us : (  0.0010%)     1
+    3454us -  327ms : ( 10.0770%) 10076 ███████████████████▏
+     327ms -  557ms : ( 21.7620%) 11685 ██████████████████████▎
+     557ms -  688ms : ( 32.1070%) 10345 ███████████████████▊
+     688ms -  753ms : ( 42.5240%) 10417 ███████████████████▉
+     753ms -  786ms : ( 50.0440%)  7520 ██████████████▎
+     786ms -  819ms : ( 56.3020%)  6258 ███████████▉
+     819ms -  851ms : ( 62.6690%)  6367 ████████████▏
+     851ms -  884ms : ( 68.3760%)  5707 ██████████▉
+     884ms -  917ms : ( 73.9490%)  5573 ██████████▋
+     917ms -  950ms : ( 79.5080%)  5559 ██████████▌
+     950ms -  983ms : ( 84.4990%)  4991 █████████▌
+     983ms - 1015ms : ( 88.9030%)  4404 ████████▍
+    1015ms - 1048ms : ( 91.4420%)  2539 ████▊
+    1048ms - 1114ms : ( 94.6060%)  3164 ██████
+    1114ms - 1179ms : ( 96.9820%)  2376 ████▌
+    1179ms - 1245ms : ( 98.7690%)  1787 ███▍
+    1245ms - 1310ms : ( 99.2830%)   514 ▉
+    1310ms - 1376ms : ( 99.4930%)   210 ▍
+    1376ms - 1441ms : ( 99.5610%)    68 ▏
+    1441ms - 1507ms : ( 99.6960%)   135 ▎
+    1507ms - 1572ms : ( 99.8230%)   127 ▏
+    1572ms - 1638ms : ( 99.9570%)   134 ▎
+    1638ms - 1703ms : (100.0000%)    43
+    Avg             : (  748ms)
+
+After this patch:
+
+ sync_write_commit_persist_to_majority (100000 total)
+       0us - 3198us : (  0.0010%)     1
+    3198us -  262ms : ( 11.0100%) 11009 █████████████████████
+     262ms -  360ms : ( 21.5290%) 10519 ████████████████████
+     360ms -  458ms : ( 31.0540%)  9525 ██████████████████▏
+     458ms -  557ms : ( 40.0470%)  8993 █████████████████▏
+     557ms -  655ms : ( 50.8740%) 10827 ████████████████████▋
+     655ms -  688ms : ( 55.3550%)  4481 ████████▌
+     688ms -  720ms : ( 60.4080%)  5053 █████████▋
+     720ms -  753ms : ( 65.2010%)  4793 █████████▏
+     753ms -  786ms : ( 70.4710%)  5270 ██████████
+     786ms -  819ms : ( 76.1430%)  5672 ██████████▊
+     819ms -  851ms : ( 81.5420%)  5399 ██████████▎
+     851ms -  884ms : ( 84.7680%)  3226 ██████▏
+     884ms -  917ms : ( 87.5950%)  2827 █████▍
+     917ms -  950ms : ( 90.8640%)  3269 ██████▏
+     950ms -  983ms : ( 93.3300%)  2466 ████▋
+     983ms - 1015ms : ( 95.3830%)  2053 ███▉
+    1015ms - 1048ms : ( 96.7730%)  1390 ██▋
+    1048ms - 1114ms : ( 98.6620%)  1889 ███▌
+    1114ms - 1179ms : ( 99.6900%)  1028 █▉
+    1179ms - 1245ms : ( 99.9680%)   278 ▌
+    1245ms - 1310ms : (100.0000%)    32
+    Avg             : (  614ms)
+
+* For a single-threaded SyncWrite workload (pillowfight, 1 thread)
+
+This changes gives a slight (1.05x) reduction in persistTo latency. I
+suspect this is due to the fact that much smaller commit batch sizes
+are seen, and hence each couchstore file increases by a much smaller
+size than the concurrent workload above.
+
+    cbc-pillowfight -U couchbase://127.0.0.1:12000/default \
+        -u Administrator -P asdasd --batch-size=1 --num-items=3200000 \
+        --min-size=512 --max-size=512 --random-body --set-pct=100 \
+        --no-population --durability=persist_to_majority --num-cycles=10000
+
+Baseline (before this patch):
+
+ sync_write_commit_persist_to_majority (5204 total)
+       0us - 2302us : (  0.0576%)   3
+    2302us - 3710us : ( 14.4696%) 750 ███████████████████████████▊
+    3710us - 3838us : ( 20.5227%) 315 ███████████▋
+    3838us - 4094us : ( 34.8002%) 743 ███████████████████████████▌
+    4094us - 4350us : ( 48.9816%) 738 ███████████████████████████▎
+    4350us - 4606us : ( 61.2798%) 640 ███████████████████████▋
+    4606us - 4862us : ( 71.8101%) 548 ████████████████████▎
+    4862us - 5118us : ( 79.9193%) 422 ███████████████▋
+    5118us - 5374us : ( 86.0300%) 318 ███████████▊
+    5374us - 5630us : ( 90.5073%) 233 ████████▋
+    5630us - 5886us : ( 93.8317%) 173 ██████▍
+    5886us - 6142us : ( 95.5611%)  90 ███▎
+    6142us - 6398us : ( 96.6756%)  58 ██▏
+    6398us - 6654us : ( 97.4058%)  38 █▍
+    6654us - 6910us : ( 97.8286%)  22 ▊
+    6910us - 7422us : ( 98.2129%)  20 ▋
+    7422us - 7934us : ( 98.5012%)  15 ▌
+    7934us - 8702us : ( 98.6357%)   7 ▎
+    8702us -   11ms : ( 98.7510%)   6 ▏
+      11ms -   31ms : ( 99.1545%)  21 ▊
+      31ms -   32ms : ( 99.5965%)  23 ▊
+      32ms -   34ms : ( 99.9616%)  19 ▋
+      34ms -   36ms : ( 99.9808%)   1
+      36ms -   40ms : (100.0000%)   1
+    Avg             : ( 4822us)
+
+After this patch:
+
+ sync_write_commit_persist_to_majority (5204 total)
+       0us - 1982us : (  0.0192%)   1
+    1982us - 3454us : ( 12.8939%) 670 ████████████████████████▊
+    3454us - 3710us : ( 24.9424%) 627 ███████████████████████▎
+    3710us - 3838us : ( 32.4942%) 393 ██████████████▌
+    3838us - 4094us : ( 45.6764%) 686 █████████████████████████▍
+    4094us - 4350us : ( 59.4927%) 719 ██████████████████████████▋
+    4350us - 4606us : ( 71.2721%) 613 ██████████████████████▋
+    4606us - 4862us : ( 79.5926%) 433 ████████████████
+    4862us - 5118us : ( 86.0876%) 338 ████████████▌
+    5118us - 5374us : ( 90.4112%) 225 ████████▎
+    5374us - 5630us : ( 93.2552%) 148 █████▍
+    5630us - 5886us : ( 95.2921%) 106 ███▉
+    5886us - 6142us : ( 96.4643%)  61 ██▎
+    6142us - 6398us : ( 97.2713%)  42 █▌
+    6398us - 6654us : ( 97.7902%)  27 █
+    6654us - 6910us : ( 98.1360%)  18 ▋
+    6910us - 7422us : ( 98.5972%)  24 ▉
+    7422us - 8702us : ( 98.7510%)   8 ▎
+    8702us -   30ms : ( 98.9816%)  12 ▍
+      30ms -   31ms : ( 99.2314%)  13 ▍
+      31ms -   32ms : ( 99.6925%)  24 ▉
+      32ms -   34ms : ( 99.9616%)  14 ▌
+      34ms -   36ms : ( 99.9808%)   1
+      36ms -   43ms : (100.0000%)   1
+    Avg             : ( 4590us)
+
+TODO: Interlock compaction more strictly. We _should_ be safe at the
+moment as external locking is used to obtain mutual exclusion between
+flushing and compaction, however that seems error-prone given we
+should be avble to go that inside CouchKVStore.
+
+Change-Id: Icd7cd07f0dc1f2a01d40c8ed00462a4b8333c86d
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Ben Huddleston
+Date: 2020-08-26 08:33:00.000000000
+Message: 
+Uploaded patch set 5.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-08-26 09:31:50.000000000
+Message: 
+Patch Set 5: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/29769/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [0149/0158]: test_MB-20697...Uncaught std::exception. what():CouchKVStore::initialize: no vbstate for ./ep_testsuite.value_eviction.comp_passive.db/0.couch.1
+(78 ms) DIED
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/29769/ )
+
+Failure of GoogleTest "ShutdownTest.ShutdownAllowed":
+
+<pre>
+[ RUN      ] ShutdownTest.ShutdownAllowed
+..\kv_engine\tests\testapp\testapp.cc(899): error: Expected equality of these values:
+  0
+  exit_code
+    Which is: 3221226505
+[  FAILED  ] ShutdownTest.ShutdownAllowed (2041 ms)
+ShutdownTest.ShutdownAllowed
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/29769/ )
+
+Timeout of a CTest test 397/397 Test #365: memcached_testapp.ep.TransportProtocols/InterfacesTest ........................................................................} ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/29769/ )
+
+Failure of a CTest test 238/397 Test #231: ep_testsuite.value_eviction.comp_passive ...................................................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/29769/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/13105/ : FAILURE
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/5388/ : FAILURE
+
+Failure of a CTest test [2020-08-26T09:03:29.611Z]  24/392 Test #225: ep_testsuite.full_eviction.comp_passive ..................................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/5388/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/3979/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/2505/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/25800/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/4309/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/5286/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/5198/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-08-26 10:31:03.000000000
+Message: 
+Patch Set 5:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/29769/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [0149/0158]: test_MB-20697...Uncaught std::exception. what():CouchKVStore::initialize: no vbstate for ./ep_testsuite.value_eviction.comp_passive.db/0.couch.1
+(78 ms) DIED
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/29769/ )
+
+Failure of GoogleTest "ShutdownTest.ShutdownAllowed":
+
+<pre>
+[ RUN      ] ShutdownTest.ShutdownAllowed
+..\kv_engine\tests\testapp\testapp.cc(899): error: Expected equality of these values:
+  0
+  exit_code
+    Which is: 3221226505
+[  FAILED  ] ShutdownTest.ShutdownAllowed (2041 ms)
+ShutdownTest.ShutdownAllowed
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/29769/ )
+
+Timeout of a CTest test 397/397 Test #365: memcached_testapp.ep.TransportProtocols/InterfacesTest ........................................................................} ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/29769/ )
+
+Failure of a CTest test 238/397 Test #231: ep_testsuite.value_eviction.comp_passive ...................................................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/29769/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/13105/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [0043/0099]: test dcp stream takeover...../kv_engine/engines/ep/tests/ep_testsuite_dcp.cc:639 Test failed: `" (Expected `2", got `3" - Unexpected number of snapshot markers)
+[2020-08-26T09:24:25.692Z] (5573 ms) FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/13105/ )
+
+AddressSanitizer issue: 2642 byte(s) leaked in 20 allocation(s). ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/13105/ )
+
+Failure of a CTest test [2020-08-26T09:24:25.691Z]   4/397 Test #245: ep_testsuite_dcp.full_eviction.comp_active ..................................................................Child aborted ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/13105/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/3979/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/2505/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/25800/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/4309/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/5286/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/5198/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/5390/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-08-26 11:32:25.000000000
+Message: 
+Patch Set 5:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/29770/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [0149/0158]: test_MB-20697...Uncaught std::exception. what():CouchKVStore::initialize: no vbstate for ./ep_testsuite.value_eviction.comp_passive.db/0.couch.1
+(41 ms) DIED
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/29770/ )
+
+Failure of GoogleTest "ShutdownTest.ShutdownAllowed":
+
+<pre>
+[ RUN      ] ShutdownTest.ShutdownAllowed
+..\kv_engine\tests\testapp\testapp.cc(899): error: Expected equality of these values:
+  0
+  exit_code
+    Which is: 3221226505
+[  FAILED  ] ShutdownTest.ShutdownAllowed (732 ms)
+ShutdownTest.ShutdownAllowed
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/29770/ )
+
+Timeout of a CTest test 397/397 Test #365: memcached_testapp.ep.TransportProtocols/InterfacesTest ........................................................................} ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/29770/ )
+
+Failure of a CTest test 238/397 Test #231: ep_testsuite.value_eviction.comp_passive ...................................................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/29770/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/3979/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/2505/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/25800/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/4309/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/5286/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/5198/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/13106/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/5390/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

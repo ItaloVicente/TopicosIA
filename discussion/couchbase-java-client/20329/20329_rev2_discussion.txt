@@ -1,0 +1,100 @@
+======================================================================================================================
+DESCRIPTION:
+
+Enhanced observe and added observe support for other mutation ops
+
+Throw ObservedException, ObservedTimeoutException
+and ObservedModifiedException
+Added support for add, replace, cas
+
+Change-Id: Ifa9accbe8056f28ecfefaac19a9d5bdf34fb9951
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Raghavan N. Srinivas
+Date: 2012-08-30 04:30:48.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: Gerrit User
+Date: 2012-08-30 04:30:51.000000000
+Message: 
+Patch Set 2:
+
+New patchset patch-id matches previous patchset, but commit message has changed.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matt Ingenthron
+Date: 2012-08-30 05:19:16.000000000
+Message: 
+Patch Set 2: Do not submit
+
+This change does two things, it needs to be split.  
+
+I think I have more comments, will come back in a bit.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matt Ingenthron
+Date: 2012-08-30 07:00:48.000000000
+Message: 
+Patch Set 2: (5 inline comments)
+
+Definitely -2 on this.
+
+In the email thread on the API, we decided to try to conform to the normal API, but then this goes a different direction and starts throwing exceptions.
+
+This needs to be undone and we need to stick to OperationFuture<Boolean> with a properly set operation status.
+Line:821, src/main/java/com/couchbase/client/CouchbaseClient.java -> I think this is the wrong approach.
+
+The current delete() methods don't throw these exceptions directly, they only throw them when blocking on the .get() method on the OperationFuture.
+
+What I had meant in our discussion earlier was something more like:
+
+try {
+  OperationFuture<Boolean> delResult = deleteOp.get();
+} catch (InterruptedException e) {
+  // do whatever we need to do on the OpFuture we're returning
+}
+
+try {
+  observePoll(key, 0L, req, rep)
+} catch (TimeoutException e) {
+  // do set op status with something that is clear about
+  // the fact that the observe timed out
+} catch (SomethingElse e) {
+  // do something about the fact that it's MODIFIIED
+  // set the OperationFuture<Boolean> to false and
+  // make it clear in the OperationStatus that it's modified
+}
+
+
+In the email discussion API, both you and others argued that we should be consistent with other MemcachedClient API.  The problem I have with the change described here is that it introduces checked that normally are on the .get() of the response.
+
+Since the OperationStatus interface has just two things, success or failure and String, we just need to make sure we can discern observe timeout, modified, success.  If there was a timeout on the operation itself, it's fair to get that from operation future.
+
+If you want to handle this with exceptions, I think it can be done with an ObserveOperationFuture that throws ObserveTimeoutException or ObserveModifiedException.  Personally, I think a false OperationFuture would be better, with an OperationStatus that makes sense.
+
+This is where we really need the ErrorCode, but then we'd be extending it for observe.
+
+Line:857, src/main/java/com/couchbase/client/CouchbaseClient.java -> All of the comments about the delete() apply here too.
+
+Line:901, src/main/java/com/couchbase/client/CouchbaseClient.java -> This makes the same mistake we're trying to fix above.  Plus, it's just wrong.
+
+addOp is an OperationFuture<Boolean> from the operation itself.  
+
+Then we observePoll, but we don't do **anything** with the response.
+
+Reading this...
+L898: block until the operation is done
+L899: set the results on the OperationFuture to false with a status message that could say nearly anything??
+L900: do a poll, just rely on it to throw some exceptions
+L901: call the setter on the OperationFuture again, even though we just did.  I guess we're relying on getting here if the poll didn't throw exceptions?
+
+Line:1224, src/main/java/com/couchbase/client/CouchbaseClient.java -> Hm, I guess I'd not caught this before, or I would have said something.
+
+RuntimeException is clearly wrong, since the client should be able to error handle.  All of the main uses of this are returning OperationFuture<Boolean>, and thus should be false.
+
+There *might* be an argument for this new exception here, but I think it'd be better to have a false come back from the OperationFuture<Boolean> with the appropriate OperationStatus.
+
+Line:1251, src/main/java/com/couchbase/client/CouchbaseClient.java -> the output for this would have "Maximumretries".  You're missing a space.
+
+----------------------------------------------------------------------------------------------------------------------

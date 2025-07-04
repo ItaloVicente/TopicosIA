@@ -1,0 +1,135 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-36926: Remove PersistenceCallback from IORequest
+
+We can shrink the IORequest object (allocated for every item that we
+flush) by removing the MutationRequestCallback (PersistenceCallback)
+object from it. We can replace it with a queued_item (which existed in
+the PersistenceCallback object previously) and make the
+PersistenceCallback a per-transaction object instead of a per-item
+object.
+
+Before:
+
+Run on (24 X 2400 MHz CPU s)
+2019-12-17 08:58:06
+***WARNING*** CPU scaling is enabled, the benchmark real time measurements may be noisy and will incur extra overhead.
+--------------------------------------------------------------------------------------------------------
+Benchmark                                                 Time           CPU Iterations
+ UserCounters...--------------------------------------------------------------------------------------------------------
+MemTrackingVBucketBench/FlushVBucket/0/1/0         11487166 ns     452554 ns       1000 PeakBytesPerItem=169.625k PeakFlushBytes=169.625k   2.15789k items/s store:couchdb mode:insert
+MemTrackingVBucketBench/FlushVBucket/0/1/1         11977731 ns     543200 ns       1390 PeakBytesPerItem=174.188k PeakFlushBytes=174.188k   1.79779k items/s store:couchdb mode:replace
+MemTrackingVBucketBench/FlushVBucket/0/100/0       10722164 ns     738063 ns        948 PeakBytesPerItem=2.37402k PeakFlushBytes=237.406k   132.314k items/s store:couchdb mode:insert
+MemTrackingVBucketBench/FlushVBucket/0/100/1       10686563 ns     844754 ns        845 PeakBytesPerItem=2.51074k PeakFlushBytes=251.109k   115.603k items/s store:couchdb mode:replace
+MemTrackingVBucketBench/FlushVBucket/0/10000/0     76810324 ns   46909813 ns         14 PeakBytesPerItem=786 PeakFlushBytes=7.49782M   208.179k items/s store:couchdb mode:insert
+MemTrackingVBucketBench/FlushVBucket/0/10000/1     68367186 ns   57698943 ns         12 PeakBytesPerItem=809 PeakFlushBytes=7.72064M   169.251k items/s store:couchdb mode:replace
+MemTrackingVBucketBench/FlushVBucket/0/1000000/0 7690150251 ns 7322659695 ns          1 PeakBytesPerItem=807 PeakFlushBytes=769.735M   133.362k items/s store:couchdb mode:insert
+MemTrackingVBucketBench/FlushVBucket/0/1000000/1 9352612196 ns 8583865915 ns          1 PeakBytesPerItem=812 PeakFlushBytes=774.458M   113.767k items/s store:couchdb mode:replace
+
+After:
+
+Run on (24 X 2400 MHz CPU s)
+2019-12-17 09:09:15
+***WARNING*** CPU scaling is enabled, the benchmark real time measurements may be noisy and will incur extra overhead.
+--------------------------------------------------------------------------------------------------------
+Benchmark                                                 Time           CPU Iterations
+ UserCounters...--------------------------------------------------------------------------------------------------------
+MemTrackingVBucketBench/FlushVBucket/0/1/0         10435760 ns     443523 ns       1000 PeakBytesPerItem=169.625k PeakFlushBytes=169.625k   2.20183k items/s store:couchdb mode:insert
+MemTrackingVBucketBench/FlushVBucket/0/1/1         10331980 ns     589517 ns       1303 PeakBytesPerItem=174.156k PeakFlushBytes=174.156k   1.65655k items/s store:couchdb mode:replace
+MemTrackingVBucketBench/FlushVBucket/0/100/0       10793665 ns     716488 ns        973 PeakBytesPerItem=2.32715k PeakFlushBytes=232.734k   136.299k items/s store:couchdb mode:insert
+MemTrackingVBucketBench/FlushVBucket/0/100/1       10245369 ns     814641 ns        853 PeakBytesPerItem=2.46387k PeakFlushBytes=246.438k   119.876k items/s store:couchdb mode:replace
+MemTrackingVBucketBench/FlushVBucket/0/10000/0     55458504 ns   44793957 ns         16 PeakBytesPerItem=738 PeakFlushBytes=7.0401M   218.012k items/s store:couchdb mode:insert
+MemTrackingVBucketBench/FlushVBucket/0/10000/1     67338033 ns   56463184 ns         12 PeakBytesPerItem=761 PeakFlushBytes=7.26289M   172.956k items/s store:couchdb mode:replace
+MemTrackingVBucketBench/FlushVBucket/0/1000000/0 7403671587 ns 7028926875 ns          1 PeakBytesPerItem=759 PeakFlushBytes=723.958M   138.935k items/s store:couchdb mode:insert
+MemTrackingVBucketBench/FlushVBucket/0/1000000/1 8731485008 ns 8390218442 ns          1 PeakBytesPerItem=764 PeakFlushBytes=728.682M   116.393k items/s store:couchdb mode:replace
+
+Change-Id: I6307b61ec6a12b27e1bb7428ee6edb5a31d057bb
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Ben Huddleston
+Date: 2019-12-17 12:27:22.000000000
+Message: 
+Uploaded patch set 9: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-12-17 12:53:02.000000000
+Message: 
+Patch Set 9: Code-Review-1
+
+(10 comments)
+Line:54, engines/ep/src/couch-kvstore/couch-kvstore.h -> Style: I'd not make this const; given we are going to retain a ref-count to it (but just one ref-count).
+
+See the rules for shared_ptr on Core C++ Guidelines (http://isocpp.github.io/CppCoreGuidelines/CppCoreGuidelines#Rr-sharedptrparam-owner) - you want to pass by non-const value; then move from the result to not increase the ref-count past the initial increase needed to call the ctor.
+
+Line:186, engines/ep/src/couch-kvstore/couch-kvstore.h -> Same comment as above here.
+
+Line:219, engines/ep/src/couch-kvstore/couch-kvstore.h -> Ditto
+
+Line:689, engines/ep/src/kvstore.cc -> I believe you can avoid a ref-count incr/decr here by calling std::move on the input item.
+
+Line:511, engines/ep/src/kvstore.h -> This a comment for a later patch?
+
+Line:1055, engines/ep/src/kvstore.h -> Should also document this method.
+
+Line:1058, engines/ep/src/kvstore.h -> Style: If you're going to make this public (which is fine), I suggest making vbid const given it wouldn't make sense to change it after construction.
+
+Line:33, engines/ep/src/kvstore_priv.h -> ?
+
+Line:40, engines/ep/src/persistence_callback.h -> Unless the caller actually needs to know about the ownership type of the Item, then just pass by const Item& - that simplifies the code and avoids having to incr/decr refcounts on each call.
+
+Line:52, engines/ep/src/persistence_callback.h -> As previous, drop the const; if the callee doesn't need ownership info then pass via the underlying type (const Item&).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2019-12-17 13:58:30.000000000
+MISMATCHED INLINE COMMENT
+Line:54, engines/ep/src/couch-kvstore/couch-kvstore.h -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2019-12-17 13:58:30.000000000
+MISMATCHED INLINE COMMENT
+Line:186, engines/ep/src/couch-kvstore/couch-kvstore.h -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2019-12-17 13:58:30.000000000
+MISMATCHED INLINE COMMENT
+Line:219, engines/ep/src/couch-kvstore/couch-kvstore.h -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2019-12-17 13:58:30.000000000
+MISMATCHED INLINE COMMENT
+Line:689, engines/ep/src/kvstore.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2019-12-17 13:58:30.000000000
+MISMATCHED INLINE COMMENT
+Line:511, engines/ep/src/kvstore.h -> It was, thought there were usages but there is not so removed in this patch
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2019-12-17 13:58:30.000000000
+MISMATCHED INLINE COMMENT
+Line:1055, engines/ep/src/kvstore.h -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2019-12-17 13:58:30.000000000
+MISMATCHED INLINE COMMENT
+Line:1058, engines/ep/src/kvstore.h -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2019-12-17 13:58:30.000000000
+MISMATCHED INLINE COMMENT
+Line:33, engines/ep/src/kvstore_priv.h -> Done - removed
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2019-12-17 13:58:30.000000000
+MISMATCHED INLINE COMMENT
+Line:40, engines/ep/src/persistence_callback.h -> We need a queued_item in redirty to enqueue into the reject queue so just dropped const
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2019-12-17 13:58:30.000000000
+MISMATCHED INLINE COMMENT
+Line:52, engines/ep/src/persistence_callback.h -> Done
+----------------------------------------------------------------------------------------------------------------------

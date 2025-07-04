@@ -1,0 +1,163 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-35415: Change Connection::datatype to be atomic
+
+The TSAN output (below) is saying that we have unlocked reads of
+the Connection::datatype 'bitset' from various threads, when the
+bitset was written with the frontend thread lock held.
+
+It is now common for non front-end threads to query a connection's
+permitted data-types, e.g. TSAN shows the backfill task deciding
+what to do about snappy.
+
+Changing the datatype to be std::atomic allows for correct write
+read between threads.
+
+ThreadSanitizer: data race/usr/local/include/c++/7.3.0/bitset:433std::_Base_bitset<1ul>::_M_do_or(std::_Base_bitset<1ul> const&)
+
+  Write of size 8 at 0x7b5c00040f60 by thread T6 (mutexes: write M35842):
+    #0 std::_Base_bitset<1ul>::_M_do_or(std::_Base_bitset<1ul> const&) /usr/local/include/c++/7.3.0/bitset:433 (memcached+0x0000004f1ec2)
+    #1 std::bitset<8ul>::operator|=(std::bitset<8ul> const&) /usr/local/include/c++/7.3.0/bitset:973 (memcached+0x0000004f1ec2)
+    #2 Datatype::enable(cb::mcbp::Feature) /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/kv_engine/daemon/datatype.cc:57 (memcached+0x0000004f1ec2)
+    #3 Connection::enableDatatype(cb::mcbp::Feature) /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/kv_engine/daemon/connection.h:653 (memcached+0x000000507ef6)
+    #4 process_bin_dcp_response /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/kv_engine/daemon/mcbp_executors.cc:573 (memcached+0x000000507ef6)
+    #5 std::_Function_handler::_M_invoke(std::_Any_data const&, Cookie&) /usr/local/include/c++/7.3.0/bits/std_function.h:316 (memcached+0x000000509c92)
+    #6 std::function::operator()(Cookie&) const /usr/local/include/c++/7.3.0/bits/std_function.h:706 (memcached+0x000000508929)
+    #7 execute_client_response_packet /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/kv_engine/daemon/mcbp_executors.cc:897 (memcached+0x000000508929)
+    #8 execute_response_packet(Cookie&, cb::mcbp::Response const&) /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/kv_engine/daemon/mcbp_executors.cc:946 (memcached+0x000000508929)
+    #9 Cookie::execute() /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/kv_engine/daemon/cookie.cc:120 (memcached+0x0000004eb86e)
+    #10 StateMachine::conn_execute() /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/kv_engine/daemon/statemachine.cc:410 (memcached+0x00000053d4fc)
+    #11 StateMachine::execute() /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/kv_engine/daemon/statemachine.cc:137 (memcached+0x00000053f837)
+    #12 Connection::runStateMachinery() /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/kv_engine/daemon/connection.cc:1340 (memcached+0x0000004d46d7)
+    #13 Connection::runEventLoop(short) /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/kv_engine/daemon/connection.cc:1414 (memcached+0x0000004d476e)
+    #14 run_event_loop(Connection*, short) /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/kv_engine/daemon/connections.cc:148 (memcached+0x0000004e9cbb)
+    #15 event_handler(int, short, void*) /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/kv_engine/daemon/memcached.cc:848 (memcached+0x00000043c50d)
+    #16 event_persist_closure /home/couchbase/jenkins/workspace/cbdeps-platform-build-old/deps/packages/build/libevent/libevent-prefix/src/libevent/event.c:1580 (libevent_core.so.2.1.8+0x000000017086)
+    #17 event_process_active_single_queue /home/couchbase/jenkins/workspace/cbdeps-platform-build-old/deps/packages/build/libevent/libevent-prefix/src/libevent/event.c:1639 (libevent_core.so.2.1.8+0x000000017086)
+    #18 CouchbaseThread::run() /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/platform/src/cb_pthreads.cc:58 (libplatform_so.so.0.1.0+0x000000009c5f)
+    #19 platform_thread_wrap /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/platform/src/cb_pthreads.cc:71 (libplatform_so.so.0.1.0+0x000000009c5f)
+    #20   (libtsan.so.0+0x000000024feb)
+
+  Previous read of size 8 at 0x7b5c00040f60 by thread T14 (mutexes: write M1073680921370941928):
+    #0 std::bitset<8ul> std::operator&<8ul>(std::bitset<8ul> const&, std::bitset<8ul> const&) /usr/local/include/c++/7.3.0/bitset:1427 (memcached+0x0000004f1c7e)
+    #1 Datatype::isEnabled(unsigned char) const /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/kv_engine/daemon/datatype.cc:101 (memcached+0x0000004f1c7e)
+    #2 Connection::isDatatypeEnabled(unsigned char) const /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/kv_engine/daemon/connection.h:679 (memcached+0x000000443b85)
+    #3 ServerCookieApi::is_datatype_supported(gsl::not_null, unsigned char) /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/kv_engine/daemon/memcached.cc:1543 (memcached+0x000000443b85)
+    #4 EventuallyPersistentEngine::isDatatypeSupported(void const*, unsigned char) /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/kv_engine/engines/ep/src/ep_engine.cc:1831 (ep.so+0x00000017861d)
+    #5 DcpProducer::isCompressionEnabled() /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/kv_engine/engines/ep/src/dcp/producer.h:175 (ep.so+0x0000000a8ab2)
+    #6 ActiveStream::isCompressionEnabled() /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/kv_engine/engines/ep/src/dcp/active_stream.cc:606 (ep.so+0x0000000a8ab2)
+    #7 DCPBackfillDisk::create() /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/kv_engine/engines/ep/src/dcp/backfill_disk.cc:208 (ep.so+0x0000000cb7e0)
+    #8 DCPBackfillDisk::run() /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/kv_engine/engines/ep/src/dcp/backfill_disk.cc:155 (ep.so+0x0000000ccb1f)
+    #9 BackfillManager::backfill() /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/kv_engine/engines/ep/src/dcp/backfill-manager.cc:313 (ep.so+0x0000000c9005)
+    #10 BackfillManagerTask::run() /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/kv_engine/engines/ep/src/dcp/backfill-manager.cc:74 (ep.so+0x0000000c9571)
+    #11 ExecutorThread::run() /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/kv_engine/engines/ep/src/executorthread.cc:153 (ep.so+0x0000001d5db8)
+    #12 launch_executor_thread /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/kv_engine/engines/ep/src/executorthread.cc:34 (ep.so+0x0000001d6e95)
+    #13 CouchbaseThread::run() /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/platform/src/cb_pthreads.cc:58 (libplatform_so.so.0.1.0+0x000000009c5f)
+    #14 platform_thread_wrap /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/platform/src/cb_pthreads.cc:71 (libplatform_so.so.0.1.0+0x000000009c5f)
+    #15   (libtsan.so.0+0x000000024feb)
+
+  Location is heap block of size 880 at 0x7b5c00040c00 allocated by thread T6:
+    #0 operator new(unsigned long)  (libtsan.so.0+0x00000006a4d6)
+    #1 allocate_connection /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/kv_engine/daemon/connections.cc:256 (memcached+0x0000004ea61a)
+    #2 conn_new(int, ListeningPort const&, event_base*, FrontEndThread&) /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/kv_engine/daemon/connections.cc:165 (memcached+0x0000004ea61a)
+    #3 dispatch_new_connections /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/kv_engine/daemon/thread.cc:251 (memcached+0x0000004a3cb5)
+    #4 thread_libevent_process /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/kv_engine/daemon/thread.cc:292 (memcached+0x0000004a3cb5)
+    #5 event_persist_closure /home/couchbase/jenkins/workspace/cbdeps-platform-build-old/deps/packages/build/libevent/libevent-prefix/src/libevent/event.c:1580 (libevent_core.so.2.1.8+0x000000017086)
+    #6 event_process_active_single_queue /home/couchbase/jenkins/workspace/cbdeps-platform-build-old/deps/packages/build/libevent/libevent-prefix/src/libevent/event.c:1639 (libevent_core.so.2.1.8+0x000000017086)
+    #7 CouchbaseThread::run() /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/platform/src/cb_pthreads.cc:58 (libplatform_so.so.0.1.0+0x000000009c5f)
+    #8 platform_thread_wrap /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/platform/src/cb_pthreads.cc:71 (libplatform_so.so.0.1.0+0x000000009c5f)
+    #9   (libtsan.so.0+0x000000024feb)
+
+  Mutex M35842 (0x7b780004f8d8) created at:
+    #0 pthread_mutex_lock  (libtsan.so.0+0x00000003876f)
+    #1 __gthread_mutex_lock /usr/local/include/c++/7.3.0/x86_64-pc-linux-gnu/bits/gthr-default.h:748 (memcached+0x0000004a4371)
+    #2 std::mutex::lock() /usr/local/include/c++/7.3.0/bits/std_mutex.h:103 (memcached+0x0000004a4371)
+    #3 phosphor::MutexEventGuard::MutexEventGuard(phosphor::tracepoint_info const*, phosphor::tracepoint_info const*, bool, std::mutex&, std::chrono::duration >) /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/phosphor/include/phosphor/scoped_event_guard.h:93 (memcached+0x0000004a4371)
+    #4 thread_libevent_process /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/kv_engine/daemon/thread.cc:300 (memcached+0x0000004a4371)
+    #5 event_persist_closure /home/couchbase/jenkins/workspace/cbdeps-platform-build-old/deps/packages/build/libevent/libevent-prefix/src/libevent/event.c:1580 (libevent_core.so.2.1.8+0x000000017086)
+    #6 event_process_active_single_queue /home/couchbase/jenkins/workspace/cbdeps-platform-build-old/deps/packages/build/libevent/libevent-prefix/src/libevent/event.c:1639 (libevent_core.so.2.1.8+0x000000017086)
+    #7 CouchbaseThread::run() /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/platform/src/cb_pthreads.cc:58 (libplatform_so.so.0.1.0+0x000000009c5f)
+    #8 platform_thread_wrap /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/platform/src/cb_pthreads.cc:71 (libplatform_so.so.0.1.0+0x000000009c5f)
+    #9   (libtsan.so.0+0x000000024feb)
+
+  Mutex M1073680921370941928 is already destroyed.
+
+  Thread T6 'mc:worker_0' (tid=6945, running) created by main thread at:
+    #0 pthread_create  (libtsan.so.0+0x0000000282a0)
+    #1 cb_create_named_thread(unsigned long*, void (*)(void*), void*, int, char const*) /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/platform/src/cb_pthreads.cc:109 (libplatform_so.so.0.1.0+0x00000000995b)
+    #2 create_worker /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/kv_engine/daemon/thread.cc:111 (memcached+0x0000004a510d)
+    #3 thread_init(unsigned long, event_base*, void (*)(int, short, void*)) /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/kv_engine/daemon/thread.cc:460 (memcached+0x0000004a510d)
+    #4 memcached_main /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/kv_engine/daemon/memcached.cc:2457 (memcached+0x00000043ebdf)
+    #5 main /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/kv_engine/daemon/main.cc:33 (memcached+0x00000042a1ee)
+
+  Thread T14 'mc:auxIO_0' (tid=7362, running) created by thread T21 at:
+    #0 pthread_create  (libtsan.so.0+0x0000000282a0)
+    #1 cb_create_named_thread(unsigned long*, void (*)(void*), void*, int, char const*) /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/platform/src/cb_pthreads.cc:109 (libplatform_so.so.0.1.0+0x00000000995b)
+    #2 ExecutorThread::start() /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/kv_engine/engines/ep/src/executorthread.cc:51 (ep.so+0x0000001d54b2)
+    #3 ExecutorPool::_adjustWorkers(task_type_t, unsigned long) /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/kv_engine/engines/ep/src/executorpool.cc:527 (ep.so+0x0000001cb9a2)
+    #4 ExecutorPool::_startWorkers() /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/kv_engine/engines/ep/src/executorpool.cc:597 (ep.so+0x0000001cc535)
+    #5 ExecutorPool::_registerTaskable(Taskable&) /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/kv_engine/engines/ep/src/executorpool.cc:483 (ep.so+0x0000001cb1f8)
+    #6 ExecutorPool::registerTaskable(Taskable&) /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/kv_engine/engines/ep/src/executorpool.cc:488 (ep.so+0x0000001cb55f)
+    #7 KVBucket::KVBucket(EventuallyPersistentEngine&) /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/kv_engine/engines/ep/src/kv_bucket.cc:315 (ep.so+0x000000214248)
+    #8 EPBucket::EPBucket(EventuallyPersistentEngine&) /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/kv_engine/engines/ep/src/ep_bucket.cc:251 (ep.so+0x00000015c99b)
+    #9 std::_MakeUniq::__single_object std::make_unique(EventuallyPersistentEngine&) /usr/local/include/c++/7.3.0/bits/unique_ptr.h:825 (ep.so+0x00000017bf75)
+    #10 EventuallyPersistentEngine::makeBucket(Configuration&) /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/kv_engine/engines/ep/src/ep_engine.cc:6100 (ep.so+0x00000017bf75)
+    #11 EventuallyPersistentEngine::initialize(char const*) /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/kv_engine/engines/ep/src/ep_engine.cc:2033 (ep.so+0x000000198dd0)
+    #12 CreateBucketThread::create() /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/kv_engine/daemon/memcached.cc:1867 (memcached+0x0000004361e2)
+    #13 CreateBucketThread::run() /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/kv_engine/daemon/memcached.cc:1910 (memcached+0x000000436a66)
+    #14 Couchbase::Thread::thread_entry() /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/platform/src/thread.cc:45 (libplatform_so.so.0.1.0+0x00000001cb0a)
+    #15 Couchbase::StartThreadDelegator::run(Couchbase::Thread&) /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/platform/src/thread.cc:59 (libplatform_so.so.0.1.0+0x00000001cc05)
+    #16 task_thread_main /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/platform/src/thread.cc:65 (libplatform_so.so.0.1.0+0x00000001cc05)
+    #17 CouchbaseThread::run() /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/platform/src/cb_pthreads.cc:58 (libplatform_so.so.0.1.0+0x000000009c5f)
+    #18 platform_thread_wrap /home/couchbase/jenkins/workspace/kv_engine-master-post-commit-TSan/platform/src/cb_pthreads.cc:71 (libplatform_so.so.0.1.0+0x000000009c5f)
+    #19   (libtsan.so.0+0x000000024feb)
+
+Change-Id: I5dce6961174eaa55d092136b328f5252add0d073
+Reviewed-on: http://review.couchbase.org/113508
+Reviewed-by: Dave Rigby <daver@couchbase.com>
+Tested-by: Build Bot <build@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2019-08-21 08:58:11.000000000
+Message: 
+Change has been successfully cherry-picked as cf07104ce998a57af2b62d57afc70a412d63d4d8 by Dave Rigby
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-08-21 08:58:19.000000000
+Message: 
+Patch Set 4:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/2063/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-08-21 09:34:50.000000000
+Message: 
+Patch Set 4:
+
+Build Unstable 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/2063/ : UNSTABLE
+
+ERROR: rebalance_in_with_ops (rebalance.rebalancein.RebalanceInTests)
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/2063/ )'
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-08-21 09:52:37.000000000
+Message: 
+Patch Set 4:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/2064/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-08-21 10:38:04.000000000
+Message: 
+Patch Set 4:
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/2064/ : SUCCESS'
+----------------------------------------------------------------------------------------------------------------------

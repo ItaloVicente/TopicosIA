@@ -1,0 +1,140 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-33186 [SR]: Use bySeqno scan for warmup of Prepared SyncWrites
+
+Modify the algorithm used by Warmup::loadPreparedSyncWrites() to load
+any in-flight (not yet committed / or aborted) SyncWrites from disk.
+
++Background+
+
+Initially the approach chosen was to identify these prepared
+SyncWrites by performing a range scan on the byKey index, looking for
+all mutations in the DurabilityPrepare namespace. This however relies
+on deleting Prepared SyncWrites from disk whenever they are Committed
+or Aborted.
+
+This is undesirable as it requires an additional item to be flushed
+every time we perform a commit (the delete of the prepared item). As
+such we do not delete Prepared items when Committed (only when Aborted
+as that's necessary to mark they should no longer be considered
+outstanding).
+
+However, this means that Warmup cannot rely on the (not-deleted)
+Prepared Sync Writes found on disk still being in-flight - they could
+have already been Committed.
+
++Solution+
+
+Instead of performing a byKey scan, perform an in-order scan of the
+seqno index:
+
+a) For each Prepared item found, add to the Durability Monitor and
+   HashTable.
+
+b) For each Committed (via Mutation or Prepare) item, if a prepared
+   item exists in the HashTable (i.e. was added at step (a)) then mark
+   it as Committed in the DurabilityMonitor.
+
+At the end of the scan, all in-flight Prepared items (which did not
+have a Commit persisted to disk) will be registered with the Durability
+Monitor.
+
+Note: The above is functionally correct, however it it potentially
+      inefficient - we must scan the complete bySeqno tree to identify
+      all in-flight SyncWrites. A later patch will introduce an
+      optimzation where we can use the high_committed_seqno to
+      contrain the range of seqnos scanned to the end of the tree.
+
+Change-Id: I799eb3e6120716ddb979aba90e6cef3f82ada50e
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2019-04-18 12:38:11.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-04-18 15:03:18.000000000
+Message: 
+Patch Set 2: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/18724/ : ABORTED
+
+Failure of a CTest test 197/198 Test #188: memcached_testapp.ep.SDPerf/SubdocPerfTest ................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/18724/ )
+
+Failure of a GoogleTest  ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/18724/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/17298/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/392/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/9970/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/16619/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/10505/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/19371/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/3267/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-04-18 16:44:02.000000000
+Message: 
+Patch Set 2: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/17298/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/392/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/9970/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/16619/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/10505/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/19371/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/3267/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/18728/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-04-23 13:07:10.000000000
+Message: 
+Patch Set 2:
+
+ping for review.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-04-23 13:24:10.000000000
+Message: 
+Patch Set 2: Code-Review-1
+
+Looking, but do we have any test coverage for this?
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-04-23 13:25:18.000000000
+Message: 
+Patch Set 2:
+
+> Looking, but do we have any test coverage for this?
+
+See the tests in evp_store_warmup_test.cc (added when the initial prepare warmup code was added).
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-04-23 13:37:17.000000000
+Message: 
+Patch Set 2: Code-Review+2
+
+(1 comment)
+Line:50, /COMMIT_MSG -> constrain
+
+----------------------------------------------------------------------------------------------------------------------

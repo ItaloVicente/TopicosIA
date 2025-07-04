@@ -1,0 +1,86 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-47460: Correctly handle replay of collection drop + doc size decrease
+
+During compaction and when the flusher runs concurrently (triggering a
+replay) where the changes copied during replay:
+
+(1) Includes mutations that replace a document and decrease its size
+(2) Where the documents of (1) are to a collection that is also
+    subsequently dropped in the replay.
+
+The diskSize stat of the dropped collection is then allowed to go
+negative resulting in an exception being thrown and compaction being
+aborted:
+
+    WARNING (GleamBookUsers0) CouchKVStore::replayPrecommitHook failed saveCollectionStats what:ThrowExceptionUnderflowPolicy current:0 arg:-1061
+    ERROR (GleamBookUsers0) CouchKVStore::compactDB: exception while performing compaction for vb:0 - Details: cb::couchstore::replay() - precommit hook Failed: error cancel
+
+The issue is that the local collection cardinality doc (|<CID>|) is
+not alive during this replay batch (as the collection has been
+dropped), hence when the replayPreCopyHook is passed the mutation
+which reduces the value size, we record a negative diskSize in
+StatisticsUpdate for the affected collection.
+
+Later in CouchKVStore::replayPrecommitHook when
+FlushAccounting::forEachCollection is called to calculate new local
+docs to write to disk, we attempt to construct a PersistedStats with a
+negative diskSize; which isn't permitted (given it's a
+NonNegativeCounter) and hence an exception is thrown, and compaction
+aborted.
+
+Note this issue appears relatively benign - while this compaction is
+aborted, a subsequent compaction will process the collection drop in
+the initial compaction phase and hence the negative diskSize code path
+isn't run.
+
+Solution
+
+The bug is in tryToCatchUpDbFile() - we read the dropped collections
+from the source Db too late, after we have seeked back to the original
+header. As such the vbucket metadata changes (critically the fact the
+collection is dropped) made in the pre-hook are not observed allowing
+the negative size to be computed.
+
+By hoisting the read of the collections earlier we observe all dropped
+collections - including the ones dropped during this iteration.
+
+Change-Id: I937f839f25a79d0d9241663837c41150a580cbba
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jim Walker
+Date: 2021-09-06 18:38:02.000000000
+Message: 
+Uploaded patch set 6.
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2021-09-06 20:10:56.000000000
+Message: 
+Removed Code-Review-2 by Jim Walker <jim@couchbase.com>
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2021-09-09 08:16:06.000000000
+Message: 
+Patch Set 6: Code-Review-1
+
+(2 comments)
+Line:1991, engines/ep/tests/module_tests/collections/evp_store_collections_test.cc -> do we have a drop + increase test?
+
+Line:2029, engines/ep/tests/module_tests/collections/evp_store_collections_test.cc -> todo or not to do?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2021-09-09 12:09:00.000000000
+Message: 
+Patch Set 6:
+
+(2 comments)
+Line:1991, engines/ep/tests/module_tests/collections/evp_store_collections_test.cc -> nope - will add
+
+Line:2029, engines/ep/tests/module_tests/collections/evp_store_collections_test.cc -> hmm i think Dave orginally put this - i'll take a look
+
+----------------------------------------------------------------------------------------------------------------------

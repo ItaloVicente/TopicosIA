@@ -1,0 +1,157 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-50389: Replace compaction_write_queue_cap with compaction_max_concurrent_ratio
+
+Introduce a new configuration setting 'compaction_max_concurrent_ratio':
+
+    Maximum number of CompactVBucketTask tasks which can run
+    concurrently, as a fraction of the possible Writer task
+    concurrency. Note that a minimum of 1, and a maximum of N-1
+    CompactVBucketTasks will be run (where N is the possible Writer
+    task concurrency), to ensure both forward progress for Compaction
+    and Flushing.
+
+Previously the compaction tasl concurrency was limited to 50% (fixed
+fraction) of possible Writer tasks, _if_ the disk queue size exceeded
+compaction_write_queue_cap:
+
+    Disk write queue threshold after which compaction tasks will be
+    made to snooze, if there are already pending compaction tasks.
+    Default: 10,000.
+
+The intent of compaction_write_queue_cap is that if a Bucket has
+sufficient outstanding disk writes, then we should limit the number of
+compaction tasks to avoid consuming all Writer threads, leaving too
+little capacity for Flusher tasks.
+
+Conceptually this reasonable, however this code dates back a long way
+- before SyncWrites, and before we were as focused on the latency of
+accessing documents on disk.
+
+Looking at compaction_write_queue_cap from the pov of the current
+state of KV-Engine, there are a couple of flaws:
+
+ (a) While we check the outstanding writes when compaction starts,
+     more writes could come in during compaction but will be blocked /
+     will be contending for disk IO with already running compaction.
+
+ (b) Even if the queue size is very small (1 even), compactor tasks
+     consuming all Writer threads means SyncWrites could be blocked
+     from being flushed at all - significantly impacting SyncWrite
+     latency.
+
+While it would be "nice" to be able to utilise all Writer threads for
+Compaction if they are not needed for Flusher tasks, ultimately it is
+_never_ safe to use "too many" Writer threads for compaction, as
+mutations (SyncWrites) either in progress or yet to start could be
+blocked from progressing.
+
+As such, remove compaction_write_queue_cap from the calculation of
+when to pause additional Compactor tasks, and always limit to some
+fraction of the possible Writer tasks. This fraction is controlled by
+the new param compaction_max_concurrent_ratio which defaults to 0.5 -
+i.e. the same fraction as we limited previously.
+
+Change-Id: I02ef39c2be6597f5ca71c932804b5172d432a428
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2022-01-26 16:10:25.000000000
+Message: 
+Patch Set 4: Published edit on patch set 3.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-01-26 16:18:01.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-01-26 16:53:59.000000000
+Message: 
+Patch Set 4: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/16855/ : FAILURE
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/14001/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/15157/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/43332/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/36607/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/15969/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/4866/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/17928/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/4805/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/17170/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/25270/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-01-26 17:37:52.000000000
+Message: 
+Patch Set 4: Verified+1
+
+Build bot failure is unrelated - overriding.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-01-26 17:37:57.000000000
+Message: 
+Removed Verified-1 by Build Bot <build@couchbase.com>
+
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2022-01-26 17:38:38.000000000
+Message: 
+Patch Set 4: Code-Review+2
+
+(1 comment)
+Line:18, /COMMIT_MSG -> nit
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-01-26 17:49:37.000000000
+Message: 
+Patch Set 4: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/14001/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/15157/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/43332/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/36607/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/15969/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/4866/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/17928/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/4805/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/17170/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/25270/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/16859/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2022-01-26 17:39:47.000000000
+MISMATCHED INLINE COMMENT
+Line:1045, engines/ep/src/kv_bucket.h -> Might this want be atomic if it's being changed while read?
+----------------------------------------------------------------------------------------------------------------------

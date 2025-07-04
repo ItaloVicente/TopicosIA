@@ -1,0 +1,142 @@
+======================================================================================================================
+DESCRIPTION:
+
+Applies "sparse-checkout" rules on a checkout.
+
+Adds support for sparse checkout. During checkout the file
+"sparse-checkout" is honoured as described in:
+https://git-scm.com/docs/git-read-tree
+
+To verify this change:
+- Create a local repository with file 'A.txt' and file 'B.txt'.
+- Stage and Commit these files to the repository.
+- Add an empty file called 'sparse-checkout' to your $GIT_DIR/info/
+directory.
+- Open the sparse-checkout file in a text editor and add enter 'A.txt'
+(without quotes) on the first line. Save the file.
+- Set your repository config to 'core.sparseCheckout=true'.
+- Perform a hard reset to 'master'.
+- Only file 'A' should exist in $GIT_DIR.
+
+Bug: 383772
+Change-Id: I5ec95c3c20c34caa2fc8b04742843392841fd6d5
+Signed-off-by: Stephen Lawson <slawson@ptc.com>
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Stephen Lawson
+Date: 2017-12-05 13:41:24.000000000
+Message: 
+Uploaded patch set 10.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2017-12-05 13:41:34.000000000
+Message: 
+Patch Set 10:
+
+Build Started https://ci.eclipse.org/jgit/job/jgit.gerrit/11715/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2017-12-05 13:54:21.000000000
+Message: 
+Patch Set 10: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/jgit.gerrit/11715/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Halstrick
+Date: 2017-12-07 16:20:46.000000000
+Message: 
+Patch Set 10: Code-Review-1
+
+(9 comments)
+Line:1973, org.eclipse.jgit.test/tst/org/eclipse/jgit/lib/DirCacheCheckoutTest.java -> That code may be problematic. Typically you get a Config instance with cfg=repo.getConfig(), then you modify it with cfg.set...(...) methods and then you call cfg.save(). But you call getConfig() twice in this line and the line above. Theoretically this could return two different Config instances and what you save in this line is not the same as what you modified in the line above. To be sure I would follow the following pattern everywhere in this file:
+
+  Config cfg=... .getConfig()
+  cfg.setBoolean(....)
+  cfg.save()
+
+Line:2237, org.eclipse.jgit.test/tst/org/eclipse/jgit/lib/DirCacheCheckoutTest.java -> s/rule/config option/
+
+The term "rule" made me think you are modifying the rules in the sparse-checkout file.
+
+Line:2394, org.eclipse.jgit.test/tst/org/eclipse/jgit/lib/DirCacheCheckoutTest.java -> There should be a test for switching from using sparse checkout to not using sparse checkout. A test where you do have index entries with skip-worktree flag set and the working tree file exits/no-exists. And then you do a configuration change and another checkout to see that all files exist and no skip-worktree bit is set. Or have I overlooked this in your tests?
+
+Line:372, org.eclipse.jgit/src/org/eclipse/jgit/dircache/DirCacheCheckout.java -> Just for info: have you thought about the situation where you have skip-worktree set for a specific path, then you do a merge a this leads to a conflict. We may have multiple entries with different stages for the same path in this moment and how does this work in combination with skip-worktree bits.
+
+Line:1154, org.eclipse.jgit/src/org/eclipse/jgit/dircache/DirCacheCheckout.java -> Don't get completely what you want to achieve here. You have to help me.
+
+Here is what the docs (of git-read-tree) say:
+
+  When git read-tree needs to update the working directory, it resets the 
+  skip-worktree bit in the index based on this file, which uses the same 
+  syntax as .gitignore files. If an entry matches a pattern in this file, skip-
+  worktree will not be set on that entry. Otherwise, skip-worktree will be 
+  set.
+
+  Then it compares the new skip-worktree value with the previous one. If 
+  skip-worktree turns from set to unset, it will add the corresponding file 
+  back. If it turns from unset to set, that file will be removed.
+
+Means, we need to save the old value of the skip-worktree bit. Then we update the DircacheEntry to be written to the index with the new value based on the rules in the sparse-checkout file (independent of the working-tree content) and configuration option sparseCheckout. 
+
+After this is done and we added a possibly change DircacheEntry to the builder we finally look at the filesystem. If the skip-worktree bit has toggled from false to true we remove the file (regardless whether it existed or not). If it has toggled from true to false we rewrite the file if it not already had the right content. Before we modify a workingtree file we have to check whether it is dirty (file content differs from index content). Better don't delete unsaved content. I am not sure what native git is doing here.
+
+But where do you compare old state of the flag to new state?
+
+I think I'll add some tests. That's sometimes easier then explaining so much.
+
+Line:1160, org.eclipse.jgit/src/org/eclipse/jgit/dircache/DirCacheCheckout.java -> Be careful with calls to the filesystem. They can be real performance killers on some platforms. I would avoid checking for the existence of the file. See my comments below.
+
+Line:1162, org.eclipse.jgit/src/org/eclipse/jgit/dircache/DirCacheCheckout.java -> Why is the decision whether to write a new DirCacheEntry been affected by the fact whether a working tree file exists or not. How we populate the index is a decision based on old index and tree you want to checkout. The working tree state plays no role.
+
+After we have decided on the new index entry we finally clean up the working tree and create or delete files.
+
+Line:1171, org.eclipse.jgit/src/org/eclipse/jgit/dircache/DirCacheCheckout.java -> What is if the old index had multiple stages (a conflicting file). We cannot switch to just writing stage 0.  Why at all we write a complete new entry. Uff, that's complicated
+
+Line:1185, org.eclipse.jgit/src/org/eclipse/jgit/dircache/DirCacheCheckout.java -> Even if we remove the file from the worktree, don't we have to update the index so it contains the content of the file we would like to checkout. Just asking, no clue what native git does.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Halstrick
+Date: 2017-12-11 15:17:38.000000000
+Message: 
+Patch Set 10:
+
+(1 comment)
+Line:479, org.eclipse.jgit/src/org/eclipse/jgit/dircache/DirCacheEntry.java -> found a more severe bug: when you call setSkipWorkTree(false) on an entry then we can't parse the resulting index anymore. Even native git can't parse that index anymore. I added a test to AddTest.java
+
+Maybe we should not extend the entry when it was not extended before and you call setSkipWorkTree(false). I tried with native git and a call to 'git update-index --no-skip-worktree ' also doesn't forcefully extend an entry.
+
+But I am not sure that's the whole problem.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Stephen Lawson
+Date: 2017-12-15 14:29:02.000000000
+Message: 
+Patch Set 10:
+
+(11 comments)
+Line:1973, org.eclipse.jgit.test/tst/org/eclipse/jgit/lib/DirCacheCheckoutTest.java -> Done
+
+Line:2237, org.eclipse.jgit.test/tst/org/eclipse/jgit/lib/DirCacheCheckoutTest.java -> Done
+
+Line:2394, org.eclipse.jgit.test/tst/org/eclipse/jgit/lib/DirCacheCheckoutTest.java -> There is already a test for turning sparse-checkout on/of: testCheckoutToggleSparseCheckoutInConfig.
+
+I will add a test to see how the skip flag behaves with files that have been modified.
+
+Line:372, org.eclipse.jgit/src/org/eclipse/jgit/dircache/DirCacheCheckout.java -> In all honesty I have not considered this state.
+
+Line:1154, org.eclipse.jgit/src/org/eclipse/jgit/dircache/DirCacheCheckout.java -> Your write up has improved my logic in this area. I am pretty sure my following change will show that.
+
+Line:1160, org.eclipse.jgit/src/org/eclipse/jgit/dircache/DirCacheCheckout.java -> Done
+
+Line:1162, org.eclipse.jgit/src/org/eclipse/jgit/dircache/DirCacheCheckout.java -> Done
+
+Line:1171, org.eclipse.jgit/src/org/eclipse/jgit/dircache/DirCacheCheckout.java -> Done
+
+Line:1185, org.eclipse.jgit/src/org/eclipse/jgit/dircache/DirCacheCheckout.java -> Of course. You are right. I will add the removed/skipped file to the index.
+
+Line:479, org.eclipse.jgit/src/org/eclipse/jgit/dircache/DirCacheEntry.java -> I fixed this bug. The entry is only extended if absolutely necessary which is the same as git native (where it only extends the entry if the skip flag is set to true).
+
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,225 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-40531: WIP Prefer paging from replicas if possible
+
+Prior to this change, the pager would try to page out X% of items in
+replica vbuckets, but if this did not bring memory usage below the low
+water mark, it would flip phase to ACTIVE_AND_PENDING_ONLY - meaning
+the next run of the pager would page immediately try to page from
+active and pending vbuckets.
+
+Now, replica vbuckets will always be considered first. In the event
+that paging _every_ possible item from replicas would not free enough
+memory to drop below the low water mark, it will then also evict from
+active vbuckets.
+
+NOTE: this does not currently account for non-evictable items like:
+system events, prepares, and dirty items.  These _must_ be considered
+to avoid the pager getting "stuck" and not considering active vbs when
+it should, because replicas report they can evict more than they really
+can.
+
+Deletes are not evictable for ephemeral, but replicas are never evicted
+from under ephemeral buckets anyway.
+
+Change-Id: I46e578bf163fa2e12834173595c8aa3f52f1593d
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: James H
+Date: 2020-07-24 11:24:59.000000000
+Message: 
+Uploaded patch set 2: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-07-24 11:25:13.000000000
+Message: 
+Patch Set 2:
+
+Branch restricted. PLEASE READ this URL: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/193600/artifact/restricted.html : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-07-24 12:08:39.000000000
+MISMATCHED INLINE COMMENT
+Line:99, engines/ep/src/item_pager.cc -> This is a bit nasty - given we already have subclasses for ep and ephemeral buckets, why don't you just call getEvictableBytes and have that return 0 bytes for replicas under ephemeral?
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-07-24 15:58:17.000000000
+MISMATCHED INLINE COMMENT
+Line:99, engines/ep/src/item_pager.cc -> Well one tweak would be to add `virtual bool KVBucket::canEvictFromReplicas() = 0;` and have EP and Ephemeral implement differently.
+
+That avoids magic config checks in here and also means you don't have to unnecessarily visit Ephemeral replica VBs.
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-07-24 15:07:48.000000000
+MISMATCHED INLINE COMMENT
+Line:99, engines/ep/src/item_pager.cc -> Done, but ephemeral replica vbuckets should still not be put in the filter for clarity/efficiency - the paging visitor will visit (and walk the hashtable of) every vb the filter matches. It would still be safe though; even if we messed up the pageable mem stat in the future eligibleToPageOut() still prevents ephemeral replica paging.
+
+It does feel a little like using "zero bytes evictable from replicas" as a proxy for "it is not correct to evict from replicas" though, which seems a bit bleh. 
+
+`isEphemeral` was already used in this method before this patch to control the phase :shrug:
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-07-27 17:38:55.000000000
+MISMATCHED INLINE COMMENT
+Line:99, engines/ep/src/item_pager.cc -> Damn! I was going to do that but second guessed myself - the theme elsewhere has been minimising additions to existing interfaces ;)
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-07-24 12:08:39.000000000
+MISMATCHED INLINE COMMENT
+Line:112, engines/ep/src/item_pager.cc -> Are the filters ordered?
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-07-24 15:58:17.000000000
+MISMATCHED INLINE COMMENT
+Line:112, engines/ep/src/item_pager.cc -> So that sounds problematic right? We want to evict from replicas first, and only for the (hopefully minority) of RAM we still need to evict should we take that from active.
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-07-24 15:07:48.000000000
+MISMATCHED INLINE COMMENT
+Line:112, engines/ep/src/item_pager.cc -> No, and the visitor goes in vb order and tests the filter rather than iterating the added vbs
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-07-24 12:08:39.000000000
+MISMATCHED INLINE COMMENT
+Line:122, engines/ep/src/item_pager.cc -> Technically this isn't a percentage as it's not out of 100. Prefer `ratioToEvict` / `fractionToEvict` ?
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-07-24 15:07:48.000000000
+MISMATCHED INLINE COMMENT
+Line:122, engines/ep/src/item_pager.cc -> I've managed to use percent and ratio in the wrong places all over :facepalm:, Done
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-07-24 15:07:48.000000000
+MISMATCHED INLINE COMMENT
+Line:140, engines/ep/src/item_pager.cc -> I was thinking of breaking the fractionToEvict out into one for active/pending and one for replica - at the moment, if actives are considered the replicas don't evict 100% of the items, they evict the same fraction as the actives. Though that situation is only reached when replicas are really scraping the bottom of the barrel, so it might not be terrible. Will test, might also show up in the viber repro.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-07-24 15:58:17.000000000
+MISMATCHED INLINE COMMENT
+Line:140, engines/ep/src/item_pager.cc -> Yeah, I think this is the same thing I mentioned above. I do think this is an issue. 
+
+The problem comes when the _first_ ItemPager run occurs which cannot fulfil the eviction amount from replica. Say it can get most - 90% of the memory freed from replicas, only 10% must come from replicas. I think with your current logic we'll equally free memory from active and replica, and end up with Replica at >0% RR, but Active at <100% RR, which is _exactly_ what we are trying to avoid here.
+
+I think we either need to visit in order (replicas first, with suitable percentage to evict everything), or keep the two phase approach.
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-07-27 17:38:55.000000000
+MISMATCHED INLINE COMMENT
+Line:140, engines/ep/src/item_pager.cc -> Fiddled with a phased impl - will probably iterate on it a bit more yet though. Down the line I'd prefer to add the ability to go over vbs in a specific order, but I've avoided that for the sake of keeping this change small(ish).
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-07-24 12:08:39.000000000
+MISMATCHED INLINE COMMENT
+Line:366, engines/ep/src/kv_bucket.h -> Not keen on adding an extra overload. I know it's ultimately simpler than VBucketVisitor, but having said that VBucketVisitor does it's own filtering. 
+
+Can we stick with the existing API for a 6.6.0 / MP patch?
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-07-24 15:07:48.000000000
+MISMATCHED INLINE COMMENT
+Line:366, engines/ep/src/kv_bucket.h -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-07-24 12:08:39.000000000
+MISMATCHED INLINE COMMENT
+Line:220, engines/ep/src/paging_visitor.cc -> There's quite a few changes in here. I think it's worth moving the removal of adjustPercent into a second follow-up patch - I agree it's probably not desirable now and causes odd biases in the vBucket eviction, but I'd like to be able to prove the specific change to "not trying to reach low watermark" in as simple a patch as possible.
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-07-24 15:07:48.000000000
+MISMATCHED INLINE COMMENT
+Line:220, engines/ep/src/paging_visitor.cc -> Sounds good
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-07-24 12:08:39.000000000
+MISMATCHED INLINE COMMENT
+Line:95, engines/ep/src/vb_filter.h -> Again, I agree this is a slightly simpler API but it's complicating things more than we need for 6.6.0. Can you just use the singular method for mad-hatter branch please?
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-07-24 15:07:48.000000000
+MISMATCHED INLINE COMMENT
+Line:95, engines/ep/src/vb_filter.h -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-07-24 12:08:39.000000000
+MISMATCHED INLINE COMMENT
+Line:1254, engines/ep/src/vbucket.h -> Needs documenting.
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-07-24 15:07:48.000000000
+MISMATCHED INLINE COMMENT
+Line:1254, engines/ep/src/vbucket.h -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-07-24 12:08:39.000000000
+MISMATCHED INLINE COMMENT
+Line:182, engines/ep/tests/module_tests/item_pager_test.cc -> 10 or 100 ?
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-07-24 15:07:48.000000000
+MISMATCHED INLINE COMMENT
+Line:182, engines/ep/tests/module_tests/item_pager_test.cc -> 1 miiillliiiooonn bytes!
+
+Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-07-24 12:08:39.000000000
+MISMATCHED INLINE COMMENT
+Line:192, engines/ep/tests/module_tests/item_pager_test.cc -> Might not be relevant, but freqCounterValue is an exponential value - I forget the coefficients but a counter of say 20 is many, many times hotter than 10.
+
+
+For more representative data (which will give a non-uniform distribution of counters), do something like, calling it `count % 256` times or similar:
+
+ uint8_t HashTable::generateFreqValue(uint8_t counter) {
+    return probabilisticCounter.generateValue(counter);
+ }
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-07-24 15:07:48.000000000
+MISMATCHED INLINE COMMENT
+Line:192, engines/ep/tests/module_tests/item_pager_test.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-07-24 12:08:39.000000000
+MISMATCHED INLINE COMMENT
+Line:301, engines/ep/tests/module_tests/item_pager_test.cc -> Note you're returning a percentage here - which is fine but that isn't a ratio :)
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-07-24 15:07:48.000000000
+MISMATCHED INLINE COMMENT
+Line:301, engines/ep/tests/module_tests/item_pager_test.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-07-24 12:08:39.000000000
+MISMATCHED INLINE COMMENT
+Line:307, engines/ep/tests/module_tests/item_pager_test.cc -> This seems unnecessarily boilerplate - I don't think we really save that much to warrant this extra method.
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-07-24 15:07:48.000000000
+MISMATCHED INLINE COMMENT
+Line:307, engines/ep/tests/module_tests/item_pager_test.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-07-24 12:08:39.000000000
+MISMATCHED INLINE COMMENT
+Line:784, engines/ep/tests/module_tests/item_pager_test.cc -> Could you please add a brief description to this test?
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-07-24 15:07:48.000000000
+MISMATCHED INLINE COMMENT
+Line:784, engines/ep/tests/module_tests/item_pager_test.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-07-24 12:08:39.000000000
+MISMATCHED INLINE COMMENT
+Line:834, engines/ep/tests/module_tests/item_pager_test.cc -> Ditto
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-07-24 15:07:48.000000000
+MISMATCHED INLINE COMMENT
+Line:834, engines/ep/tests/module_tests/item_pager_test.cc -> Done
+----------------------------------------------------------------------------------------------------------------------

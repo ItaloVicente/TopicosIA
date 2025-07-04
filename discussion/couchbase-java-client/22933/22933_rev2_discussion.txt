@@ -1,0 +1,176 @@
+======================================================================================================================
+DESCRIPTION:
+
+JCBC-27: exponential backoff when cluster is not warmed up
+
+This changeset prevents operations against a warming up cluster and
+waits until its in a warmed-up state or throws an exception after
+the backoff limit is reached.
+
+Change-Id: I655700909b98179c3f828df863c2a4ce355fc9fe
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Michael Nitschinger
+Date: 2012-11-30 08:49:46.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matt Ingenthron
+Date: 2012-12-02 20:17:34.000000000
+Message: 
+Patch Set 2: I would prefer that you didn't submit this
+
+(1 inline comment)
+
+Seems like the right direction, and can probably move forward, but slightly concerned about a couple things.
+
+Trond/Alk: can you guys look this over?  Idea is that we'll wait during warmup (as this changed between ~1.8 and 2.0.  Is there a ceiling for how long warmup might be?  My guess is no, so we should retry forever?
+
+I'm -1 on this for now, but it does seem to be an improvement.
+Line:136, src/main/java/com/couchbase/client/vbucket/ConfigurationProviderHTTP.java -> I'm a little worried about this scenario.  Specifically, we'd wait a minute or so, then we'd start throwing errors right away.  I think warmup may go longer than that minute or so.  We may want to just hold at the 32sec wait time forever.
+
+Second issue is, I think, this happens during the ctor()?  Or is this in that thread we broke out.  Have you checked on that.
+
+I'll ask Trond/Alk to review for warmup.
+
+Do keep in mind this needs to work against 1.8 and 2.0.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Mark Nunberg
+Date: 2012-12-02 21:31:37.000000000
+Message: 
+Patch Set 2: Looks good to me, but someone else must approve
+
+(1 inline comment)
+
+
+Line:136, src/main/java/com/couchbase/client/vbucket/ConfigurationProviderHTTP.java -> We certainly want a timeout here and not wait forever. This might be user-configurable, or whatever; and we might want to make the timeout a bit higher.
+
+I've personally seen cases where warmup hangs forever (cluster/node issues..)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Deepti Dawar
+Date: 2012-12-03 10:07:44.000000000
+Message: 
+Patch Set 2: Looks good to me, but someone else must approve
+
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matt Ingenthron
+Date: 2012-12-03 15:22:49.000000000
+Message: 
+Patch Set 2: (1 inline comment)
+
+
+Line:136, src/main/java/com/couchbase/client/vbucket/ConfigurationProviderHTTP.java -> It could be that bugs make the cluster warmup hang forever, but I don't think I want to code for a bug here.  The expected case is that the cluster takes an indeterminate amount of time to warm up.  I think the right thing to do is to have a ceiling and retry forever, warning forever.   Hopefully someone will patch the server and restart it in the mean time and then this client will work fine.  :)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Kandratsenka
+Date: 2012-12-03 18:01:33.000000000
+Message: 
+Patch Set 2:
+
+Adding my 2 cents.
+
+I think all our ops should have deadline that is propagated across the stack. Including through moxi and memcached layers.
+
+Then not just SDK can throw timeout back to application code, but moxi and memcached can stop doing work that's not needed anymore.
+
+Under heavy load when queues either inside moxi or memcached itself, say due to lots of bgfetches are growing that would help a lot IMHO.
+
+I understand our protocols don't support that.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matt Ingenthron
+Date: 2012-12-03 18:33:35.000000000
+Message: 
+Patch Set 2:
+
+Thanks alk, but that seems different than what we're talking about here.  That wouldn't do anything to solve the warmup situation unless the server starts telling us how long until it's done warming up in a reliable fashion.
+
+With our current protocol and operation, should clients just block initialization until the cluster says it's complete? 
+
+I guess this one has gone a bit away from where it started.
+----------------------------------------------------------------------------------------------------------------------
+Author: Mark Nunberg
+Date: 2012-12-03 18:48:27.000000000
+Message: 
+Patch Set 2: (1 inline comment)
+
+
+Line:136, src/main/java/com/couchbase/client/vbucket/ConfigurationProviderHTTP.java -> It's not about a specific bug. It's about not having a socket client ever assume that something will not hang. No matter how buggy or not something may be.
+
+The discussion should be not about whether the client will timeout, but rather under which conditions.
+
+
+
+Furthermore in situations where we've seen hangs (bugs or otherwise) I don't see the harm in bumping up this number.
+
+It would be nice to be able to receive more detailed status information about warmup progress etc - but apparently that's not the scope of this change here.
+
+I'm not too familiar with where this happens. If it's an internal thread that doesn't block the user program then I guess there's no harm in retrying infinitely (warning along the way), but if it's called from within the ctor then most definitely a timeout is warranted here.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Kandratsenka
+Date: 2012-12-03 18:52:08.000000000
+Message: 
+Patch Set 2:
+
+Not necessarily, Matt. You can retry (with exp. backoff) until you either succeed or until you hit deadline. There's no need for server to support estimating warmup completion time. IMHO
+----------------------------------------------------------------------------------------------------------------------
+Author: Matt Ingenthron
+Date: 2012-12-03 19:00:33.000000000
+Message: 
+Patch Set 2:
+
+I agree with that Alk, I'm just saying your comment about expressing deadline won't help if we don't know when the other side will be done.  At least, there's nothing we can do at the client side and the problem here is that we won't be able to do anything until warmed up.
+
+Agree with you Mark-- I think we'll need to look at this after beta.
+
+Personally, I don't really like doing all of this smart stuff in the ctor anyway, but it's been that way for quite a while.
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2012-12-04 13:06:02.000000000
+Message: 
+Patch Set 2: (1 inline comment)
+
+
+Line:131, src/main/java/com/couchbase/client/vbucket/ConfigurationProviderHTTP.java -> Looks like you need to fix your space key ;) In addition to that its considered bad practice to test a boolean variable against a value.. you're suppose to write: if (foo) or if (!foo) etc
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matt Ingenthron
+Date: 2013-01-30 05:56:18.000000000
+Message: 
+Patch Set 2:
+
+Michael, what's the status on this one?
+----------------------------------------------------------------------------------------------------------------------
+Author: Michael Nitschinger
+Date: 2013-01-30 11:24:09.000000000
+Message: 
+Patch Set 2:
+
+I don't know to be honest. Should something be changed on the current patchset? There has been so many discussion around this, I guess we need to align first.
+----------------------------------------------------------------------------------------------------------------------
+Author: Michael Nitschinger
+Date: 2013-01-30 11:25:49.000000000
+Message: 
+Patch Set 2: (1 inline comment)
+
+
+Line:136, src/main/java/com/couchbase/client/vbucket/ConfigurationProviderHTTP.java -> This code is blocking the user thread, to be clear.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matt Ingenthron
+Date: 2013-02-27 20:21:21.000000000
+Message: 
+Patch Set 2: Looks good to me, approved
+
+To cover the case I was concerned about, we've opened another enhancement request in JCBC-255.  This is a big improvement and covers many use cases-- especially development-- so it's good to add at this time.
+----------------------------------------------------------------------------------------------------------------------
+Author: Michael Nitschinger
+Date: 2013-02-27 20:35:32.000000000
+Message: 
+Patch Set 2: Rebased
+----------------------------------------------------------------------------------------------------------------------

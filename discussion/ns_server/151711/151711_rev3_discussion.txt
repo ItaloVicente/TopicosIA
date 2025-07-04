@@ -1,0 +1,176 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-45061: Fix rebalance failure
+
+Fixes the root cause of the rebalance report file writing failure by
+changing the filename to no longer include ':' (colon) characters which windows
+does not allow. Instead removed all hyphens and colons which is still valid
+iso8601, and label it as "filename_safe" and "safe" to indicate that these can
+be used in filenames safely across different platforms.
+
+This failure caused out of control memory and cpu usage. The overarching issue
+with large state dumps due to process crashes is being addressed in another
+commit / ticket.
+
+Change-Id: I8e621efd9049bcda82a9f3a05438b80f45b76cfb
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Bryan McCoid
+Date: 2021-04-21 17:53:10.000000000
+Message: 
+Uploaded patch set 3.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-04-21 17:53:18.000000000
+Message: 
+Patch Set 3:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-test/23392/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-04-21 17:57:59.000000000
+Message: 
+Patch Set 3: Well-Formed+1
+
+Permission granted to commit to restricted branch
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-04-21 18:40:14.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:126, src/ns_rebalance_report_manager.erl -> It's probably good to only impact the windows case. There may be scripts that look for rebalance reports and maybe parse the name for the date/time? Maybe pass the delimiter....
+
+Delim = case misc:is_windows() of
+            true -> "";
+            false -> ":"
+        end,
+FileName = "rebalance_report_" ++ misc:timestamp_utc_iso8601(Delim) ++ ".json",
+
+This would need
+
+timestamp_utc_iso8601() ->
+    timestamp_utc_iso8601(":").
+timestamp_utc_iso8601(Delim) ->
+    iso_8601_fmt(erlang:universaltime(), undefined, {0, 0}, Delim).
+etc...
+
+Passing the delimiter avoids having duplicated snippets of existing code slightly modified from the existing code.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2021-04-21 18:47:36.000000000
+Message: 
+Patch Set 3:
+
+Steve -- I guess it's just a tradeoff when it comes to affecting all platforms filenames or requiring windows to have the different filenames (because wouldn't that theoretical tool also get tripped up by this?) but I agree that we can easily have it take the delimiter and lose some duplication, except that we also can't have underscores or hyphens and have it be valid iso8601 so we'd have to take two delimiters or just a flag for the no delimiters case.
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-04-21 18:58:26.000000000
+Message: 
+Patch Set 3:
+
+> Patch Set 3:
+> 
+> Steve -- I guess it's just a tradeoff when it comes to affecting all platforms filenames or requiring windows to have the different filenames (because wouldn't that theoretical tool also get tripped up by this?) but I agree that we can easily have it take the delimiter and lose some duplication, except that we also can't have underscores or hyphens and have it be valid iso8601 so we'd have to take two delimiters or just a flag for the no delimiters case.
+
+The guiding principle we tend to use is to not affect existing customers if possible. While it seems unlikely someone has a tool that parses the file name for a date/time it is possible. Good point about allowing only iso8601 delimiters. My aim is mainly to not have duplicate snippets of code which are slightly modified.
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2021-04-21 19:39:24.000000000
+Message: 
+Patch Set 3:
+
+> Patch Set 3:
+> 
+> > Patch Set 3:
+> > 
+> > Steve -- I guess it's just a tradeoff when it comes to affecting all platforms filenames or requiring windows to have the different filenames (because wouldn't that theoretical tool also get tripped up by this?) but I agree that we can easily have it take the delimiter and lose some duplication, except that we also can't have underscores or hyphens and have it be valid iso8601 so we'd have to take two delimiters or just a flag for the no delimiters case.
+> 
+> The guiding principle we tend to use is to not affect existing customers if possible. While it seems unlikely someone has a tool that parses the file name for a date/time it is possible. Good point about allowing only iso8601 delimiters. My aim is mainly to not have duplicate snippets of code which are slightly modified.
+
+So just to clarify, the two formats available for iso8601 are:
+YYYY-MM-DDThh:mm:ss.sss 
+YYYYMMDDThhmmss.sss
+
+So basically delimiter or no delimiter (except decimal points). I think it sounds like I should narrow the blast radius (make it affect windows only) and minimize the duplicated code more. Would an atom as a flag make sense in this case? I'm not sure how idiomatic that is, but I see it in some places. I can also do what you recommend with passing in delimiter, but it would open up the issue that there are multiple delimiters being used, and it would allow someone to construct non iso8601 strings by passing in the wrong delimiters.
+----------------------------------------------------------------------------------------------------------------------
+Author: Meni Hillel
+Date: 2021-04-21 19:47:54.000000000
+Message: 
+Patch Set 3:
+
+> Patch Set 3:
+> 
+> > Patch Set 3:
+> > 
+> > > Patch Set 3:
+> > > 
+> > > Steve -- I guess it's just a tradeoff when it comes to affecting all platforms filenames or requiring windows to have the different filenames (because wouldn't that theoretical tool also get tripped up by this?) but I agree that we can easily have it take the delimiter and lose some duplication, except that we also can't have underscores or hyphens and have it be valid iso8601 so we'd have to take two delimiters or just a flag for the no delimiters case.
+> > 
+> > The guiding principle we tend to use is to not affect existing customers if possible. While it seems unlikely someone has a tool that parses the file name for a date/time it is possible. Good point about allowing only iso8601 delimiters. My aim is mainly to not have duplicate snippets of code which are slightly modified.
+> 
+> So just to clarify, the two formats available for iso8601 are:
+> YYYY-MM-DDThh:mm:ss.sss 
+> YYYYMMDDThhmmss.sss
+> 
+> So basically delimiter or no delimiter (except decimal points). I think it sounds like I should narrow the blast radius (make it affect windows only) and minimize the duplicated code more. Would an atom as a flag make sense in this case? I'm not sure how idiomatic that is, but I see it in some places. I can also do what you recommend with passing in delimiter, but it would open up the issue that there are multiple delimiters being used, and it would allow someone to construct non iso8601 strings by passing in the wrong delimiters.
+
+I'd find it hard to believe someone maybe parsing this particular file, as it is temporary and only exist to allow webserver to download it. Certainly the dashes and colons makes it easier to read, but is it fail to assume nobody, other than our internal code, will try accessing it? If this is the case, I'd vote to a single format for both windows and linux.
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-04-21 20:02:13.000000000
+Message: 
+Patch Set 3:
+
+> Patch Set 3:
+> 
+> > Patch Set 3:
+> > 
+> > > Patch Set 3:
+> > > 
+> > > > Patch Set 3:
+> > > > 
+> > > > Steve -- I guess it's just a tradeoff when it comes to affecting all platforms filenames or requiring windows to have the different filenames (because wouldn't that theoretical tool also get tripped up by this?) but I agree that we can easily have it take the delimiter and lose some duplication, except that we also can't have underscores or hyphens and have it be valid iso8601 so we'd have to take two delimiters or just a flag for the no delimiters case.
+> > > 
+> > > The guiding principle we tend to use is to not affect existing customers if possible. While it seems unlikely someone has a tool that parses the file name for a date/time it is possible. Good point about allowing only iso8601 delimiters. My aim is mainly to not have duplicate snippets of code which are slightly modified.
+> > 
+> > So just to clarify, the two formats available for iso8601 are:
+> > YYYY-MM-DDThh:mm:ss.sss 
+> > YYYYMMDDThhmmss.sss
+> > 
+> > So basically delimiter or no delimiter (except decimal points). I think it sounds like I should narrow the blast radius (make it affect windows only) and minimize the duplicated code more. Would an atom as a flag make sense in this case? I'm not sure how idiomatic that is, but I see it in some places. I can also do what you recommend with passing in delimiter, but it would open up the issue that there are multiple delimiters being used, and it would allow someone to construct non iso8601 strings by passing in the wrong delimiters.
+> 
+> I'd find it hard to believe someone maybe parsing this particular file, as it is temporary and only exist to allow webserver to download it. Certainly the dashes and colons makes it easier to read, but is it fail to assume nobody, other than our internal code, will try accessing it? If this is the case, I'd vote to a single format for both windows and linux.
+
+The files are included in the cbcollect_info results.  e.g.
+
+-rw-rw----@  1 stevewatanabe  staff        325 Mar 31 23:09 projector_mprof.log
+-rw-rw----@  1 stevewatanabe  staff        330 Mar 31 23:09 projector_pprof.log
+-rw-rw----@  1 stevewatanabe  staff         71 Mar 31 23:09 query_cprof.log
+-rw-rw----@  1 stevewatanabe  staff         71 Mar 31 23:09 query_mprof.log
+-rw-rw----@  1 stevewatanabe  staff         71 Mar 31 23:09 query_pprof.log
+-rw-rw----@  1 stevewatanabe  staff        894 Mar 31 14:20 rebalance_report_2021-03-31T21:20:17Z.json
+-rw-rw----@  1 stevewatanabe  staff       2951 Mar 31 14:32 rebalance_report_2021-03-31T21:32:53Z.json
+-rw-rw----@  1 stevewatanabe  staff    3420715 Mar 31 15:12 rebalance_report_2021-03-31T22:12:18Z.json
+-rw-rw----@  1 stevewatanabe  staff       3060 Mar 31 16:54 rebalance_report_2021-03-31T23:54:07Z.json
+-rw-rw----@  1 stevewatanabe  staff       1959 Mar 31 21:30 rebalance_report_2021-04-01T04:30:30Z.json
+-rw-rw----@  1 stevewatanabe  staff      84030 Mar 31 23:17 stats.log
+drwxr-xr-x@ 10 stevewatanabe  staff        320 Apr  1 15:53 stats_snapshot
+-rw-rw----@  1 stevewatanabe  staff      13194 Mar 31 23:09 syslog.tar.gz
+-rw-rw----@  1 stevewatanabe  staff         20 Mar 31 23:09 systemd_journal.gz
+-rw-rw----@  1 stevewatanabe  staff      56347 Mar 31 02:05 users.dets
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Artamonau
+Date: 2021-04-21 21:23:12.000000000
+Message: 
+Patch Set 3:
+
+> I'd vote to a single format for both windows and linux.
+
++1 from me.
+----------------------------------------------------------------------------------------------------------------------

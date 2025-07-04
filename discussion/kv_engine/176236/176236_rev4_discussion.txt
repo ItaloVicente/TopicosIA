@@ -1,0 +1,320 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-52490: Avoid that a Producer consumes all backfills.maxRunning slots
+
+That is possible in the case where a Producer is busy with many
+backfills. Eg, the current backfill fixture implementation allows the
+follwing:
+
+1. backfills.maxRunning = 4096
+2. Two DcpProducer connections with some active/pending backfills
+   -> Prod1(active:4096, pending:100), Prod2(active:0, pending:1)
+3. Prod1 completes a backfill -> Prod1(active:4095, pending:100)
+4. Prod1 is rescheduled to run immediately
+5. Prod2 keeps being snoozed and rescheduled to run only after its
+   sleep-time (1 sec by default for the BackfillManagerTask)
+
+The consequence is that Prod1 has much more chance to drain its pending
+queue than Prod2.
+
+This patch prevents that by ensuring that the backfills.maxRunning
+slots are more fairly allocated across producers.
+The logic change in this patch is that at step (3) and (4) Prod2 is
+accounted when computing a single connection share. That share is lower
+than backfills.maxRunning, so at step (4) Prod1 is snoozed, same as
+what happens at step (5) for Prod2. That gives Prod2 a much higher
+chance to take its slot in backfills.maxRunning at the next run.
+
+Here the single connection is computed simply by
+
+    backfills.maxRunning / num-conns-with-queued-backfills
+
+In the example above share = 2048.
+
+The computation is made at runtime after every backfill run. That
+allows a single Producer to allocate all the backfills.maxRunning slots
+if it's the only connection with queued backfill. Again from the above
+example, share for Prod1 will be 4096 again once Prod2 has completed
+its single backfill.
+
+Change-Id: I9bfd733dc000e22f195cbbe9401c91898b976280
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2022-06-15 15:35:55.000000000
+Message: 
+Uploaded patch set 4.
+----------------------------------------------------------------------------------------------------------------------
+Author: Restriction Checker
+Date: 2022-06-15 15:36:06.000000000
+Message: 
+Patch Set 4: Well-Formed-1
+
+Branch restricted. PLEASE READ this URL: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/302928/artifact/restricted.html : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2022-06-15 15:45:16.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> The patch misses some specific test coverage.
+I open for review now for giving early visibility to the team.
+Plan is to make a toy with this and give it to QE for rerunning the test related to MB-52490.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-06-15 17:21:18.000000000
+Message: 
+Patch Set 4: Verified-1 Code-Review-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-neo/356/ : FAILURE
+
+Failure of GoogleTest "DCPBackfillDiskTest.ScanDiskError":
+
+<pre>
+[ RUN      ] DCPBackfillDiskTest.ScanDiskError
+unknown file: error: SEH exception with code 0xc0000094 thrown in the test body.
+..\kv_engine\engines\ep\tests\module_tests\backfill_disk_test.cc(49): error: Actual function call count doesn"t match EXPECT_CALL(mockKVStore, scan(An<BySeqnoScanContext&>()))...
+         Expected: to be called once
+           Actual: never called - unsatisfied and active
+[  FAILED  ] DCPBackfillDiskTest.ScanDiskError (32 ms)
+DCPBackfillDiskTest.ScanDiskError
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-neo/356/ )
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [12/93]: test dcp replica stream in-memory...(154 ms) OK
+
+
+91% tests passed, 36 tests failed out of 422
+
+Total Test time (real) = 632.88 sec
+
+The following tests FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-neo/356/ )
+
+Timeout of a CTest test 213/422 Test #147: ep-engine_ep_unit_tests.CollectionsDcpEphemeralOrPersistent/CollectionsDcpParameterizedTest ...................................} ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-neo/356/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/neo/260/ : FAILURE
+
+Failure of GoogleTest "DCPBackfillDiskTest.ScanDiskError":
+
+<pre>
+[ RUN      ] DCPBackfillDiskTest.ScanDiskError
+[2022-06-15T15:47:06.383Z] ../kv_engine/engines/ep/tests/module_tests/backfill_disk_test.cc:77: Failure
+[2022-06-15T15:47:06.383Z] Expected equality of these values:
+[2022-06-15T15:47:06.383Z]   backfill_success
+[2022-06-15T15:47:06.383Z]     Which is: 0
+[2022-06-15T15:47:06.383Z]   bfm.backfill()
+[2022-06-15T15:47:06.383Z]     Which is: 2
+[2022-06-15T15:47:06.383Z] ../kv_engine/engines/ep/tests/module_tests/backfill_disk_test.cc:49: Failure
+[2022-06-15T15:47:06.383Z] Actual function call count doesn"t match EXPECT_CALL(mockKVStore, scan(An<BySeqnoScanContext&>()))...
+[2022-06-15T15:47:06.383Z]          Expected: to be called once
+[2022-06-15T15:47:06.383Z]            Actual: never called - unsatisfied and active
+[2022-06-15T15:47:06.383Z] [  FAILED  ] DCPBackfillDiskTest.ScanDiskError (5 ms)
+DCPBackfillDiskTest.ScanDiskError
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/neo/260/ )
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [13/93]: test dcp replica stream all.../usr/bin/timeout: the monitored command dumped core
+[2022-06-15T16:06:25.985Z] 
+[2022-06-15T16:06:25.985Z] 
+[2022-06-15T16:06:25.985Z] 94% tests passed, 26 tests failed out of 443
+[2022-06-15T16:06:25.985Z] 
+[2022-06-15T16:06:25.985Z] Total Test time (real) = 1160.45 sec
+[2022-06-15T16:06:25.985Z] 
+[2022-06-15T16:06:25.985Z] The following tests FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/neo/260/ )
+
+Test exceeded the timeout:
+[2022-06-15T15:54:21.310Z] Running [13/93]: test dcp replica stream all.../usr/bin/timeout: the monitored command dumped core ( http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/neo/260/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/neo/272/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [13/93]: test dcp replica stream all...WARNING: Logging before InitGoogleLogging() is written to STDERR
+[2022-06-15T16:05:02.677Z] W0615 16:03:31.653672 104789 HazptrDomain.h:670] Using the default inline executor for asynchronous reclamation may be susceptible to deadlock if the current thread happens to hold a resource needed by the deleter of a reclaimable object
+[2022-06-15T16:05:02.677Z] /usr/bin/timeout: the monitored command dumped core
+[2022-06-15T16:05:02.677Z] 
+[2022-06-15T16:05:02.677Z] 
+[2022-06-15T16:05:02.677Z] 91% tests passed, 38 tests failed out of 442
+[2022-06-15T16:05:02.677Z] 
+[2022-06-15T16:05:02.677Z] Total Test time (real) = 292.35 sec
+[2022-06-15T16:05:02.677Z] 
+[2022-06-15T16:05:02.677Z] The following tests FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/neo/272/ )
+
+Failure of GoogleTest "CollectionsRbacBucket.BucketAccessScopeSuccess":
+
+<pre>
+[ RUN      ] CollectionsRbacBucket.BucketAccessScopeSuccess
+[2022-06-15T16:01:52.439Z] CRITICAL Breakpad caught a crash (Couchbase version 7.1.2-0000). Writing crash dump to /home/couchbase/jenkins/workspace/kv_engine.linux_neo/build/kv_engine/cluster_37f131/n_0/crash/0d489c28-9a66-41ff-ae60b78d-e92f1a0a.dmp before terminating.
+[2022-06-15T16:01:52.439Z] Stack backtrace of crashed thread:
+[2022-06-15T16:01:52.439Z]    #0  /home/couchbase/jenkins/workspace/kv_engine.linux_neo/build/kv_engine/memcached() [0x400000+0x61bfd7]
+[2022-06-15T16:01:52.439Z]    #1  /home/couchbase/jenkins/workspace/kv_engine.linux_neo/build/kv_engine/memcached() [0x400000+0x61c0a0]
+[2022-06-15T16:01:52.439Z]    #2  /home/couchbase/jenkins/workspace/kv_engine.linux_neo/build/kv_engine/memcached(_ZN15google_breakpad16ExceptionHandler12GenerateDumpEPNS0_12CrashContextE+0x3ea) [0x400000+0x65cf5a]
+[2022-06-15T16:01:52.439Z]    #3  /home/couchbase/jenkins/workspace/kv_engine.linux_neo/build/kv_engine/memcached(_ZN15google_breakpad16ExceptionHandler13SignalHandlerEiP9siginfo_tPv+0xb8) [0x400000+0x65d298]
+[2022-06-15T16:01:52.439Z]    #4  /lib/x86_64-linux-gnu/libpthread.so.0() [0x7fc180727000+0x12980]
+[2022-06-15T16:01:52.439Z]    #5  /home/couchbase/jenkins/workspace/kv_engine.linux_neo/build/kv_engine/memcached() [0x400000+0x21b098]
+[2022-06-15T16:01:52.439Z]    #6  /home/couchbase/jenkins/workspace/kv_engine.linux_neo/build/kv_engine/memcached() [0x400000+0x231da4]
+[2022-06-15T16:01:52.439Z]    #7  /home/couchbase/jenkins/workspace/kv_engine.linux_neo/build/kv_engine/memcached() [0x400000+0x2320ab]
+[2022-06-15T16:01:52.439Z]    #8  /home/couchbase/jenkins/workspace/kv_engine.linux_neo/build/kv_engine/memcached() [0x400000+0x568167]
+[2022-06-15T16:01:52.439Z]    #9  /home/couchbase/jenkins/workspace/kv_engine.linux_neo/build/kv_engine/memcached() [0x400000+0x584e8a]
+[2022-06-15T16:01:52.439Z]    #10 /home/couchbase/jenkins/workspace/kv_engine.linux_neo/build/kv_engine/memcached() [0x400000+0x585130]
+[2022-06-15T16:01:52.439Z]    #11 /home/couchbase/jenkins/workspace/kv_engine.linux_neo/build/kv_engine/memcached() [0x400000+0x57c8ff]
+[2022-06-15T16:01:52.439Z]    #12 /home/couchbase/jenkins/workspace/kv_engine.linux_neo/build/kv_engine/memcached() [0x400000+0x57cca3]
+[2022-06-15T16:01:52.439Z]    #13 /home/couchbase/jenkins/workspace/kv_engine.linux_neo/build/kv_engine/memcached() [0x400000+0x6deca0]
+[2022-06-15T16:01:52.439Z]    #14 /home/couchbase/jenkins/workspace/kv_engine.linux_neo/build/kv_engine/memcached() [0x400000+0x6c9e0a]
+[2022-06-15T16:01:52.439Z]    #15 /home/couchbase/jenkins/workspace/kv_engine.linux_neo/build/kv_engine/memcached() [0x400000+0x6e1c59]
+[2022-06-15T16:01:52.439Z]    #16 /home/couchbase/jenkins/workspace/kv_engine.linux_neo/build/kv_engine/memcached() [0x400000+0x5830b2]
+[2022-06-15T16:01:52.439Z]    #17 /home/couchbase/jenkins/workspace/kv_engine.linux_neo/build/kv_engine/memcached() [0x400000+0x580e7a]
+[2022-06-15T16:01:52.439Z]    #18 /home/couchbase/jenkins/workspace/kv_engine.linux_neo/build/kv_engine/memcached(_ZNSt6thread11_State_implINS_8_InvokerISt5tupleIJZN5folly18NamedThreadFactory9newThreadEONS3_8FunctionIFvvEEEEUlvE_EEEEE6_M_runEv+0x1b) [0x400000+0x5807fd]
+[2022-06-15T16:01:52.439Z]    #19 /opt/gcc-10.2.0/lib64/libstdc++.so.6() [0x7fc17e852000+0xd62f0]
+[2022-06-15T16:01:52.439Z]    #20 /lib/x86_64-linux-gnu/libpthread.so.0() [0x7fc180727000+0x76db]
+[2022-06-15T16:01:52.439Z]    #21 /lib/x86_64-linux-gnu/libc.so.6(clone+0x3f) [0x7fc17deab000+0x12161f]
+[2022-06-15T16:01:52.439Z] Received exception:  DcpPipe::event_callback: got event: 17. wait 5 sec before throwing the exception
+[2022-06-15T16:01:52.439Z] Received exception:  DcpPipe::event_callback: got event: 17. wait 5 sec before throwing the exception
+[2022-06-15T16:01:52.439Z] unknown file: Failure
+[2022-06-15T16:01:52.439Z] C++ exception with description "AsyncSocketException: recv() failed (peer=<uninitialized address>, local=127.0.0.1:45618), type = Internal error, errno = 104 (Connection reset by peer): Connection reset by peer" thrown in SetUp().
+[2022-06-15T16:01:52.439Z] [  FAILED  ] CollectionsRbacBucket.BucketAccessScopeSuccess (516 ms)
+CollectionsRbacBucket.BucketAccessScopeSuccess
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/neo/272/ )
+
+One of more core files found at the end of the build. Data for post-mortem saved to archived_core_dumps.tar.bz2 under "Build Artifacts". ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/neo/272/ )
+
+Test exceeded the timeout:
+[2022-06-15T16:00:37.481Z] Running [13/93]: test dcp replica stream all.../usr/bin/timeout: the monitored command dumped core ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/neo/272/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/neo/281/ : FAILURE
+
+Failure of GoogleTest "CollectionsRbacBucket.BucketAccessCollectionSuccess":
+
+<pre>
+[ RUN      ] CollectionsRbacBucket.BucketAccessCollectionSuccess
+[2022-06-15T16:03:12.081Z] Failed building socket: connect() failed (127.0.0.1 43537): Connection refused
+[2022-06-15T16:03:12.081Z] unknown file: Failure
+[2022-06-15T16:03:12.081Z] C++ exception with description "Failed to connect to: localhost:43537: Connection refused" thrown in SetUp().
+[2022-06-15T16:03:12.081Z] [  FAILED  ] CollectionsRbacBucket.BucketAccessCollectionSuccess (0 ms)
+CollectionsRbacBucket.BucketAccessCollectionSuccess
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/neo/281/ )
+
+One of more core files found at the end of the build. Data for post-mortem saved to archived_core_dumps.tar.bz2 under "Build Artifacts". ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/neo/281/ )
+
+Test exceeded the timeout:
+[2022-06-15T16:02:38.611Z] Running [13/93]: test dcp replica stream all.../usr/bin/timeout: the monitored command dumped core ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/neo/281/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/neo/271/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [13/93]: test dcp replica stream all...WARNING: Logging before InitGoogleLogging() is written to STDERR
+[2022-06-15T16:14:47.446Z] W0615 16:01:04.059168 44550 HazptrDomain.h:670] Using the default inline executor for asynchronous reclamation may be susceptible to deadlock if the current thread happens to hold a resource needed by the deleter of a reclaimable object
+[2022-06-15T16:14:47.446Z] /usr/bin/timeout: the monitored command dumped core
+[2022-06-15T16:14:47.446Z] 
+[2022-06-15T16:14:47.446Z] 
+[2022-06-15T16:14:47.446Z] 92% tests passed, 36 tests failed out of 424
+[2022-06-15T16:14:47.446Z] 
+[2022-06-15T16:14:47.446Z] Total Test time (real) = 961.35 sec
+[2022-06-15T16:14:47.446Z] 
+[2022-06-15T16:14:47.446Z] The following tests FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/neo/271/ )
+
+Failure of GoogleTest "CollectionsRbacBucket.BucketAccessCollectionSuccess":
+
+<pre>
+[ RUN      ] CollectionsRbacBucket.BucketAccessCollectionSuccess
+[2022-06-15T16:02:18.497Z] Received exception: Received exception:  DcpPipe::event_callback: got event: 17. wait 5 sec before throwing the exception
+[2022-06-15T16:02:18.497Z]  DcpPipe::event_callback: got event: 17. wait 5 sec before throwing the exception
+[2022-06-15T16:02:18.497Z] unknown file: Failure
+[2022-06-15T16:02:18.497Z] C++ exception with description "AsyncSocketException: recv() failed (peer=<uninitialized address>, local=127.0.0.1:50112), type = Internal error, errno = 104 (Connection reset by peer): Connection reset by peer" thrown in SetUp().
+[2022-06-15T16:02:18.497Z] [  FAILED  ] CollectionsRbacBucket.BucketAccessCollectionSuccess (182 ms)
+CollectionsRbacBucket.BucketAccessCollectionSuccess
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/neo/271/ )
+
+One of more core files found at the end of the build. Data for post-mortem saved to archived_core_dumps.tar.bz2 under "Build Artifacts". ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/neo/271/ )
+
+Test exceeded the timeout:
+[2022-06-15T15:58:55.158Z] Running [13/93]: test dcp replica stream all.../usr/bin/timeout: the monitored command dumped core ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/neo/271/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/neo/268/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [13/93]: test dcp replica stream all...WARNING: Logging before InitGoogleLogging() is written to STDERR
+[2022-06-15T16:25:38.757Z] W0615 16:11:39.374559 118225 HazptrDomain.h:670] Using the default inline executor for asynchronous reclamation may be susceptible to deadlock if the current thread happens to hold a resource needed by the deleter of a reclaimable object
+[2022-06-15T16:25:38.757Z] 
+[2022-06-15T16:25:38.757Z] 
+[2022-06-15T16:25:38.757Z] 91% tests passed, 36 tests failed out of 416
+[2022-06-15T16:25:38.757Z] 
+[2022-06-15T16:25:38.757Z] Total Test time (real) = 1373.19 sec
+[2022-06-15T16:25:38.757Z] 
+[2022-06-15T16:25:38.757Z] The following tests FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/neo/268/ )
+
+Failure of GoogleTest "CollectionsRbacBucket.BucketAccessCollectionSuccess":
+
+<pre>
+[ RUN      ] CollectionsRbacBucket.BucketAccessCollectionSuccess
+[2022-06-15T16:12:49.317Z] Failed building socket: connect() failed (127.0.0.1 37715): Connection refused
+[2022-06-15T16:12:49.317Z] unknown file: Failure
+[2022-06-15T16:12:49.317Z] C++ exception with description "Failed to connect to: localhost:37715: Connection refused" thrown in SetUp().
+[2022-06-15T16:12:49.317Z] [  FAILED  ] CollectionsRbacBucket.BucketAccessCollectionSuccess (1 ms)
+CollectionsRbacBucket.BucketAccessCollectionSuccess
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/neo/268/ )
+
+ThreadSanitizer issue: lock-order-inversion (potential deadlock) (/opt/gcc-10.2.0/lib64/libtsan.so.0+0x50dfa) in __interceptor_pthread_mutex_lock  ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/neo/268/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/neo/376/ : FAILURE
+
+Failure of GoogleTest "CollectionsRbacBucket.BucketAccessScopeSuccess":
+
+<pre>
+[ RUN      ] CollectionsRbacBucket.BucketAccessScopeSuccess
+[2022-06-15T15:45:38.852Z] Received exception:  DcpPipe::event_callback: got event: 17. wait 5 sec before throwing the exception
+[2022-06-15T15:45:38.852Z] Received exception:  DcpPipe::event_callback: got event: 17. wait 5 sec before throwing the exception
+[2022-06-15T15:45:38.852Z] unknown file: Failure
+[2022-06-15T15:45:38.852Z] C++ exception with description "AsyncSocketException: recv() failed (peer=<uninitialized address>, local=127.0.0.1:56011), type = Internal error, errno = 54 (Connection reset by peer): Connection reset by peer" thrown in SetUp().
+[2022-06-15T15:45:38.852Z] [  FAILED  ] CollectionsRbacBucket.BucketAccessScopeSuccess (5 ms)
+CollectionsRbacBucket.BucketAccessScopeSuccess
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/neo/376/ )
+
+Timeout of a CTest test [2022-06-15T15:48:36.567Z]  50/442 Test #307: ep_testsuite_dcp.full_eviction.magma ........................................................................} ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/neo/376/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-neo/259/ : UNSTABLE
+
+Clang Analyser identified one or more potential bugs - see <a href="clangScanBuildBugs">clangScanBuildBugs</a> ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-neo/259/ )
+
+CMake error: CMakeLists.txt:139 (MESSAGE) ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-neo/259/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-neo/263/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/17234/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/neo/264/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

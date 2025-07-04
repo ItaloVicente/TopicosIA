@@ -1,0 +1,187 @@
+======================================================================================================================
+DESCRIPTION:
+
+RefDirectory.scanRef: Re-use file existence check done in snapshot creation
+
+Return immediately in scanRef if the loose ref was identified as
+missing when a snapshot was attempted for the ref. This will help
+performance of scanRef when the ref is packed but has a corresponding
+empty dir in 'refs/'.
+
+For example, consider the case where we create 50k sharded refs in
+a new namespace called 'new-refs' using an atomic 'BatchRefUpdate'.
+The refs are named like 'refs/new-refs/01/1/1', 'refs/new-refs/01/1/2',
+'refs/new-refs/01/1/3' and so on. After the refs are created, the
+'new-refs' namespace looks like below:
+
+$ find refs/new-refs -type f | wc -l
+0
+
+$ find refs/new-refs -type d | wc -l
+5101
+
+At this point, an 'exactRef' call on each of the 50k refs without
+this change takes ~2.5s, where as with this change it takes ~1.5s.
+
+Change-Id: I926bc41b9ae89a1a792b1b5ec9a17b05271c906b
+Signed-off-by: Kaushik Lingarkar <quic_kaushikl@quicinc.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Kaushik Lingarkar
+Date: 2021-11-29 20:41:42.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2021-11-29 20:41:53.000000000
+Message: 
+Patch Set 1:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/5595/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2021-11-29 20:46:50.000000000
+Message: 
+Patch Set 1: Verified-1
+
+Build Failed 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/5595/ : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2021-11-29 21:29:42.000000000
+Message: 
+Patch Set 1:
+
+LGTM, but you should rebase this series onto origin/stable-5.1 to pick up Iea77024947a34267f008847d81312fe0abadc615. Otherwise the HTTP tests will always fail.
+----------------------------------------------------------------------------------------------------------------------
+Author: Nasser Grainawi
+Date: 2021-11-29 23:37:20.000000000
+Message: 
+Patch Set 1: Code-Review-1
+
+(1 comment)
+Line:1107, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/RefDirectory.java -> I think this could bypass the throw that happens on 1114 since we also get to this case from an IOException.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2021-11-30 08:16:05.000000000
+Message: 
+Patch Set 1:
+
+(2 comments)
+Line:1107, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/RefDirectory.java -> That's true. 1114 seems to handle the case of an existing but inaccessible file; it was added in If4a94217fb5b7cfd4c04d881902f3e86193c7008. I don't quite understand under what conditions this can occur. BTW, see below.
+
+Line:1113, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/RefDirectory.java -> Could be simplified to path.isFile(). No need to query file attributes twice.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2021-12-02 11:08:01.000000000
+Message: 
+Patch Set 1:
+
+(2 comments)
+Line:1107, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/RefDirectory.java -> there are multiple cases where this can happen
+
+- missing file permissions
+- incompatible read vs. read/write open modes
+- filesystem locking
+- temporary lack of resources (e.g. too many open files)
+
+see I03c6f6891de3c343d3d517092eaa75dba282c0cd
+
+Line:1113, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/RefDirectory.java -> yep File.isFile() checks if the file exists and is a normal file
+
+see https://docs.oracle.com/javase/8/docs/api/java/io/File.html#isFile--
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Nasser Grainawi
+Date: 2021-12-02 14:38:44.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:267, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/FileSnapshot.java -> We could save this exception for later inspection/re-throwing? That will add overhead to a lot of FileSnapshots that expect to hit this exception, but maybe that can be offset by skipping currently duplicated work where we probably re-do this existence check?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2021-12-02 15:26:59.000000000
+Message: 
+Patch Set 1:
+
+(2 comments)
+Line:267, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/FileSnapshot.java -> I don't understand what we would gain by saving this exception, RefDirectory.scanRef line 1111 tries to read the loose ref at a different time and anything could happen in between.
+
+Line:1107, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/RefDirectory.java -> looks like there are 2 cases:
+
+1. the file exists when line 1106 is executed, reading from it in 1111 can fail for any of the reasons mentioned above or if the file disappeared until we reach line 1111, due to a race.
+
+2. the file does not exist when line 1106 is executed but could exist again in line 1111, due to a race, if we wouldn't return null in line 1107.
+
+I think case 2 shouldn't cause new issues since the same problem could occur without this change if the timing of the race is slightly different
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Nasser Grainawi
+Date: 2021-12-02 16:30:17.000000000
+Message: 
+Patch Set 1:
+
+(2 comments)
+Line:267, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/FileSnapshot.java -> We could use it to address the case #3 I added to your comment on RefDirectory.
+
+Line:1107, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/RefDirectory.java -> > looks like there are 2 cases:
+> 
+> 1. the file exists when line 1106 is executed, reading from it in 1111 can fail for any of the reasons mentioned above or if the file disappeared until we reach line 1111, due to a race.
+
+I'm not worried about the race because that's not new behavior.
+
+> 
+> 2. the file does not exist when line 1106 is executed but could exist again in line 1111, due to a race, if we wouldn't return null in line 1107.
+> 
+> I think case 2 shouldn't cause new issues since the same problem could occur without this change if the timing of the race is slightly different
+
+Case 3 is the issue:
+
+3. the file fails for the reasons above when line 1106 is executed, but we return null on 1107 instead of re-throwing the exception like we would on 1114.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2021-12-02 23:11:33.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:1107, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/RefDirectory.java -> In the FileSnapshot constructor in line 266 we read the file's attributes here in line 1111 we read the file content. At least on Linux according to [1] no permissions on the file are needed to read the file attributes using stat but read permission is required to read the file content. Hence I am not sure if it would be correct to throw the saved IOException which might have occurred in FileSnapshot() and throw it here. If missing file permissions are causing FileNotFoundException in 1112 then this wouldn't cause an IOException in FileSnapshot().
+
+[1] https://man7.org/linux/man-pages/man2/lstat.2.html
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Nasser Grainawi
+Date: 2021-12-03 17:17:05.000000000
+Message: 
+Patch Set 1:
+
+(3 comments)
+Line:267, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/FileSnapshot.java -> Resolving this since I had a bad assumption around these IOExceptions.
+
+Line:1107, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/RefDirectory.java -> > In the FileSnapshot constructor in line 266 we read the file's attributes here in line 1111 we read the file content. At least on Linux according to [1] no permissions on the file are needed to read the file attributes using stat but read permission is required to read the file content. Hence I am not sure if it would be correct to throw the saved IOException which might have occurred in FileSnapshot() and throw it here. If missing file permissions are causing FileNotFoundException in 1112 then this wouldn't cause an IOException in FileSnapshot().
+
+Thanks for looking into that, I didn't have the correct understanding of it.
+
+I think this means my original concern isn't valid? It looks like the only cases where we would end up on line 1107 are the same as the cases where we'd end up on 1116. Seeing that I03c6f6891de only touched paths where we actually tried to read from the file seems to confirm that further. Is my understanding correct?
+
+Line:1113, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/RefDirectory.java -> Done in https://git.eclipse.org/r/c/jgit/jgit/+/188513
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Nasser Grainawi
+Date: 2021-12-03 17:17:17.000000000
+Message: 
+Patch Set 1: -Code-Review
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2021-12-03 22:21:34.000000000
+MISMATCHED INLINE COMMENT
+Line:1107, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/RefDirectory.java -> Ack
+----------------------------------------------------------------------------------------------------------------------

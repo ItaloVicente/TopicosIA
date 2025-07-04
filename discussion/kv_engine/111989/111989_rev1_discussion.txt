@@ -1,0 +1,95 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-35073: Release StreamContainer lock before calling Stream::setDead
+
+TSan found lock inversion as DcpProducer::closeAllStreams() holds
+`StreamContainer->rlock()` and then acquires `vb->getStateLock()`
+whereas `VBucket::set()` acquires them in the opposite order.
+
+Release the stream container lock before calling `Stream::setDead()` to
+avoid holding both in the `closeAllStreams()` path.
+
+Also, preemptively apply the same change to `setStreamDeadStatus`
+though TSan has not identified inversion in this case.
+
+TSan report:
+[ RUN      ] DurabilityTest.MB34780
+==================
+WARNING: ThreadSanitizer: lock-order-inversion (potential deadlock) (pid=16422)
+  Cycle in lock order graph: M3987 (0x7b68000308f8) => M225878274331574312 (0x000000000000) => M3987
+
+  Mutex M225878274331574312 acquired here while holding mutex M3987 in thread T7:
+    #0 pthread_rwlock_rdlock <null> (libtsan.so.0+0x00000002953b)
+    #1 cb_rw_reader_enter(pthread_rwlock_t*) .../platform/src/cb_pthreads.cc:195 (libplatform_so.so.0.1.0+0x000000009cfa)
+    #2 cb::RWLock::readerLock() .../platform/include/platform/rwlock.h:87 (ep.so+0x0000000f423a)
+    #3 cb::RWLock::lock_shared() .../platform/include/platform/rwlock.h:67 (ep.so+0x00000012f578)
+    #4 std::shared_lock<cb::RWLock>::shared_lock(cb::RWLock&) /usr/local/include/c++/7.3.0/shared_mutex:553 (ep.so+0x00000012f578)
+    #5 StreamContainer<std::shared_ptr<Stream> >::ReadLockedHandle::ReadLockedHandle(StreamContainer<std::shared_ptr<Stream> > const&) .../kv_engine/engines/ep/src/dcp/stream_container.h:213 (ep.so+0x00000012f578)
+    #6 StreamContainer<std::shared_ptr<Stream> >::rlock() const .../kv_engine/engines/ep/src/dcp/stream_container.h:273 (ep.so+0x000000122ea7)
+    #7 DcpProducer::notifySeqnoAvailable(Vbid, unsigned long) .../kv_engine/engines/ep/src/dcp/producer.cc:1312 (ep.so+0x000000122ea7)
+    #8 DcpConnMap::notifyVBConnections(Vbid, unsigned long) .../kv_engine/engines/ep/src/dcp/dcpconnmap.cc:424 (ep.so+0x0000000fa071)
+    #9 KVBucket::notifyReplication(Vbid, long) .../kv_engine/engines/ep/src/kv_bucket.cc:2570 (ep.so+0x000000210711)
+    #10 EPBucket::notifyNewSeqno(Vbid, VBNotifyCtx const&) .../kv_engine/engines/ep/src/ep_bucket.cc:1327 (ep.so+0x00000016232b)
+    #11 NotifyNewSeqnoCB::callback(Vbid const&, VBNotifyCtx const&) .../kv_engine/engines/ep/src/kv_bucket.h:837 (ep.so+0x0000002267d9)
+    #12 VBucket::notifyNewSeqno(VBNotifyCtx const&) .../kv_engine/engines/ep/src/vbucket.cc:3631 (ep.so+0x000000264871)
+    #13 VBucket::set() .../kv_engine/engines/ep/src/vbucket.cc:1568 (ep.so+0x00000026c768)
+    #14 KVBucket::set() .../kv_engine/engines/ep/src/kv_bucket.cc:692 (ep.so+0x000000220856)
+    #15 EventuallyPersistentEngine::storeIfInner() .../kv_engine/engines/ep/src/ep_engine.cc:2440 (ep.so+0x000000181fef)
+
+  Mutex M3987 previously acquired by the same thread here:
+    #0 AnnotateRWLockAcquired <null> (libtsan.so.0+0x00000005b63d)
+    #1 folly::detail::annotate_rwlock_acquired_impl(void const volatile*, folly::annotate_rwlock_level, char const*, int) .../folly/follytsan-prefix/src/follytsan/folly/synchronization/SanitizeThread.cpp:91 (memcached+0x0000006463de)
+    #2 annotate_rwlock_acquired .../build/tlm/deps/folly.exploded/include/folly/synchronization/SanitizeThread.h:99 (ep.so+0x000000220340)
+    #3 folly::SharedMutexImpl<false, void, std::atomic, false, true>::annotateAcquired(folly::annotate_rwlock_level) .../build/tlm/deps/folly.exploded/include/folly/SharedMutex.h:696 (ep.so+0x000000220340)
+    #4 folly::SharedMutexImpl<false, void, std::atomic, false, true>::lock_shared(folly::SharedMutexToken&) .../build/tlm/deps/folly.exploded/include/folly/SharedMutex.h:376 (ep.so+0x000000220340)
+    #5 folly::SharedMutexImpl<false, void, std::atomic, false, true>::ReadHolder::ReadHolder(folly::SharedMutexImpl<false, void, std::atomic, false, true> const&) .../build/tlm/deps/folly.exploded/include/folly/SharedMutex.h:1315 (ep.so+0x000000220340)
+    #6 KVBucket::set() .../kv_engine/engines/ep/src/kv_bucket.cc:659 (ep.so+0x000000220340)
+    #7 EventuallyPersistentEngine::storeIfInner() .../kv_engine/engines/ep/src/ep_engine.cc:2440 (ep.so+0x000000181fef)
+
+  Mutex M3987 acquired here while holding mutex M225878274331574312 in thread T5:
+    #0 AnnotateRWLockAcquired <null> (libtsan.so.0+0x00000005b63d)
+    #1 folly::detail::annotate_rwlock_acquired_impl(void const volatile*, folly::annotate_rwlock_level, char const*, int) .../folly/follytsan-prefix/src/follytsan/folly/synchronization/SanitizeThread.cpp:91 (memcached+0x0000006463de)
+    #2 annotate_rwlock_acquired .../build/tlm/deps/folly.exploded/include/folly/synchronization/SanitizeThread.h:99 (ep.so+0x0000000bb626)
+    #3 folly::SharedMutexImpl<false, void, std::atomic, false, true>::annotateAcquired(folly::annotate_rwlock_level) .../build/tlm/deps/folly.exploded/include/folly/SharedMutex.h:696 (ep.so+0x0000000bb626)
+    #4 folly::SharedMutexImpl<false, void, std::atomic, false, true>::lock_shared(folly::SharedMutexToken&) .../build/tlm/deps/folly.exploded/include/folly/SharedMutex.h:376 (ep.so+0x0000000bb626)
+    #5 folly::SharedMutexImpl<false, void, std::atomic, false, true>::ReadHolder::ReadHolder(folly::SharedMutexImpl<false, void, std::atomic, false, true> const&) .../build/tlm/deps/folly.exploded/include/folly/SharedMutex.h:1315 (ep.so+0x0000000bb626)
+    #6 ActiveStream::setDead(end_stream_status_t) .../kv_engine/engines/ep/src/dcp/active_stream.cc:1181 (ep.so+0x0000000bb626)
+    #7 operator() .../kv_engine/engines/ep/src/dcp/producer.cc:1383 (ep.so+0x0000001257d1)
+    #8 for_each<...> /usr/local/include/c++/7.3.0/bits/stl_algo.h:3884 (ep.so+0x0000001257d1)
+    #9 DcpProducer::closeAllStreams() .../kv_engine/engines/ep/src/dcp/producer.cc:1377 (ep.so+0x000000125c00)
+
+  Mutex M225878274331574312 previously acquired by the same thread here:
+    #0 pthread_rwlock_wrlock <null> (libtsan.so.0+0x0000000297eb)
+    #1 cb_rw_writer_enter(pthread_rwlock_t*) .../platform/src/cb_pthreads.cc:217 (libplatform_so.so.0.1.0+0x000000009e80)
+    #2 cb::RWLock::writerLock() .../platform/include/platform/rwlock.h:103 (ep.so+0x000000125597)
+    #3 cb::RWLock::lock() .../platform/include/platform/rwlock.h:77 (ep.so+0x000000125597)
+    #4 std::unique_lock<cb::RWLock>::lock() /usr/local/include/c++/7.3.0/bits/std_mutex.h:267 (ep.so+0x000000125597)
+    #5 std::unique_lock<cb::RWLock>::unique_lock(cb::RWLock&) /usr/local/include/c++/7.3.0/bits/std_mutex.h:197 (ep.so+0x000000125597)
+    #6 StreamContainer<std::shared_ptr<Stream> >::WriteLockedHandle::WriteLockedHandle(StreamContainer<std::shared_ptr<Stream> >&) .../kv_engine/engines/ep/src/dcp/stream_container.h:237 (ep.so+0x000000125597)
+    #7 StreamContainer<std::shared_ptr<Stream> >::wlock() .../kv_engine/engines/ep/src/dcp/stream_container.h:277 (ep.so+0x000000125597)
+    #8 operator() .../kv_engine/engines/ep/src/dcp/producer.cc:1381 (ep.so+0x000000125597)
+    #9 for_each<...> /usr/local/include/c++/7.3.0/bits/stl_algo.h:3884 (ep.so+0x000000125597)
+    #10 DcpProducer::closeAllStreams() .../kv_engine/engines/ep/src/dcp/producer.cc:1377 (ep.so+0x000000125c00)
+
+Change-Id: Icc15e74e80d7f1926ce6c75bbdd8aa1c43f5ca2c
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: James H
+Date: 2019-07-15 15:47:16.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-07-15 15:50:03.000000000
+Message: 
+Patch Set 1: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/5680/ : ABORTED
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/5680/ )
+----------------------------------------------------------------------------------------------------------------------

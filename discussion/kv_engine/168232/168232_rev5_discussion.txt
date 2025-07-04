@@ -1,0 +1,234 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-50110: Reset CheckpointMemRecoveryTask to SNOOZED only at return
+
+Currently the task is set to SNOOZED at function's prologue.
+The consequence is that the task runs in that state, and any further
+attempt of waking up the task would be successful even when the task is
+already running.
+That causes unnecessary over-scheduling. Issue introduced at
+https://review.couchbase.org/c/kv_engine/+/165623.
+
+Change-Id: Ia125b36db35ec97f315121e3328c7eeca623b45e
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2022-01-05 16:17:05.000000000
+Message: 
+Uploaded patch set 5: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-01-05 16:45:05.000000000
+Message: 
+Patch Set 5: Code-Review-1
+
+Can we add a test for this? Perhaps some test hook which attempts to re-schedule when it is already running?
+
+Note also we have the potential for a lost wakeup here still - say if one attempted to wake it just before we set the status to Snoozed (but the task has otherwise finished). I think we need to add an atomic flag like BgFetcher.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2022-01-10 13:08:22.000000000
+Message: 
+Patch Set 5:
+
+> Patch Set 5: Code-Review-1
+> 
+> Can we add a test for this? Perhaps some test hook which attempts to re-schedule when it is already running?
+> 
+> Note also we have the potential for a lost wakeup here still - say if one attempted to wake it just before we set the status to Snoozed (but the task has otherwise finished). I think we need to add an atomic flag like BgFetcher.
+
+Sure on the test.
+
+On the potential wakeup lost, the task state itself is an atomic flag, so that seems already be giving us the semantic that we want here?
+
+Not that this is different than the BGFetcher.
+The BGFetcher 'pendingFetch' flag is used for signaling that a new pending request was added to the queue. Then the task does:
+
+bool BgFetcher::run(GlobalTask *task) {
+    ..
+    task->snooze(INT_MAX);
+    pendingFetch.store(false);
+
+    <process queued requests>
+    ..
+}
+
+One important point is that a BGFetcher's run result is discrete and deterministic - ie request processed / not-processed. Essentially the 'pendingFetch' flag is synchronizing adding/removing to/from the queue, and it ensures that another run is scheduled if some pending request is queued while the task is running.
+Note that the logic isn't perfect as it doesn't prevents unnecessary runs. Another run might be scheduled unnecessarily if the current run picks up all the latest entries in the queue.
+
+Now with regard to Checkpoint Mem Recovery here.
+
+First (same as for the BGFetcher), an equivalent 'pendingRun' wouldn't prevent unnecessary schedules, eg:
+1. Task runs and sets pendingRun=false
+2. Before (1) manages to recover enough memory, the frontend schedules another run -> pendingRun=true
+3. Run (1) frees up all the CM memory
+4. The following run schedules at (2) is unnecessarily performed.
+
+You are right on that, with the current fix, the opposite might happen:
+1. Task runs with state:Running
+2. Before (1) manages to set state:Snoozed, the frontend detects high CM memory and tries to schedule another run -> that fails as still state:Running
+3. Run (1) doesn't manage to free-up all the necessary CM memory
+4. The wakeup attempt from (2) is lost.
+
+That seems less of a problem though.
+The mem recovery approach is "optimistic", ie we try to intercept the need of memory recovery as soon as the condition is verified, but in the worst case the operation is just delayed. Eg imagine during a load, we can miss a run at write1 but write2 will probably manage to schedule the task.
+A possible solution seems checking within the task itself (in the prologue of the run() function) if mem recovery is still necessary, and setting the task to re-run itself immediately (eg, snooze(0)).
+
+Collateral Note: The usage of taskState:Snoozed in BGFetcher is still unclear to me.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2022-01-10 13:18:38.000000000
+Message: 
+Patch Set 5:
+
+> Patch Set 5:
+> 
+> > Patch Set 5: Code-Review-1
+> > 
+> > Can we add a test for this? Perhaps some test hook which attempts to re-schedule when it is already running?
+> > 
+> > Note also we have the potential for a lost wakeup here still - say if one attempted to wake it just before we set the status to Snoozed (but the task has otherwise finished). I think we need to add an atomic flag like BgFetcher.
+> 
+> Sure on the test.
+> 
+> On the potential wakeup lost, the task state itself is an atomic flag, so that seems already be giving us the semantic that we want here?
+> 
+> Not that this is different than the BGFetcher.
+> The BGFetcher 'pendingFetch' flag is used for signaling that a new pending request was added to the queue. Then the task does:
+> 
+> bool BgFetcher::run(GlobalTask *task) {
+>     ..
+>     task->snooze(INT_MAX);
+>     pendingFetch.store(false);
+> 
+>     <process queued requests>
+>     ..
+> }
+> 
+> One important point is that a BGFetcher's run result is discrete and deterministic - ie request processed / not-processed. Essentially the 'pendingFetch' flag is synchronizing adding/removing to/from the queue, and it ensures that another run is scheduled if some pending request is queued while the task is running.
+> Note that the logic isn't perfect as it doesn't prevents unnecessary runs. Another run might be scheduled unnecessarily if the current run picks up all the latest entries in the queue.
+> 
+> Now with regard to Checkpoint Mem Recovery here.
+> 
+> First (same as for the BGFetcher), an equivalent 'pendingRun' wouldn't prevent unnecessary schedules, eg:
+> 1. Task runs and sets pendingRun=false
+> 2. Before (1) manages to recover enough memory, the frontend schedules another run -> pendingRun=true
+> 3. Run (1) frees up all the CM memory
+> 4. The following run schedules at (2) is unnecessarily performed.
+> 
+> You are right on that, with the current fix, the opposite might happen:
+> 1. Task runs with state:Running
+> 2. Before (1) manages to set state:Snoozed, the frontend detects high CM memory and tries to schedule another run -> that fails as still state:Running
+> 3. Run (1) doesn't manage to free-up all the necessary CM memory
+> 4. The wakeup attempt from (2) is lost.
+> 
+> That seems less of a problem though.
+> The mem recovery approach is "optimistic", ie we try to intercept the need of memory recovery as soon as the condition is verified, but in the worst case the operation is just delayed. Eg imagine during a load, we can miss a run at write1 but write2 will probably manage to schedule the task.
+> A possible solution seems checking within the task itself (in the prologue of the run() function) if mem recovery is still necessary, and setting the task to re-run itself immediately (eg, snooze(0)).
+> 
+> Collateral Note: The usage of taskState:Snoozed in BGFetcher is still unclear to me.
+
+So let me summarize:
+1. A new flag (like the one used in the BGFetcher) would prevent losing wake-ups but it wouldn't prevent unnecessary runs.
+2. We can prevent losing wake-ups by
+   run() {
+     <state:Running>
+     <process>
+     <state:Snoozed>
+     <verify mem state and run again immediately if necessary>
+   }
+
+That doesn't require any additional flag logic.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-01-10 13:48:50.000000000
+Message: 
+Patch Set 5:
+
+<snip>
+
+> > 
+> > Collateral Note: The usage of taskState:Snoozed in BGFetcher is still unclear to me.
+>
+
+So the basic idea is that the run() method just runs the task once, and doesn't re-wake it[1] - we rely on the wakeUpTaskIfSnoozed() method (normally called from a front-end thread) to perform any waking
+
+The intent here is twofold:
+- firstly we simplify and separate concerns - run() just has to worry about running the task once, with no extra "re-check conditions" logic.
+- We avoid lost wakeups if wakeup occurred at the "wrong" time in the sequence. As you point out below we can wake up unnecessarily; but that's better than the opposite.
+
+([1]: I know there's an exception to this if the bucket hasn't been created yet at line 145; but that's not part of the "normal" operation of the BgFetcher).
+
+> So let me summarize:
+> 1. A new flag (like the one used in the BGFetcher) would prevent losing wake-ups but it wouldn't prevent unnecessary runs.
+> 2. We can prevent losing wake-ups by
+>    run() {
+>      <state:Running>
+>      <process>
+>      <state:Snoozed>
+>      <verify mem state and run again immediately if necessary>
+>    }
+> 
+> That doesn't require any additional flag logic.
+
+So I agree that in general with an asychronous, non-instantaneous task (memory recovery) you either suffer from a lost wakeup, or an extra wakeup (similar to distributed systems "at-least once" or "at most once" semantics).
+
+For these kinds of workloads I think the lost-wakeup case is worse, as in theory one could never run the task again (if no other trigger came in), leaving us in the "bad" case of too much memory (or in the case of BGFetch, never fetching something).
+
+I think relying on the "Running" / "Snoozed" state to determine if something needs waking up or not is not ideal, for a couple of reasons:
+
+1. Because of the need for the extra "run again?" check - which feels overly complex (and inefficient in the common-case where there hasn't been another wakeup request).
+2. Because it is inconsistent with other tasks (e.g. BGFetcher) - I would prefer we have a single method (if possible) to handle these kinds of periodic, "poke to run" Tasks.
+
+As such, I'd prefer if we structure similar to BGfetcher.
+
+(Ideally we'd have a sub-class of GlobalTask or similar which encapsulates this logic - for example similar to VBNotifiableTask, except per-Bucket and not per VBucket; so we wouldn't keep having to re-implement this tricky logic etch time).
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2022-01-11 15:56:47.000000000
+Message: 
+Patch Set 5:
+
+> For these kinds of workloads I think the lost-wakeup case is worse
+
++1 - especially given the task checks if recovery is needed or not before doing any heavy lifting, one extra run doesn't seem too costly?
+
+> 2. Because it is inconsistent with other tasks (e.g. BGFetcher) - I would prefer we have a single method (if possible) to handle these kinds of periodic, "poke to run" Tasks.
+
+For a couple of other examples, the active stream checkpoint processor, pager, item freq decayer and durability completion task all use a notified flag and prefer a potentially unnecessary run over a potentially missed notification.
+
+> (Ideally we'd have a sub-class of GlobalTask or similar which encapsulates this logic - for example similar to VBNotifiableTask, except per-Bucket and not per VBucket; so we wouldn't keep having to re-implement this tricky logic etch time).
+
++1 again - Might even be nice to pull that out of VBNotifiableTask as a parent class, so GlobalTask -> NotifiableTask -> VBNotifiableTask ?
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2022-01-11 16:59:15.000000000
+Message: 
+Patch Set 5:
+
+> Patch Set 5:
+> 
+> > For these kinds of workloads I think the lost-wakeup case is worse
+> 
+> +1 - especially given the task checks if recovery is needed or not before doing any heavy lifting, one extra run doesn't seem too costly?
+> 
+> > 2. Because it is inconsistent with other tasks (e.g. BGFetcher) - I would prefer we have a single method (if possible) to handle these kinds of periodic, "poke to run" Tasks.
+> 
+> For a couple of other examples, the active stream checkpoint processor, pager, item freq decayer and durability completion task all use a notified flag and prefer a potentially unnecessary run over a potentially missed notification.
+> 
+> > (Ideally we'd have a sub-class of GlobalTask or similar which encapsulates this logic - for example similar to VBNotifiableTask, except per-Bucket and not per VBucket; so we wouldn't keep having to re-implement this tricky logic etch time).
+> 
+> +1 again - Might even be nice to pull that out of VBNotifiableTask as a parent class, so GlobalTask -> NotifiableTask -> VBNotifiableTask ?
+
+I'm already on a GlobalTask->NotifiableTask, but no relation with VBNotifiableTask
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2022-01-18 13:38:09.000000000
+Message: 
+Abandoned
+
+Replaced by https://review.couchbase.org/c/kv_engine/+/168594
+----------------------------------------------------------------------------------------------------------------------

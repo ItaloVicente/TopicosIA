@@ -1,0 +1,148 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-35937: Don't re-check an already authorized command
+
+1) A command passed authorization and is executed, e.g. a sync-write ADD
+2) The command returns "would block" (and has set engine-specific)
+3) some time passes and ns_server disconnects
+4) The engine calls notifyIOComplete
+5) The command resumes and is authorized, this time because ns_server is
+   down authorization fails and the command returns "no access".
+6) ns_server resumes
+7) A new sync-write ADD passes authorization and is executed, it
+   observes that the engine-specific is set and "short-cuts" the actual
+   ADD, it returns success.
+
+In this scenario we have now returned success for the ADD at step 7, yet
+the key has not been stored.
+
+To address this issue, update the Cookie object so it can track when
+authorization was successful, allowing the resumption of the command
+to skip authorization and complete within the engine.
+
+Change-Id: I8e077786b8aadfead849d4f72b8c93450c8dd437
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jim Walker
+Date: 2019-09-16 15:28:14.000000000
+Message: 
+Uploaded patch set 4.
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2019-09-16 15:42:08.000000000
+Message: 
+Patch Set 4:
+
+> > I can't find a suitable test-suite which would allow coverage
+ > here?
+ > > I would need to be able to  drive the memcached statemachine
+ > > against a real engine.
+ > 
+ > Hmm. Could we use ewouldblock_engine to inject an EWOULDBLOCK
+ > status code at the "wrong" time  - or if not a more custom
+ > ewouldblock mode?
+
+I still need to be able to step the state-machine so I could reliably break priv checking
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-09-16 15:45:24.000000000
+Message: 
+Patch Set 4:
+
+> > > I can't find a suitable test-suite which would allow coverage
+ > > here?
+ > > > I would need to be able to  drive the memcached statemachine
+ > > > against a real engine.
+ > >
+ > > Hmm. Could we use ewouldblock_engine to inject an EWOULDBLOCK
+ > > status code at the "wrong" time  - or if not a more custom
+ > > ewouldblock mode?
+ > 
+ > I still need to be able to step the state-machine so I could
+ > reliably break priv checking
+
+Could we customise ewouldblock_engine to say callback into the server (daemon) in the middle of a given call (e.g. bucket_store) to sinumate the disconnect / auth invalidate? That would allow us to trigger a change in the middle of the state machine.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-09-16 15:58:51.000000000
+Message: 
+Patch Set 4: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/23313/ : FAILURE
+
+Failure of a GoogleTest test:
+
+SslCertTest.LoginEnabledWithCert (13 ms) ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/23313/ )
+
+Failure of a CTest test  85/184 Test  #86: memcached_testapp.default.SslCertTest ........................................ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/23313/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/22340/ : FAILURE
+
+Failure of a GoogleTest test:
+
+SslCertTest.LoginEnabledWithCert (5 ms) ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/22340/ )
+
+Failure of a CTest test  98/200 Test #100: memcached_testapp.default.SslCertTest ........................................ ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/22340/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/4011/ : FAILURE
+
+Failure of a GoogleTest test:
+
+SslCertTest.LoginEnabledWithCert (5 ms) ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/4011/ )
+
+Failure of a CTest test  98/200 Test #100: memcached_testapp.default.SslCertTest ........................................ ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/4011/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/14251/ : FAILURE
+
+Failure of a GoogleTest test:
+
+SslCertTest.LoginEnabledWithCert (14 ms) ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/14251/ )
+
+Failure of a CTest test  77/179 Test  #79: memcached_testapp.default.SslCertTest ........................................ ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/14251/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/6963/ : FAILURE
+
+Failure of a CTest test [2019-09-16T15:47:22.242Z]  79/181 Test  #81: memcached_testapp.default.SslCertTest ........................................ ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/6963/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/19907/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/20933/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/13201/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2019-09-17 07:56:23.000000000
+Message: 
+Patch Set 4:
+
+> > > > I can't find a suitable test-suite which would allow coverage
+ > > > here?
+ > > > > I would need to be able to  drive the memcached statemachine
+ > > > > against a real engine.
+ > > >
+ > > > Hmm. Could we use ewouldblock_engine to inject an EWOULDBLOCK
+ > > > status code at the "wrong" time  - or if not a more custom
+ > > > ewouldblock mode?
+ > >
+ > > I still need to be able to step the state-machine so I could
+ > > reliably break priv checking
+ > 
+ > Could we customise ewouldblock_engine to say callback into the
+ > server (daemon) in the middle of a given call (e.g. bucket_store)
+ > to sinumate the disconnect / auth invalidate? That would allow us
+ > to trigger a change in the middle of the state machine.
+
+I'll take a look, what can't be done with a dose of std::bind std::function
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2019-09-17 08:27:12.000000000
+Message: 
+Patch Set 4: Code-Review-1
+
+It needs to be reset in Cookie::reset and Cookie::initialize
+----------------------------------------------------------------------------------------------------------------------

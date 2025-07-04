@@ -1,0 +1,153 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-22523: Return TMPFAIL in the case of FULL_EVICTION
+
+Return ENGINE_TMPFAIL in the case of FULL_EVICTION as it should
+always be possible to evict items from memory in order to
+create space for incoming items
+
+Change-Id: I69e2f1fb2978d547f56b5134bff7a8ed051abc5c
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Sriram Ganesan
+Date: 2017-06-19 23:10:11.000000000
+Message: 
+Uploaded patch set 9.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2017-06-19 23:42:11.000000000
+Message: 
+Patch Set 9: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/731/ : FAILURE
+
+Timeout of a CTest test 84/84 Test #34: ep_perfsuite.value_eviction ....................} ( http://cv.jenkins.couchbase.com//job/kv_engine-threadsanitizer-master/731/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master/716/ : FAILURE
+
+Timeout of a CTest test 83/83 Test #33: ep_perfsuite.value_eviction ....................} ( http://cv.jenkins.couchbase.com//job/kv_engine-addresssanitizer-master/716/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/650/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/732/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/710/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Manu Dhundi
+Date: 2017-06-19 23:55:57.000000000
+Message: 
+Patch Set 9: Code-Review-1
+
+(1 comment)
+Line:3062, engines/ep/src/ep_engine.cc -> While this might mask the issue causing the hard oom, it also creates a possibility of returning temp oom forever.
+Say in FULL_EVICTION, haveEvidenceWeCanFreeMemory is false due to high memOverhead and that memOverhead never comes down, we will return temp oom forever.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Sriram Ganesan
+Date: 2017-06-20 01:01:24.000000000
+Message: 
+Patch Set 9:
+
+(1 comment)
+Line:3062, engines/ep/src/ep_engine.cc -> Good point. The memOverhead (if I understand it correctly) is the sizeof the structures allocated inside the engine, namely KVBucket, Checkpoint and queued_item (checkpoint item). Given that we are returning TMPFAIL for all new mutations, no new mutations are being added to the checkpoint. The checkpoint remover task will end up clearing up the checkpoints and releasing more memory, thus bringing down the memOverhead. So, I believe that TMPFAIL will be returned until new mutations can be added.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2017-06-20 01:09:57.000000000
+Message: 
+Patch Set 9: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master/717/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/650/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/732/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/710/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/732/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Manu Dhundi
+Date: 2017-06-20 18:55:24.000000000
+Message: 
+Patch Set 9:
+
+(1 comment)
+Line:3062, engines/ep/src/ep_engine.cc -> If I understand correctly, the bug you are trying to fix is: a scenario in FULL EVICTION mode when transiently the memory usage was high (say memOverhead) but we still returned ENOMEM. This should be fixed by either not considering the transient high memory usage for returning ENOMEM or returning ETMPFAIL for transient high memory usage and checking again.
+
+But with the fix, 
+(i) we now always assume that the high memory usage in full eviction mode is transient and hope it will be reduced in future and hence return ETMPFAIL always. What if high memOverhead is a steady state condition (bad hash table sizing or failure in disk flush of checkpoint items or some other bug) and not transient ? 
+(ii) we do not wakeup item pager or checkpoint remover and then return ETMPFAIL.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Sriram Ganesan
+Date: 2017-06-20 19:47:56.000000000
+Message: 
+Patch Set 9:
+
+(1 comment)
+Line:3062, engines/ep/src/ep_engine.cc -> It is certainly possible that there could be other bad scenarios that could result in continous TMPFAIL returns. But, expected behaviour in the case of FULL_EVICTION is that there is always memory that can be freed in order to make room for adding more items. So, under such circumstances, returning TMPFAIL makes sense. If the root cause happens to be poor hash table sizing or persistence failures, then that specific issue needs to be addressed. If you have any suggestions on what would be a better way to solve this, I would be happy to consider that. My understanding is that the checkpoint remover task is a daemon task that wakes up at specific intervals. Not sure, if waking up is absolutely required. Also, a note to reviewers. I am trying to keep this fix minimal given that we are a much later stage in the release.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Manu Dhundi
+Date: 2017-06-20 20:54:50.000000000
+Message: 
+Patch Set 9:
+
+(1 comment)
+Line:3062, engines/ep/src/ep_engine.cc -> (i) "expected behaviour in the case of FULL_EVICTION is that there is always memory that can be freed in order to make room for adding more items" --> not always true, hence we track memOverhead. Before this change we assumed, memOverhead will never come down, now we are going to other extreme that memOverhead will surely come down.
+(ii) Waking up is better, because we do not have to wait until the next time the daemon task is run.
+
+Alternative approaches:
+(a) Return ETMPFAIL until certain number of times or for a duration or until all checkpoint remover task/ ht pager are run. Then return ENOMEM
+(b) Determine if there is checkpoint overhead to be reduced or hashtable overhead to be reduced and then decide whether to return ETMPFAIL vs ENOMEM.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Sriram Ganesan
+Date: 2017-06-20 21:48:12.000000000
+Message: 
+Patch Set 9:
+
+(1 comment)
+Line:3062, engines/ep/src/ep_engine.cc -> As previously stated in my comments, I am trying to keep the change minimal given the release deadlines we are trying to meet. Not sure the exact reasons why that specific stat was added, but it does track overhead from allocating the checkpoint structures, which addresses the checkpoint overhead in (b). I am sure we can track every single task and track every possible stat to choose between TMPFAIL/ENOMEM but then the fix is going to be complicated. I would prefer to not complicate this more than what it is now. Checkpoint remover can be woken up right away. Don't think that should be a problem.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Manu Dhundi
+Date: 2017-06-21 15:55:28.000000000
+Message: 
+Patch Set 9:
+
+(1 comment)
+Line:3062, engines/ep/src/ep_engine.cc -> Ok sounds good.. We go with the minimal changes that are good now before the release and later on revisit this
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2017-06-21 14:06:02.000000000
+MISMATCHED INLINE COMMENT
+Line:3062, engines/ep/src/ep_engine.cc -> There's been a number of good points, but I think ultimately we need to make a compromise here. Let me try to summarise my take:
+
+Background:
+
+1. This function is trying to accurately return either ETMPFAIL or ENOMEM based on if the current memory usage level is temporary or not.
+2. This is a Hard Problem, given that we are trying to predict what will happen in future (after pagers runs) running in a complex system.
+3. The issue only affects Full Eviction - in the sense that Full Eviction ideally shouldn't ever return ETMPFAIL given we should always be able to evict items.
+4. We are very close to Beta, and hence we don't have much time to experiment with potentially risky / speculative changes.
+
+Issue at hand:
+
+The linked MB describes a situation where we returned ENOMEM (and caused an application to give up) when we should have returned ETMPFAIL. The challenge therefore is to fix this issue, with 1..4 in mind.
+
+I would argue that it's better for us to incorrectly return ETMPFAIL when we "should" have returned ENOMEM, compared to incorrectly returning ENOMEM when we should have returned ETMPFAIL. Given (2), any predictor could potentially get the answer wrong, particulary without any major refactoring - i.e. (4). Therefore I'm personally ok with the current (v12) approach - I'd rather we *never* return ENOMEM in Full Eviction case, than sometimes return ENOMEM when we should have returned ETMPFAIL:
+
+* For an incorrect ENOMEM, an application sees that as a hard error and will stop performing operations, when it should have retried.
+* For an incorrect ETMPFAIL, an application will keep on retrying (and get another ETMPFAIL), when it should have stopped.
+
+Given in both cases no data / operations change in KV-Engine (the user operation is rejected for both error codes).
+----------------------------------------------------------------------------------------------------------------------

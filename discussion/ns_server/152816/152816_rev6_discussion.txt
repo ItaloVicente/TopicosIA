@@ -1,0 +1,195 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-45853 Handle retry of write_cfg rename
+
+While memcached_cfg is writing configuration to a file it will disallow
+futher writes but remember that they must be done once the current
+writing (and rename) of the file has been completed. The state that is
+written to the file is whatever exists when the writing of the config
+starts. Changes to state will happen after the initiation of the write
+but won't be written until the next writing of the configuration.
+
+If the rename of the file is unsuccessful then we exit on the assumption
+that plowing on with wrong data isn't correct.
+
+Change-Id: Ib642c63611e1aa82f8bdf44a375af2c89c846209
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Steve Watanabe
+Date: 2021-05-10 19:11:35.000000000
+Message: 
+Uploaded patch set 6.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-05-10 19:11:42.000000000
+Message: 
+Patch Set 6:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-test/23750/
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-05-10 19:15:22.000000000
+Message: 
+Patch Set 6:
+
+make simple-test
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-05-10 19:15:27.000000000
+Message: 
+Patch Set 6:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-simple-test/2278/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-05-10 19:15:29.000000000
+Message: 
+Patch Set 6: Well-Formed+1
+
+Permission granted to commit to restricted branch
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-05-10 19:15:32.000000000
+Message: 
+Patch Set 6: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/ns-server-simple-test/2278/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/ns-server-simple-test/2278/ )
+----------------------------------------------------------------------------------------------------------------------
+Author: Meni Hillel
+Date: 2021-05-10 19:28:40.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+Line:206, src/memcached_cfg.erl -> Could there be transient failures here? if so, we should probably retry
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-05-10 20:53:45.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+Line:206, src/memcached_cfg.erl -> Error will lead to retries in memcached_refresh:handle_info(refresh, ToRefresh)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-05-10 20:54:02.000000000
+Message: 
+Patch Set 6:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-simple-test/2287/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-05-10 20:54:07.000000000
+Message: 
+Patch Set 6:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/ns-server-simple-test/2287/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/ns-server-simple-test/2287/ )
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-05-10 21:17:54.000000000
+Message: 
+Patch Set 6:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-simple-test/2288/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-05-10 22:04:03.000000000
+Message: 
+Patch Set 6: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/ns-server-simple-test/2288/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-05-10 22:11:43.000000000
+Message: 
+Removed Verified+1 by Build Bot <build@couchbase.com>
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-05-10 22:12:51.000000000
+Message: 
+Patch Set 6: Verified+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Meni Hillel
+Date: 2021-05-10 23:14:23.000000000
+Message: 
+Patch Set 6:
+
+(2 comments)
+Line:88, src/memcached_cfg.erl -> write_pending which is now write_waiting, I realize this code was already there earlier, but wonder why it is needed. Waiting requests will be queued up in the process's queue. I think we should remove it altogether.
+
+Line:206, src/memcached_cfg.erl -> I am not sure this will be the case... We will just swallow the error and basically the config request will be lost.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-05-11 00:09:52.000000000
+MISMATCHED INLINE COMMENT
+Line:88, src/memcached_cfg.erl -> initiate_write is initiated via events and if such an event occurs (asynchronous to other activity in this process) while a write of the config is happening (write_in_progress is true) but a rename retry hasn't happened (retry_timer is undefined) then we need to set write_waiting to true.
+
+When the writing of the config and rename (and possibly retries of the rename) complete then the "done" handling will initiate the next write.
+
+handle_cast(write_cfg_done, State) ->
+    %% Done writing config and there's waiting writes.
+    {noreply, initiate_write(State#state{write_in_progress = false,
+                                         write_waiting = false})}.
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-05-11 00:16:26.000000000
+MISMATCHED INLINE COMMENT
+Line:206, src/memcached_cfg.erl -> I don't believe those error cases can happen:
+
+In this code in memcached_cfg.erl
+
+rename_and_refresh(#state{path = Path,
+                          tmp_path = TmpPath,
+                          module = Module} = State, Tries, SleepTime) ->
+    case file:rename(TmpPath, Path) of
+        ok ->
+            case (catch Module:refresh()) of <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+                ok ->
+                    ok;
+                %% in case memcached is not yet started
+                {error, couldnt_connect_to_memcached} ->
+                    ok;
+                Error ->
+                    ?log_error("Failed to force update of memcached configuration for ~p:~p",
+                               [Path, Error])
+            end;
+
+The Module:refresh() calls either
+
+memcached_permissions:refresh() ->
+    memcached_refresh:refresh(rbac).
+OR
+memcached_password:refresh() ->
+    memcached_refresh:refresh(isasl).
+
+and the memcached_refresh:refresh does
+
+refresh(Item) ->
+    gen_server:cast(?MODULE, {refresh, Item}).
+
+Since gen_server:cast always returns "ok" how does the error cases happen?  
+
+I asked Artem via slack about this and he agrees this code doesn't make sense.
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-05-11 00:09:52.000000000
+MISMATCHED INLINE COMMENT
+Line:206, src/memcached_cfg.erl -> The config request has already been written and renamed successfully. It's the refresh to memcached that hasn't been sent. Let me think about the "refresh" handle more.
+----------------------------------------------------------------------------------------------------------------------

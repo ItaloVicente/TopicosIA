@@ -1,0 +1,183 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-28926: Use collatejson as binary protocol between GSI client and indexer
+
+Change-Id: I02b80c03a3fe9e8999ceec87788bd075b7d345e9
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: amithk
+Date: 2018-11-13 12:23:48.000000000
+Message: 
+Patch Set 19: Patch Set 18 was rebased
+----------------------------------------------------------------------------------------------------------------------
+Author: Deepkaran Salooja
+Date: 2018-11-13 23:03:13.000000000
+Message: 
+Patch Set 19:
+
+(3 comments)
+Line:984, secondary/collatejson/collate.go -> It would be good to catch any panic and return error as done in DecodeN1QLValue.
+
+Line:1001, secondary/collatejson/collate.go -> decode is always going to be true. We could just pass true in code2n1ql.
+
+Line:1005, secondary/collatejson/collate.go -> What is the significance of 64 here? As the code is always appending to vals, I guess it is not required.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: John Liang
+Date: 2018-11-14 22:32:02.000000000
+Message: 
+Patch Set 19:
+
+(16 comments)
+Line:26, secondary/common/scan_result.go -> Ideally, cjson is the encoding format.   So ScanResultKey should use a constant or enum for identifying the encoding format, instead of using a boolean (Usecjson).
+
+Line:49, secondary/common/scan_result.go -> Do not hardcode the oversizing multiplier (6)
+
+Line:56, secondary/common/scan_result.go -> If the error is due to buffer too small, we should resize the buffer and retry.
+
+Line:71, secondary/common/scan_result.go -> If the buffer has resized, we could return the buffer back to the caller.  Otherwise, it is possible that we have to resize the buffer again in the next row.
+
+Line:103, secondary/common/scan_result.go -> If Skeys is []ScanResultKey instead of []*ScanResultKey, then we don't have to do memory allocation for each key.
+
+Line:546, secondary/indexer/scan_pipeline.go -> Even though ReadSecKeyCJson alwasy return err=nil, indexer should not crash.  If there is  bad key, this will bring the indexer down.
+
+Line:547, secondary/indexer/scan_pipeline.go -> ReadDocId also does not return error.  But we should not crash even if there is error.
+
+Line:27, secondary/querycmd/docmd.go -> can we define a common constant somewhere?
+
+Line:681, secondary/querycmd/docmd.go -> avoid hardcoding constant (6)
+
+Line:1532, secondary/queryport/client/client.go -> SetUsecjson() and GetUsecjson() needs to use atomic.   GetUsecjson() can be called for every scan, while Refresh() can be called concurrently to update usecjson.  It could make things easier if you don't have usecjsonSet.
+
+Line:1541, secondary/queryport/client/client.go -> Why do we need to do this check?
+
+Line:100, secondary/queryport/client/scatter.go -> Can we not have usecjsonSet?
+
+Line:1144, secondary/queryport/client/scatter.go -> We should not modify the interface of SendEntries (instId, partitions).  This function could return a bool and an error.   The caller (secondaryIndex.go) can call broker.Error() at that time.
+
+Line:1163, secondary/queryport/client/scatter.go -> Why do you need iterator when you have to iterate through the skeys using for loop?
+
+Line:1176, secondary/queryport/client/scatter.go -> Why do you need a special method for encoding error?  How does this error differently from other errors happened during scatter/gather?
+
+Can this function just return an error and let the caller invokes broker.Error() instead?
+
+Line:1688, secondary/queryport/n1ql/secondary_index.go -> GetTempbuf() is used in scatter.SendEntries().  So you could end up having 2 goroutines sharing the same buffer.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2018-11-14 18:57:40.000000000
+MISMATCHED INLINE COMMENT
+Line:984, secondary/collatejson/collate.go -> I had added it earlier. But after Pratap's suggestion I removed it. 
+
+I ran a microbenchmark to analyse the impact of having defer recover(). The impact is about 50 to 100 nanoseconds per function call. This function will be called once per row returned.
+
+Let's assume 50 nanosecond delay.
+For CI3 workload, we get throughput about 9000 scans with limit = 100. So, In one second, 900K rows are returned. With 50 nanosecond delay, we will need 45 extra milliseconds to process 900K rows, if we have a defer recover() in it. So, the perf impact doesn't look that significant i.e. time increase from 1 second to 1.045 second to serve 9000 scans. 
+
+So I have re-introduced defer recover().
+
+Please let me know what you think about this.
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2018-11-14 18:57:40.000000000
+MISMATCHED INLINE COMMENT
+Line:1001, secondary/collatejson/collate.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2018-11-14 18:57:40.000000000
+MISMATCHED INLINE COMMENT
+Line:1005, secondary/collatejson/collate.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2018-11-20 14:31:44.000000000
+MISMATCHED INLINE COMMENT
+Line:26, secondary/common/scan_result.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2018-11-20 14:31:44.000000000
+MISMATCHED INLINE COMMENT
+Line:49, secondary/common/scan_result.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2018-11-20 14:31:44.000000000
+MISMATCHED INLINE COMMENT
+Line:56, secondary/common/scan_result.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2018-11-29 12:01:11.000000000
+MISMATCHED INLINE COMMENT
+Line:71, secondary/common/scan_result.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2018-11-20 14:31:44.000000000
+MISMATCHED INLINE COMMENT
+Line:71, secondary/common/scan_result.go -> Partly done.
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2018-11-29 12:01:11.000000000
+MISMATCHED INLINE COMMENT
+Line:103, secondary/common/scan_result.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2018-11-20 14:31:44.000000000
+MISMATCHED INLINE COMMENT
+Line:546, secondary/indexer/scan_pipeline.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2018-11-20 14:31:44.000000000
+MISMATCHED INLINE COMMENT
+Line:547, secondary/indexer/scan_pipeline.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2018-11-20 14:31:44.000000000
+MISMATCHED INLINE COMMENT
+Line:27, secondary/querycmd/docmd.go -> Will remove this.
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2018-11-29 12:01:11.000000000
+MISMATCHED INLINE COMMENT
+Line:27, secondary/querycmd/docmd.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2018-11-20 14:31:44.000000000
+MISMATCHED INLINE COMMENT
+Line:681, secondary/querycmd/docmd.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2018-11-20 14:31:44.000000000
+MISMATCHED INLINE COMMENT
+Line:1532, secondary/queryport/client/client.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2018-11-20 14:31:44.000000000
+MISMATCHED INLINE COMMENT
+Line:1541, secondary/queryport/client/client.go -> I have removed it. But it would have been better for diagnosability if there were errors due to not setting it correctly.
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2018-11-20 14:31:44.000000000
+MISMATCHED INLINE COMMENT
+Line:100, secondary/queryport/client/scatter.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2018-11-20 14:31:44.000000000
+MISMATCHED INLINE COMMENT
+Line:1144, secondary/queryport/client/scatter.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2018-11-20 14:31:44.000000000
+MISMATCHED INLINE COMMENT
+Line:1163, secondary/queryport/client/scatter.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2018-11-20 14:31:44.000000000
+MISMATCHED INLINE COMMENT
+Line:1176, secondary/queryport/client/scatter.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2018-11-29 12:01:11.000000000
+MISMATCHED INLINE COMMENT
+Line:1688, secondary/queryport/n1ql/secondary_index.go -> Done
+----------------------------------------------------------------------------------------------------------------------

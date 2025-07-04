@@ -1,0 +1,229 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-38196: don't confuse invalid names for zero length strings
+
+If a bucket or scope name can't be converted to utf32, the error
+return code is ignored, the length validation code concludes the
+name has zero length, and a confusing error message is emitted.
+
+Explicitly test for conversion failure instead.
+
+Change-Id: If4ab8126675beebafbd0f3ddd732f5f27b40a43b
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Sam Cramer
+Date: 2020-05-07 01:26:05.000000000
+Message: 
+Uploaded patch set 9.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-05-07 01:26:15.000000000
+Message: 
+Patch Set 9:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-test/17225/
+----------------------------------------------------------------------------------------------------------------------
+Author: Sam Cramer
+Date: 2020-05-07 01:27:42.000000000
+Message: 
+Patch Set 9:
+
+> Patch Set 5: Code-Review-1
+> 
+> (1 comment)
+
+Done.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-05-07 01:30:20.000000000
+Message: 
+Patch Set 9: Well-Formed+1
+
+Permission granted to commit to restricted branch
+----------------------------------------------------------------------------------------------------------------------
+Author: Sam Cramer
+Date: 2020-05-07 01:30:52.000000000
+Message: 
+Patch Set 9:
+
+(3 comments)
+
+> Patch Set 5: Code-Review-1
+> 
+> (1 comment)
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2020-05-07 01:50:35.000000000
+Message: 
+Patch Set 9:
+
+(1 comment)
+Line:352, src/validator.erl -> I guess you need to convert Value to binary first here. Like this:
+case unicode:characters_to_binary(list_to_binary(Value)) of
+
+Reasoning:
+"Value" is our original utf8 string converted to list by list_to_binary without any decoding. But unicode:characters_to_binary reads it as latin1_chardata() (see https://erlang.org/doc/man/unicode.html#characters_to_binary-1) and essentially converts it from latin1 to utf8 which we don't need in this case. See example:
+
+(n_0@node0.localhost)50> Value = binary_to_list(<<"абс"/utf8>>).
+[208,176,208,177,209,129]
+(n_0@node0.localhost)51> Res1 = unicode:characters_to_binary(Str).
+<<"Ð°Ð±Ð²"/utf8>>
+(n_0@node0.localhost)52> Res2 = unicode:characters_to_binary(list_to_binary(Str)).
+<<208,176,208,177,208,178>>
+(n_0@node0.localhost)53> io:format("~ts ~ts~n", [Res1, Res2]).
+Ð°Ð±Ð² абв
+ok
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2020-05-07 02:20:04.000000000
+Message: 
+Patch Set 9:
+
+(1 comment)
+Line:477, src/validator.erl -> I don't think that's what you get from user.
+It is rather something like binary_to_list(<<"abc"/utf8, 16#ee, "defg"/utf8>>)
+
+It would also be nice to have tests for empty string, both types of incorrect utf8 strings (to test incorrect and "Ill-formed" cases), and utf8 string where number of codepoints is greater then number of characters (you can take the one from Aliaksei's example)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Sam Cramer
+Date: 2020-05-07 18:55:42.000000000
+Message: 
+Patch Set 9:
+
+(1 comment)
+Line:477, src/validator.erl -> I checked this by adding some debug output and my unit test to an otherwise
+unmodified version of validator.erl:
+
+  length(Name, Min, Max, State) ->
+      validate(
+        fun (Value) ->
+                Length = size(unicode:characters_to_binary(
+                                list_to_binary(Value), utf8, utf32)) div 4,
+                ?log_debug("length(): Value ~p Min ~p Max ~p", [Value, Min, Max]),
+                ?log_debug("length(): Value ~w", [Value]),
+                ?log_debug("length(): Length ~p", [Length]),
+                case Length < Min orelse Length > Max of
+  	      	   <etc>
+
+  length_test() ->
+      length_tester("g5DEWBlmDJhJ\xEELx9Fa", 18).
+
+When I ran it, the test failed:
+
+  $ T_WILDCARD=validator make test
+
+  Running eunit tests for modules: [validator]
+  ======================== EUnit ========================
+  validator: length_test (module 'validator')...[ns_server:debug,2020-05-07T10:51:27.025-07:00,test-ZZ6D7AUAD87GHJYQ@REML0653s-MacBook-Pro:<0.110.0>:validator:length:354]length(): Value "g5DEWBlmDJhJ�Lx9Fa" Min 18 Max 18
+  [ns_server:debug,2020-05-07T10:51:27.026-07:00,test-ZZ6D7AUAD87GHJYQ@REML0653s-MacBook-Pro:<0.110.0>:validator:length:355]length(): Value [103,53,68,69,87,66,108,109,68,74,104,74,238,76,120,57,70,97]
+  [ns_server:debug,2020-05-07T10:51:27.026-07:00,test-ZZ6D7AUAD87GHJYQ@REML0653s-MacBook-Pro:<0.110.0>:validator:length:356]length(): Length 0
+  *failed*
+  in function validator:'-length_tester/2-fun-1-'/2 (src/validator.erl, line 451)
+  in call from validator:length_tester/2 (src/validator.erl, line 451)
+  **error:{assertEqual,[{module,validator},
+                {line,451},
+                {expression,"[ ]"},
+                {expected,[{"name",[76,101,110,103,116,104,32,109|...]}]},
+                {value,[]}]}
+    output:<<"">>
+
+  =======================================================
+    Failed: 1.  Skipped: 0.  Passed: 0.
+
+I also tested this using the REST api:
+
+  $ NAME='name=g5DEWBlmDJhJ%eeLx9Fa'
+  $ curl -i -u Administrator:asdasd -X POST \
+  > http://127.0.0.1:9000/pools/default/buckets/testBucket/collections \
+  >     -d name=$NAME
+  HTTP/1.1 400 Bad Request
+  Cache-Control: no-cache,no-store,must-revalidate
+  Content-Length: 58
+  Content-Type: application/json
+  Date: Thu, 07 May 2020 18:01:11 GMT
+  Expires: Thu, 01 Jan 1970 00:00:00 GMT
+  Pragma: no-cache
+  Server: Couchbase Server
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  X-Permitted-Cross-Domain-Policies: none
+  X-XSS-Protection: 1; mode=block
+
+  {"errors":{"name":"Length must be in range from 1 to 30"}}%
+
+Here's what I see in the output:
+
+  [ns_server:debug,2020-05-07T11:01:11.487-07:00,n_0@127.0.0.1:<0.23118.0>:validator:length:354]length(): Value "name=g5DEWBlmDJhJîLx9Fa" Min 1 Max 30
+  [ns_server:debug,2020-05-07T11:01:11.488-07:00,n_0@127.0.0.1:<0.23118.0>:validator:length:355]length(): Value [110,97,109,101,61,103,53,68,69,87,66,108,109,68,74,104,74,238,76,120,57,70,97]
+  [ns_server:debug,2020-05-07T11:01:11.488-07:00,n_0@127.0.0.1:<0.23118.0>:validator:length:356]length(): Length 0
+
+So, for the unit test we have
+
+  Value "name=g5DEWBlmDJhJîLx9Fa"
+  Value [110,97,109,101,61,103,53,68,69,87,66,108,
+         109,68,74,104,74,238,76,120,57,70,97]
+
+and for the REST api test we have
+
+  Value "name=g5DEWBlmDJhJîLx9Fa" Min 1 Max 30
+  Value [110,97,109,101,61,103,53,68,69,87,66,108,
+         109,68,74,104,74,238,76,120,57,70,97]
+
+Thus, I believe I'm testing using the string mentioned in the JIRA ticket.
+Do you agree?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2020-05-07 19:22:49.000000000
+Message: 
+Patch Set 9:
+
+(1 comment)
+Line:364, src/validator.erl -> Suggest using the "Name length (~p) must be in the range from ~p to ~p, inclusive"
+Otherwise it'll be possible to have "funky" error messages:
+
+Name length (15) must be greater than -1 and less than 10
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2020-05-07 20:13:15.000000000
+Message: 
+Patch Set 9:
+
+(1 comment)
+Line:477, src/validator.erl -> Agree, they are the same, but still it will be clearer if we create the test strings the same way as they are created in reality.
+I suggest we construct utf8 strings and convert them to lists explicitly. This way it will be clear how it works and why we need this characters_to_binary and list_to_binary calls:
+
+length_tester(<<""/utf8>>)
+length_tester(<<"ß↑e̊"/utf8>>)
+length_tester(<<"g5DEWBlmDJhJ"/utf8, 16#EE, "Lx9Fa"/utf8>>)
+
+while in length_in_range we might have:
+ 
+length_in_range(Value, Min, Max) ->
+    #state{errors = E} = length(name, Min, Max, #state{kv=[{"name", binary_to_list(Value)}]}),
+    E.
+
+Does it make sense?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Sam Cramer
+Date: 2020-05-26 00:17:57.000000000
+MISMATCHED INLINE COMMENT
+Line:352, src/validator.erl -> Yes, you're right.
+----------------------------------------------------------------------------------------------------------------------
+Author: Sam Cramer
+Date: 2020-05-26 00:17:57.000000000
+MISMATCHED INLINE COMMENT
+Line:364, src/validator.erl -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Sam Cramer
+Date: 2020-05-26 00:17:57.000000000
+MISMATCHED INLINE COMMENT
+Line:477, src/validator.erl -> Yes.  Thanks for the explanation!
+----------------------------------------------------------------------------------------------------------------------

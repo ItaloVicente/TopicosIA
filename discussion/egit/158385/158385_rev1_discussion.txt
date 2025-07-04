@@ -1,0 +1,143 @@
+======================================================================================================================
+DESCRIPTION:
+
+Start RepositoryChangeScanner after workbench initialized
+
+This is not meant to be merged as is, but merely something that
+different people should measure using their own machine and measurement
+strategy. With the change, the RepositoryChangeScanner is only
+registered after workbench startup.
+
+Without this change, the egit.ui.Activator.start takes about 500ms on my
+Windows machine, with more than 90% of the runtime attributed to the
+setupRepositoryChangeScanner method (which triggers egit.core
+activation, preferences initialization and some other things).
+
+With this change, the egit.ui activator takes less than 50ms, and
+egit.core is no longer activated from egit.ui, but from the extension
+registry.
+
+Interestingly, the runtime of the setupRepositoryChangeScanner
+(previously 450 ms) drops down to less than 10ms, because all the class
+initializations and class loadings formerly caused by egit.ui are now
+caused by other parts of the workbench. I cannot yet say where the code
+is triggered now, and I also cannot judge whether the workbench comes up
+faster overall. However, it would be nice if someone following the
+tracing approach could post comparisons with/without this change.
+
+Be aware that this change does NOT save 450ms magically (because egit.ui
+activator is that much faster). It just doesn't contain egit.core
+activation nested anymore. Still it might be useful to defer the
+repository change scanner this way, since we probably can't do much with
+its callbacks before the workbench is up.
+
+Change-Id: Ic0cca820e61783b53e5084c56c725583a624c298
+Signed-off-by: Michael Keppler <Michael.Keppler@gmx.de>
+Bug:560412
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Michael Keppler
+Date: 2020-02-26 07:39:32.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: EGit Bot
+Date: 2020-02-26 07:39:40.000000000
+Message: 
+Patch Set 1:
+
+Build Started https://ci.eclipse.org/egit/job/egit.gerrit/1280/
+----------------------------------------------------------------------------------------------------------------------
+Author: Andrey Loskutov
+Date: 2020-02-26 08:21:06.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+
+Looks OK in general, but see below.
+Line:925, org.eclipse.egit.ui/src/org/eclipse/egit/ui/Activator.java -> I think this could fail on too "fast" stop. If that all is needed by the new service only, all the init/dispose could be done by the service on start/stop hooks.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: EGit Bot
+Date: 2020-02-26 08:27:06.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/egit/job/egit.gerrit/1280/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Alex Blewitt
+Date: 2020-02-26 08:50:56.000000000
+Message: 
+Patch Set 1: Code-Review-1
+
+(3 comments)
+
+Looks good, but a few changes could improve it further.
+Line:925, org.eclipse.egit.ui/src/org/eclipse/egit/ui/Activator.java -> I'm not sure it makes sense to have a `join()` here; it will delay stopping them and potentially blocks if there is an error. If we've cancelled it, and the bundle is being stopped, then if the job is outstanding it will pin the bundlecontext in memory anyway until it stops, but there's no need to explicitly wait for it.
+
+Line:10, org.eclipse.egit.ui/src/org/eclipse/egit/ui/RepositoryChangeScannerStarter.java -> Nit: OSGi
+
+Line:20, org.eclipse.egit.ui/src/org/eclipse/egit/ui/RepositoryChangeScannerStarter.java -> General observation: I think in general we should try and move away from the Activator.getDefault() patterns, but it is probably a good change in the meantime and we can tackle that later.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Lars Vogel
+Date: 2020-02-26 09:33:54.000000000
+Message: 
+Patch Set 1:
+
+Just to share "my" times:
+
+Without change:
+
+198 ms for total start time event STARTED - osgi.identity; osgi.identity="org.eclipse.egit.core"; type="osgi.bundle"; version:Version="5.7.0.qualifier"; singleton:="true" [id=124]
+241 ms for total start time event STARTED - osgi.identity; osgi.identity="org.eclipse.egit.ui"; type="osgi.bundle"; version:Version="5.7.0.qualifier"; singleton:="true" [id=128]
+
+
+
+With the change:
+59 ms for total start time event STARTED - osgi.identity; osgi.identity="org.eclipse.egit.ui"; type="osgi.bundle"; version:Version="5.7.0.qualifier"; singleton:="true" [id=128]
+214 ms for total start time event STARTED - osgi.identity; osgi.identity="org.eclipse.egit.core"; type="osgi.bundle"; version:Version="5.7.0.qualifier"; singleton:="true" [id=124]
+----------------------------------------------------------------------------------------------------------------------
+Author: Alex Blewitt
+Date: 2020-03-05 18:29:40.000000000
+Message: 
+Patch Set 1:
+
+What about instead of using an E4 event that gets posted post-startup, we bind it to the IWorkspaceService or IWorkbench?
+
+{org.eclipse.core.resources.IWorkspace}={service.id=194, service.bundleid=90, service.scope=singleton}
+  "Registered by bundle:" org.eclipse.core.resources_3.13.600.v20191122-2104 [90]
+{org.eclipse.e4.ui.workbench.IWorkbench}={service.id=228, service.bundleid=118, service.scope=singleton, id=5392e09d-575c-4937-a619-40e193c52ff8}
+  "Registered by bundle:" org.eclipse.e4.ui.workbench_1.11.0.v20191120-1917 [118]
+  "No bundles using service."
+
+The idea would be to have a setWorkspace on the repository change csanner, and it could use that instead of PlatformUI.getWorkbench() instead. You'd then have the lifetime of the service based on the existence of the workbench, and it would be shut down when the workbench goes away (or implicitly when the containing bundle is stopped)
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2020-03-05 23:50:31.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:1, org.eclipse.egit.ui/src/org/eclipse/egit/ui/RepositoryChangeScannerStarter.java -> missing license header
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2020-03-05 23:59:40.000000000
+MISMATCHED INLINE COMMENT
+Line:925, org.eclipse.egit.ui/src/org/eclipse/egit/ui/Activator.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2020-03-05 23:59:40.000000000
+MISMATCHED INLINE COMMENT
+Line:1, org.eclipse.egit.ui/src/org/eclipse/egit/ui/RepositoryChangeScannerStarter.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2020-03-05 23:59:40.000000000
+MISMATCHED INLINE COMMENT
+Line:10, org.eclipse.egit.ui/src/org/eclipse/egit/ui/RepositoryChangeScannerStarter.java -> Done
+----------------------------------------------------------------------------------------------------------------------

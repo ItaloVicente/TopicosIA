@@ -1,0 +1,103 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-30463: Avoid modifying ptr refcounts when setting freqCounterValue
+
+StoredValue uses a TaggedPtr to store both the (pointer to) Blob, and
+the 16bit frequency counter, which in turn is managed by a
+SingleThreadedRCPtr. The result is we store both the ref-counted
+pointer and frequency counter in 64bits.
+
+However, to update the frequency counter we must reset() the RCPtr,
+which requires (atomically) incrementing and then decrementing it's
+refcount. This is unnecessary costly work.
+
+Improve this by exposing the underlying Pointer value in the RCPtr
+(which in this instance is a TaggedPtr object); and just directly
+changing the tag. While in the general case such a method is
+potentially dangerous, it significantly speeds up this operation:
+
+Original asm / perf report (first column is sample count):
+
+    _ZN11StoredValue19setFreqCounterValueEt
+      4 │53e7c0:   push   %rbx
+        │53e7c1:   mov    (%rdi),%rbx
+      1 │53e7c4:   movabs $0xffffffffffff,%rax
+      2 │53e7ce:   shl    $0x30,%rsi
+        │53e7d2:   and    %rax,%rbx
+      2 │53e7d5:   or     %rbx,%rsi
+      2 │53e7d8:   mov    %rsi,%rdx
+        │53e7db:   and    %rax,%rdx
+      3 │53e7de: ↓ je     53e7ea <StoredValue::setFreqCounterValue(unsigned short)+0x2a>
+    632 │53e7e0:   lock   addl $0x1,(%rdx)
+      5 │53e7e4:   and    (%rdi),%rax
+        │53e7e7:   mov    %rax,%rbx
+      1 │53e7ea:   test   %rbx,%rbx
+      3 │53e7ed:   mov    %rsi,(%rdi)
+        │53e7f0: ↓ jne    53e7f8 <StoredValue::setFreqCounterValue(unsigned short)+0x38>
+        │53e7f2:   pop    %rbx
+      3 │53e7f3: ← retq
+        │53e7f4:   nopl   0x0(%rax)
+    398 │53e7f8:   lock   subl $0x1,(%rbx)
+      1 │53e7fc: ↑ jne    53e7f2 <StoredValue::setFreqCounterValue(unsigned short)+0x32>
+        │53e7fe:   mov    %rbx,%rdi
+        │53e801: → callq  438a30 <Blob::~Blob()>
+        │53e806:   mov    %rbx,%rdi
+        │53e809:   pop    %rbx
+        │53e80a: ↓ jmpq   670890 <operator delete(void*)>
+
+New asm / perf report:
+
+    _ZN11StoredValue19setFreqCounterValueEt
+      2 │52725a:   mov    %si,0x6(%rdi)
+      8 │52725d: ← retq
+
+Additionally, given the function is only 5 instructions of work; move
+the methods back to the header so they can be inlined.
+
+Results in a ~10% speedup of HashTableBench/Find:
+
+    ----------------------------------------------------------------------
+    Benchmark                               Time           CPU Iterations
+    ----------------------------------------------------------------------
+Before:
+    HashTableBench/Find/threads:24         76 ns       1592 ns    8832288
+
+After:
+    HashTableBench/Find/threads:24         68 ns       1455 ns    9645312
+
+Change-Id: I5e28d4f841ec4830bfab12505d6333d7ff62ed8b
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2018-07-18 09:41:28.000000000
+Message: 
+Patch Set 4: Patch Set 3 was rebased
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-07-18 10:51:49.000000000
+Message: 
+Patch Set 4: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/10571/ : FAILURE
+
+Failure of a CTest test  31/175 Test  #29: ep_testsuite.full_eviction.comp_active ....................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/10571/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/165/ : FAILURE
+
+Failure of a CTest test  51/174 Test  #49: ep_testsuite_dcp.full_eviction.comp_active ................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/165/ )
+
+AddressSanitizer issue: 378290 byte(s) leaked in 20864 allocation(s). ( http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/165/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/9428/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/10451/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/9297/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/2310/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,86 @@
+======================================================================================================================
+DESCRIPTION:
+
+atomic topology change operations
+
+topology mutations are done in 2 steps:
+1. mutate some keys in kv
+2. change chronicle topology
+
+If something goes wrong we don't want to end up in state when the
+kv mutation is done and chronicle mutation is not
+
+This patch joins 2 steps in one transaction using special key:
+unfinished_topology_operation which exists for the duration of
+the transaction and keeps the information about the operation
+being done
+
+Topology mutation in this commit is performed this way:
+1. Grab chronicle lock
+2. Check if unfinished_topology_operation exists and execute
+   repair operation. Repair operation is executed if the current
+   operation doesn't match the one in the key, otherwise we just
+   proceed with the current operation.
+3. Perform the requested operation both on kv and on chronicle
+   topology.
+4. remove unfinished_topology_operation key fi the lock matches
+
+Any lock mismatch causes chronicle_master to crash and the call
+to chronicle master is retried 3 times if crash happens. The idea
+is that eventually there will be a single chronicle_master in
+the cluster and therefore no lock conflicts will occure.
+
+Recovery operation for add_replica is remove_peer, because it reflects
+the current recovery code in ns_cluster that calls shun() if add_node
+fails. For all other operations we just repeat the operation.
+
+If the retries are exceeded we might end up with unfinished transaction.
+The janitor for such situations comes in the next commit.
+
+Change-Id: I4038ab21ccad2f971c36448186eb8f233f9de6c5
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Artem Stemkovski
+Date: 2021-03-04 00:03:47.000000000
+Message: 
+Uploaded patch set 3: Patch Set 2 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-03-04 00:04:07.000000000
+Message: 
+Patch Set 3: -Well-Formed
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-test/22272/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-03-04 00:10:16.000000000
+Message: 
+Patch Set 3: Well-Formed+1
+
+Permission granted to commit to restricted branch
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Artamonau
+Date: 2021-03-04 04:31:08.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+
+I'm still thinking about this patch. But one thing that doesn't seem to be handled in any way is the following.
+
+1. Add node initiated. nodes_wanted is changed, the node is added as replica, unfinished_topology_operation key is deleted.
+2. Before perform_join() is called, a request comes in to remove the node from cluster.
+3. The node gets removed.
+4. perform_join() is finally called. But by this time chronicle doesn't replicate to the node anymore, so it times out. But only after 3 minutes or so.
+
+I think it's also possible to construct a similar situation when there are simply two competing mb_master-s, and one of them undoes what the other one had started.
+Line:155, src/failover.erl -> Why did you change the order of these calls here? Seems that if chronicle_master:deactivate_nodes() succeeds but deactivate_quorum_nodes() fails, the nodes will forever be part of the lease quorum, even after they are removed.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2021-03-04 21:20:42.000000000
+MISMATCHED INLINE COMMENT
+Line:155, src/failover.erl -> I'll switch them back. We either need to include this in the same chronicle transaction or get rid of this call, as we discussed earlier.
+----------------------------------------------------------------------------------------------------------------------

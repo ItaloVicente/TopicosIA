@@ -1,0 +1,84 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-45756: Persist snapshot stats after the flusher has been stopped
+
+Currently during the destruction of an ep-engine bucket we persist a
+key "ep_force_shutdown" to stats.json, this value is set to false when
+we've had a clean shutdown and true if the shutdown was forced.
+
+This value effects when we decide to generate a new failover table
+entry during warmup in Warmup::createVBuckets(), when we've had a
+forced shutdown or if the key isn't present in the document. Which is
+used to help us identify differing seqno histories between kv nodes.
+
+MB-45756 showed that this wasn't always working in the way it should
+have. This would occur if memcached is killed using SIGKILL while it's
+in EventuallyPersistentEngine::~EventuallyPersistentEngine().
+As ~EventuallyPersistentEngine() is responsible for shutting the
+flusher it takes a non insignificant amount of time to complete and if
+killed when flushing could leave the node in an inconsistent state with
+its replica. As in the case of MB-45756, where the active was at
+seqno:Y when it was killed but only persisted to X. So when it came
+back up the at seqno:X it was behind replica at seqno:Y. But due to
+expiry we generated enough seqnos to have a high seqno > Y. Causing us
+to having differing histories but not causing us to roll back the
+replica.
+
+To fix this we have refactored
+EventuallyPersistentEngine::destroyInner() & EPBucket::deinitialize(),
+so that the responsibility to take a snapshot of stats and persist it
+is performed by EPBucket::deinitialize() just after the flushers have
+been stopped. Meaning we have a consistent state on disk. That way if
+we crash at any point before we'll have never inserted a
+"ep_force_shutdown" key in the document (as ep_force_shutdown is only
+ever written during shutdown).
+
+~EventuallyPersistentEngine() & destroyInner() has been refactored to
+now takes over the responsibility of deinitialize() the KVBucket and
+freeing its memory. To allow for easier testing of this fix.
+
+This patch also covers a case where we crash during Warmup after we
+modify the state on disk, but before the StatSnap task runs (which
+removes the 'ep_force_shutdown' from stats.log). As the next time we
+Warmup we want to create a new failover table entry as we didn't
+shutdown cleanly and our history could have diverged from our replicas.
+To cover this case we set 'ep_force_shutdown=true' in
+Warmup::initialize() as we may flush items to disk during this phase
+of warmup and also allow streaming from active vbuckets. This flag
+with then be removed once StatSnap task runs at the end of warmup.
+
+Change-Id: Ia05cafcbcc0c225fe373d0ccfebf135a5c012c6e
+Reviewed-on: http://review.couchbase.org/c/kv_engine/+/152912
+Tested-by: Build Bot <build@couchbase.com>
+Reviewed-by: Dave Rigby <daver@couchbase.com>
+Reviewed-by: Ben Huddleston <ben.huddleston@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Richard de Mellow
+Date: 2021-05-12 09:50:52.000000000
+Message: 
+Change has been successfully cherry-picked as 92fed9e6b0608f8bc74cf54bf40e27fb91355221 by Richard de Mellow
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-05-12 09:51:01.000000000
+Message: 
+Patch Set 17:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/7663/ (2/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-05-12 11:16:39.000000000
+Message: 
+Patch Set 17:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv-engine-master-perf/4819/ : FAILURE
+
+CMake error: CMakeLists.txt:4 (CMAKE_MINIMUM_REQUIRED) ( http://cv.jenkins.couchbase.com/job/kv-engine-master-perf/4819/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/7663/ : SUCCESS'
+----------------------------------------------------------------------------------------------------------------------

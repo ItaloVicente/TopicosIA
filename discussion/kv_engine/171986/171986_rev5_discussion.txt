@@ -1,0 +1,222 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-51105: Stop ActiveStream from sending non WeaklyMonotonic snapStart
+
+Problem:
+MB-51105 showed that just after a rebalance of a cluster, a KV node
+would crash when trying to process data for a collection filtered
+stream. Due to ActiveStream::nextSnapStart throwing as it's
+WeaklyMonotonic property has been violated.
+
+Cause:
+This crash is due to a checkpoint within a recently promoted active
+node, having an incorrect snapshot range (see figure 1, checkpoint
+id:3).
+
+This happens when the following steps occur (referring to figure 1):
+1. An active vbucket has a number of documents on disk (e.g. up to
+   seqno 11, seqno 11 -> 16 in memory).
+2. Then a replica connects and wants to stream 0 -> +inf, e.g.
+   send the replica a snapshot[0,16].
+3. Then writes come into the active, stored in memory in
+   checkpoint id:2 (current checkpoint snap range [12,21]). And we send
+   a snapshotMarker ([17,21]) with a checkpoint flag. As it's the first
+   items from in memory.
+4. Then more mutations come in which we send a snapshot marker e.g
+   ([22, 26] & [27,31]), without a checkpoint marker flag as its still
+   part of the last checkpoint.
+5. NS-Server then closes the stream, to start a takeover stream from
+   the high seqno of the active vbucket. At this point we change the
+   topology of the Active two times which causes us to add two
+   set_vbucket_state items, with the first one causing us to close
+   the checkpoint and the second in a new checkpoint (at seqno 32).
+6. The takeover stream moves the replica to the pending state, but
+   before moving it from pending to active. The original active
+   receives mutations.
+7. **THE BUG**: At this point the active process the mutations in
+   ActiveStream::processItems() to send a snapshot. However, while
+   doing this we register our cursor on the first active
+   set_vbucket_state (at seqno 32). Which causes us to pick up the
+   first in memory's snapshot range (see step 3). Which we then use
+   for this snapshot's start seqno (so we end up sending [12, 33] as
+   can be seen at checkpoint id:3 in figure 1).
+   ***We've now poisoned the replica**
+8. The take over stream the moves the replica from pending to active.
+9. Then a collection only DCP client comes along and streams some of
+   the items from the vbucket. We send the items for the collection
+   from the disk snapshot. Then we move to send data from the memory
+   checkpoints. At this point we set the ActiveStream::nextSnapStart
+   when ever we see a new checkpoint start. This causes us to set it's
+   value from 17 then 12 causing us to beak nextSnapStart's
+   WeaklyMonotonic property causing us to throw and crash.
+
+Fix:
+To fix this bug we need to ensure that we don't use Snapshot range from
+previous checkpoints. To do this every time we see a checkpoint_end item
+during ActiveStream::processItems(), remove the head of the
+OutstandingItemsResult::ranges, ensuring that the current head's end
+seqno is < the queue_op::checkpoint_end's seqno.
+
+Figure 1:
+CheckpointManager[0x10e59ea00] with numItems:39 checkpoints:4
+    Checkpoint[0x10e59ec80] with id:1 seqno:{1,16} snap:{0,16, visible:16} state:Closed numCursors:1 type:InitialDisk hcs:0 items:[
+        {1,empty,cid:0x1:empty,118,[m]}
+        {1,checkpoint_start,cid:0x1:checkpoint_start,129,[m]}
+        {1,set_vbucket_state,cid:0x1:set_vbucket_state,207,[m]}{"failover_table":[{"id":43660393103423,"seq":0}],"state":"replica"}
+        {1,system_event,cid:0x1:0x0:0x9:_collection,191,}
+...
+        {17,checkpoint_end,cid:0x1:checkpoint_end,127,[m]}
+]
+    Checkpoint[0x10cbbba00] with id:2 seqno:{17,31} snap:{17,31, visible:31} state:Closed numCursors:0 type:Memory hcs:none  items:[
+        {17,empty,cid:0x1:empty,118,[m]}
+        {17,checkpoint_start,cid:0x1:checkpoint_start,129,[m]}
+...
+        {32,set_vbucket_state,cid:0x1:set_vbucket_state,207,[m]}{"failover_table":[{"id":43660393103423,"seq":0}],"state":"replica"}
+        {32,set_vbucket_state,cid:0x1:set_vbucket_state,207,[m]}{"failover_table":[{"id":43660393103423,"seq":0}],"state":"pending"}
+        {32,checkpoint_end,cid:0x1:checkpoint_end,127,[m]}
+]
+    Checkpoint[0x10cbbbf00] with id:3 seqno:{32,33} snap:{12,33, visible:33} state:Closed numCursors:0 type:Memory hcs:none  items:[ <<----- BANG!
+        {32,empty,cid:0x1:empty,118,[m]}
+        {32,checkpoint_start,cid:0x1:checkpoint_start,129,[m]}
+...
+        {34,checkpoint_end,cid:0x1:checkpoint_end,127,[m]}
+]
+    Checkpoint[0x10cbbc180] with id:4 seqno:{34,34} snap:{34,34, visible:33} state:Open numCursors:0 type:Memory hcs:none  items:[
+        {34,empty,cid:0x1:empty,118,[m]}
+        {34,checkpoint_start,cid:0x1:checkpoint_start,129,[m]}
+        {34,set_vbucket_state,cid:0x1:set_vbucket_state,206,[m]}{"failover_table":[{"id":43660393103423,"seq":0}],"state":"active"}
+
+Change-Id: Ifede1a5a18636be149f2b0847a59e483eaf28485
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Richard de Mellow
+Date: 2022-03-10 21:35:33.000000000
+Message: 
+Uploaded patch set 5.
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-03-10 21:35:50.000000000
+Message: 
+Patch Set 5:
+
+(14 comments)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-03-10 21:58:24.000000000
+Message: 
+Patch Set 5: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-neo/78/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [32/93]: test producer keep stream open replica...(135 ms) OK
+
+
+99% tests passed, 1 tests failed out of 422
+
+Total Test time (real) = 343.46 sec
+
+The following tests FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-neo/78/ )
+
+Timeout of a CTest test 422/422 Test #290: ep_testsuite_dcp.full_eviction.comp_active ....................................................................................} ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-neo/78/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/14887/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-neo/62/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-neo/63/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/neo/65/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/neo/63/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/neo/65/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/neo/63/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/neo/57/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/neo/64/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/neo/63/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-03-10 22:25:38.000000000
+Message: 
+Patch Set 5: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/14887/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-neo/62/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-neo/63/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/neo/65/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/neo/63/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/neo/65/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/neo/63/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/neo/57/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/neo/64/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/neo/63/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-neo/79/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-03-11 11:13:32.000000000
+Message: 
+Patch Set 5: Code-Review-1
+
+(5 comments)
+Line:1190, engines/ep/src/dcp/active_stream.cc -> Is this worth promoting to error? ie if this happens, how bad is it?
+
+Line:3881, engines/ep/tests/module_tests/collections/evp_store_collections_dcp_test.cc -> two - and do we need two here - from what I understand of the bug we should be able to reproduce with just single items being written into checkpoints mostly?
+
+Line:3896, engines/ep/tests/module_tests/collections/evp_store_collections_dcp_test.cc -> I believe these expects should all be ASSERT as they are checking test preconditions, right?
+
+Line:3906, engines/ep/tests/module_tests/collections/evp_store_collections_dcp_test.cc -> two
+
+Line:3998, engines/ep/tests/module_tests/collections/evp_store_collections_dcp_test.cc -> Just one now.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-03-11 14:24:20.000000000
+MISMATCHED INLINE COMMENT
+Line:1190, engines/ep/src/dcp/active_stream.cc -> Went down a bit of a rabbit hole with this one as some of the tests are broken, but also showed that there's an edge case where snap end can be == to checkpoint_end's seqno. Hope fully in the future we can make it more consistent but for now I'll just allow for it. Also had to fix a test to drive the active stream correctly.
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-03-11 14:24:20.000000000
+MISMATCHED INLINE COMMENT
+Line:3881, engines/ep/tests/module_tests/collections/evp_store_collections_dcp_test.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-03-11 14:24:20.000000000
+MISMATCHED INLINE COMMENT
+Line:3896, engines/ep/tests/module_tests/collections/evp_store_collections_dcp_test.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-03-11 14:24:20.000000000
+MISMATCHED INLINE COMMENT
+Line:3906, engines/ep/tests/module_tests/collections/evp_store_collections_dcp_test.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-03-11 14:24:20.000000000
+MISMATCHED INLINE COMMENT
+Line:3998, engines/ep/tests/module_tests/collections/evp_store_collections_dcp_test.cc -> Done
+----------------------------------------------------------------------------------------------------------------------

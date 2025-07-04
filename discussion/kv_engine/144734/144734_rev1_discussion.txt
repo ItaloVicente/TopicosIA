@@ -1,0 +1,120 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-41658: Don't clear dirty flag unconditionally during warmup
+
+There exists a race-condition between warmup, commit of prepared
+SyncWritess and persistence which can result in the persistence
+callback finding a non-dirty item. This throws an assert failure and
+terminates memcached.
+
+The issue is caused when the following sequence of events occur, on
+various concurrent threads:
+
+  0. Outstanding prepare exists on disk (without Commit).
+
+  1. [Reader] Warmup loads prepare from disk.
+
+  2. [NonIO] ActiveDM completes prepare, adding Committed SyncWrite to
+     HashTable (as dirty) and queuing Committed SyncWrite to CkptMgr.
+
+  3. [Writer] Flusher runs, writing the Commit to disk - but crucially
+      *doesn't* get as far as executing PersistenceCallback.
+
+  4. [Reader] Warmup advances to value load phase, and loads the
+     Commit from [3] into HashTable (setting it clean).
+
+  5. [Writer] Persistence Callback runs, encounters a clean item in HT
+     for item just persisted - CRASH.
+
+The underlying bug is at [4] - when loading items into the HashTable
+during warmup; they should _not_ be unconditionally set as clean.
+
+Bulk of the patch is the testcase setting up the above sequence of
+events, fix itself is straightforard :)
+
+Change-Id: I70b410848500bb2c5457020d747beb3f1637337b
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2021-01-29 15:09:53.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-01-29 16:24:11.000000000
+Message: 
+Patch Set 1: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/8368/ : FAILURE
+
+Failure of GoogleTest "ExecutorPoolEpEngineTest/0.TaskStats_MemAccounting":
+
+<pre>
+[ RUN      ] ExecutorPoolEpEngineTest/0.TaskStats_MemAccounting
+[2021-01-29T16:05:45.577Z] ../kv_engine/engines/ep/tests/module_tests/executorpool_test.cc:1631: Failure
+[2021-01-29T16:05:45.577Z] Expected equality of these values:
+[2021-01-29T16:05:45.577Z]   0
+[2021-01-29T16:05:45.577Z]   memoryPostCancel - memoryInitial
+[2021-01-29T16:05:45.577Z]     Which is: 160
+[2021-01-29T16:05:45.577Z] mem_used has not returned to initial value after cancelling task
+[2021-01-29T16:05:45.577Z] [  FAILED  ] ExecutorPoolEpEngineTest/0.TaskStats_MemAccounting, where TypeParam = TestExecutorPool (5 ms)
+ExecutorPoolEpEngineTest/0.TaskStats_MemAccounting
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/8368/ )
+
+Test exceeded the timeout:
+[2021-01-29T16:09:44.415Z] /usr/bin/timeout: the monitored command dumped core ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/8368/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/5363/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/6828/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/33276/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/28625/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/16298/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/8493/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/8749/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/7452/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2021-02-01 15:24:02.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:49, engines/ep/src/persistence_callback.cc -> So I don't regret this as it's helping in finding issues, but why don't we make it a DEV_BUILD check? 😊
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2021-02-01 15:26:26.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:49, engines/ep/src/persistence_callback.cc -> My understanding is that the issue that we fix in this patch is benign (apart from the crash caused by this assertion), right?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2021-02-01 15:27:42.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:49, engines/ep/src/persistence_callback.cc -> Oops, seems that I m reviewing on the wrong branch , moving to http://review.couchbase.org/c/kv_engine/+/144740 😊
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-02-04 21:14:23.000000000
+Message: 
+Abandoned
+----------------------------------------------------------------------------------------------------------------------

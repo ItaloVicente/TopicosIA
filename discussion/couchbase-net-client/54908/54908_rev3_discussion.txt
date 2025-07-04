@@ -1,0 +1,139 @@
+======================================================================================================================
+DESCRIPTION:
+
+NCBC-978: implement retry logic on prepare
+
+Motivation:
+-----------
+Some conditions on the server (eg. new version of the query engine) can
+render a cached prepared statement stale. This means that when errors
+associated with this case are detected, the prepared statement should be
+ditched and the original statement prepared again.
+
+Modifications:
+--------------
+In the QueryRequest, the original statement is always kept and the
+GetStatement() method has been renamed to GetOriginalStatement() to
+better reflect that. A QueryRequest can also be marked has having been
+retried once, allowing to avoid infinite retry loops.
+
+Retry logic has been put in place when using Query(): if identified
+errors are detected, de-optimize by removing the QueryPlan from cache
+and retry Prepare step. This can happen no more than once in a row, by
+calling the Retry/RetryAsync methods.
+
+Results:
+--------
+Optimization via prepared statements now also has retry logic in place
+in case the server says a plan cannot be executed / is stale.
+
+Existing tests pass, but this is difficult to entirely test in isolation
+so a subsequent change will introduce mocking to test retry scenario in
+depth.
+
+Change-Id: I75260f49471810846bb0437422f0916c555e7ea2
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Simon Baslé
+Date: 2015-08-28 16:32:55.000000000
+Message: 
+Uploaded patch set 3.
+----------------------------------------------------------------------------------------------------------------------
+Author: Simon Baslé
+Date: 2015-08-28 16:34:13.000000000
+Message: 
+Patch Set 3: Verified+1
+
+Jeff, I've executed the existing tests and they pass, and I have simulated a retry execution by temporarily making CheckRetry return true, but I think the best way to test retry logic is to create some mock-based tests...
+
+However my skills in .Net mock testing are lacking, so if you have time... :)
+
+For reference here are the kind of tests we do in java:
+https://github.com/couchbase/couchbase-java-client/blob/master/src%2Ftest%2Fjava%2Fcom%2Fcouchbase%2Fclient%2Fjava%2Fquery%2Fcore%2FN1qlQueryExecutorTest.java#L290
+----------------------------------------------------------------------------------------------------------------------
+Author: Jeffry Morris
+Date: 2015-09-04 17:15:10.000000000
+Message: 
+Patch Set 3: Code-Review-1
+
+(9 comments)
+
+Simon -
+
+I think this can be tightened up a bit, especially the QueryClient code.
+
+See comments.
+
+-Jeff
+Line:25, Src/Couchbase/N1QL/QueryClient.cs -> Shouldn't the variable name reflect the meaning of the error? i.e. what do these errors mean?
+
+Line:30, Src/Couchbase/N1QL/QueryClient.cs -> Why not use an enum here?
+
+Line:202, Src/Couchbase/N1QL/QueryClient.cs -> I suggest encapsulating this logic into a method of QueryResult. A method name like HasErrors, then you can just do:
+
+return result.HasErrors()
+
+Or something of the equiv.
+
+Line:213, Src/Couchbase/N1QL/QueryClient.cs -> it's ok if this cache doesn't contain the entry?
+
+Line:217, Src/Couchbase/N1QL/QueryClient.cs -> If this had a line between each step (mark, re-optimize, re-execute), it would be easier to grok.
+
+Line:251, Src/Couchbase/N1QL/QueryClient.cs -> If you don't throw, the QueryResult.Exception should probably have an exception: PrepareFailedException with the message. The calling app can rethrow if it choses.
+
+Line:255, Src/Couchbase/N1QL/QueryClient.cs -> If Rows is empty, a InvalidOperationException will be thrown here. You may want to use FirstOrDefault() and check the result for null (the default). you could also do if(result.Rows.Any()){//do stuff}
+
+Line:283, Src/Couchbase/N1QL/QueryClient.cs -> Same as sync method.
+
+Line:287, Src/Couchbase/N1QL/QueryClient.cs -> Same as sync method.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Simon Baslé
+Date: 2015-09-07 13:21:20.000000000
+Message: 
+Patch Set 3:
+
+(8 comments)
+Line:25, Src/Couchbase/N1QL/QueryClient.cs -> Done
+
+Line:30, Src/Couchbase/N1QL/QueryClient.cs -> because we just need a string to search for in the error message of a 5000 error, I don't think an enum is more suited for that
+
+Line:202, Src/Couchbase/N1QL/QueryClient.cs -> this is something very specific to adhoc/prepared, I don't think putting this inside the QueryResult makes sense (it's not "has any errors", but rather "has these 3 very specific errors that should trigger a prepared retry").
+
+Line:213, Src/Couchbase/N1QL/QueryClient.cs -> yes it should be ok, the goal is that the retry should succeed in obtaining a new plan. if it doesn't, the fact that we removed any cached plan will avoid the extra round-trip of trying a stale plan then retrying (we'll see the cache empty, PREPARE and EXECUTE rather than EXECUTE stale, fail, PREPARE, EXECUTE).
+
+Line:217, Src/Couchbase/N1QL/QueryClient.cs -> Done
+
+Line:251, Src/Couchbase/N1QL/QueryClient.cs -> the problem is that is something that is done outside of the query the client sees... the client expects a QueryResult<T>, this code is dealing with a QueryResult<QueryPlan>. Should we return a custom crafted QueryResult that contains the error? if so, how to deal with T?
+
+Line:255, Src/Couchbase/N1QL/QueryClient.cs -> Done
+
+Line:287, Src/Couchbase/N1QL/QueryClient.cs -> Done
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jeffry Morris
+Date: 2015-09-08 18:01:37.000000000
+Message: 
+Patch Set 3:
+
+(2 comments)
+
+Simon -
+
+A few comments for patchset 3.
+
+-Jeff
+Line:30, Src/Couchbase/N1QL/QueryClient.cs -> Sorry, i meant for error codes above this line: ERROR_PREPARED1, ERROR_PREPARED2, etc
+
+Line:251, Src/Couchbase/N1QL/QueryClient.cs -> Yes, maybe a PreparedQueryResult with T closed to QueryPlan is the solution. 
+
+It's OK to throw the exception as long as it is caught at higher layer of the SDK and converted into something useful for the user. The convention in the SDK is to _not_ let thrown exceptions work their way up to the app level, the caveat of course is if bootstrapping failed.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Gerrit Code Review
+Date: 2015-09-09 19:03:51.000000000
+Message: 
+Change has been successfully cherry-picked as 96be2380924b9ae1d02228d7ed2362a4377c39c9
+----------------------------------------------------------------------------------------------------------------------

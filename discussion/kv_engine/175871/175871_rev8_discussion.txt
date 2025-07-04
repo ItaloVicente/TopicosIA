@@ -1,0 +1,420 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-52067: Ensure bgfetch does not short circuit multi-phase ops
+
+Increment is implemented with a SteppableCommandContext.
+If any phase receives status `would_block`, the subsequent
+notify_io_complete call _must_ provide `success` if the steppable
+context needs to run again.
+
+Any other status will result in a corresponding response being written
+and any remaining stages of the command context being skipped.
+
+If operations overlap, a bgfetch may complete but not find a temporary
+item in the HashTable (also possible if the paging visitor removes the
+temp item). Previously, if the item was not found on disk this could
+lead to the cookie being notified with no_such_key, potentially ending
+a command with an unexpected no_such_key response.
+
+To avoid this specific case, this patch ensures bgfetches which:
+
+* don't find the item on disk
+* don't find a temp item in the HT
+
+notifies the cookie with success.
+
+This is not entirely new behaviour - if a temp item _is_ found, the
+cookie is already notified with success, relying on the operation
+to re-run and find the temp non existent item.
+
+This does introduce inefficiency - multiple concurrent GETs for the
+same key might now wastefully trigger repeated bgfetches.
+To resolve this, a future patch _may_ prevent GETs cleaning up temp
+items (as the ItemPager will do so eventually).
+
+Change-Id: I825739c3ccdb373850a40f442b3e829e7d65080d
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: James H
+Date: 2022-06-27 13:50:24.000000000
+Message: 
+Uploaded patch set 8.
+----------------------------------------------------------------------------------------------------------------------
+Author: Restriction Checker
+Date: 2022-06-27 13:50:36.000000000
+Message: 
+Patch Set 8: Well-Formed+1
+
+Permission granted to commit: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/304241/artifact/restricted.html : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2022-06-27 13:52:41.000000000
+Message: 
+Patch Set 8: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-06-27 14:13:36.000000000
+Message: 
+Patch Set 8: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-neo/413/ : FAILURE
+
+Failure of GoogleTest "PersistentAndEphemeral/ConnectionTest.test_maybesendnoop_not_sufficient_time_passed/1":
+
+<pre>
+[ RUN      ] PersistentAndEphemeral/ConnectionTest.test_maybesendnoop_not_sufficient_time_passed/1
+unknown file: error: C++ exception with description "cb::io::rmrf: remove of file \\?\C:\Jenkins\workspace\kv_engine-windows-neo\build\kv_engine\ep_engine_ep_unit_tests.db\test.111801\magma.1\wal\wal.1 under ep_engine_ep_unit_tests.db/test.111801 failed: The data is invalid." thrown in TearDown().
+[  FAILED  ] PersistentAndEphemeral/ConnectionTest.test_maybesendnoop_not_sufficient_time_passed/1, where GetParam() = "bucket_type=ephemeral:ephemeral_full_policy=fail_new_data" (24 ms)
+PersistentAndEphemeral/ConnectionTest.test_maybesendnoop_not_sufficient_time_passed/1
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-neo/413/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/neo/311/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [31/159]: test bloomfilters"s in a delete+set scenario...Exceeded maximum wait time of 60000000us waiting for stat "ep_queue_size" to be 0 (last value:1) - aborting.
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/neo/311/ )
+
+One of more core files found at the end of the build. Data for post-mortem saved to archived_core_dumps.tar.bz2 under "Build Artifacts". ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/neo/311/ )
+
+Test exceeded the timeout:
+[2022-06-27T14:07:51.535Z] /usr/bin/timeout: the monitored command dumped core ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/neo/311/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/neo/441/ : FAILURE
+
+Failure of GoogleTest "EphemeralOrPersistent/STItemPagerTest.ReplicaEvictedBeforeActive/persistent_couchstore_value_only":
+
+<pre>
+[ RUN      ] EphemeralOrPersistent/STItemPagerTest.ReplicaEvictedBeforeActive/persistent_couchstore_value_only
+[2022-06-27T13:59:16.855Z] ../kv_engine/engines/ep/tests/module_tests/item_pager_test.cc:1180: Failure
+[2022-06-27T13:59:16.855Z] Expected equality of these values:
+[2022-06-27T13:59:16.855Z]   100
+[2022-06-27T13:59:16.855Z]   getRRPercent(*store->getVBucket(vbid))
+[2022-06-27T13:59:16.855Z]     Which is: 94
+[2022-06-27T13:59:16.855Z] vb:0 not fully resident after eviction
+[2022-06-27T13:59:16.855Z] ../kv_engine/engines/ep/tests/module_tests/item_pager_test.cc:1180: Failure
+[2022-06-27T13:59:16.855Z] Expected equality of these values:
+[2022-06-27T13:59:16.855Z]   100
+[2022-06-27T13:59:16.855Z]   getRRPercent(*store->getVBucket(vbid))
+[2022-06-27T13:59:16.855Z]     Which is: 97
+[2022-06-27T13:59:16.855Z] vb:1 not fully resident after eviction
+[2022-06-27T13:59:16.855Z] [  FAILED  ] EphemeralOrPersistent/STItemPagerTest.ReplicaEvictedBeforeActive/persistent_couchstore_value_only, where GetParam() = "bucket_type=persistent:backend=couchstore:item_eviction_policy=value_only" (341 ms)
+EphemeralOrPersistent/STItemPagerTest.ReplicaEvictedBeforeActive/persistent_couchstore_value_only
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/neo/441/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-neo/300/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/17483/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-neo/294/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/neo/312/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/neo/302/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/neo/299/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/neo/320/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/neo/309/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-06-27 15:57:23.000000000
+Message: 
+Patch Set 8:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/neo/442/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [42/159]: file stats post warmup...../kv_engine/engines/ep/tests/ep_testsuite.cc:2328 Test failed: `" (Expected `250675" to be less than or equal to `245760" - Unexpected fileSize for vbucket)
+[2022-06-27T15:34:21.478Z] (261 ms) FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/neo/442/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-neo/300/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/17483/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-neo/294/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/neo/312/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/neo/302/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/neo/312/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/neo/299/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/neo/320/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/neo/309/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-neo/415/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-06-27 16:56:27.000000000
+Message: 
+Patch Set 8:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/neo/443/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [42/159]: file stats post warmup...../kv_engine/engines/ep/tests/ep_testsuite.cc:2328 Test failed: `" (Expected `317030" to be less than or equal to `286720" - Unexpected fileSize for vbucket)
+[2022-06-27T16:25:33.803Z] (251 ms) FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/neo/443/ )
+
+Failure of GoogleTest "ExecutorPoolTest/0.ScheduleCancelx2":
+
+<pre>
+[ RUN      ] ExecutorPoolTest/0.ScheduleCancelx2
+[2022-06-27T16:37:26.025Z] ../kv_engine/engines/ep/tests/module_tests/executorpool_test.cc:732: Failure
+[2022-06-27T16:37:26.025Z] Value of: this->pool->cancel(taskId, false)
+[2022-06-27T16:37:26.025Z]   Actual: false
+[2022-06-27T16:37:26.025Z] Expected: true
+[2022-06-27T16:37:26.025Z] [  FAILED  ] ExecutorPoolTest/0.ScheduleCancelx2, where TypeParam = TestExecutorPool (1 ms)
+ExecutorPoolTest/0.ScheduleCancelx2
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/neo/443/ )
+
+Timeout of a CTest test [2022-06-27T16:56:17.991Z] 443/443 Test #441: cluster_test ................................................................................................} ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/neo/443/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-neo/300/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/17483/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-neo/294/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/neo/312/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/neo/302/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/neo/312/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/neo/299/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/neo/320/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/neo/309/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-neo/415/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-06-28 09:07:13.000000000
+Message: 
+Patch Set 8:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/neo/446/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [42/159]: file stats post warmup...../kv_engine/engines/ep/tests/ep_testsuite.cc:2328 Test failed: `" (Expected `191693" to be less than or equal to `188416" - Unexpected fileSize for vbucket)
+[2022-06-28T08:36:21.869Z] (294 ms) FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/neo/446/ )
+
+Timeout of a CTest test [2022-06-28T09:07:04.413Z] 443/443 Test #441: cluster_test ................................................................................................} ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/neo/446/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-neo/300/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/17483/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-neo/294/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/neo/312/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/neo/302/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/neo/312/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/neo/299/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/neo/320/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/neo/309/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-neo/415/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-06-28 09:58:37.000000000
+Message: 
+Patch Set 8:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/neo/447/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [42/159]: file stats post warmup...../kv_engine/engines/ep/tests/ep_testsuite.cc:2328 Test failed: `" (Expected `376013" to be less than or equal to `360448" - Unexpected fileSize for vbucket)
+[2022-06-28T09:49:18.468Z] (275 ms) FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/neo/447/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-neo/300/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/17483/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-neo/294/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/neo/312/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/neo/302/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/neo/312/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/neo/299/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/neo/320/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/neo/309/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-neo/415/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-06-28 10:43:35.000000000
+Message: 
+Patch Set 8:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/neo/448/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [42/159]: file stats post warmup...../kv_engine/engines/ep/tests/ep_testsuite.cc:2328 Test failed: `" (Expected `398131" to be less than or equal to `385024" - Unexpected fileSize for vbucket)
+[2022-06-28T10:12:54.136Z] (361 ms) FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/neo/448/ )
+
+Timeout of a CTest test [2022-06-28T10:43:25.694Z] 443/443 Test #441: cluster_test ................................................................................................} ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/neo/448/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-neo/300/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/17483/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-neo/294/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/neo/312/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/neo/302/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/neo/312/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/neo/299/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/neo/320/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/neo/309/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-neo/415/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-06-28 11:22:37.000000000
+Message: 
+Patch Set 8:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/neo/449/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [42/159]: file stats post warmup...../kv_engine/engines/ep/tests/ep_testsuite.cc:2328 Test failed: `" (Expected `287539" to be less than or equal to `278528" - Unexpected fileSize for vbucket)
+[2022-06-28T10:57:15.801Z] (268 ms) FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/neo/449/ )
+
+Timeout of a CTest test [2022-06-28T11:22:28.334Z] 443/443 Test #441: cluster_test ................................................................................................} ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/neo/449/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-neo/300/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/17483/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-neo/294/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/neo/312/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/neo/302/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/neo/312/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/neo/299/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/neo/320/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/neo/309/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-neo/415/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-06-28 13:55:39.000000000
+Message: 
+Patch Set 8:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/neo/457/ : FAILURE
+
+Failure of GoogleTest "ExecutorPoolTest/0.WakeSetsTaskRunning":
+
+<pre>
+[ RUN      ] ExecutorPoolTest/0.WakeSetsTaskRunning
+[2022-06-28T13:44:33.487Z] ../kv_engine/engines/ep/tests/module_tests/executorpool_test.cc:551: Failure
+[2022-06-28T13:44:33.487Z] Expected equality of these values:
+[2022-06-28T13:44:33.487Z]   task_state_t::TASK_RUNNING
+[2022-06-28T13:44:33.487Z]     Which is: RUNNING
+[2022-06-28T13:44:33.487Z]   task->getState()
+[2022-06-28T13:44:33.487Z]     Which is: DEAD
+[2022-06-28T13:44:33.487Z] [  FAILED  ] ExecutorPoolTest/0.WakeSetsTaskRunning, where TypeParam = TestExecutorPool (1 ms)
+ExecutorPoolTest/0.WakeSetsTaskRunning
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/neo/457/ )
+
+Timeout of a CTest test [2022-06-28T13:55:29.637Z] 443/443 Test #441: cluster_test ................................................................................................} ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/neo/457/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-neo/300/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/17483/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-neo/294/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/neo/312/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/neo/302/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/neo/312/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/neo/299/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/neo/320/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/neo/309/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-neo/415/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

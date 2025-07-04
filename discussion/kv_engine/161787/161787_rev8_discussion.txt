@@ -1,0 +1,180 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-40314 Make MagmaKVStore local doc keys same as CouchKVStore
+
+Right now local doc keys used for Magma are different from Couchstore.
+Magma keys lack the "_local" prefix in them, for example:
+_vbstate VS _local/vbstate
+
+This doesn't let us use common libraries like ep-engine_storage_common
+that have local doc decoders that only recognize local doc keys of
+Couchstore. Hence this change makes Magma local doc keys same as
+Couchstore.
+
+Linked magma change:
+http://review.couchbase.org/c/magma/+/161788
+
+Change-Id: Id859fae688cb649c345c251b973a892a753bf751
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Rohan Suri
+Date: 2021-09-22 05:03:53.000000000
+Message: 
+Patch Set 8: Patch Set 7 was rebased
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-09-22 05:21:59.000000000
+Message: 
+Patch Set 8: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/2354/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/2354/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/34241/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/40224/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/12682/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/11473/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/14551/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/15058/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/2322/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/13440/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/22564/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/14298/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Rohan Suri
+Date: 2021-09-22 07:54:43.000000000
+Message: 
+Patch Set 8:
+
+@DaveR is this looking good now?
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-09-22 08:32:57.000000000
+Message: 
+Patch Set 8: Code-Review-1
+
+(1 comment)
+Line:110, engines/ep/src/kvstore/couch-kvstore/couch-kvstore.h -> Looking at this again, I think this should stay as an rvalue reference.
+
+While most of the instances where we construct a CouchLocalDocRequest take a literal (the various constants you've updated in this patch), the collection count documents (which are some of the most commonly accessed) have variable keys - as created via:
+
+ /// @returns the document ID used to store cid
+ std::string CouchKVStore::getCollectionStatsLocalDocId(CollectionID cid) {
+     return fmt::format("|{:#x}|", uint32_t(cid));
+ }
+
+Given this function returns a string, we have already paid a heap allocation here[1], and if we pass the key via std::string_view we have to create a second string (with a second heap allocation in the CouchLocalDocRequest ctor.
+
+Please change back to having this take an rvalue reference; that will probably require you to explicitly construct a std::string from your std::string_view instances:
+
+ localDocQueue.emplace_back(std::string{LocalDocKey::vbstate}, json.dump());
+
+Admittedly that's a bit verbose, but I think it's the best option to ensure we minimise heap allocations - there's a reason the code currently takes std::string&&.
+
+(The obvious alternative would be to have an additional ctor overloads which take either std::string&& or std::string_view for the key. That would probably be fine if there was just a single constructor already, but there's already 3 overloads; and allowing each to take either std::string&& or std::string_view would multiply that to 6 which I feel is over-complicating things.
+
+
+[1] I'm assuming here that small-string-optimization doesn't kick in, which for the specific case of the collection stats document is probably pessimistic. However the general principle holds; and we may well have other local docs in future which have longer keys.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Rohan Suri
+Date: 2021-09-22 09:54:57.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:110, engines/ep/src/kvstore/couch-kvstore/couch-kvstore.h -> Sure, I'll refactor.
+
+Just to understand better, wouldn't std::string also solve this issue?
+
+For example:
+
+ CouchLocalDocRequest(std::string key_): key(std::move(key_))
+
+Any rvalues passed into this ctor would be move constructed into key_. Further key will be move constructed from key_. So we will only have one allocation. This also does away with the verbosity of forcing callers to create rvalues.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-09-22 11:04:44.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:110, engines/ep/src/kvstore/couch-kvstore/couch-kvstore.h -> > Any rvalues passed into this ctor would be move constructed into key_. Further key will be move constructed from key_. So we will only have one allocation. This also does away with the verbosity of forcing callers to create rvalues.
+
+I think the problem is not really with rvalues; it's with lvalues (which may have been passed via a number functions). 
+
+It looks like the intent with the original code was to require an rvalue(reference) - and because all users of CouchLocalDocRequest used std::string (rvalues) it all worked.
+
+Now we have changed the constant local keys to std::string_view (which I think is a better choice in general), we do have a mix of std::string and std::string_view - and hence the debate here :)
+
+If we don't want the complexity of the different overloads (std::string&& and std::string_view) for the most optimal way to pass in every scenario; then we need to pick one type. std::string&& essentially forces the caller to use the type we believe is the most optimal; but at the cost of the extra boilerplate if we don't already have that type...
+
+Given the code was already using std::string&& (all arguments must be rvalue-references), that gives us a optimal calling-convention. However, using either std::string or std::string&& will now require that the std::string_view (from the constants) is explicitly converted to std::string, given there's no implicit conversion.
+
+At the end of the day if we want to avoid copies from a std::string (rvalue or otherwise) parameter, we cannot have the constructor take a std::string_view - it must be std::string or std::string&&. And both of those require the explicit conversion.
+
+So I think the choice is between:
+
+a) std::string_view for the constants (and having to add explicit std::string{} to the calls, or
+b) std::string for the constants, and avoiding the explicit calls.
+
+None is ideal, but (b) to me kinda feels wrong as std::string is really for string-objects which can potentially change; which the constants cannot.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Rohan Suri
+Date: 2021-09-22 14:16:30.000000000
+MISMATCHED INLINE COMMENT
+Line:110, engines/ep/src/kvstore/couch-kvstore/couch-kvstore.h -> > At the end of the day if we want to avoid copies from a std::string (rvalue or otherwise) parameter, we cannot have the constructor take a std::string_view - it must be std::string or std::string&&
+
+Good point.
+
+Done. Refactored as per choice (a).
+
+> (b) to me kinda feels wrong as std::string is really for string-objects which can potentially change; which the constants cannot.
+
+Will constants declared as `const std::string` also not suffice?
+----------------------------------------------------------------------------------------------------------------------
+Author: Rohan Suri
+Date: 2021-09-22 14:59:35.000000000
+MISMATCHED INLINE COMMENT
+Line:110, engines/ep/src/kvstore/couch-kvstore/couch-kvstore.h -> > under the ASan build (which is both less optimised and performs extra work on all allocations / deallocations) we got a noticeable speedup
+
+Very interesting thanks for sharing that. Got a good idea about their usages now.
+
+> Given the issues we've hit with the ctor, I'm ok with changing the constants back to std::string for simplicity
+
+Let's keep those constants as std::string_view and continue using std::string&& in the ctor. The latest patchset has those changes.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-09-22 14:33:52.000000000
+MISMATCHED INLINE COMMENT
+Line:110, engines/ep/src/kvstore/couch-kvstore/couch-kvstore.h -> > Will constants declared as `const std::string` also not suffice?
+
+Well, it depends on how much you care about performance etc 😊
+
+std::string is a non-constexpr class (in C++17 and consumes at least 3 words, plus a heap allocation for non-SSO).
+
+Using `const std::string for those constants is both larger and will require the compiler to generate calls to the constructor at runtime (typically in some init function before main).
+
+Given the issues we've hit with the ctor, I'm ok with changing the constants back to std::string for simplicity; given there are only a few and we end up turning them into std::string anyways later.
+
+As a random example (not necessarily relevant here, but still), we have some unit tests which check all expected stat names are printed. That's done by building a unordered_map of what is returned from all the different stat groups, and comparing them to a known (constant) set of stats. I recall we used to use `const std::string` for all those stat keys (even through they are compile-time constant), and under the ASan build (which is both less optimised and performs extra work on all allocations / deallocations) we got a noticeable speedup (many seconds) in test runtime by moving to `const char*` or string_view (I forget which one).
+
+Here you have <10 constants (there were a few hundred in that test), plus they arn't manipulated as much so it's likely to not be the same kind of issue, but I think does illustrate the kind of difference this can make in the right situation.
+----------------------------------------------------------------------------------------------------------------------

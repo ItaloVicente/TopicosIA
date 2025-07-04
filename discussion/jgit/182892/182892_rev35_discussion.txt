@@ -1,0 +1,222 @@
+======================================================================================================================
+DESCRIPTION:
+
+CommitGraph: implement commit-graph read
+
+Git introduced a new file storing the topology and some metadata of
+the commits in the repo (commitGraph). With this data, git can browse
+commit history without parsing the pack, speeding up e.g.
+reachability checks.
+
+This change teaches JGit to read commit-graph-format file, following
+the upstream format([1]).
+
+JGit can read a commit-graph file from a buffered stream, which means
+that we can provide this feature for both FileRepository and
+DfsRepository.
+
+[1] https://git-scm.com/docs/commit-graph-format/2.21.0
+
+Bug: 574368
+Change-Id: Ib5c0d6678cb242870a0f5841bd413ad3885e95f6
+Signed-off-by: kylezhao <kylezhao@tencent.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Kyle Zhao
+Date: 2022-12-12 07:52:26.000000000
+Message: 
+Uploaded patch set 35.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2022-12-12 07:53:25.000000000
+Message: 
+Patch Set 35:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline.java11/2468/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2022-12-12 08:03:53.000000000
+Message: 
+Patch Set 35: Verified-1
+
+Build Failed 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline.java11/2468/ : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2022-12-12 08:24:09.000000000
+Message: 
+Patch Set 35:
+
+(14 comments)
+File Comment: /PATCHSET_LEVEL -> Thanks for your reviews.
+----------------------------------------------------------------------------------------------------------------------
+Author: Ivan Frade
+Date: 2022-12-12 20:02:04.000000000
+Message: 
+Patch Set 35:
+
+(19 comments)
+File Comment: /PATCHSET_LEVEL -> Thanks! Some suggestions on CommitGraphData readability (it should be easy to modify because there are tests!) and minor details here and there.
+Line:30, org.eclipse.jgit/src/org/eclipse/jgit/errors/CommitGraphFormatException.java -> This constructor can be package-private, nobody out from this package should create this exception.
+
+Line:105, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/CommitGraph.java -> add "seconds since epoch" (it saves a trip to the spec)
+
+Line:110, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/CommitGraph.java -> nit: whitespace
+
+Line:112, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/CommitGraph.java -> mention "or {@link Constants#COMMIT_GENERATION_NOT_COMPUTED} if the writer didn't calculate it."
+
+Line:132, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/CommitGraphLoader.java -> Nit: you can pass here numberOfChunks+1, so the array list books only the required space.
+
+Line:133, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/CommitGraphLoader.java -> Can you add a comment explaining that the last chunk is just a marker, so we load n+1 chunks in the list, but later iterate only n?
+
+Otherwise the n+1 size, and the subtle difference in the for loops is hard to see and looks like a bug.
+
+Line:77, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/GraphCommitData.java -> We could do here as RevCommit does, define a private static final int[] NO_PARENTS = {} and reuse it, instead of doing this "new".
+
+Line:78, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/GraphCommitData.java -> I thought first this was an "extra edge" value, but it is actually a parent.
+
+Should this be called "parent", "parentPos" or "parentPosition"?
+
+Line:89, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/GraphCommitData.java -> This becomes more readable with explicit "firstParent" and "secondParent" variables and returning early. I may save also some array mangling.
+
+Something like:
+```
+firstParent = NB...
+if (no parent) {
+  return CommitDataImpl(..., NO_PARENTS, ...)
+}
+
+secondParent = NB...
+if (no second parent) {
+  return CommitDataImpl(..., [firstParent]. ...)
+}
+
+if (secondParent is regular edge) {
+  return CDImpl(.., [firstParent, secondParent], ...)
+}
+
+if (secondParent is needs_extra_edged {
+  ...
+}
+...
+
+Line:93, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/GraphCommitData.java -> Could we pass the known parent as parameter and let findExtraEdgeList return an array with all parents, so we can pass directly into CommitDataImpl instead of copying it one more time?
+
+Alternative: that findExtraEdgeList leaves the first position of the array "empty" and we overwrite it here.
+
+Both options are "hacky" but can save a bunch of array copies.
+
+Line:128, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/GraphCommitData.java -> Does this mean that our graph has invalid offsets? if so, it should be an exception.
+
+Line:133, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/GraphCommitData.java -> Can we use this for loop to advance the offset?
+
+e.g.
+for (int offset = pptr * 4; offset <= maxOffset; offset += 4) {
+    // Make sure there is space
+    // Read parent
+    // if last { parse, add, break }
+    // add
+}
+
+Before we already checked the offset is never > maxOffset, and we don't need the check inside the loop.
+
+Line:135, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/GraphCommitData.java -> Extract this to a resize (expand?) function, so it is easier to read:
+
+if (count >= pList.length) {
+   parentList = expand(pList);
+}
+
+Line:144, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/GraphCommitData.java -> pList[count++] to make it consistent with line 148
+
+Line:29, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/GraphObjectIndex.java -> Now that the fanout array is here, this can probably be private.
+
+Line:56, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/GraphObjectIndex.java -> With the integer check, this array can now be int[] and cast in insertion (no need to the cast later ~line 77
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2022-12-13 07:15:13.000000000
+MISMATCHED INLINE COMMENT
+Line:30, org.eclipse.jgit/src/org/eclipse/jgit/errors/CommitGraphFormatException.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2022-12-13 07:15:13.000000000
+MISMATCHED INLINE COMMENT
+Line:105, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/CommitGraph.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2022-12-13 07:15:13.000000000
+MISMATCHED INLINE COMMENT
+Line:110, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/CommitGraph.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2022-12-13 07:15:13.000000000
+MISMATCHED INLINE COMMENT
+Line:112, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/CommitGraph.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2022-12-13 07:15:13.000000000
+MISMATCHED INLINE COMMENT
+Line:132, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/CommitGraphLoader.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2022-12-13 07:15:13.000000000
+MISMATCHED INLINE COMMENT
+Line:133, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/CommitGraphLoader.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2022-12-13 07:15:13.000000000
+MISMATCHED INLINE COMMENT
+Line:77, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/GraphCommitData.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2022-12-13 07:15:13.000000000
+MISMATCHED INLINE COMMENT
+Line:78, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/GraphCommitData.java -> Done.
+I changed them to parent1 and parent2.
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2022-12-13 07:15:13.000000000
+MISMATCHED INLINE COMMENT
+Line:89, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/GraphCommitData.java -> Done.
+The code looks much better.
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2022-12-13 07:15:13.000000000
+MISMATCHED INLINE COMMENT
+Line:93, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/GraphCommitData.java -> Done.
+I passed parent1 to #findParents4OctopusMerge(), feel like this looks better.
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2022-12-13 07:15:13.000000000
+MISMATCHED INLINE COMMENT
+Line:128, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/GraphCommitData.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2022-12-13 07:15:13.000000000
+MISMATCHED INLINE COMMENT
+Line:133, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/GraphCommitData.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2022-12-13 07:15:13.000000000
+MISMATCHED INLINE COMMENT
+Line:135, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/GraphCommitData.java -> Done.
+I added a comment above it.
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2022-12-13 07:15:13.000000000
+MISMATCHED INLINE COMMENT
+Line:144, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/GraphCommitData.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2022-12-13 07:15:13.000000000
+MISMATCHED INLINE COMMENT
+Line:29, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/GraphObjectIndex.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2022-12-13 07:15:13.000000000
+MISMATCHED INLINE COMMENT
+Line:56, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/commitgraph/GraphObjectIndex.java -> Done
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,108 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-32776: Retry rebalance upon failure.
+
+Change-Id: Iee10d6d4bdc20f5b011ee88d8446651c6f7dbc84
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Poonam Dhavale
+Date: 2019-01-23 23:10:27.000000000
+Message: 
+Uploaded patch set 5.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-01-23 23:10:34.000000000
+Message: 
+Patch Set 5:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-test/8077/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-01-23 23:14:51.000000000
+Message: 
+Patch Set 5: Well-Formed+1
+
+Permission granted to commit to restricted branch
+----------------------------------------------------------------------------------------------------------------------
+Author: Poonam Dhavale
+Date: 2019-01-23 23:18:34.000000000
+Message: 
+Patch Set 5: Verified+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Artamonau
+Date: 2019-02-13 19:14:46.000000000
+Message: 
+Patch Set 5:
+
+There are two major issues with this patch as I see it.
+
+1. ns_orchestrator makes synchronous calls into auto_rebalance and vice versa. This will lead to sporadic crashes of both processes when they both wait for the other to respond.
+
+2. The calls to cancel_any_pending_retry/1 to prevent a rebalance restart with the wrong configuration are problematic in multiple ways:
+
+ - The caller might be talking to a wrong instance of auto_rebalance if there are competing leaders in the cluster due to some sort of network partition.
+
+ - Even if the former is not the case, it's still possible to restart a rebalance with bad configuration. For example, we don't prohibit server group changes during rebalance. So it's possible that rebalance starts with configuration C0, while it's running configuration is changed to C1, then rebalance fails. It will be successfully retried even though the configuration is different now.
+
+ - On the aesthetics and supportability side, it'd be better to have this handled centrally: so we don't have to think about how it all works in multi-version clusters.
+
+To address (2), I'd suggest for ns_orchestrator to record a snapshot of current configuration and then upon restart verifying that nothing has changed in between. It doesn't address all possible issues due to ns_config weaknesses (and also how we use it in this particular code path), but at least it makes them significantly less probable.
+
+I'll leave couple of more minor comments inline.
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Artamonau
+Date: 2019-02-13 19:19:10.000000000
+Message: 
+Patch Set 5:
+
+(1 comment)
+Line:256, src/auto_rebalance.erl -> The timer might have already expired, so you should probably cleanup the retry_rebalance messages from the mailbox to prevent "unexpected message" warnings.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Poonam Dhavale
+Date: 2019-02-20 21:13:25.000000000
+Message: 
+Patch Set 5:
+
+Hi Aliaksey,
+
+I will convert the sync “calls" from ns_orchestrator to the auto-rebalance module into “casts".
+
+Regarding retrying rebalance with bad configuration: 
+
+I had actually thought about this during the design. And, wondered whether I should grab phash2 of config at the start of rebalance and if rebalance fails, then pass that to auto-rebalance. On retry, the orchestrator will compare the passed phash2 and fail the retry if it does not match with the one for current config.
+
+But, I felt that it was not required for following reasons. There are several layers of checks that are performed.
+
+- UI disables many operations while rebalance is in progress, including server group changes.
+
+- REST API does not allow server group changes while rebalance is in progress.  
+http://src.couchbase.org/source/xref/trunk/ns_server/src/menelaus_web_groups.erl#115 
+
+- If new nodes are added while retry is pending, then the existing nodes_mismatch check here will prevent the retry.
+http://src.couchbase.org/source/xref/trunk/ns_server/src/ns_orchestrator.erl#368 
+
+- Also, as mentioned in the design doc, when retry is pending, UI will present a banner and a button which will allow users to cancel pending retry.  Users will be urged to cancel the retry before performing any manual operation. 
+
+- But, we cannot rely that the users will actually do that. So, In addition,  “cancel_any_pending_retry” calls are added at the beginning of node add, failover, manual rebalance, server group change.
+
+- But,  even with above, it is still possible (although less likely) that user changes some configuration while the rebalance is in progress/pending and the retry happens on the modified config. However, that can happen even today. Users can and some do have automated scripts to retry rebalance. Also, the external orchestrators such as the Kubernetes Couchbase operator can trigger rebalance automatically. And, these automated rebalances may not be coordinated with other actions user may be taking manually. 
+
+- However, for added robustness, I can add a phash2 check I described above. This need not be a phash2 of entire ns_config but only of keys that are important from rebalance perspective – e.g node, buckets, server groups.
+
+Regarding the upgrade: One of the pending TODOs is to prevent  the auto-rebalance calls while the cluster is at pre-madhatter. 
+
+Please let me know your thoughts.
+----------------------------------------------------------------------------------------------------------------------
+Author: Poonam Dhavale
+Date: 2019-02-20 21:22:17.000000000
+Message: 
+Patch Set 5:
+
+(1 comment)
+Line:256, src/auto_rebalance.erl -> Good catch. Will call misc:canecl_timer(). This will take care of the flush as well.
+
+----------------------------------------------------------------------------------------------------------------------

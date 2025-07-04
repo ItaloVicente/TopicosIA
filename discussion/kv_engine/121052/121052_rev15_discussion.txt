@@ -1,0 +1,135 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-37546: Early-return if no items for persistence cursor
+
+Before this change, the logic in EPBucket::flushVBucket() is:
+
+  if (some-items-for-persistence-cursor) {
+    <many lines of code for flushing to disk>
+  }
+  <epilogue>
+
+The epilogue, which is executed regardless of whether we have flushed
+or not, performs:
+  - KVStore::pendingTasks()
+  - Notify satisfied SeqnoPersistence requests
+  - Checkpoint related operations:
+    - Wakeup CheckpointRemover if CM has checkpoints that can be removed
+    - Notify satisfied CheckpointPersistence requests
+
+With this change we remove the extra indentation of many lines of code:
+
+  if (no-items-for-persistence-cursor) {
+    return;
+  }
+  <many lines of code for flushing to disk>
+  <epilogue>
+
+The side effect of this is that we do /not/ execute the <epilogue> if we
+early-return. But:
+  - KVStore::pendingTasks() does not need to be executed as by
+    definition "is called after persisting a batch of data to perform
+    any pending tasks on the underlying store"
+  - There is definitely no SeqnoPersistence requests to notify as we
+    have not persisted anything
+So that is fine.
+
+Now about the Checkpoint related operations:
+  - Wakeup CheckpointRemover
+      I am keeping this by executing it unconditionally just after the
+      call to VB::getItemsForPersistence(), as the persistence cursor
+      may have just moved to the beginning of a new checkpoint, which
+      may make the previous checkpoint eligible for removal.
+      Also, it is safe to execute this step regardless of whether (1)
+      no-items-for-pcursor or (2) flush-success or (3) flush-failure.
+      Note that before this change we missed to execute this step before
+      some nested return statement. Which is fixed here.
+  - Notify satisfied CheckpointPersistence request
+      This step must still be executed if we early-return because
+      (again) the persistence cursor may have moved.
+      But, we cannot execute this step unconditionally because we cannot
+      notify if the flush fails.
+      So, this step is executed if (1) no-items-for-pcursor or (2)
+      flush-success, but not executed if (3) flush-failure.
+
+For reference, the CheckpointPersistence command seems to be just legacy
+from TAP, so we can probably remove it in a follow-up.
+
+Change-Id: I12fb3f0afffcfca2db768d3179592f0eda2a2f18
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2020-01-28 15:34:11.000000000
+Message: 
+Uploaded patch set 15.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-01-28 15:34:22.000000000
+Message: 
+Patch Set 15: Well-Formed+1
+
+Permission granted to commit: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/165842/artifact/restricted.html : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-01-28 17:09:14.000000000
+Message: 
+Patch Set 15: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/774/ : FAILURE
+
+CMake error: C:/Jenkins/workspace/kv_engine-windows-madhatter/tlm/cmake/Modules/CouchbaseGoogleTestAddTests.cmake:39 (message) ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/774/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/783/ : FAILURE
+
+Failure of a CTest test [2020-01-28T16:36:29.351Z]  29/193 Test  #29: ep_testsuite.value_eviction.comp_active ...................................... ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/783/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/23948/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/708/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/mad-hatter/123/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/553/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/778/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/770/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-01-30 16:27:50.000000000
+Message: 
+Patch Set 15: Code-Review+1
+
+(2 comments)
+Line:356, engines/ep/src/ep_bucket.cc -> Is it worth raising a follow up MB to come back to this at some point? Or is it touched in a later patch?
+
+Line:362, engines/ep/src/ep_bucket.cc -> haven't checked the code but IIRC, checkpoint removal checks this value and does not remove checkpoints if they are >= this ID?
+Though your later patches definitely make that unnecessary, the deferred cursor movement will prevent the checkpoint being removed :)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-01-30 16:47:49.000000000
+Message: 
+Patch Set 15:
+
+(2 comments)
+Line:356, engines/ep/src/ep_bucket.cc -> Not touched under this MB, I ll open a new one
+
+Line:362, engines/ep/src/ep_bucket.cc -> We do use that as you say in the checkpoint removal code, but I think it s definitely unnecessary. Ie, why do we need to treat the persistence-cursor in any different way than DCP cursors when it s about checkpoint removal ? 
+I can add that to the comment anyway
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-02-11 09:45:53.000000000
+Message: 
+Patch Set 15:
+
+(1 comment)
+----------------------------------------------------------------------------------------------------------------------

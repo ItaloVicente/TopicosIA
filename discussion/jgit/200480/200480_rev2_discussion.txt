@@ -1,0 +1,181 @@
+======================================================================================================================
+DESCRIPTION:
+
+Allow applying a patch with conflicts
+
+In some settings, we want to let users apply a patch that does
+not cleanly apply and add conflict markers. In Gerrit, this is
+useful when cherry picking (via Git patches) from one host to
+another.
+
+This commit takes a simple approach: If a hunk doesn't apply,
+go to the pre-image line, treat all lines in pre-image length
+as left side of the conflict and all context and newly added
+lines as right side of the conflict.
+
+Change-Id: I01411d7a32b3f3207097b26231909aae6b835650
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Patrick Hiesel
+Date: 2023-03-16 16:00:45.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2023-03-16 16:00:52.000000000
+Message: 
+Patch Set 2:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline.java11/3261/
+----------------------------------------------------------------------------------------------------------------------
+Author: Patrick Hiesel
+Date: 2023-03-16 16:01:16.000000000
+Message: 
+Patch Set 2:
+
+This change is ready for review.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2023-03-16 16:03:33.000000000
+Message: 
+Patch Set 2: Verified-1
+
+Build Failed 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline.java11/3261/ : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Nitzan Gur-Furman
+Date: 2023-03-17 08:16:11.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:10, org.eclipse.jgit.test/tst-rsrc/org/eclipse/jgit/diff/Conflict_PostImage -> The patch is expecting lineB to be the new line after line3, so this output doesn't show any actual issue.
+
+I would expect to see lineA here, or in some "expected head" part.
+(Can we think of that as a 3-way merge with actual base, the base as in the patch file being "other", and the patch result being "mine"?)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Patrick Hiesel
+Date: 2023-03-17 08:34:33.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:10, org.eclipse.jgit.test/tst-rsrc/org/eclipse/jgit/diff/Conflict_PostImage -> It expects line A pre image and it's not there which is why it's a conflict in the first place. If it was there, the logic would have deleted it, so it's gone post image. The patch file does tell what it expects post image to look like:
+
+```
+ line3
+ lineB
+ line5
+ line6
+```
+
+So no line A.
+
+This is exactly what the conflict markers say? (the part between << and == has pre image and the part between == and >> has post image and we can't automatically merge these two, so spit out conflict markers).
+
+How could we do a 3way merge if we can't find the patch sha1 in the repo? (i.e. how would we construct the base/other/mine file from the patch and repo and what would that help with?)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Nitzan Gur-Furman
+Date: 2023-03-17 09:01:58.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:10, org.eclipse.jgit.test/tst-rsrc/org/eclipse/jgit/diff/Conflict_PostImage -> > So no line A.
+I understand the logic of why this is currently not shown here. But if the users are looking only at the result file, they see the patch they actually expected to apply as the *post image*, with no conflict visible to them; then they should go to the *patch input* (which is stored elsewhere) and manually compare it with the *pre image* to see that there's a mishmash. This is quite tedious IMO.
+
+> How could we do a 3way merge
+We can't do the actual merge this way, but I think we can (and should) construct the diff markers in a similar way. Can't the missing part be directly inferred from the `hunkLines` variable?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Patrick Hiesel
+Date: 2023-03-17 09:13:36.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:10, org.eclipse.jgit.test/tst-rsrc/org/eclipse/jgit/diff/Conflict_PostImage -> > We can't do the actual merge this way, but I think we can (and should) construct the diff markers in a similar way.
+
+Which diff markers? Conflict markers (they don't contain diff a la +/-, just content).
+
+> Can't the missing part be directly inferred from the `hunkLines` variable?
+What is the missing part? Can you help me understand your suggestion better by providing an example (patch, pre image, post image)? Thanks!
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Nitzan Gur-Furman
+Date: 2023-03-17 09:28:00.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:10, org.eclipse.jgit.test/tst-rsrc/org/eclipse/jgit/diff/Conflict_PostImage -> I was meant something similar to this[1], including the ||||||| markers.
+
+In this examples the output will be:
+
+line1
+line2
+<<<<<<< HEAD
+line3
+line4
+line5
+line6
+||||||| ASSUMED PATCH BASE
+line3
+lineA
+line5
+line6
+=======
+line3
+lineB
+line5
+line6
+>>>>>>> PATCH
+line7
+line8
+
+[1] (https://git-scm.com/docs/git-merge#_how_conflicts_are_presented)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Han-Wen NIenhuys
+Date: 2023-03-23 13:36:38.000000000
+Message: 
+Patch Set 2:
+
+(2 comments)
+Line:10, org.eclipse.jgit.test/tst-rsrc/org/eclipse/jgit/diff/Conflict_PostImage -> I personally always get confused by a conflict marker
+
+```
+<<<
+your
+===
+theirs
+>>>
+```
+
+because I can never remember what YOURS and THEIRS are (especially if I'm patching a piece of code that I didn't write in the first place).  Also, in the case of a conflict, the location of the marker is likely wrong, so putting the conflict marker in-line will confuse users, and once they figure it out, they'll send bug reports about it to us.
+
+Expanding the diff as in Nitzan's example makes the (confusing) conflict markers even more unwieldy, because there are now 3 sections instead of 2, but I think it's good to somehow expose the 'before' lines, so users can see where the patch should have been applied.
+
+Here is my suggestion: have applyText() return a separate list of failed patch hunks. 
+
+This could be used for generating a .rej file later on (for compatibility with git-apply --reject), but as a first approach, simply append the rejected hunks to the file.
+
+Line:223, org.eclipse.jgit/src/org/eclipse/jgit/patch/PatchApplier.java -> you need to format with Eclipse formatter. It's an extension for IntelliJ, which you can install. (CI will fail otherwise.)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Nitzan Gur-Furman
+Date: 2023-03-23 13:46:42.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:10, org.eclipse.jgit.test/tst-rsrc/org/eclipse/jgit/diff/Conflict_PostImage -> Han-Wen, do you find it confusing even when the markers are containing the "side name"?
+
+Patrick already added "HEAD" and "PATCH" titles to the markers, I think adding a 3rd title and keep the conflict in context is easier to handle than a separate .rej file, both code-wise and user-wise.
+
+----------------------------------------------------------------------------------------------------------------------

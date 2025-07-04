@@ -1,0 +1,135 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-49071: Use std::any for engine-specific storage [1/2]
+
+std::any allows us to avoid reinterpret_casts from void* and to use
+smart pointers for memory management.
+
+This will be a two-part patch. This first part swaps out the underlying
+void* storage with std::any and ensures that memory allocations are
+correctly accounted for, but it does not change the interface of the
+(get|set)EngineStorage methods we use in EventuallyPersistentEngine to
+acccess the stored data.
+
+I will refactor those methods and their callers to std::any in a
+follow-up patch.
+
+Change-Id: Idadd77ded7a7be14bf7ca290f7aa29861f294442
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Vesko Karaganev
+Date: 2022-09-07 15:17:23.000000000
+Message: 
+Uploaded patch set 16: Patch Set 15 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-09-07 15:52:53.000000000
+Message: 
+Patch Set 16: Verified+1
+
+Build Successful 
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/19351/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/20130/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-windows-master/49095/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/41271/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/9928/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/21423/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/9830/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/22094/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/23195/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/30487/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/22451/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Vesko Karaganev
+Date: 2022-09-08 08:43:18.000000000
+Message: 
+Patch Set 16:
+
+(1 comment)
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-09-08 12:31:55.000000000
+Message: 
+Patch Set 16: Code-Review-1
+
+(4 comments)
+Line:443, daemon/connection.cc -> Should they have any engine storage at this point? SelectBucket cannot be executed out-of-order, so all previous requests should have completed - and hence engineStorage should be empty.
+
+What circumstances did you observe cookies still having engine storage here?
+
+Line:451, daemon/cookie.h -> Suggest deinlining this method (and the below one) as it's forcing cookie.h to include engine.h which is probably going to impact our compile speed (plus the method requires taking a mutex so it's not really a trivial method anymore.
+
+Line:805, include/memcached/engine.h -> Please fill in this documentation.
+
+Line:276, include/memcached/types.h -> Do we need a custom deleter here? I would have thought we could always do the same thing - switch to the specific bucket and then call operator delete() ?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-09-08 15:39:44.000000000
+MISMATCHED INLINE COMMENT
+Line:443, daemon/connection.cc -> So even on disconnect, any operation which is running in the background (e.g. stats vkey, or a SyncWrite) _must_ complete first before we allow the Connection object to be freed.
+
+I believe we should be able to assert here (and other similar places) that engineStorage is empty for all cookies - if we have executed SelectBucket and we still have engineStoreage used, then I believe that's a bug.
+----------------------------------------------------------------------------------------------------------------------
+Author: Vesko Karaganev
+Date: 2022-09-08 16:51:57.000000000
+MISMATCHED INLINE COMMENT
+Line:443, daemon/connection.cc -> You're right... What I intended to do was explicitly allow the engine specific to not be cleared manually, but automatically and while the bucket is still alive. I've now realised that this might be better done in Cookie::reset().
+----------------------------------------------------------------------------------------------------------------------
+Author: Vesko Karaganev
+Date: 2022-09-08 15:21:02.000000000
+MISMATCHED INLINE COMMENT
+Line:443, daemon/connection.cc -> We do currently clean up manually so the engine specific is empty.
+
+I want to introduce a safe way of storing data in the engine specific and have it cleaned up automatically upon disconnect or SelectBucket even when we do not do so manually.
+----------------------------------------------------------------------------------------------------------------------
+Author: Vesko Karaganev
+Date: 2022-09-08 15:21:02.000000000
+MISMATCHED INLINE COMMENT
+Line:451, daemon/cookie.h -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Vesko Karaganev
+Date: 2022-09-08 15:21:02.000000000
+MISMATCHED INLINE COMMENT
+Line:805, include/memcached/engine.h -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Vesko Karaganev
+Date: 2022-09-08 16:51:57.000000000
+MISMATCHED INLINE COMMENT
+Line:276, include/memcached/types.h -> In this patch, the engine specific is `unique_ptr<any{data}, deleter>`. 
+If we were to use `std::any{shared_ptr{something, deleter}}` , we could ensure that `~something()` is run whatever domain is necessary, using the custom deleter. 
+But I'm not sure how we could account for the memory allocated by std::any itself, and how we could ensure that `~any()` is run in the correct memory domain.
+
+* shared_ptr because std::any can only store copyable types
+----------------------------------------------------------------------------------------------------------------------
+Author: Vesko Karaganev
+Date: 2022-09-13 15:07:03.000000000
+MISMATCHED INLINE COMMENT
+Line:276, include/memcached/types.h -> I've moved away from using std::any, but I guess the question why we use a custom deleter still stands. The EngineStorageIface object which replaced the std::any is heap allocated and we need to deallocate it in the correct memory domain.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-09-08 15:39:44.000000000
+MISMATCHED INLINE COMMENT
+Line:276, include/memcached/types.h -> So all uses of setEngineStorage() are from ep-engine, and that will always need the memory domain switching back to the one which allocated it (which we probably need to store in the new "engineStorage" object.
+
+One suggestion would be to keep the interface in cookie.h / types.h to be a simple std::any (as the frontend aka daemon doesn't really know anything about ObjectRegister of BucketAllocationGuards). Then, in the ep-engine method to store items (EventiallyPersistentEngine::storeEngineSpecific) that stores a unique_ptr templated on a deleter which is given the "current" bucket and can switch to that before deleting.
+----------------------------------------------------------------------------------------------------------------------
+Author: Vesko Karaganev
+Date: 2022-09-08 15:21:02.000000000
+MISMATCHED INLINE COMMENT
+Line:276, include/memcached/types.h -> I think we do need a custom deleter, to make sure we deallocate from the same memory domain. EPEngine::allocateEngineStorage allocates the engine storage from the non-bucket one, and we need to make sure to deallocate from it. But passing in a deleter seems cleaner than interacting with ObjectRegistry from cookie.h when deleting.
+----------------------------------------------------------------------------------------------------------------------

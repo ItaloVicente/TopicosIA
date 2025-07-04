@@ -1,0 +1,113 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-25427 [1/4] Move GET_META to memcached - New functions in engines.
+
+GET_META command is currently implemented in engines (ep, default,
+ ewouldblock) under `unknown_command()`. Memcached does not know
+about GET_META, thus the MCBP request/response decoding/encoding
+are delegated to the engines.
+With this change we want to move all MCBP processing to memcached
+and make the engines to peform only the bucket operations (i.e.,
+retrieving the item metadata from memory or disk).
+This first patch adds the new `get_meta()` functions into engines
+and updates the engine testsuites to use the new API.
+For now we do not switch the execution to the new implementation,
+we will switch in a following patch.
+
+Change-Id: Idda5e377d35a257287f39ef66e7915eb0ff22ef0
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2017-08-29 08:22:36.000000000
+Message: 
+Uploaded patch set 26: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2017-08-29 08:44:10.000000000
+Message: 
+Patch Set 26: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master/2204/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/2270/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/2274/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/2057/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/794/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/2302/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2017-08-29 09:10:30.000000000
+Message: 
+Patch Set 26:
+
+(3 comments)
+Line:573, engines/default_engine/default_engine.cc -> Could also just use "handle"
+
+Line:581, engines/default_engine/default_engine.cc -> use handle
+
+Line:353, engines/ep/src/item.cc -> we need to make sure that this returns a value which is consistent across the various engines. We do have a "special hack" for this in the case for virtuall xattrs for subdoc as we didn't want to change the normal return value from get_item_info (as it was only used _once_).
+
+I guess the "cleanest" solution is to make it consistent what the exptime in item_info is, so that we need to do the "fixup" in the implementation in GetMetaContext just like we do for the exptime in vattr.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2017-08-29 11:59:13.000000000
+Message: 
+Patch Set 26:
+
+(3 comments)
+Line:573, engines/default_engine/default_engine.cc -> Done
+
+Line:581, engines/default_engine/default_engine.cc -> Done
+
+Line:353, engines/ep/src/item.cc -> I had a look and it seems that changing the type of `info_item.exptime` to `time_t` does not require many changes around. 
+Do we want to put it within thin this change or in a separate patch? 
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2017-08-29 14:48:35.000000000
+Message: 
+Patch Set 26:
+
+(1 comment)
+Line:353, engines/ep/src/item.cc -> Also, it is not clear to me what kind of `exptime` default-engine and ep-engine are supposed to return, absolute or relative ? Whatever it is, is not it already "consistent" across engines ?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2017-08-29 17:09:19.000000000
+Message: 
+Patch Set 26:
+
+(1 comment)
+Line:353, engines/ep/src/item.cc -> Pretty sure that on the wire it needs to be absolute.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2017-08-29 20:10:46.000000000
+Message: 
+Patch Set 26:
+
+(1 comment)
+Line:353, engines/ep/src/item.cc -> If you look in the comment for item_info it states:
+
+    rel_time_t exptime; /**< When the item will expire (relative to process
+                         * startup) */
+
+from history memcached buckets always stored the time in relative time (as it would be gone if the server restarted or the item evicted), but in ep-buckets it was stored in absolute time since it may be read back in from disk. 
+
+We never actually read the data in the core after calling get_item_info on the item (as it was internal to the engine), but the first time we tried to use it was when we added the virtual xattrs in subdoc. 
+
+Given that we call this method a lot of times around in our code, and in 99.999% of the times we don't care about the exptime we don't want to always translate it back to relative time and throw away the result.
+
+I linked to the subdoc code in one of the other patch where we call the function to "translate" it to an absolute time. I personally think it would be best if we continue to return the absolute time for the expiry time from this method _AND_ call the same translation function as we do for the subdoc code where we use the information from item_info (that way we're consistent across the usage of the struct)
+
+----------------------------------------------------------------------------------------------------------------------

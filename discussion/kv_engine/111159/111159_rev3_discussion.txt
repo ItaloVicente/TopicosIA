@@ -1,0 +1,139 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-34628 [1/2] SR: Avoid recursive locking of collection Manifest lock
+
+When performing mutations with durability requirements (SyncWrites),
+the VBuckets' collection manifest lock is acquired (in shared mode)
+recurisively.
+
+This causes lock ordering problems with a forthcoming change to avoid
+SyncWrites being committed in the wrong order, as we end up creating a
+cycle in lock ordering. Current lock ordering (before this patch is):
+
+    * KVBucket:set (also add, replace...):
+      LOCK VB::Manifest
+          * VBucket::set()
+              * ActiveDM::addSyncWrite()
+                LOCK ActiveDM::State
+                ...
+                UNLOCK ActiveDM::State
+              * ActiveDM::checkForCommit()
+                ... get set of SyncWrites to commit...
+                for (item : toCommit) {
+                    LOCK VB::Manfest <=== RECURSIVE LOCK
+                    * VB::commit()
+                    UNLOCK VB::Manifest
+                }
+
+Note that VB::Manifest it locked recursively inside VB::commit() in
+the above sequence.  Currently the above doesn't cause any problems
+(however in general recursive locking can be tricky to debug), but the
+with needed change to commit items in order, the above changes to:
+
+    * KVBucket:set (also add, replace...):
+      LOCK VB::Manifest
+          * VBucket::set()
+              * ActiveDM::addSyncWrite()
+                LOCK ActiveDM::State
+                ...
+                UNLOCK ActiveDM::State
+              * ActiveDM::checkForCommit()
+    NEW         LOCK ActiveDM::completedQueue
+                ... get set of SyncWrites to commit...
+                for (item : toCommit) {
+                    LOCK VB::Manfest <=== LOCK CYCLE with ActiveDM::completedQueue
+                    * VB::commit()
+                    UNLOCK VB::Manifest
+                }
+
+Note how the second lock of VB::Manifest (recursively, in the same
+thread) now forms a cycle with the new ActiveDM::completedQueue lock
+which is needed to serialise the calls to VB::commit.
+
+To avoid this cycle when ActiveDM::completedQueue is introduced,
+remove the recursive locking by moving checkForCommit to outside
+VBucket::set(), after VB::Manifest is unlocked:
+
+    * KVBucket:set (also add, replace...):
+      LOCK VB::Manifest
+          * VBucket::set()
+              * ActiveDM::addSyncWrite()
+                LOCK ActiveDM::State
+                ...
+                UNLOCK ActiveDM::State
+      UNLOCK VB::Manifest
+          * ActiveDM::checkForCommit()
+    NEW     LOCK ActiveDM::completedQueue
+            ... get set of SyncWrites to commit...
+            for (item : toCommit) {
+                UNLOCK VB::Manifest
+                * VB::commit()
+                LOCK VB::Manfest
+            }
+
+Change-Id: I03d8a1bd638aab9547fc08b06fb072e5597399c2
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2019-06-26 11:11:07.000000000
+Message: 
+Uploaded patch set 3: Patch Set 2 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-06-26 12:34:54.000000000
+Message: 
+Patch Set 3: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/19301/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/11724/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/18407/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/12459/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/21468/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/20681/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/2331/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/5264/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2019-06-26 15:26:30.000000000
+Message: 
+Patch Set 3: Code-Review+1
+
+(4 comments)
+
+just a couple of typos/comment things
+Line:11, /COMMIT_MSG -> recursively
+
+Line:35, /COMMIT_MSG -> with the
+
+Line:1455, engines/ep/src/vbucket.h -> manifest
+
+Line:1455, engines/ep/src/vbucket.h -> pretty sure we'd definitely deadlock if we did this in a WriteHandle
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-06-26 16:27:42.000000000
+Message: 
+Patch Set 3:
+
+(4 comments)
+Line:11, /COMMIT_MSG -> Done
+
+Line:35, /COMMIT_MSG -> Done
+
+Line:1455, engines/ep/src/vbucket.h -> Done
+
+Line:1455, engines/ep/src/vbucket.h -> Done
+
+----------------------------------------------------------------------------------------------------------------------

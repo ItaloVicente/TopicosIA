@@ -1,0 +1,272 @@
+======================================================================================================================
+DESCRIPTION:
+
+Do not create reflog for remote tracking branches
+
+When using JGit on a non-bare repository, it creates a local
+reflog for tracking the changes made to all refs.
+
+The ReflogWriter made no distinction between a local ref
+that is subject to multiple changes due to local activity and
+a remote ref that is just a remote pointer.
+
+When using JGit for working with a large Git repository, the
+creation of a large number of local reflog files can cause a
+significant slowdown for the whole operation because of the
+creation of a potentially large number of files.
+
+A local filesystem may not be as optimised as the one on
+the remote Git server: tracking all remotes is both unnecessary
+and damaging from a filesystem and performance's perspective.
+
+The Git client does not track the remote refs logs so the JGit
+client should not do it either.
+
+Bug: 579805
+Change-Id: I58d0d36a8a4ce42e0f59b8bf063747c4b81bd859
+Signed-off-by: Luca Milanesio <luca.milanesio@gmail.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Luca Milanesio
+Date: 2022-05-04 12:44:27.000000000
+Message: 
+Patch Set 3: Patch Set 2 was rebased
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2022-05-04 12:44:35.000000000
+Message: 
+Patch Set 3:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/5743/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2022-05-04 12:55:01.000000000
+Message: 
+Patch Set 3: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/5743/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Fabio Ponciroli
+Date: 2022-05-04 14:06:11.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:52, org.eclipse.jgit.test/tst/org/eclipse/jgit/internal/storage/file/ReflogWriterTest.java -> We should probably filter the opposite case as well. I don't see any test doing it.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2022-05-04 14:12:04.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:52, org.eclipse.jgit.test/tst/org/eclipse/jgit/internal/storage/file/ReflogWriterTest.java -> True, let me add it.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2022-05-04 16:45:59.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:218, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/ReflogWriter.java -> Not sure ReflogWriter is the right place to decide for which refs we want reflogs.
+JGit is a library and if the caller set forceWrite = true we should probably do what he said.
+
+Git does not create reflogs in bare repos but Gerrit, hosting bare repos, does.
+
+return early if it's a remote tracking branch to avoid indenting the complete implementation:
+
+ if (refName.startsWith(R_REMOTES)) {
+     return this;
+ }
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2022-05-04 18:11:24.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:218, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/ReflogWriter.java -> Done
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2022-05-04 18:23:33.000000000
+MISMATCHED INLINE COMMENT
+Line:52, org.eclipse.jgit.test/tst/org/eclipse/jgit/internal/storage/file/ReflogWriterTest.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2022-05-05 14:59:51.000000000
+MISMATCHED INLINE COMMENT
+Line:218, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/ReflogWriter.java -> I don't know which applications using jgit might want to write reflogs for remote tracking branches. Must be an application using non-bare repos since bare repos typically don't have remote tracking branches.
+
+I think it could make sense for some use case to enable writing reflogs for remote tracking branches. E.g. some application may want an audit log for updates of remote tracking branches to track when they got updated.
+
+I think jgit should implement the semantics of core.logAllRefUpdates as defined in [1] unless this documentation is stale and cgit changed that for a good reason. 
+It says:
+
+"If this configuration variable is set to true, missing "$GIT_DIR/logs/<ref>" file is automatically created for branch heads (i.e. under refs/heads/), remote refs (i.e. under refs/remotes/), note refs (i.e. under refs/notes/), and the symbolic ref HEAD."
+...
+"This value is true by default in a repository that has a working directory associated with it, and false by default in a bare repository."
+
+Reading this it seems the behavior you observed matches this definition. I didn't check yet if cgit behaves according to this definition, if not this should be discussed on the git list.
+
+The forceWrite flag was introduced to support some use case in Gerrit where it wants to decide on a single RefUpdate level that a reflog entry should be written unconditionally. I think we should not break this flag's semantics for any ref. I.e. if it is true the reflog should be written in any case.
+
+What's a use case for a repository with millions of branches someone wants to fully clone to a non-bare repository ? Does it really need all branches in the non-bare clone ? The repositories I saw so far had sometimes thousands but not millions.
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2022-05-05 20:34:19.000000000
+MISMATCHED INLINE COMMENT
+Line:218, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/ReflogWriter.java -> I analysed the clone.c and the absence of reflog for the remote refs is a consequence of how the clone works.
+
+The remote refs are created as a unique packedref file and the implementation is provided by packed-backend.c.
+
+A packed refstore has some limitations compared to a file-based refstore:
+
+```
+/*
+ * A `ref_store` representing references stored in a `packed-refs`
+ * file. It implements the `ref_store` interface, though it has some
+ * limitations:
+ *
+ * - It cannot store symbolic references.
+ *
+ * - It cannot store reflogs.
+ *
+ * - It does not support reference renaming (though it could).
+ *
+ * On the other hand, it can be locked outside of a reference
+ * transaction. In that case, it remains locked even after the
+ * transaction is done and the new `packed-refs` file is activated.
+ */
+ ```
+ 
+That's the rationale behind the absence of a reflog associated to the remote refs created during clone.
+
+In fact, when doing:
+- git init
+- git remote add origin <remote>
+- git fetch origin '+refs/heads/*:refs/remotes/origin/*'
+
+... the reflog *is populated* with all the remote refs.
+
+I am going to amend this change and simulate the behaviour implemented by cgit.
+
+@Matthias do you agree with the analysis?
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2022-05-04 18:25:13.000000000
+MISMATCHED INLINE COMMENT
+Line:218, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/ReflogWriter.java -> > Not sure ReflogWriter is the right place to decide for which refs we want reflogs.
+> JGit is a library and if the caller set forceWrite = true we should probably do what he said.
+
+True, but is there really a use-case where JGit needs to track the logs of all remote refs?
+
+> Git does not create reflogs in bare repos but Gerrit, hosting bare repos, does.
+
+Gerrit does not use remote refs on bare repos AFAIK.
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2022-05-05 14:13:09.000000000
+MISMATCHED INLINE COMMENT
+Line:218, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/ReflogWriter.java -> > ReflogWriter is a low level class which knows how to persist reflogs to the filesystem. Applications using JGit to work on git repositories may want to apply different policies on which refs to create reflogs. Hence I think we should not completely prohibit writing reflogs for remote tracking branches.
+
+Are you aware of anyone using this functionality?
+It is specific to JGit as Git doesn't do it AFAIK.
+
+> I dug a little deeper into the implementation and found the following:
+> 
+> ReflogWriter#shouldAutoCreateLog decides for which refs reflog files are created automatically based on the configured value of option core.logAllRefUpdates [1] which is also supported by cgit.
+> 
+> ReflogWriter#log writes a reflog message to the corresponding reflog file
+> - if the reflog file already exists, also see the comment [2] in Gerrit
+> - if ReflogWriter#shouldAutoCreateLog auto-creates the corresponding reflog file
+> - or if the forceWrite flag is set to true by the application
+> 
+> The intention of RefUpdate#setForceRefLog [3] is to enable applications to change the default behaviour on which refs reflogs should be written on a per-update basis.
+> 
+> How did you set core.logAllRefUpdates when testing this with git/jgit ?
+
+Running on defaults, I did not set anything.
+
+> AFAICS the only gap in the current implementation to enable fully relying on reflogs for implementing audit logs for refs is a way to archive reflogs when their ref is deleted. Currently the reflog is deleted when its corresponding ref is deleted. AFAIR there were discussions on the git list how this could be implemented. Not sure if cgit implemented such an archiving solution.
+
+Do you see a use-case where the client should be able to recover a remote-tracking ref deleted on the server?
+Is a performance degradation (and filesystem overload of millions of inodes) of hundreds of times slower clone worth the benefit, or should this be an exceptional situation confirmed on purpose?
+
+> [1] https://git-scm.com/docs/git-config#Documentation/git-config.txt-corelogAllRefUpdates
+> [2] https://gerrit.googlesource.com/gerrit/+/refs/heads/master/java/com/google/gerrit/server/git/LocalDiskRepositoryManager.java#210
+> [3] https://git.eclipse.org/r/c/jgit/jgit/+/102396
+
+Thanks for the refs, I'll have a look.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2022-05-05 13:37:13.000000000
+MISMATCHED INLINE COMMENT
+Line:218, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/ReflogWriter.java -> ReflogWriter is a low level class which knows how to persist reflogs to the filesystem. Applications using JGit to work on git repositories may want to apply different policies on which refs to create reflogs. Hence I think we should not completely prohibit writing reflogs for remote tracking branches.
+
+I dug a little deeper into the implementation and found the following:
+
+ReflogWriter#shouldAutoCreateLog decides for which refs reflog files are created automatically based on the configured value of option core.logAllRefUpdates [1] which is also supported by cgit.
+
+ReflogWriter#log writes a reflog message to the corresponding reflog file
+- if the reflog file already exists, also see the comment [2] in Gerrit
+- if ReflogWriter#shouldAutoCreateLog auto-creates the corresponding reflog file
+- or if the forceWrite flag is set to true by the application
+
+The intention of RefUpdate#setForceRefLog [3] is to enable applications to change the default behaviour on which refs reflogs should be written on a per-update basis.
+
+How did you set core.logAllRefUpdates when testing this with git/jgit ?
+
+AFAICS the only gap in the current implementation to enable fully relying on reflogs for implementing audit logs for refs is a way to archive reflogs when their ref is deleted. Currently the reflog is deleted when its corresponding ref is deleted. AFAIR there were discussions on the git list how this could be implemented. Not sure if cgit implemented such an archiving solution.
+
+[1] https://git-scm.com/docs/git-config#Documentation/git-config.txt-corelogAllRefUpdates
+[2] https://gerrit.googlesource.com/gerrit/+/refs/heads/master/java/com/google/gerrit/server/git/LocalDiskRepositoryManager.java#210
+[3] https://git.eclipse.org/r/c/jgit/jgit/+/102396
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2022-05-05 15:26:58.000000000
+MISMATCHED INLINE COMMENT
+Line:218, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/ReflogWriter.java -> > I don't know which applications using jgit might want to write reflogs for remote tracking branches. Must be an application using non-bare repos since bare repos typically don't have remote tracking branches.
+> 
+> I think it could make sense for some use case to enable writing reflogs for remote tracking branches. E.g. some application may want an audit log for updates of remote tracking branches to track when they got updated.
+> 
+> I think jgit should implement the semantics of core.logAllRefUpdates as defined in [1] unless this documentation is stale and cgit changed that for a good reason. 
+> It says:
+> 
+> "If this configuration variable is set to true, missing "$GIT_DIR/logs/<ref>" file is automatically created for branch heads (i.e. under refs/heads/), remote refs (i.e. under refs/remotes/), note refs (i.e. under refs/notes/), and the symbolic ref HEAD."
+> ...
+> "This value is true by default in a repository that has a working directory associated with it, and false by default in a bare repository."
+
+I know, however, git behaves differently for a git clone. Even if I set core.logAllRefUpdates to always, when I clone a repository with 2.8M refs, I get:
+
+```
+$ git branch -r | wc -l
+2800058
+
+$ git branch -r | wc -l
+1
+
+$find .git/logs -type f | wc -l
+3
+```
+
+> Reading this it seems the behavior you observed matches this definition. I didn't check yet if cgit behaves according to this definition, if not this should be discussed on the git list.
+
+I believe the interpretation of what's written is different in jgit and cgit.
+I do see some .git/logs/refs/remotes/* in my local Gerrit workspace/.git/logs, but they are not all created during clones.
+
+> The forceWrite flag was introduced to support some use case in Gerrit where it wants to decide on a single RefUpdate level that a reflog entry should be written unconditionally. I think we should not break this flag's semantics for any ref. I.e. if it is true the reflog should be written in any case.
+
+That's not my case and yes, if set we should honour it.
+
+> What's a use case for a repository with millions of branches someone wants to fully clone to a non-bare repository ? Does it really need all branches in the non-bare clone ? The repositories I saw so far had sometimes thousands but not millions.
+
+The clone is for 1 single branch, but JGit creates the $GIT_DIR/logs/ for *ALL* remote refs, even if they are not cloned or checked out.
+----------------------------------------------------------------------------------------------------------------------

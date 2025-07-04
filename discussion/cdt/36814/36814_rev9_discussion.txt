@@ -1,0 +1,134 @@
+======================================================================================================================
+DESCRIPTION:
+
+debug tests: Add thread compatibility layer, make MultiThread test use it
+
+Having a compatibility layer for threading operations, like the one we
+have for sleep, will allow removing a lot of platform dependent code in
+the test sources, therefore simplifying the tests themselves.
+
+The Windows part is not implemented, but I'll do it if the preliminary
+reviews are positive.
+
+I changed MultiThread.cc to use it as an example, but there are other
+tests files that could benefit from it.
+
+I also changed MultiThread.cc to remove all the synchronization based on
+sleeps. It now works using thread barriers, which should make the tests
+less prone to random failure (although I don't think these ones were
+particularly flaky) and run faster (since we don't wait for nothing).
+
+The fallouts of that change on the tests are taken care of in the
+following patch.
+
+Change-Id: I7be86a5727877638c0ff0a489d263ee6bbe84764
+Signed-off-by: Simon Marchi <simon.marchi@polymtl.ca>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Simon Marchi
+Date: 2014-11-28 17:56:05.000000000
+Message: 
+Uploaded patch set 9.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2014-11-28 19:27:00.000000000
+Message: 
+Patch Set 9:
+
+Build Started https://hudson.eclipse.org/cdt/job/cdt-verify/1652/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2014-11-28 20:12:54.000000000
+Message: 
+Patch Set 9: Code-Review-1
+
+Build Unstable 
+
+https://hudson.eclipse.org/cdt/job/cdt-verify/1652/ : UNSTABLE
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2014-11-28 20:58:28.000000000
+Message: 
+Patch Set 9: -Code-Review
+
+Build Started https://hudson.eclipse.org/cdt/job/cdt-verify/1656/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2014-11-28 21:44:07.000000000
+Message: 
+Patch Set 9: Code-Review-1
+
+Build Unstable 
+
+https://hudson.eclipse.org/cdt/job/cdt-verify/1656/ : UNSTABLE
+----------------------------------------------------------------------------------------------------------------------
+Author: Alvaro Sanchez-Leon
+Date: 2014-12-03 21:15:15.000000000
+Message: 
+Patch Set 9: Code-Review-1
+
+(4 comments)
+
+I like this new platform compatibility layer, it makes sense !
+
+See below some general comments besides the minor inline comments/ questions in patch set 9. 
+
+* Do we really have a dependency on: https://git.eclipse.org/r/#/c/36435/18
+* We definitely need to support Windows before moving forward
+* It would be nice if this compatibility layer is ready to grow its support to other platforms e.g. OSX, not necessary to proceed with this change as this was not the case with the current implementation.
+
+The following tests are failing when running with this new structure, however they are fixed on the next commit, Gerrit change 36815. 
+  This commit shall be squashed with the c/36815 as the commits shall be complete e.g. no compilation or test errors.
+
+* MIRunControlTest_7_7#getExecutionContexts
+* MIRegistersTest_7_7#compareRegisterForMultipleExecutionContexts
+Line:71, dsf-gdb/org.eclipse.cdt.tests.dsf.gdb/data/launch/src/MultiThread.cc -> In the original code we had a 1 sec delay between thread creations, 
+why do we need 30 secs ?  probably 3 secs ?
+
+Line:5, dsf-gdb/org.eclipse.cdt.tests.dsf.gdb/data/launch/src/Thread.h -> suggestion, to change to "platform compatibility layer" to be clear from the start
+
+Line:23, dsf-gdb/org.eclipse.cdt.tests.dsf.gdb/data/launch/src/Thread.h -> suggestion:
+	 "return THREAD_DEFAULT_RET instead"
+
+Line:8, dsf-gdb/org.eclipse.cdt.tests.dsf.gdb/data/launch/src/ThreadPthreadTypes.h -> suggestion: 
+I think of it as more of an Id rather than a handle to e.g. an object.     What about ThreadId ?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Simon Marchi
+Date: 2014-12-04 16:24:36.000000000
+Message: 
+Patch Set 9:
+
+(4 comments)
+
+> Do we really have a dependency on: https://git.eclipse.org/r/#/c/36435/18
+
+No, but it's merged now so it doesn't matter anymore :).
+
+> We definitely need to support Windows before moving forward
+
+I will do that.
+
+> It would be nice if this compatibility layer is ready to grow its support to other platforms e.g. OSX, not necessary to proceed with this change as this was not the case with the current implementation.
+
+I don't think there will be a problem to change it to support OS X, for example. Although the "pthread/posix" version is a bit of a lie, because it uses some non-posix functions (for the thread name for example). Therefore, we might need to make "Linux" and "OSX" versions rather than "Pthread". But since most of the things would be the same in both, we could think of ways to make a generic pthread version, and make Linux and OSX inherit of that one.
+
+> The following tests are failing when running with this new structure, however they are fixed on the next commit, Gerrit change 36815.
+> This commit shall be squashed with the c/36815 as the commits shall be complete e.g. no compilation or test errors.
+
+Ok, I will squash them.
+Line:71, dsf-gdb/org.eclipse.cdt.tests.dsf.gdb/data/launch/src/MultiThread.cc -> The delay between the thread creation is useless. The sleep is only necessary for the "interruptRunningTarget" test, where we let the program run free for 1 seconds, and then try to interrupt it. Previously, it would work because of the delay between the thread creations. Without any delay, the program just finishes very quickly and the test does not work (since you can't interrupt a program that has finished).
+
+The behaviour I want to achieve is to let the program run, all the threads are created and then execution is caught in the SLEEP(30). Then the test interrupts execution. The value of the SLEEP is irrelevant, all tests except interruptRunningTarget don't even reach that point, and interruptRunningTarget doesn't wait the whole duration of the SLEEP. An infinite loop could work also, but then if the debugger crashes, you risk leaving processes that will never end on the build machine.
+
+Line:5, dsf-gdb/org.eclipse.cdt.tests.dsf.gdb/data/launch/src/Thread.h -> Done
+
+Line:23, dsf-gdb/org.eclipse.cdt.tests.dsf.gdb/data/launch/src/Thread.h -> Done
+
+Line:8, dsf-gdb/org.eclipse.cdt.tests.dsf.gdb/data/launch/src/ThreadPthreadTypes.h -> Well, the vocabulary changes from platform to platform. Windows calls it a HANDLE [1]. Also, I wanted to avoid the confusion with the operating system thread id (tid)/process id (pid). I think handle is a quite common name for this kind of stuff where you are returned an opaque value to refer to a particular resource.
+
+[1] http://msdn.microsoft.com/en-us/library/windows/desktop/ms682453%28v=vs.85%29.aspx
+
+----------------------------------------------------------------------------------------------------------------------

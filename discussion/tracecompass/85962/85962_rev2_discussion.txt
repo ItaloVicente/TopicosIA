@@ -1,0 +1,143 @@
+======================================================================================================================
+DESCRIPTION:
+
+ss: add 2D iterator queries to the SS API
+
+This patch adds 2D iterator queries to the ITmfStateSystem API,
+which lazily returns intervals from a list of their quarks,
+that intersect a time range of a list of timestamps.
+
+Change-Id: I52d510a1c6e5d24faa2d5d5466112c70d795b39a
+Signed-off-by: Loïc Prieur-Drevon <loic.prieurdrevon@gmail.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Loic Prieur-Drevon
+Date: 2016-11-29 18:49:54.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: Loic Prieur-Drevon
+Date: 2016-11-29 19:05:03.000000000
+Message: 
+Patch Set 2:
+
+Addressed changes from previous comment:
+Times and Quarks are List<> inside all x implementing ISHB,
+ISHB default now returns null (it's better to have a simpler algo in default),
+InMemory 2D query is implemented more efficiently using Guava Iterables,
+Added missing JavaDoc
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2016-11-30 04:44:34.000000000
+Message: 
+Patch Set 2:
+
+Build Started https://hudson.eclipse.org/tracecompass/job/tracecompass-gerrit/11675/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2016-11-30 05:52:48.000000000
+Message: 
+Patch Set 2: Code-Review+1
+
+Build Successful 
+
+https://hudson.eclipse.org/tracecompass/job/tracecompass-gerrit/11675/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2016-12-01 00:28:05.000000000
+Message: 
+Patch Set 2: Code-Review-1
+
+(17 comments)
+
+Looking great! A few initial comments. Two high-level ones:
+
+* Instead of hopefully-sorted-lists, have you looked into using NavigableSets? (see comment in the last file) It would avoid having to call Collections.sorted() and hoping nobody passes a non-sorted List. Calls to .binarySearch could then be simplified, maybe.
+
+* I'll have to finish wrapping my head around it, but I feel there is at least one too many things added to the Node classes between the following three: NodeWithBounds, the queue() methods, and the separate added selectNextChildren() methods. I don't have a clear specific solution yet, but I feel some of these concepts could be merged together, and the iterator in HistoryTreeBackend could be simplified.
+Line:11, /COMMIT_MSG -> of -> or ?
+
+Line:618, statesystem/org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/internal/statesystem/core/StateSystem.java -> Not a big deal, but the declaration could use just "List<Integer>"
+
+Line:626, statesystem/org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/internal/statesystem/core/StateSystem.java -> phew, "tranState" and "transState" are very easy to confuse! This could be called "transStateIntervals" instead?
+
+Line:631, statesystem/org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/internal/statesystem/core/StateSystem.java -> This is slightly more succinct, up to you:
+
+  .map(transState::getOngoingInterval)
+
+Line:665, statesystem/org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/internal/statesystem/core/StateSystem.java -> same as above
+
+Line:537, statesystem/org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/internal/statesystem/core/backend/historytree/HTNode.java -> Specify that this is the "out" parameter of the method.
+
+Also, it's not a hard requirement, but typically out parameters are put as first arguments.
+
+Line:546, statesystem/org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/internal/statesystem/core/backend/historytree/HTNode.java -> you could keep both checks in the same 'if' with &&
+
+Line:351, statesystem/org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/internal/statesystem/core/backend/historytree/HistoryTreeBackend.java -> You can do:
+
+        return () -> new Iterator<ITmfStateInterval>() {
+            Deque<NodeWithBounds> queue = null;
+            Deque<ITmfStateInterval> intervals = new LinkedList<>();
+            ...
+
+:^)
+
+I'm not sure what is more useful tbh, an Iterable or an Iterator. It's simple to go from one to another either way.
+
+Line:357, statesystem/org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/internal/statesystem/core/backend/historytree/HistoryTreeBackend.java -> fields should be private. second one can also be final.
+
+Line:32, statesystem/org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/internal/statesystem/core/backend/historytree/ParentNode.java -> I know Eclipse auto-completes this, but it's too spammy. Just add your name to the top class javadoc instead.
+
+Line:38, statesystem/org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/internal/statesystem/core/backend/historytree/ParentNode.java -> All fields can be final.
+
+I know I usually say "fields should be private!!!1" but here I'll say the opposite ;)
+
+This is the only condition where fields could be public, where you have C-struct-like object with no behaviour, only fields. Even safer if the fields are final. That way you only need a constructor, and don't need the getters.
+
+Line:305, statesystem/org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/internal/statesystem/core/backend/historytree/ThreadedHistoryTreeBackend.java -> Yikes, BufferedBlockingQueue is quite shaky already... there might be unexpected behaviour if the iterator is used while the backend is being built. Let's see what happens.
+
+Line:447, statesystem/org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/statesystem/core/ITmfStateSystem.java -> should be updated, it returns an Iterable instead of an Iterator now.
+
+Line:468, statesystem/org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/statesystem/core/ITmfStateSystem.java -> same
+
+Line:367, statesystem/org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/statesystem/core/StateSystemUtils.java -> You should use high-as-possible interfaces in method APIs, like List here instead of ArrayList. Unless you absolutely need to.
+
+In addition, these two added methods here are more for internal processing. StateSystemUtils is public API, and is meant to help callers access the state system. I would suggest they be moved to an internal class instead (either where they are called from, or into a new internal utils class, if it's worth it).
+
+getTimes() in particular is only used by tests atm.
+
+Line:201, statesystem/org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/statesystem/core/backend/IStateHistoryBackend.java -> What would happen if the Lists passed here ends up not being sorted?
+
+I don't know if you are aware of SortedSet/NavigableSet and ceiling()/floor()/higher()/lower() (TreeSet is the go-to implementation). Insertions are a bit slower but the structure is always sorted, and you have a easier time accessing it with them ceiling()/floor() or headSet()/tailSet().
+
+I'm not sure if it would be particularly useful here, but it could be considered.
+
+Line:220, statesystem/org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/statesystem/core/backend/IStateHistoryBackend.java -> since the methods in (ITmf)StateSystem are called query2D, is it worth calling it query2D here too?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Loic Prieur-Drevon
+Date: 2016-12-01 00:41:31.000000000
+Message: 
+Patch Set 2:
+
+(3 comments)
+
+Thanks for taking the time to review, I will fix all the comments to which I haven't directly replied.
+Line:367, statesystem/org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/statesystem/core/StateSystemUtils.java -> This is actually for sampling down to a display resolution, I use it to make a list of timestamps for which to retrieve intervals in the ControlFlowView for example.
+
+Line:390, statesystem/org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/statesystem/core/StateSystemUtils.java -> This one is called in a number of classes for the 2D query, where do you recommend I put it?
+
+Line:201, statesystem/org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/statesystem/core/backend/IStateHistoryBackend.java -> I know about them, even if I'm not specially familiar with them. There are use cases for Iterable and for SortedSet/NavigableSet, but Iterable was easier to implement and there is the issue of choosing along what to order (time/quark?). I'm open to discussion.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2016-12-01 01:34:21.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:201, statesystem/org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/statesystem/core/backend/IStateHistoryBackend.java -> Returning an Iterable is fine, I mean instead of using "List" in the parameters here, and internally, you could use NavigableSet<Integer> and NavigableSet<Long>. This would ensure the collections are sorted, and might make accesses easier in the implementations (wouldn't need Collections.binarySearch()).
+
+----------------------------------------------------------------------------------------------------------------------

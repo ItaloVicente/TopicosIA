@@ -1,0 +1,97 @@
+======================================================================================================================
+DESCRIPTION:
+
+[BP] MB-46361: Persist snapshot stats after the flusher has been stopped
+
+Currently during the destruction of an ep-engine bucket we persist a
+key "ep_force_shutdown" to stats.json, this value is set to false when
+we've had a clean shutdown and true if the shutdown was forced.
+
+This value effects when we decide to generate a new failover table
+entry during warmup in Warmup::createVBuckets(), when we've had a
+forced shutdown or if the key isn't present in the document. Which is
+used to help us identify differing seqno histories between kv nodes.
+
+MB-45756 showed that this wasn't always working in the way it should
+have. This would occur if memcached is killed using SIGKILL while it's
+in EventuallyPersistentEngine::~EventuallyPersistentEngine().
+As ~EventuallyPersistentEngine() is responsible for shutting the
+flusher it takes a non insignificant amount of time to complete and if
+killed when flushing could leave the node in an inconsistent state with
+its replica. As in the case of MB-45756, where the active was at
+seqno:Y when it was killed but only persisted to X. So when it came
+back up the at seqno:X it was behind replica at seqno:Y. But due to
+expiry we generated enough seqnos to have a high seqno > Y. Causing us
+to having differing histories but not causing us to roll back the
+replica.
+
+To fix this we have refactored
+EventuallyPersistentEngine::destroyInner() & EPBucket::deinitialize(),
+so that the responsibility to take a snapshot of stats and persist it
+is performed by EPBucket::deinitialize() just after the flushers have
+been stopped. Meaning we have a consistent state on disk. That way if
+we crash at any point before we'll have never inserted a
+"ep_force_shutdown" key in the document (as ep_force_shutdown is only
+ever written during shutdown).
+
+~EventuallyPersistentEngine() & destroyInner() has been refactored to
+now takes over the responsibility of deinitialize() the KVBucket and
+freeing its memory. To allow for easier testing of this fix.
+
+This patch also covers a case where we crash during Warmup after we
+modify the state on disk, but before the StatSnap task runs (which
+removes the 'ep_force_shutdown' from stats.log). As the next time we
+Warmup we want to create a new failover table entry as we didn't
+shutdown cleanly and our history could have diverged from our replicas.
+To cover this case we set 'ep_force_shutdown=true' in
+Warmup::initialize() as we may flush items to disk during this phase
+of warmup and also allow streaming from active vbuckets. This flag
+with then be removed once StatSnap task runs at the end of warmup.
+
+Change-Id: Ia05cafcbcc0c225fe373d0ccfebf135a5c012c6e
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Ben Huddleston
+Date: 2021-05-24 11:34:17.000000000
+Message: 
+Uploaded patch set 10.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-05-24 11:34:31.000000000
+Message: 
+Patch Set 10: Well-Formed+1
+
+Permission granted to commit: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/241785/artifact/restricted.html : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-05-24 11:56:00.000000000
+Message: 
+Patch Set 10: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/1800/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/2030/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/26411/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/mad-hatter/1255/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/1692/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/1884/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/1909/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/1912/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-05-24 12:42:56.000000000
+Message: 
+Patch Set 10: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------

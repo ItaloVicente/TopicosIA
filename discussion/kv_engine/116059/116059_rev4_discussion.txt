@@ -1,0 +1,95 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-36366: Don't drop cursors if checkpoint expelling was good enough
+
+Reviewing of the code revealed that if we're in a situation where
+checkpoint memory is above the upper bound the amount of memory that
+ClosedUnrefCheckpointRemoverTask::attemptMemoryRecovery is told to
+reclaim is too large, the result could be that if expelling was
+successful in getting checkpoint memory down to the lower bound the
+function would still go on to cursor dropping.
+
+The following shows the values used when evaluating memory recovery
+and goes onto highlight the issue fixed here.
+
+0                                                                      #
+├───────────────────┬───────────────┬───────────────┬────┬────┬────┬───┤
+│                   │               │               │    │    │    │   │
+│                   │               │               │    │    │    │   │
+└───────────────────▼───────────────▼───────────────▼────▼────▼────▼───┘
+                    A               B               L    C    H    D
+
+Using the coded defaults and the default configuration.json:
+
+A = cursor_dropping_checkpoint_mem_lower_mark (30%)
+B = cursor_dropping_checkpoint_mem_upper_mark (50%)
+C = cursor_dropping_lower_mark (80%)
+D = cursor_dropping_upper_mark (95%)
+L = mem_low_watermark (75%)
+H = mem_high_watermark (85%)
+
+In a situation when checkpoint memory alone is larger than B we wish to
+attempt to get checkpoint memory down to A or less. The same diagram
+shows an example checkpoint (X) memory and mem_used (Y).
+
+0                                                                      #
+├───────────────────┬───────────────┬───┬───────────┬──┬─┬────┬────┬───┤
+│                   │               │   │           │  │ │    │    │   │
+│                   │               │   │           │  │ │    │    │   │
+└───────────────────▼───────────────▼───▼───────────▼──▼─▼────▼────▼───┘
+                    A               B   X           L  Y C    H    D
+
+The difference between X and Y should be non checkpoint memory, ideally
+the data in the cache, but could be other transient allocations. Before
+this commit the target to free was calculated as Y - A, i.e. we're
+including the size of the cached items in the target.
+
+So if expelling ran and successfully moved X down to A or lower, the
+ClosedUnrefCheckpointRemoverTask::attemptMemoryRecovery would see that
+the target is unsatisfied and still go on to drop cursors.
+
+This commit changes the target to be X - A, so if expelling is by itself
+successful in getting X down to A or less, then the target is satisfied
+and cursor dropping is not attempted.
+
+This commit also:
+
+1) updates attemptMemoryRecovery to read mem_used once and base all
+ calculations from that data-point, this makes the function simpler to
+ reason about.
+
+2) When mem_used exceeds the cursor_dropping_upper_mark (95%) also log
+ the checkpoint consumption. It could happen that we trigger expelling
+ and cursor dropping, yet checkpoint consumption isn't an issue, it is
+ worth logging if this ever happens.
+
+Change-Id: I480cf2d8fbe229d3e64933058ff94a213d7b5b5e
+Reviewed-on: http://review.couchbase.org/116059
+Reviewed-by: Dave Rigby <daver@couchbase.com>
+Tested-by: Build Bot <build@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2019-10-09 10:42:56.000000000
+Message: 
+Change has been successfully cherry-picked as cebe8f10a497fae24c1923f8ab8aa3d753a68c76 by Dave Rigby
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-10-09 10:49:27.000000000
+Message: 
+Patch Set 4:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/2382/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-10-09 11:42:04.000000000
+Message: 
+Patch Set 4:
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/2382/ : SUCCESS'
+----------------------------------------------------------------------------------------------------------------------

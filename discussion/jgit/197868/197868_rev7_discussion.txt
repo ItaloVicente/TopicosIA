@@ -1,0 +1,267 @@
+======================================================================================================================
+DESCRIPTION:
+
+Reload pack if bitmap file is changed
+
+Without this change `PackDirectory.scanPackImpl` method reloads
+pack only if pack file is modified.
+
+For some slow file system(for example NFS) file renaming operation
+can take up to few seconds this means that we can have situation when
+pack file and index file are already present but bitmap file is not.
+
+To make sure that bitmap file is used when is available check bitmap
+state together with pack file and if it is changed reload pack file.
+
+Bug: 581252
+Change-Id: I2855f701fdd89bacdfb4493b05dd8b0ba0a921d8
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Marcin Czech
+Date: 2023-01-04 22:56:23.000000000
+Message: 
+Uploaded patch set 7.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2023-01-04 22:56:32.000000000
+Message: 
+Patch Set 7:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/5912/
+----------------------------------------------------------------------------------------------------------------------
+Author: Marcin Czech
+Date: 2023-01-04 22:56:33.000000000
+Message: 
+Patch Set 7:
+
+(1 comment)
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2023-01-04 23:06:55.000000000
+Message: 
+Patch Set 7: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/5912/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Marcin Czech
+Date: 2023-01-04 23:14:31.000000000
+Message: 
+Patch Set 7:
+
+(3 comments)
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2023-01-04 23:57:08.000000000
+Message: 
+Patch Set 7: Code-Review+1
+
+(4 comments)
+Line:360, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/Pack.java -> Can be rewritten as:
+```
+if (bitmapFile == null) {
+   return bitmapFileSnapshot.isPresent();
+ }
+```
+
+Line:441, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/PackDirectory.java -> We should add a comment, specifying why we do not reuse the Pack even if it is just the bitmap being modified but not the Pack itself.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2023-01-05 00:32:47.000000000
+Message: 
+Patch Set 7:
+
+(1 comment)
+Line:463, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/PackDirectory.java -> I believe the performance hit is here when we reload a Pack when we don't need to. We are triggering the Pack.close() which runs the following: 
+
+```
+	public void close() {
+		WindowCache.purge(this);
+		synchronized (this) {
+			loadedIdx = null;
+			reverseIdx = null;
+		}
+	}
+```
+
+If the packfile was substantial (GBs of data), we purge the entire JGit cache (WindowCache) that was loaded and we create a temporary hiccup to Gerrit.
+
+That hiccup would have not happened before this change, hence the performance regression introduced.
+
+The follow-up change I8de58485dc would restore the normal behaviour by keeping the Pack and its associated WindowCache segments in memory.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Nasser Grainawi
+Date: 2023-01-05 00:37:56.000000000
+Message: 
+Patch Set 7: Code-Review-1
+
+(4 comments)
+File Comment: /PATCHSET_LEVEL -> I don't know if Matthias/JGit-Maintainers are still maintaining 5.13 or if everyone needs to move to 6.x (and Java 11). Do you need this on 5.13? I think all non-EOL Gerrit versions are 6.x now.
+Line:144, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/Pack.java -> I missed this earlier, but I think you want to use FileSnapshot.MISSING_FILE when bitmapIdxFile is null. It makes the logic below simpler too.
+
+Here:
+
+ PackFileSnapshot bitmapFileSnapshot = bitmapIdxFile == null : FileSnapshot.MISSING_FILE ? FileSnapshot.save(bitmapIdxFile);
+
+And then in isBitmapModified() you can do:
+
+ if (bitmapFile != null) {
+   return bitmapFileSnapshot.isModified(bitmapFile);
+ }
+ return !bitmapFileSnapshot.equals(FileSnapshot.MISSING_FILE);
+
+Line:360, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/Pack.java -> (Ignore if you go with the comment above) This is probably simpler as:
+
+ if (bitmapFile == null) {
+   return bitmapFileSnapshot.isPresent();
+ }
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Nasser Grainawi
+Date: 2023-01-05 00:42:36.000000000
+Message: 
+Patch Set 7:
+
+(1 comment)
+Line:463, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/PackDirectory.java -> > I believe the performance hit is here when we reload a Pack when we don't need to. We are triggering the Pack.close() which runs the following: 
+> 
+> ```
+> 	public void close() {
+> 		WindowCache.purge(this);
+> 		synchronized (this) {
+> 			loadedIdx = null;
+> 			reverseIdx = null;
+> 		}
+> 	}
+> ```
+> 
+> If the packfile was substantial (GBs of data), we purge the entire JGit cache (WindowCache) that was loaded and we create a temporary hiccup to Gerrit.
+
+It doesn't purge the entire cache, only the data for this pack. I do agree that the work to reload that data is unnecessarily and potentially a significant performance impact for Gerrit. However, how often are you expecting that the .bitmap file will change when the .pack file doesn't? That seems like an uncommon scenario that we wouldn't optimize for.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2023-01-05 00:50:33.000000000
+Message: 
+Patch Set 7:
+
+(2 comments)
+File Comment: /PATCHSET_LEVEL -> I believe stable-5.13 is still supported and Matthias accepts fixes here.
+@Matthias?
+Line:463, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/PackDirectory.java -> > > I believe the performance hit is here when we reload a Pack when we don't need to. We are triggering the Pack.close() which runs the following: 
+> > 
+> > ```
+> > 	public void close() {
+> > 		WindowCache.purge(this);
+> > 		synchronized (this) {
+> > 			loadedIdx = null;
+> > 			reverseIdx = null;
+> > 		}
+> > 	}
+> > ```
+> > 
+> > If the packfile was substantial (GBs of data), we purge the entire JGit cache (WindowCache) that was loaded and we create a temporary hiccup to Gerrit.
+> 
+> It doesn't purge the entire cache, only the data for this pack.
+
+Yes, correct. Also it applies ONLY if the packfile was substantial (GBs of data), otherwise is negligible.
+
+> I do agree that the work to reload that data is unnecessarily and potentially a significant performance impact for Gerrit.
+
+Correct, and before this fix it was not performed: it is technically a performance regression.
+
+> However, how often are you expecting that the .bitmap file will change when the .pack file doesn't? 
+
+During the racy-reads period, which may lasts a few seconds. For very busy servers, this may kick a race between the incoming clones and the eviction of the packfile in the JGit cache, which may in turn trigger some consecutive JVM GCs for a few seconds.
+
+> That seems like an uncommon scenario that we wouldn't optimize for.
+
+It depends on how busy the server is, how big is the repo and how unlucky you are.
+It is not an optimisation but rather a performance regression that is temporarily introduced by this change.
+
+However, it is addressed by the follow-up, which is fine by me.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Marcin Czech
+Date: 2023-01-05 18:32:01.000000000
+MISMATCHED INLINE COMMENT
+Line:144, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/Pack.java -> I refactored the code with your suggestion from comment below:
+> if (bitmapFile == null) {
+>   return bitmapFileSnapshot.isPresent();
+> }
+----------------------------------------------------------------------------------------------------------------------
+Author: Nasser Grainawi
+Date: 2023-01-06 21:12:43.000000000
+MISMATCHED INLINE COMMENT
+Line:144, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/Pack.java -> And thinking about this more, I think there's an even better trade to make for more simplicity. If we skip passing in the bitmapIdxFile to the constructor, we can have FileSnapshot do more work for us and encapsulate more in Pack:
+
+ Pack(File packFile) {
+   this.packFile = new PackFile(packFile);
+   this.bitmapIdxFile = packFile.create(BITMAP);
+   this.bitmapFileSnapshot = FileSnapshot.save(bitmapIdxFile); // handles non-existent file for us
+ }
+
+And then you wouldn't ever pass a bitmap file to isBitmapModified() either since a missing file isn't considered modified when compared to another missing file (I'll push the test I wrote confirming that as soon as I get a chance).
+
+ boolean isBitmapModified() {
+   return bitmapFileSnapshot.isModified(bitmapIdxFile);
+ }
+
+The downsides to this approach are that 1) we're rechecking existence of the bitmapIdxFile when trying to save the file snapshot and 2) we'll need to fix the first line of getBitmapIndex() that assumes bitmapIdxFile is null when it doesn't exist and the 2 lines that set it to null. One of those getBitmapIndex() lines doesn't equate to MISSING_FILE though (it's more like bitmapIdxInvalid=true).
+
+So I think it would be better on the stable branch to minimize the change and keep the null assumption. That should just mean modifying the solution above slightly:
+
+ Pack(File packFile) {
+   this.packFile = new PackFile(packFile);
+   this.bitmapIdxFile = packFile.create(BITMAP);
+   this.bitmapFileSnapshot = FileSnapshot.save(bitmapIdxFile);
+   if (bitmapFileSnapshot.equals(FileSnapshot.MISSING_FILE)) {
+     this.bitmapIdxFile = null;
+   }
+ }
+
+ boolean isBitmapModified() {
+   return bitmapFileSnapshot.isModified(packFile.create(BITMAP));
+ }
+----------------------------------------------------------------------------------------------------------------------
+Author: Nasser Grainawi
+Date: 2023-01-05 19:12:27.000000000
+MISMATCHED INLINE COMMENT
+Line:144, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/Pack.java -> But that's not using FileSnapshot.MISSING_FILE, which I think is the more JGit-appropriate thing to do vs an Optional. It also means you don't have confusing variables where fileSnapshot is a FileSnapshot but bitmapFileSnapshot is an Optional<FileSnapshot>.
+----------------------------------------------------------------------------------------------------------------------
+Author: Marcin Czech
+Date: 2023-01-05 18:32:01.000000000
+MISMATCHED INLINE COMMENT
+Line:360, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/Pack.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Marcin Czech
+Date: 2023-01-05 18:32:01.000000000
+MISMATCHED INLINE COMMENT
+Line:360, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/Pack.java -> Ack
+----------------------------------------------------------------------------------------------------------------------
+Author: Marcin Czech
+Date: 2023-01-05 18:32:01.000000000
+MISMATCHED INLINE COMMENT
+Line:441, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/PackDirectory.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Nasser Grainawi
+Date: 2023-01-05 19:12:27.000000000
+MISMATCHED INLINE COMMENT
+Line:463, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/PackDirectory.java -> > > I do agree that the work to reload that data is unnecessarily and potentially a significant performance impact for Gerrit.
+> 
+> Correct, and before this fix it was not performed: it is technically a performance regression.
+
+I don't buy the claim that because we have a bug that results in skipping work that fixing the bug so that it does the new work is a regression.
+
+> 
+> > However, how often are you expecting that the .bitmap file will change when the .pack file doesn't? 
+> 
+> During the racy-reads period, which may lasts a few seconds. For very busy servers, this may kick a race between the incoming clones and the eviction of the packfile in the JGit cache, which may in turn trigger some consecutive JVM GCs for a few seconds.
+
+I'm not following the sequence of events that would trigger this, but we can discuss in the commit message where it's documented now.
+----------------------------------------------------------------------------------------------------------------------

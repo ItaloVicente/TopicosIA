@@ -1,0 +1,190 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-50622: respond to race condition in auth during node rename
+
+There's a race condition where we change the node()'s name before we
+actually change the ns_config node data to use the new node's name.
+So during this time we should return a 500 error to any callers, and
+they will try again later.
+
+Change-Id: Ib628a88764def33c97726607498f898cbf97a0c0
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Bryan McCoid
+Date: 2022-01-28 19:09:04.000000000
+Message: 
+Uploaded patch set 6.
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-01-28 19:09:20.000000000
+Message: 
+Patch Set 6:
+
+make simple-test
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-01-28 19:12:26.000000000
+Message: 
+Patch Set 6:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-simple-test/3359/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-01-28 19:13:19.000000000
+Message: 
+Patch Set 6:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-test/29321/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-01-28 19:19:40.000000000
+Message: 
+Patch Set 6: Well-Formed+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/ns-server-test/29321/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2022-01-28 19:19:56.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+Line:1164, src/menelaus_web.erl -> Shouldn't the try/catch just be around the verify_rest_auth call?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-01-28 19:55:50.000000000
+Message: 
+Patch Set 6: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/ns-server-simple-test/3359/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-01-28 20:33:19.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+Line:1164, src/menelaus_web.erl -> Is this a semantic or stylistic concern?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2022-01-28 20:52:03.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+Line:1164, src/menelaus_web.erl -> Won't it mask potential issues in other areas?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-01-28 21:11:19.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+Line:1164, src/menelaus_web.erl -> Only if those hidden errors throw this very specific error.. We aren't catching everything, naturally. We are only catching a specific throw with {internal_error, _}. For example:
+(n_0@127.0.0.1)36> try
+(n_0@127.0.0.1)36> 2 div 0
+(n_0@127.0.0.1)36> catch throw:{internal_error, Reason} -> ok end.
+** exception error: an error occurred when evaluating an arithmetic expression
+     in operator  div/2
+        called as 2 div 0
+(n_0@127.0.0.1)37>
+
+alternatively if you catch everything:
+(n_0@127.0.0.1)38> try
+(n_0@127.0.0.1)38> 2 div 0
+(n_0@127.0.0.1)38> catch _:_ -> ok end.
+ok
+(n_0@127.0.0.1)39>
+
+If you do it where only the one part is in the try/catch, we have a problem of not being able to make an early return in erlang and have to kinda dance around that a bit:
+-------------------------------------------
+{{RV, Headers}, Msg} = try
+                            {menelaus_auth:verify_rest_auth(Req, Permission), 
+                              none}
+                       catch throw:{internal_error, Reason} ->
+                            {{internal_error, []}, Reason}
+                       end,
+    NewReq = menelaus_auth:apply_headers(Req, Headers),
+    case RV of
+    .... snip ....
+    internal_error ->
+            menelaus_util:reply_json(Req,
+                                     {[{message,
+                                        erlang:list_to_binary(Msg)}]}, 
+                                      500)
+    end.
+--------------------------------------------
+So it requires kind of a weird round-about way to finish the rest of the function or similar technique to cut out the rest of the function.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2022-01-28 21:43:56.000000000
+Message: 
+Patch Set 6: Code-Review+1
+
+(1 comment)
+
+I thought your attempt to decrease the window where the issue occurred was valiant....though it was a good decision to not use it when the chance of happening were still > 0. This is one of those cases where there's a very small window (relative to the lifetime of a cluster) when an issue occurs and there's tradeoffs with adding code to handle it. 
+
+How come no one else has thoughts on this change?  :-)
+Line:96, src/ns_config_auth.erl -> Suggest adding a comment about this occurring during a node rename. A future person will wonder when this occurs and it'll save them the research time.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-01-28 21:52:31.000000000
+Message: 
+Patch Set 6: Verified+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-01-28 21:54:37.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+
+> Patch Set 6: Code-Review+1
+> 
+> (1 comment)
+> 
+> I thought your attempt to decrease the window where the issue occurred was valiant....though it was a good decision to not use it when the chance of happening were still > 0. This is one of those cases where there's a very small window (relative to the lifetime of a cluster) when an issue occurs and there's tradeoffs with adding code to handle it. 
+> 
+> How come no one else has thoughts on this change?  :-)
+
+yeah and honestly this only seems to happen (that we know of) from other services trying to auth during rename and at worst they now just retry. So just not worth the effort.
+Line:96, src/ns_config_auth.erl -> will do, good thinking.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-01-29 00:04:16.000000000
+MISMATCHED INLINE COMMENT
+Line:1164, src/menelaus_web.erl -> by the same token couldn't we literally just call the menelaus_util:web_exception(500, <<"Msg">>) from the source? It (calls) an exception after all.. otherwise we are catching to just rethrow again. As for calling it from the other spots.. I suppose but we weren't having any issues in those call paths. I guess it depends on if we see this as a one-off or a general problem that can happen other places.
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2022-01-29 02:00:03.000000000
+MISMATCHED INLINE COMMENT
+Line:1164, src/menelaus_web.erl -> Well semantically it is the same :) But just reads weird since it presumes the only place ns_config:authenticate will be called is from menelaus_web (despite that being the case currently). I would raise an exception here and catch in menelaus_web and re-throw the web_expection.
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2022-01-28 23:28:19.000000000
+MISMATCHED INLINE COMMENT
+Line:1164, src/menelaus_web.erl -> menelaus_auth:verify_rest_auth/2 seems to be also called from deps/ns_couchdb/src/capi_frontend.erl; should we handling the throw there too?
+
+As to catching just the menelaus_auth:verify_rest_auth - Artem should me this a while ago; you could use menelaus_util:web_exception(500, <<"Msg">>). 
+
+Then you could just try catch the verify_rest_auth call and catch the {internal_error, ...} and call menelaus_util:web_exception.
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-01-28 21:58:29.000000000
+MISMATCHED INLINE COMMENT
+Line:96, src/ns_config_auth.erl -> Done
+----------------------------------------------------------------------------------------------------------------------

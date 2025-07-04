@@ -1,0 +1,185 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-47566: Ensure compaction doesn't cause a underflow exception
+
+Currently an implicit compaction of a MamaKVStore can run concurrently
+while VBucket's are being re-set during in memory. This can be
+triggered due to a replica VBucket being rolled back to seqno:0. This
+can cause an underflow of the item stats during the compaction
+completion callback, the callback gets hold of the VBucket pointer to
+the current VBucket in memory. The problem is that this points to the
+new VBucket at seqno:0. So when we subtract the dropped items it
+causes a subtraction against 0.
+
+To fix this the CompactionContext should store a shared pointer to the
+VBucket it's compacting for instead of just the VBid. So that we
+correctly modify the in memory values of the VBucket revision we're
+compacting for.
+
+Change-Id: I1a2db87d5ae9c5346dc0b850e08fe6e423a3481e
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Richard de Mellow
+Date: 2021-10-21 10:16:04.000000000
+Message: 
+Uploaded patch set 17.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-10-21 10:44:42.000000000
+Message: 
+Patch Set 17: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/41291/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [0041/0159]: file stats...(7 ms) SKIPPED
+
+
+99% tests passed, 1 tests failed out of 413
+
+Total Test time (real) = 667.53 sec
+
+The following tests FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/41291/ )
+
+Timeout of a CTest test 413/413 Test #269: ep_testsuite.ephemeral.comp_active ............................................................................................} ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/41291/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/16147/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/16147/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/23530/ : FAILURE
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/35081/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/13592/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/12391/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/3227/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/3297/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/14363/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/15204/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/15483/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-10-21 11:06:48.000000000
+Message: 
+Patch Set 17: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/35081/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/41292/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/13592/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/12391/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/3227/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/3297/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/14363/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/15204/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/15483/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/23531/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/16149/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2021-11-01 10:05:06.000000000
+Message: 
+Patch Set 17: Code-Review-1
+
+(4 comments)
+Line:1221, engines/ep/src/ep_bucket.cc -> why can't we just do vb->getId() rather than a lambda (the lambda is suggesting some complexity which isn't clear why)?
+
+... reading further along and is this just for unit tests that don't create a VBucket object? It could be simpler to just have a VBid parameter and comments as to why it exists (needed for cases when VBucket is null)
+
+Line:1229, engines/ep/src/ep_bucket.cc -> similar here - no need to copy the shared_ptr, can pass the VBucket reference (*ctx->vbPtr)
+
+Line:1257, engines/ep/src/ep_bucket.cc -> no need to copy the shared_ptr here, just read out the VBucket 
+
+auto& vb = *ctx.vb;
+
+Line:341, engines/ep/src/ep_bucket.h -> pass a VBucket reference here - we don't need to pass the shared_ptr
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-11-01 10:12:26.000000000
+Message: 
+Patch Set 17: Code-Review-1
+
+(4 comments)
+
+Looks like I'm playing snap with Jim ;)
+Line:1169, engines/ep/src/ep_bucket.cc -> Unless you actually need to share ownership of the vbucket with anyone else (i.e. the vb is copied / passed to some background task here), prefer just passing a VBucket&. The caller of this function is the one who is responsible for the VBucket ownership.
+
+Line:1229, engines/ep/src/ep_bucket.cc -> Might be worth thinking about what we want to happen to a running compaction if a VBucket is deleted. By handing out shared ptrs to VBucket, you essentially keep that VBucket object alive for an extended period - until compaction has finished (or more explicitly until the various contexts here are deleted).
+
+Given compaction _can_ take many seconds or even minutes, is that desirable?  If there isn't already some other cancellation method for compaction when a vBucket is deleted, I would suggest passing a weak_ptr into these various background contexts; if they fail to promote to a strong (shared) ptr, then compaction can be cancelled on that file etc.
+
+Line:240, engines/ep/src/kvstore/kvstore.h -> This seems a bit complex - what's the reason for it - can a caller not just ask for the vbucket id from the VBucketPtr?
+
+Or even just have a const vbid member which is initialised in the constructor - I assume the VBucket for compactions cannot change while compaction is running?
+
+Line:619, engines/ep/tests/module_tests/magma_bucket_tests.cc -> Do you need threads here? Could you not directly trigger compaction from within the completionCallback?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2021-11-01 13:53:54.000000000
+MISMATCHED INLINE COMMENT
+Line:1169, engines/ep/src/ep_bucket.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2021-11-01 13:53:54.000000000
+MISMATCHED INLINE COMMENT
+Line:1221, engines/ep/src/ep_bucket.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2021-11-01 13:53:54.000000000
+MISMATCHED INLINE COMMENT
+Line:1229, engines/ep/src/ep_bucket.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2021-11-01 13:53:54.000000000
+MISMATCHED INLINE COMMENT
+Line:1229, engines/ep/src/ep_bucket.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2021-11-01 13:53:54.000000000
+MISMATCHED INLINE COMMENT
+Line:1229, engines/ep/src/ep_bucket.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2021-11-01 13:53:54.000000000
+MISMATCHED INLINE COMMENT
+Line:1229, engines/ep/src/ep_bucket.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2021-11-01 13:53:54.000000000
+MISMATCHED INLINE COMMENT
+Line:1257, engines/ep/src/ep_bucket.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2021-11-01 13:53:54.000000000
+MISMATCHED INLINE COMMENT
+Line:341, engines/ep/src/ep_bucket.h -> Done
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,50 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-47460: Correctly handle replay of collection drop + doc shrink
+
+During compaction, if mutations were flushed concurrently requiring a
+compaction replay, then if a collection has a doucment's value shrink
+and the collection is dropped the diskSize stat would go negative,
+resulting in an exception being thrown and compaction being aborted:
+
+    WARNING (GleamBookUsers0) CouchKVStore::replayPrecommitHook failed saveCollectionStats what:ThrowExceptionUnderflowPolicy current:0 arg:-1061
+    ERROR (GleamBookUsers0) CouchKVStore::compactDB: exception while performing compaction for vb:0 - Details: cb::couchstore::replay() - precommit hook Failed: error cancel
+
+The issue is that the local collection cardinality doc (|<CID>|) is
+not alive during this replay batch (as the collection has been
+dropped), hence when the replayPreCopyHook is passed the mutation
+which reduces the value size, we record a negative diskSize in
+StatisticsUpdate for the affected collection.
+
+Later in CouchKVStore::replayPrecommitHook when
+FlushAccounting::forEachCollection is called to calculate new local
+docs to write to disk, we attempt to construct a PersistedStats with a
+negative diskSize; which isn't permitted (given it's a
+NonNegativeCounter) and hence an exception is thrown, and compaciton
+aborted.
+
+Note this issue appears relatively benign - while this compaction is
+aborted, a subsequent compaction will process the collection drop in
+the initial compaction phase and hence the negative diskSize code path
+isn't run.
+
+Solution
+
+The bug is in tryToCatchUpDbFile() - we read the dropped collections
+from the source Db too late, after we have seeked back to the original
+header. As such the changes made in the pre-hook are not observed.
+
+By hoisting the read of the collections earlier we observe all dropped
+collections - including the ones dropped during this iteration.
+
+Change-Id: I937f839f25a79d0d9241663837c41150a580cbba
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2021-08-12 10:40:17.000000000
+Message: 
+Patch Set 3: Patch Set 2 was rebased
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,128 @@
+======================================================================================================================
+DESCRIPTION:
+
+bug 562127 - Optimize ViewCSSImpl.getComputedStyle by avoiding calling
+getParentNode() excessively.
+
+Change-Id: I1d0af4e564dc1f63ccf96b3a208e25724a5be8b4
+Signed-off-by: Mike Marchand <mmarchand@cranksoftware.com>
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Mike Marchand
+Date: 2020-04-14 21:24:46.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Platform Bot
+Date: 2020-04-14 21:25:23.000000000
+Message: 
+Patch Set 1:
+
+Build Started https://ci.eclipse.org/platform/job/eclipse.platform.ui-Gerrit/22260/
+----------------------------------------------------------------------------------------------------------------------
+Author: Platform Bot
+Date: 2020-04-14 21:29:25.000000000
+Message: 
+Patch Set 1: Verified-1
+
+Build Failed 
+
+https://ci.eclipse.org/platform/job/eclipse.platform.ui-Gerrit/22260/ : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Lars Vogel
+Date: 2020-04-15 08:16:56.000000000
+Message: 
+Patch Set 1:
+
+Karsten, can you please review?
+----------------------------------------------------------------------------------------------------------------------
+Author: Karsten Thoms
+Date: 2020-04-15 22:36:02.000000000
+Message: 
+Patch Set 1: Code-Review-1
+
+(6 comments)
+Line:7, bundles/org.eclipse.e4.ui.css.core/META-INF/MANIFEST.MF -> version was already incremented for 4.16
+please revert
+
+Line:119, bundles/org.eclipse.e4.ui.css.core/src/org/eclipse/e4/ui/css/core/impl/dom/ViewCSSImpl.java -> creating arrays with a null inside looks fishy
+
+Line:124, bundles/org.eclipse.e4.ui.css.core/src/org/eclipse/e4/ui/css/core/impl/dom/ViewCSSImpl.java -> this will always add 'null' at the end of the list
+
+Line:129, bundles/org.eclipse.e4.ui.css.core/src/org/eclipse/e4/ui/css/core/impl/dom/ViewCSSImpl.java -> How about building a Stream of the hierarchy. This would look as follows:
+
+	private Stream<Node> getHierarchy(Node node) {
+		return node != null ? Stream.concat(Stream.of(node), hierarchy(node.getParentNode())) : Stream.empty();
+	}
+
+
+       Node[] hierarchy = getHierarchy(elt.getParentNode()).toArray(Node[]::new);
+
+
+However, this would scrumble a bit the match() logic in the selectors. The given hierarchy array can't be null then.
+
+I have to admit I did not completely get the logic in there (CSSDescendantSelectorImpl, CSSDirectAdjacentSelectorImpl).
+
+Could you try to make them work with the logic above using the stream?
+
+Line:56, bundles/org.eclipse.e4.ui.css.core/src/org/eclipse/e4/ui/css/core/impl/sac/CSSChildSelectorImpl.java -> This only worked because you passed in the artificial null element. Without the array could also be empty.
+
+The logic would have to change to something like follows:
+
+	public boolean match(Element e, Node[] hierarchy, int index, String pseudoE) {
+		if (index >= hierarchy.length) {
+			return false;
+		}
+
+		Node n = hierarchy[index];
+		if (n.getNodeType() == Node.ELEMENT_NODE && hierarchy.length > index) {
+			return ((ExtendedSelector) getAncestorSelector()).match((Element) n, hierarchy, index + 1, null)
+					&& ((ExtendedSelector) getSimpleSelector()).match(e, hierarchy, index + 1, pseudoE);
+		}
+		return false;
+	}
+
+Line:55, bundles/org.eclipse.e4.ui.css.core/src/org/eclipse/e4/ui/css/core/impl/sac/CSSDirectAdjacentSelectorImpl.java -> typo hiearchy => hierarchy
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Mike Marchand
+Date: 2020-04-15 22:47:06.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+
+> (6 comments)
+I will revert the manifest change no problem, thanks for the advice.
+
+The logic does depend on a null in the array, that was intentional.  I can try to make it work with the stream, and protecting against dereferencing the array at an invalid index in the selector code.  Is there a particular reason that a stream is preferable over the way that I had it implemented with a list-to-array?
+
+Really, admittedly I don't have a strong grasp on the logic inside CSSDecendantSelectorImpl and CSSChildSelectorImpl either.  
+
+ > (6 comments)
+Line:7, bundles/org.eclipse.e4.ui.css.core/META-INF/MANIFEST.MF -> I was not sure if this was the appropriate change to the version number.  The interface that changed, was changed in a backwards compatible fashion.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Karsten Thoms
+Date: 2020-04-15 23:08:02.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+
+> The logic does depend on a null in the array, that was intentional.
+ >  I can try to make it work with the stream, and protecting against
+ > dereferencing the array at an invalid index in the selector code. 
+ > Is there a particular reason that a stream is preferable over the
+ > way that I had it implemented with a list-to-array?
+ > 
+ > Really, admittedly I don't have a strong grasp on the logic inside
+ > CSSDecendantSelectorImpl and CSSChildSelectorImpl either.
+
+Then we should not touch that too much. The reason why I proposed this was that it looks nicer and that I thought that the null element looks fishy.
+
+Then please define a constant NO_NODE for that array to avoid its permanent creation.
+Line:7, bundles/org.eclipse.e4.ui.css.core/META-INF/MANIFEST.MF -> Versions have to be incremented when a bundle has changed the first time after a release. But only once. Since this already happened this must not happen here.
+
+----------------------------------------------------------------------------------------------------------------------

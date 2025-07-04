@@ -1,0 +1,248 @@
+======================================================================================================================
+DESCRIPTION:
+
+PackDirectory: Always scanPacks in searchPacksAgain
+
+Don't worry about modification timestamps and always recheck what's on
+disk when asked to search again. This could incur a small performance
+penalty in miss/failure paths, but likely only on slower filesystems
+like NFS where the recommendation already is to use
+trustFolderStat=false to avoid false errors due to NFS caching.
+
+Also fix the config options doc to replace the trustFolderStat text with
+the only remaining usage in RefDirectory (which was previously
+undocumented).
+
+Our JGit 2.3.1 fork has had this same behavior for over 9 years and it
+has worked very well in production with NFS for us.
+
+Change-Id: I0f0ee0e9467d2e75c766c29fd4a00799f9a18ff8
+Signed-off-by: Nasser Grainawi <quic_nasserg@quicinc.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Nasser Grainawi
+Date: 2022-11-08 19:29:46.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2022-11-08 19:29:55.000000000
+Message: 
+Patch Set 2:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline.java11/2078/
+----------------------------------------------------------------------------------------------------------------------
+Author: Nasser Grainawi
+Date: 2022-11-08 19:31:09.000000000
+Message: 
+Patch Set 2: Code-Review+1
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2022-11-08 19:42:29.000000000
+Message: 
+Patch Set 2: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline.java11/2078/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2022-11-10 20:21:04.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> I don't understand how removing an optimisation which has known issues (that's why trustForlderStat was introduced) on NFS but works on other filesystems improves jgit. You say this change may incur a small performance penalty, without measurements this is a guess. And why should we accept any performance penalty ? What would we gain from that ?
+----------------------------------------------------------------------------------------------------------------------
+Author: Nasser Grainawi
+Date: 2022-11-11 20:37:02.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> > I don't understand how removing an optimisation which has known issues (that's why trustForlderStat was introduced) on NFS but works on other filesystems improves jgit.
+
+Our problem is that we don't want to trust modification time for objects/pack because failures are too frequent otherwise. However, we do want to trust the modification time of the packed-refs file because otherwise the performance penalty is too high (we're going to retest to confirm that).
+
+An alternate approach might be to keep searchPacksAgain() as-is, but introduce a new config with a higher precedence than trustFolderStat to control trusting the modification time of packed-refs.
+
+> You say this change may incur a small performance penalty, without measurements this is a guess. And why should we accept any performance penalty ? What would we gain from that ?
+
+The idea of this approach is that less complexity helps us. I know JGit has historically valued performance optimizations over reduced complexity, so maybe this approach is too counter to that. I agree I didn't provide measurements, but we do understand in what scenarios this would even apply. It's only in the cases where we've already failed to produce a successful result that we call searchPacksAgain(). While we could skip some work if we keep the optimization, what we would skip in that no-op case is:
+
+ FileSnapshot.save(directory) // gets lastModifiedTime for `directory`
+ getPackFilesByExtById() // walks the files in the objects/pack/ directory and populates a map
+ oldPack.getFileSnapshot().isModified(packFile) // gets lastModifiedTime for `packFile`
+
+I think it's safe to assume the file snapshot methods are fast on any filesystem where you would be trusting that stat, and at least one of those is equivalent to the check I'm removing, so worst case it's net +1 stat call. That leaves walking files in the pack/ dir. I agree doing that work is more than skipping it. I don't think that will be measurable on any filesystem where you would trust the file system stats, do you? If yes, in what scenarios would you be concerned about it? Maybe something like a spinning disk with 1000 pack files? I think SSDs are going to have such good seek times that we won't be able to measure it, but that's just my guess.
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2022-11-18 22:05:23.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> > > I don't understand how removing an optimisation which has known issues (that's why trustForlderStat was introduced) on NFS but works on other filesystems improves jgit.
+> 
+> Our problem is that we don't want to trust modification time for objects/pack because failures are too frequent otherwise. However, we do want to trust the modification time of the packed-refs file because otherwise the performance penalty is too high (we're going to retest to confirm that).
+
+With the JGit change Ia378f8f228 that isn't true anymore.
+
+> An alternate approach might be to keep searchPacksAgain() as-is, but introduce a new config with a higher precedence than trustFolderStat to control trusting the modification time of packed-refs.
+
+I believe we already proposed by Marco Miller with Ic2718c816 that and it was not accepted.
+
+
+> > You say this change may incur a small performance penalty, without measurements this is a guess. And why should we accept any performance penalty ? What would we gain from that ?
+> 
+> The idea of this approach is that less complexity helps us. I know JGit has historically valued performance optimizations over reduced complexity, so maybe this approach is too counter to that. I agree I didn't provide measurements, but we do understand in what scenarios this would even apply. It's only in the cases where we've already failed to produce a successful result that we call searchPacksAgain(). While we could skip some work if we keep the optimization, what we would skip in that no-op case is:
+> 
+>  FileSnapshot.save(directory) // gets lastModifiedTime for `directory`
+>  getPackFilesByExtById() // walks the files in the objects/pack/ directory and populates a map
+>  oldPack.getFileSnapshot().isModified(packFile) // gets lastModifiedTime for `packFile`
+> 
+> I think it's safe to assume the file snapshot methods are fast on any filesystem where you would be trusting that stat, and at least one of those is equivalent to the check I'm removing, so worst case it's net +1 stat call. That leaves walking files in the pack/ dir. I agree doing that work is more than skipping it. I don't think that will be measurable on any filesystem where you would trust the file system stats, do you? If yes, in what scenarios would you be concerned about it? Maybe something like a spinning disk with 1000 pack files? I think SSDs are going to have such good seek times that we won't be able to measure it, but that's just my guess.
+
+I would recommend to measure, which is always a good thing :-)
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2022-11-18 22:54:46.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> | With the JGit change Ia378f8f228 that isn't true anymore.
+
+This change isn't submitted yet. It needs to be moved to a maintained branch and I'd like to see some numbers about memory consumption compared to the current implementation. We need to be careful since jgit has a lot of consumers, org.eclipse.jgit has >7million downloads per month from Maven central.
+
+| I believe we already proposed by Marco Miller with Ic2718c816 that and it was not accepted.
+
+This change was abandoned by Marco since he didn't have time anymore to work on it, if you have evidence that this works in your setup we can consider accepting something like that.
+
+Maybe it makes sense to split the configuration of which stats are trusted by jgit to enable experimenting on NFS. This configuration trades performance against risking lost updates hence there should be corresponding warnings in the documentation. These options should be marked as experimental.
+
+In the long run we should use RefTable which is for sure superior compared to RefDirectory using packed-refs regarding performance and scalability. Hopefully this can land in c-git some time in the not too distant future.
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2022-11-18 23:07:24.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> > | With the JGit change Ia378f8f228 that isn't true anymore.
+> 
+> This change isn't submitted yet. It needs to be moved to a maintained branch and I'd like to see some numbers about memory consumption compared to the current implementation. 
+
+True, it is still at the proposal stage and, also, it lacks numbers and data for being accepted and merged.
+
+> We need to be careful since jgit has a lot of consumers, org.eclipse.jgit has >7million downloads per month from Maven central.
+
++1
+
+> | I believe we already proposed by Marco Miller with Ic2718c816 that and it was not accepted.
+> 
+> This change was abandoned by Marco since he didn't have time anymore to work on it, if you have evidence that this works in your setup we can consider accepting something like that.
+
+I would prefer to resume Ic2718c816, as it was allowing to control what to trust. @Nasser would that also work for you?
+
+> Maybe it makes sense to split the configuration of which stats are trusted by jgit to enable experimenting on NFS. This configuration trades performance against risking lost updates hence there should be corresponding warnings in the documentation. These options should be marked as experimental.
+
++1
+
+> In the long run we should use RefTable which is for sure superior compared to RefDirectory using packed-refs regarding performance and scalability. Hopefully this can land in c-git some time in the not too distant future.
+
++1
+----------------------------------------------------------------------------------------------------------------------
+Author: Nasser Grainawi
+Date: 2022-12-12 18:04:54.000000000
+Message: 
+Patch Set 2: Code-Review-1
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> > > | With the JGit change Ia378f8f228 that isn't true anymore.
+> > 
+> > This change isn't submitted yet. It needs to be moved to a maintained branch and I'd like to see some numbers about memory consumption compared to the current implementation. 
+> 
+> True, it is still at the proposal stage and, also, it lacks numbers and data for being accepted and merged.
+
+https://git.eclipse.org/r/c/jgit/jgit/+/197526 is proposed as a simpler alternative that we have tested and have performance numbers for. With that change we could reasonably set trustFolderStat=false in our environments. PTAL.
+
+> > | I believe we already proposed by Marco Miller with Ic2718c816 that and it was not accepted.
+> > 
+> > This change was abandoned by Marco since he didn't have time anymore to work on it, if you have evidence that this works in your setup we can consider accepting something like that.
+> 
+> I would prefer to resume Ic2718c816, as it was allowing to control what to trust. @Nasser would that also work for you?
+
+I think we have a better option in https://git.eclipse.org/r/c/jgit/jgit/+/197526
+
+> In the long run we should use RefTable which is for sure superior compared to RefDirectory using packed-refs regarding performance and scalability. Hopefully this can land in c-git some time in the not too distant future.
+
+Unfortunately RefTable probably has as bad or worse problems with NFS+multi-primary since loose refs can alleviate contention on frequently updated refs. RefTable doesn't have a solution to that.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2022-12-12 19:56:32.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> > Unfortunately RefTable probably has as bad or worse problems with NFS+multi-primary since loose refs can alleviate contention on frequently updated refs. RefTable doesn't have a solution to that.
+
+- I agree there are less chances for lock contention when doing concurrent ref updates with loose refs but they don't support transactional batch ref updates
+- which frequency of ref updates do you observe on busy repositories ?
+- are these mostly single ref updates or batch updates which need to be transactional ?
+- did you try this ?
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2022-12-13 22:50:03.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> > https://git.eclipse.org/r/c/jgit/jgit/+/197526 is proposed as a simpler
+> alternative that we have tested and have performance numbers for. With that
+> change we could reasonably set trustFolderStat=false in our environments. PTAL.
+
+... and set trustPackedRefsModificationTime=true
+
++1
+----------------------------------------------------------------------------------------------------------------------
+Author: Nasser Grainawi
+Date: 2022-12-14 04:51:18.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> > > https://git.eclipse.org/r/c/jgit/jgit/+/197526 is proposed as a simpler
+> > alternative that we have tested and have performance numbers for. With that
+> > change we could reasonably set trustFolderStat=false in our environments. PTAL.
+> 
+> ... and set trustPackedRefsModificationTime=true
+> 
+> +1
+
+Actually we'll set trustPackedRefsModificationTime=after_open (and looks like it'll be renamed to trustPackedRefsStat) since that's the new magic that trades a small perf penalty for being able to trust the file attributes.
+
+
+> which frequency of ref updates do you observe on busy repositories ?
+
+I don't think we have a good measurement of this yet, but it seems like a good metric for us to have. Do you have a method you use to measure it?
+
+> are these mostly single ref updates or batch updates which need to be transactional ?
+
+It's a bit of both. I think the use case we're seeing "most" (not a clear measurement, just my feeling based on our debugging so far) is with change meta ref updates. Some of those are a single ref update, like when label votes are set on a change. Others are batch updates, like when a new patchset is created (patchset ref + change meta ref).
+
+> did you try this ?
+
+If you're asking if we've tried reftable, no, we have not.
+
+If you're asking if we've tried trustFolderStat=false + trustPackedRefsStat=after_open, yes, we're actively testing that configuration and it seems promising. It does cause some performance regressions that we'll need to find other ways to solve, but the performance impact is a fraction of what trustFolderStat=false is on its own. We think we can probably solve those regressions by identifying code paths where the same git data is accessed multiple times within a single request and caching that data for the lifetime of the request.
+----------------------------------------------------------------------------------------------------------------------
+Author: Nasser Grainawi
+Date: 2022-12-14 20:13:20.000000000
+Message: 
+Abandoned
+
+Replaced with 197526: Introduce core.trustPackedRefsStat config | https://git.eclipse.org/r/c/jgit/jgit/+/197526
+----------------------------------------------------------------------------------------------------------------------

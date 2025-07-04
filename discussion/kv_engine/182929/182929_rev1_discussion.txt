@@ -1,0 +1,248 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-54591: ActiveStream: Avoid lost wakeup due to race on itemsReady
+
++Summary+
+
+There exists a race in ActiveStream between a notifying that a new
+mutation available, and processing the previous mutation(s). If the
+notification occurs just before ActiveStream sets a flag indicating
+that there's currently no more items to process, then the notification
+is lost and the DCP stream is not notified of this new mutation when
+it should be.
+
+This results in the DCP stream being behind by that seqno, until the
+the next mutation on the vBucket occurs with will re-notify the stream
+and cause it to process both.
+
++Impact+
+
+When it occurs, this bug introduces additional latency between a
+mutation occurring on the KV node, and it getting passed to the
+affected DCP client. For DCP connections which require a "current" set
+of seqnos to proceed - e.g. GSI when using request_plus queries, this
+can manifest as those operations hanging.
+
+Note the latency added is bounded by the mutation rate on the vBucket
+- the next mutation is guaranteed to wake up the stream (as it is now
+idle and there's no possible race). For workloads with moderate
+mutation rates (e.g. 1000 mutations per second per Bucket), the
+additional latency on average should be 1s. However for workloads with
+very low mutation rates (<100 per second) then on average the latency
+would be 10+ seconds.
+
+For workloads which are intermittent and idle for extended periods,
+the added latency could be large - as long as it takes for that
+vBucket to be modified again.
+
++Details+
+
+The race is between the itemsReady flag being tested in
+notifyStreamReady, and clearing itemsReady when there are no more
+items available for the stream in ActiveStream::next(). Flag is tested
+here:
+
+    void ActiveStream::notifyStreamReady(bool force, DcpProducer* producer, uint64_t seqno) {
+        bool inverse = false;
+        if (force || itemsReady.compare_exchange_strong(inverse, true)) {
+
+            if (seqno) {
+                itemsReadySeqnosForNotify.lock()->push_back(seqno);
+            }
+    ...
+
+And it is set/reset here:
+
+    std::unique_ptr<DcpResponse> ActiveStream::next(DcpProducer& producer) {
+        std::unique_ptr<DcpResponse> response;
+        switch (state_.load()) {
+        ...
+        case StreamState::InMemory:
+            response = inMemoryPhase(producer);
+            break;
+        ...
+        }
+
+       itemsReady.store(response ? true : false);
+       return response;
+   }
+
+We can lose a notification (from ActiveStream::notifyStreamReady) from
+one front-end thread (performing a set) if the notification occurs
+while the DCP thread is executing ActiveStream::next() and has already
+called inMemoryPhase() and found the CheckpointManger empty - but
+*before* we clear itemsReady at the end of the function.
+
+To fix the lost wakeup we clear itemsReady _before_ we fetch the next
+response - and only set it back to true (inhibiting notifies) if we
+find we have at least one more item.
+
+This potentially swaps lost wakeups for unnecessary wakeups (i.e. if a
+notifyStreamReady() occurs in ActiveStream::next() between clearing
+itemsReady and re-setting it at the end) - but correctness >
+performance.
+
+Change-Id: I3ed9ff1abfe654b8ced4e9c8d084bd0ddaa668ee
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2022-11-17 21:54:11.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Restriction Checker
+Date: 2022-11-17 21:54:23.000000000
+Message: 
+Patch Set 1: Well-Formed-1
+
+Branch restricted. PLEASE READ this URL: 
+
+https://server.jenkins.couchbase.com/job/restricted-branch-check/325328/artifact/restricted.html : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-11-17 23:01:25.000000000
+Message: 
+Patch Set 1: Verified-1
+
+Build Failed 
+
+https://cv.jenkins.couchbase.com/job/kv_engine.macos/job/mad-hatter/1532/ : FAILURE
+
+Failure of GoogleTest "AllBucketTypes/DurabilityActiveStreamTest.BackfillDurabilityLevel/ephemeral_auto_delete":
+
+<pre>
+[ RUN      ] AllBucketTypes/DurabilityActiveStreamTest.BackfillDurabilityLevel/ephemeral_auto_delete
+[2022-11-17T21:59:39.051Z] ../kv_engine/engines/ep/tests/module_tests/dcp_durability_stream_test.cc:5671: Failure
+[2022-11-17T21:59:39.051Z] Value of: itemsRemoved
+[2022-11-17T21:59:39.051Z]   Actual: 0
+[2022-11-17T21:59:39.051Z] Expected: numItems
+[2022-11-17T21:59:39.051Z] Which is: 1
+[2022-11-17T21:59:39.051Z] unknown file: Failure
+[2022-11-17T21:59:39.051Z] C++ exception with description "DcpProducer::updateStreamsMap (vb:0) Stream (sid:none) request failed because a stream unexpectedly exists in StreamContainer for this vbucket" thrown in the test body.
+[2022-11-17T21:59:39.051Z] [  FAILED  ] AllBucketTypes/DurabilityActiveStreamTest.BackfillDurabilityLevel/ephemeral_auto_delete, where GetParam() = ("ephemeral", "auto_delete") (1 ms)
+AllBucketTypes/DurabilityActiveStreamTest.BackfillDurabilityLevel/ephemeral_auto_delete
+</pre>
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.macos/job/mad-hatter/1532/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/2182/ : FAILURE
+
+Failure of GoogleTest "AllBucketTypes/DurabilityActiveStreamTest.BackfillDurabilityLevel/ephemeral_auto_delete":
+
+<pre>
+[ RUN      ] AllBucketTypes/DurabilityActiveStreamTest.BackfillDurabilityLevel/ephemeral_auto_delete
+[2022-11-17T22:14:49.398Z] ../kv_engine/engines/ep/tests/module_tests/dcp_durability_stream_test.cc:5671: Failure
+[2022-11-17T22:14:49.398Z] Value of: itemsRemoved
+[2022-11-17T22:14:49.398Z]   Actual: 0
+[2022-11-17T22:14:49.398Z] Expected: numItems
+[2022-11-17T22:14:49.398Z] Which is: 1
+[2022-11-17T22:14:49.398Z] unknown file: Failure
+[2022-11-17T22:14:49.398Z] C++ exception with description "DcpProducer::updateStreamsMap (vb:0) Stream (sid:none) request failed because a stream unexpectedly exists in StreamContainer for this vbucket" thrown in the test body.
+[2022-11-17T22:14:49.398Z] [  FAILED  ] AllBucketTypes/DurabilityActiveStreamTest.BackfillDurabilityLevel/ephemeral_auto_delete, where GetParam() = ("ephemeral", "auto_delete") (2 ms)
+AllBucketTypes/DurabilityActiveStreamTest.BackfillDurabilityLevel/ephemeral_auto_delete
+</pre>
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/2182/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/2168/ : FAILURE
+
+Failure of GoogleTest "AllBucketTypes/DurabilityActiveStreamTest.BackfillDurabilityLevel/ephemeral_auto_delete":
+
+<pre>
+[ RUN      ] AllBucketTypes/DurabilityActiveStreamTest.BackfillDurabilityLevel/ephemeral_auto_delete
+[2022-11-17T22:45:36.448Z] ../kv_engine/engines/ep/tests/module_tests/dcp_durability_stream_test.cc:5671: Failure
+[2022-11-17T22:45:36.448Z] Value of: itemsRemoved
+[2022-11-17T22:45:36.448Z]   Actual: 0
+[2022-11-17T22:45:36.448Z] Expected: numItems
+[2022-11-17T22:45:36.448Z] Which is: 1
+[2022-11-17T22:45:36.448Z] unknown file: Failure
+[2022-11-17T22:45:36.448Z] C++ exception with description "DcpProducer::updateStreamsMap (vb:0) Stream (sid:none) request failed because a stream unexpectedly exists in StreamContainer for this vbucket" thrown in the test body.
+[2022-11-17T22:45:36.448Z] [  FAILED  ] AllBucketTypes/DurabilityActiveStreamTest.BackfillDurabilityLevel/ephemeral_auto_delete, where GetParam() = ("ephemeral", "auto_delete") (4 ms)
+AllBucketTypes/DurabilityActiveStreamTest.BackfillDurabilityLevel/ephemeral_auto_delete
+</pre>
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/2168/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/mad-hatter/234/ : FAILURE
+
+Failure of GoogleTest "AllBucketTypes/DurabilityActiveStreamTest.BackfillDurabilityLevel/ephemeral_auto_delete":
+
+<pre>
+[ RUN      ] AllBucketTypes/DurabilityActiveStreamTest.BackfillDurabilityLevel/ephemeral_auto_delete
+[2022-11-17T22:19:34.890Z] ../kv_engine/engines/ep/tests/module_tests/dcp_durability_stream_test.cc:5671: Failure
+[2022-11-17T22:19:34.890Z] Value of: itemsRemoved
+[2022-11-17T22:19:34.890Z]   Actual: 0
+[2022-11-17T22:19:34.890Z] Expected: numItems
+[2022-11-17T22:19:34.890Z] Which is: 1
+[2022-11-17T22:19:34.890Z] unknown file: Failure
+[2022-11-17T22:19:34.890Z] C++ exception with description "DcpProducer::updateStreamsMap (vb:0) Stream (sid:none) request failed because a stream unexpectedly exists in StreamContainer for this vbucket" thrown in the test body.
+[2022-11-17T22:19:34.890Z] [  FAILED  ] AllBucketTypes/DurabilityActiveStreamTest.BackfillDurabilityLevel/ephemeral_auto_delete, where GetParam() = ("ephemeral", "auto_delete") (4 ms)
+AllBucketTypes/DurabilityActiveStreamTest.BackfillDurabilityLevel/ephemeral_auto_delete
+</pre>
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/mad-hatter/234/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/2331/ : FAILURE
+
+Failure of GoogleTest "AllBucketTypes/DurabilityActiveStreamTest.BackfillDurabilityLevel/ephemeral_auto_delete":
+
+<pre>
+[ RUN      ] AllBucketTypes/DurabilityActiveStreamTest.BackfillDurabilityLevel/ephemeral_auto_delete
+..\kv_engine\engines\ep\tests\module_tests\dcp_durability_stream_test.cc(5671): error: Value of: itemsRemoved
+  Actual: 0
+Expected: numItems
+Which is: 1
+unknown file: error: C++ exception with description "DcpProducer::updateStreamsMap (vb:0) Stream (sid:none) request failed because a stream unexpectedly exists in StreamContainer for this vbucket" thrown in the test body.
+[  FAILED  ] AllBucketTypes/DurabilityActiveStreamTest.BackfillDurabilityLevel/ephemeral_auto_delete, where GetParam() = ("ephemeral", "auto_delete") (4 ms)
+AllBucketTypes/DurabilityActiveStreamTest.BackfillDurabilityLevel/ephemeral_auto_delete
+</pre>
+ ( https://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/2331/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/2182/ : FAILURE
+
+Failure of GoogleTest "AllBucketTypes/DurabilityActiveStreamTest.BackfillDurabilityLevel/ephemeral_auto_delete":
+
+<pre>
+[ RUN      ] AllBucketTypes/DurabilityActiveStreamTest.BackfillDurabilityLevel/ephemeral_auto_delete
+[2022-11-17T22:07:00.013Z] ../kv_engine/engines/ep/tests/module_tests/dcp_durability_stream_test.cc:5671: Failure
+[2022-11-17T22:07:00.013Z] Value of: itemsRemoved
+[2022-11-17T22:07:00.013Z]   Actual: 0
+[2022-11-17T22:07:00.013Z] Expected: numItems
+[2022-11-17T22:07:00.013Z] Which is: 1
+[2022-11-17T22:07:00.013Z] unknown file: Failure
+[2022-11-17T22:07:00.013Z] C++ exception with description "DcpProducer::updateStreamsMap (vb:0) Stream (sid:none) request failed because a stream unexpectedly exists in StreamContainer for this vbucket" thrown in the test body.
+[2022-11-17T22:07:00.013Z] [  FAILED  ] AllBucketTypes/DurabilityActiveStreamTest.BackfillDurabilityLevel/ephemeral_auto_delete, where GetParam() = ("ephemeral", "auto_delete") (1 ms)
+AllBucketTypes/DurabilityActiveStreamTest.BackfillDurabilityLevel/ephemeral_auto_delete
+</pre>
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/2182/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/1963/ : FAILURE
+
+Failure of GoogleTest "AllBucketTypes/DurabilityActiveStreamTest.BackfillDurabilityLevel/ephemeral_auto_delete":
+
+<pre>
+[ RUN      ] AllBucketTypes/DurabilityActiveStreamTest.BackfillDurabilityLevel/ephemeral_auto_delete
+[2022-11-17T22:32:54.754Z] ../kv_engine/engines/ep/tests/module_tests/dcp_durability_stream_test.cc:5671: Failure
+[2022-11-17T22:32:54.754Z] Value of: itemsRemoved
+[2022-11-17T22:32:54.754Z]   Actual: 0
+[2022-11-17T22:32:54.754Z] Expected: numItems
+[2022-11-17T22:32:54.754Z] Which is: 1
+[2022-11-17T22:32:54.754Z] unknown file: Failure
+[2022-11-17T22:32:54.754Z] C++ exception with description "DcpProducer::updateStreamsMap (vb:0) Stream (sid:none) request failed because a stream unexpectedly exists in StreamContainer for this vbucket" thrown in the test body.
+[2022-11-17T22:32:54.754Z] [  FAILED  ] AllBucketTypes/DurabilityActiveStreamTest.BackfillDurabilityLevel/ephemeral_auto_delete, where GetParam() = ("ephemeral", "auto_delete") (25 ms)
+AllBucketTypes/DurabilityActiveStreamTest.BackfillDurabilityLevel/ephemeral_auto_delete
+</pre>
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/1963/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/2084/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_format/26700/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Restriction Checker
+Date: 2022-11-17 23:01:38.000000000
+Message: 
+Patch Set 1:
+
+Branch restricted. PLEASE READ this URL: 
+
+https://server.jenkins.couchbase.com/job/restricted-branch-check/325342/artifact/restricted.html : FAILURE
+----------------------------------------------------------------------------------------------------------------------

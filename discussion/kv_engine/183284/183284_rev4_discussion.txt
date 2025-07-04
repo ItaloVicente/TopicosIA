@@ -1,0 +1,156 @@
+======================================================================================================================
+DESCRIPTION:
+
+Reduce the size of StoredValues by 4 bytes
+
+By changing the datatype to be a 3-bit long bit field and combining it
+with the 5-bits of flags that we had, and ignoring the 4 bytes of
+resulting padding when allocating StoredValues.
+
+It is difficult to precisely quantify the benefit of this change -- we
+use jemalloc in our release builds and it uses bins of size 64, 80, 96,
+112, 128... Some of the allocations will go in the lower bin size.
+
+For example, if the document key is 23-26 bytes long, these allocations
+will be in the 80 byte bin, whereas before this change they would have
+ended up in the 96 byte bin, giving a saving of 16 bytes per StoredValue
+with that key size.
+
+Note that OrderedStoredValue size is unaffected (and the compiler adds
+the appropriate padding for the base class object).
+
+Change-Id: I6cc52ff5a2db4dd253a6d13eab2bb17e6bf035b9
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Vesko Karaganev
+Date: 2022-11-28 17:57:03.000000000
+Message: 
+Patch Set 4: Patch Set 3 was rebased
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-11-28 18:38:55.000000000
+Message: 
+Patch Set 4: Verified+1
+
+Build Successful 
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/43037/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/21986/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-windows-master/51271/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/21486/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/11802/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/23512/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux-debug/job/master/744/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/11712/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/25298/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/24032/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/24445/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/32449/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2022-11-29 08:57:30.000000000
+Message: 
+Patch Set 4: Code-Review-1
+
+(1 comment)
+Line:1227, engines/ep/src/stored-value.h -> Why an #ifdef when both branches contains the same content?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-11-29 09:41:19.000000000
+Message: 
+Patch Set 4: Code-Review-1
+
+(5 comments)
+File Comment: /PATCHSET_LEVEL -> Good find! A few comments on potential ways to achieve the same size reduction but in a simpler way...
+Line:135, engines/ep/src/stored-value.h -> If we can get away with it, it would be preferable to avoid #pragma pack and simply align / pack things as minimal as possible.
+
+(Packing the struct means things may not be naturally-aligned, which can make accessing them more costly for certain microarchitectures; and potentially reduce the scope the compiler has for optimisation (as it may need to use unaligned accesses).
+
+For example, if we simply change the type of `datatype` to be uint8_t then it should occupy the same byte as the other bitfield flags - is that sufficient to get the same size reduction?
+
+Line:341, engines/ep/src/stored-value.h -> I don't think we should ifdef this - clear if the expects fails then we'd corrupt data in the StoredValue and should flag it always.
+
+Line:977, engines/ep/src/stored-value.h -> I'd remove all these offset comments - they are just going to be expensive to keep updated as the layout changes. If someone needs to check layout they can use gdb pahole or similar.
+
+Line:1063, engines/ep/src/stored-value.h -> Do we know why Windows differs here?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Vesko Karaganev
+Date: 2022-11-29 10:59:44.000000000
+Message: 
+Patch Set 4:
+
+(2 comments)
+Line:135, engines/ep/src/stored-value.h -> The pack pragma does not change field offsets in this case. Members have their natural alignment, as before. If they didn't, I think that could cause memory faults on arm, possibly run slower on intel. 
+
+The type of datatype already is uint8_t, and I have folded the value in the other bitfields are you suggest, but that by itself does not reduce the size of the struct. 
+
+The reason I added the pack pragma is it removes the 4 bytes of padding at the end of the struct, reducing the size from 56 to 52 bytes. The reason the padding was added before was because the alignment of the struct was selected to be the largest alignment of any of its members (so 8 in this case, because we have uint64_ts in the StoredValue; 52 is not divisible by 8). 
+
+These padding bytes at the end would normally ensure that stack allocated values are correctly aligned, but we only every heap-allocate StoredValues, and heap allocations are always 8 byte aligned, so the padding doesn't achieve anything in this case.
+
+--- 
+
+I will investigate the approach you suggested in our chat earlier -- adding an explicit "padding" as a char[4] field and splicing the first 4 bytes of the key in there.
+
+Line:1063, engines/ep/src/stored-value.h -> I have a comment explaining why in the unit test. I guess it would have made more sense to have it here instead -- will update. 
+
+MSVC ignores the requested byte alignment if the struct contains std::atomics.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Vesko Karaganev
+Date: 2022-11-29 12:39:12.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:135, engines/ep/src/stored-value.h -> :wave: Okay, I've managed to implement the char[4] trick, fold the first 4 bytes of the key inside, and avoid the pragma.
+
+However, I think the pragma will enable us to do some, additional optimisation on OSV, that wouldn't be possible without it. 
+
+1. Currently, OrderedStoredValue has two members: a 6 byte int and a 16 byte seqno_hook (intrusive list pointers). The compiler will add 2 byte padding to the 6 byte int, because the seqno_hook needs 8 byte alignment, so that it can be at offset 64. 
+2. By folding 2 bytes from the revSeqno (uint48_t) inside the tag of the chain_next_or_replacement (tag is unused) as you suggested earlier, we will reduce the size of the SV struct to 50. 
+3. By using the pack pragma(1) on OSV, the SV base object will be 50 bytes, the 6 byte integer will end at offset 55 and the seqno hook can be places at offset 56 (8 byte aligned) without requiring any padding. 
+
+This will reduce the size of OSV by 8 bytes 😎 (on non-MSVC builds)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Vesko Karaganev
+Date: 2022-11-30 08:39:40.000000000
+MISMATCHED INLINE COMMENT
+Line:135, engines/ep/src/stored-value.h -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Vesko Karaganev
+Date: 2022-11-30 08:39:40.000000000
+MISMATCHED INLINE COMMENT
+Line:341, engines/ep/src/stored-value.h -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Vesko Karaganev
+Date: 2022-11-30 08:39:40.000000000
+MISMATCHED INLINE COMMENT
+Line:977, engines/ep/src/stored-value.h -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Vesko Karaganev
+Date: 2022-11-30 08:39:40.000000000
+MISMATCHED INLINE COMMENT
+Line:1063, engines/ep/src/stored-value.h -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Vesko Karaganev
+Date: 2022-11-30 08:39:40.000000000
+MISMATCHED INLINE COMMENT
+Line:1227, engines/ep/src/stored-value.h -> Done
+----------------------------------------------------------------------------------------------------------------------

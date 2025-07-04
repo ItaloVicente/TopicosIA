@@ -1,0 +1,178 @@
+======================================================================================================================
+DESCRIPTION:
+
+analysis.linux: make SoftIrqs support being raised while executing.
+
+In order to do this, statevalues are now bitmasks. Many more checks
+at SoftIrq Raise, Entry and Exit handlers now take into account if
+there are other SoftIrqs running and will retain their state.
+
+Fixes part 2 of bug 381497
+
+Change-Id: I2f109d1e4e3a227c10dcdf8f54df7b42c7776d4a
+Signed-off-by: Matthew Khouzam <matthew.khouzam@ericsson.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Matthew Khouzam
+Date: 2016-03-08 16:23:56.000000000
+Message: 
+Uploaded patch set 8.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2016-03-08 16:24:03.000000000
+Message: 
+Patch Set 8:
+
+Build Started https://hudson.eclipse.org/tracecompass/job/tracecompass-gerrit/6741/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2016-03-08 17:04:02.000000000
+Message: 
+Patch Set 8: Code-Review+1
+
+Build Successful 
+
+https://hudson.eclipse.org/tracecompass/job/tracecompass-gerrit/6741/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2016-03-08 22:50:31.000000000
+Message: 
+Patch Set 8:
+
+(3 comments)
+
+Some questions
+Line:30, analysis/org.eclipse.tracecompass.analysis.os.linux.core/src/org/eclipse/tracecompass/analysis/os/linux/core/kernelanalysis/StateValues.java -> Is this value meant to be used in the softIRQ attributes? Or in the CPU status one? Or both?
+
+Line:33, analysis/org.eclipse.tracecompass.analysis.os.linux.core/src/org/eclipse/tracecompass/analysis/os/linux/core/kernelanalysis/StateValues.java -> Same with this one here. Perhaps the naming should be aligned? Also this could be renamed to _SOFTIRQ_ACTIVE to differentiate with the new one.
+
+Line:71, analysis/org.eclipse.tracecompass.analysis.os.linux.core/src/org/eclipse/tracecompass/analysis/os/linux/core/kernelanalysis/StateValues.java -> Can a single SoftIRQ, on a given CPU, be both running and raised at the same time?
+
+Or is this meant solely for CPU states?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthew Khouzam
+Date: 2016-03-09 02:42:14.000000000
+Message: 
+Patch Set 8:
+
+(3 comments)
+
+Right now the states are for both softirq and cpu status. If you look at the next patch in the chain (make cpu status an aggregate entry) you will see, the cpu status will dissappear soon. It's a good thing for v1.0, but once again, it is too much info in one attribute and the states don't make sense. They are aggregates, not a real state but a projection of all the real states.
+Line:30, analysis/org.eclipse.tracecompass.analysis.os.linux.core/src/org/eclipse/tracecompass/analysis/os/linux/core/kernelanalysis/StateValues.java -> Only in the softirq branch, later, but for now, both.
+
+Line:33, analysis/org.eclipse.tracecompass.analysis.os.linux.core/src/org/eclipse/tracecompass/analysis/os/linux/core/kernelanalysis/StateValues.java -> Yeah, I was recycling as to avoid useless api thrashing as I felt the names were still true.
+
+Line:71, analysis/org.eclipse.tracecompass.analysis.os.linux.core/src/org/eclipse/tracecompass/analysis/os/linux/core/kernelanalysis/StateValues.java -> SoftIRQ 9 RCU appears to raise itself. on the same cpu.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2016-03-15 00:59:34.000000000
+Message: 
+Patch Set 8: Code-Review-1
+
+(7 comments)
+
+Looks good, however since the RAISED_RUNNING isn't being used or shown in the view, I would suggest to not include it at all in this patch, and do it separately. Unless you want to add it in the views as part of this patch.
+
+Few other comments.
+Line:30, analysis/org.eclipse.tracecompass.analysis.os.linux.core/src/org/eclipse/tracecompass/analysis/os/linux/core/kernelanalysis/StateValues.java -> Well yes, eventually there should be no dirct "CPU_" states anymore.
+
+But for now this should be called CPU_STATUS_SOFTIRQ_RAISED, to align it with the others. We don't know when the aggregated CPU states will come, this patch should make sense on its own.
+
+Line:33, analysis/org.eclipse.tracecompass.analysis.os.linux.core/src/org/eclipse/tracecompass/analysis/os/linux/core/kernelanalysis/StateValues.java -> Yeah it's a bit annoying that this class is API...
+
+Some things are using it and they shouldn't (like StateSystem tests in lttng2.kernel.core), but other analyses are making genuine use of this state system, like the VM analysis and the critical path.
+
+Perhaps we should only expose things as aspects in the public API, and keep these SS-related values internal? We'll have to see...
+
+Line:54, analysis/org.eclipse.tracecompass.analysis.os.linux.core/src/org/eclipse/tracecompass/internal/analysis/os/linux/core/kernel/handlers/SoftIrqEntryHandler.java -> I think the resource view currently checks if value >= 1 to display the SoftIRQ state or not. That check should be changed to equals(StateValues.CPU_STATUS_SOFTIRQ_VALUE).
+
+Also, you are not handling the RAISED_ACTIVE case? It's fine if that is done separately, but would not introduce its declaration in the interface then. Just making it so the >= 1 check keeps working is just a bad coincidence.
+
+Line:55, analysis/org.eclipse.tracecompass.analysis.os.linux.core/src/org/eclipse/tracecompass/internal/analysis/os/linux/core/kernel/handlers/SoftIrqExitHandler.java -> You can do away with the added complexity of a negative check when you have both if and else. You could remove the "!" and just swap the two clauses.
+
+Line:60, analysis/org.eclipse.tracecompass.analysis.os.linux.core/src/org/eclipse/tracecompass/internal/analysis/os/linux/core/kernel/handlers/SoftIrqExitHandler.java -> Do you really need the @NonNull here? It should get inferred automatically. I can remove it safely, with the latest I-build of Eclipse at least.
+
+Also, instead of rewalking the tree, you could just do getParentAttributeQuark(quark) to get the SOFT_IRQS attribute. Not a very big deal.
+
+Line:68, analysis/org.eclipse.tracecompass.analysis.os.linux.core/src/org/eclipse/tracecompass/internal/analysis/os/linux/core/kernel/handlers/SoftIrqExitHandler.java -> I would have suggested the one-liner:
+
+  boolean nestedSoftIrqs = softIrqs.stream().anyMatch(softIrq -> !ss.queryOngoingState(softIrq).isNull());
+
+However that doesn't work, because queryOngoingState() throws a checked exception, and a Function can't throw a checked exception, even if it's rethrown! This sucks! We need to finish getting rid of those exceptions! :P
+
+So yeah the current form is the best we can have atm.
+
+Line:56, analysis/org.eclipse.tracecompass.analysis.os.linux.core/src/org/eclipse/tracecompass/internal/analysis/os/linux/core/kernel/handlers/SoftIrqRaiseHandler.java -> Should check for RAISED_RUNNING too? (if it's to be kept)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthew Khouzam
+Date: 2016-03-15 03:59:04.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+
+I think I need to explain in the commit message that the cpu states are becoming more bitmask like.
+
+Thanks for the review, i'll get to it tomorrow.
+Line:56, analysis/org.eclipse.tracecompass.analysis.os.linux.core/src/org/eclipse/tracecompass/internal/analysis/os/linux/core/kernel/handlers/SoftIrqRaiseHandler.java -> it is checked... raised_running == raised | running.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthew Khouzam
+Date: 2016-03-15 04:03:19.000000000
+Message: 
+Patch Set 8:
+
+(2 comments)
+Line:54, analysis/org.eclipse.tracecompass.analysis.os.linux.core/src/org/eclipse/tracecompass/internal/analysis/os/linux/core/kernel/handlers/SoftIrqEntryHandler.java -> raised does not affect the cpu node, it is a flag, not a "state of hardware". I can be convinced otherwise.
+
+As for the check, it's actually != unsigned 0 more or less, which is quite fair IMO.
+
+Line:60, analysis/org.eclipse.tracecompass.analysis.os.linux.core/src/org/eclipse/tracecompass/internal/analysis/os/linux/core/kernel/handlers/SoftIrqExitHandler.java -> ooh thx
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2016-03-15 15:32:18.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:54, analysis/org.eclipse.tracecompass.analysis.os.linux.core/src/org/eclipse/tracecompass/internal/analysis/os/linux/core/kernel/handlers/SoftIrqEntryHandler.java -> > raised does not affect the cpu node, it is a flag, not a "state of hardware". I can be convinced otherwise.
+
+Hmm, makes sense. Just like right now we do not show the "raised" state on the CPU's status line, just the softirq_active one.
+
+I'm trying to imagine how it will work with generic aggregate states though. That means it won't just be a matter of putting attribute priorities, but also "blacklisting" some quark/state values so that we don't want to show up in the aggregate state?
+
+> As for the check, it's actually != unsigned 0
+
+Well "!= unsigned 0" is pretty much the same as ">= 1" !
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthew Khouzam
+Date: 2016-03-15 18:06:26.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:54, analysis/org.eclipse.tracecompass.analysis.os.linux.core/src/org/eclipse/tracecompass/internal/analysis/os/linux/core/kernel/handlers/SoftIrqEntryHandler.java -> We can worry about blacklisting later if we need it. I can say it's intentional, I want to have aggregates with bitmasking allowing to make not just aggregate entries but aggregate states.
+
+> val != 0 == Math.abs(value) >= 1
+I am agree
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthew Khouzam
+Date: 2016-03-15 18:16:32.000000000
+Message: 
+Patch Set 8:
+
+It turns out I already put the bitmask explanation in the commit message. I forgot to check before promising to do it. ;)
+----------------------------------------------------------------------------------------------------------------------
+Author: Gerrit Code Review
+Date: 2016-03-17 04:01:26.000000000
+Message: 
+Change has been successfully cherry-picked as 8140841e1fd24349a55d7a5b467dd825822949ed by Alexandre Montplaisir
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,113 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-30865: [3/n] Encode CID on disk as leb128
+
+Store the collection-id on disk as a leb128 field.
+
+DefaultCollection data uses 0 bytes
+Real collection should use 2 to 3 bytes for realistic
+workloads, 4 may take years, +4 a long time.
+
+Change-Id: Ib669b5bf817db9d81f80386683d2aa6dc25ff933
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jim Walker
+Date: 2018-08-10 14:48:34.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2018-08-10 14:50:59.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+
+overall some extra allocations are needed so we can build the leb128 prefixed keys
+Line:498, engines/ep/src/couch-kvstore/couch-kvstore.cc -> Not keen on the double iteration, did investigate using std::move to move the StoredDocKey into the PersistedDocKey, but the incoming keys are still live (so no stealing resource).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-08-10 15:33:43.000000000
+Message: 
+Patch Set 1: Code-Review-1
+
+(6 comments)
+Line:498, engines/ep/src/couch-kvstore/couch-kvstore.cc -> Fair enough. Could we not at least combine the two for-loops? Something like:
+
+ std::vector<PersistedDocKey> persistedKeys;
+ std::vector<sized_buf> ids;
+ ids.reserve(itms.size());
+ for (const auto& item : itms) {
+     persistedKeys.emplace_back(item.first,
+                                   configuration.shouldPersistDocNamespace());
+     ids.emplace_back(persistedKeys.back()... );
+ }
+
+Note change to "size" being empty; but reserve to expected length..
+
+Line:53, engines/ep/src/couch-kvstore/couch-kvstore.h -> (Here and previous patches) - this is a somewhat lengthy type - worth declaring a type alias ?
+
+Line:57, engines/ep/src/couch-kvstore/couch-kvstore.h -> might be worth adding forwarding methods begin() and end() to leb128 (which call down to underlying const_char_buffer) to simplify the code a bit here.
+
+Line:68, engines/ep/src/couch-kvstore/couch-kvstore.h -> I think you can simplify this if you use an initialiser list:
+
+ PersistedDocKey(const DocInfo& info)
+     : keydata(info.id.buf(), info.id.size()) {}
+
+(that should also avoid a possible double-allocation at present (default-constructing; followed by resize).
+
+Line:81, engines/ep/src/couch-kvstore/couch-kvstore.h -> To my comment on the previous leb128 patch - I think this is an example where a slightly different API for decode_unsigned_leb128()'s return param will simplify the code.
+
+Line:87, engines/ep/src/couch-kvstore/couch-kvstore.h -> Couple of these methods (this and constructor) are relatively large - I think they warrant shuffling into the .cc file.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-08-10 15:43:56.000000000
+Message: 
+Patch Set 1: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/11028/ : FAILURE
+
+Compile error at ..\kv_engine\engines\ep\src\couch-kvstore\couch-kvstore.cc(1871): error C2065: "collectionsFlush": undeclared identifier ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/11028/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/10886/ : FAILURE
+
+Compile error at /home/couchbase/jenkins/workspace/kv_engine-linux-master/kv_engine/engines/ep/src/couch-kvstore/couch-kvstore.cc:1871:23:
+error: "collectionsFlush" was not declared in this scope
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/10886/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/599/ : FAILURE
+
+Compile error at /home/couchbase/jenkins/workspace/kv_engine-ASan-UBSan-master/kv_engine/engines/ep/src/couch-kvstore/couch-kvstore.cc:1871:23:
+error: "collectionsFlush" was not declared in this scope
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/599/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/2755/ : FAILURE
+
+Compile error at /home/couchbase/jenkins/workspace/kv_engine-threadsanitizer-master/kv_engine/engines/ep/src/couch-kvstore/couch-kvstore.cc:1871:23:
+error: "collectionsFlush" was not declared in this scope
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/2755/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/9703/ : FAILURE
+
+Compile error at /home/couchbase/jenkins/workspace/kv_engine-clang_analyzer-master/kv_engine/engines/ep/src/couch-kvstore/couch-kvstore.cc:1871:23:
+error: use of undeclared identifier "collectionsFlush"
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/9703/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/9864/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2018-08-13 13:25:45.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:498, engines/ep/src/couch-kvstore/couch-kvstore.cc -> Problem becomes that emplace_back can move all data during push_back/emplace_back, so any ids sized_buf pointing at the persistedKeys data becomes invalid. So other option is to size persistedKeys, but give PersistedDocKey a default constructor, than the loop has to call an init method :/ other idea to explore is if the incoming bgfetch_queue thing is abstracted and never contains a StoredDocKey, only PersistedDocKey
+
+----------------------------------------------------------------------------------------------------------------------

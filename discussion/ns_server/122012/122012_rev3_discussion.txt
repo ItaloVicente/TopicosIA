@@ -1,0 +1,78 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-37871 Auto-failover should flush older "tick" messages
+
+When handling a tick message we'll now flush any other tick messages
+from our mailbox.  The current state of things may not reflect how
+things were at the time the other tick messages were sent.  Prior to
+this change we would apply tick message processing for each message
+using the current state.
+
+---- Thoughts about eating the ticks vs trying to account for them ----
+
+When all nodes are healthy it make sense to throw away (eat) accumulated
+auto-failover tick messages. Otherwise, as was seen in this ticket, the
+node can be declared down based solely on its current state.
+
+But what about cases where we were already counting down to failover and
+went into zombie mode (tm)? Let's think about some examples...
+
+Assume auto-failover is set to 120 seconds.
+
+We've started the count-down on a node and we...
+
+...go into zombie mode for a short (10) number of seconds
+...go into zombie mode for a longer period of time but less than 120 seconds
+...got into zombie mode for a long period of time (1 day)
+
+…and the node is still not responsive
+
+For shorter periods:
+
+Adding the accumulated ticks to the count-down would lead to the node being
+declared down sooner than eating the ticks. But if the node was down during
+that time this is the correct thing to do.
+Eating the ticks would only add one to the count-down. This might result in
+a longer than configured auto-failover time
+
+For longer periods:
+
+Adding at most the configured auto-failover time number of ticks, which would
+likely lead to immediately declaring the node down. Again, if the node were
+down during the zombie time this is the correct action.
+Eating the ticks would add one to the count-down. This might result in a
+longer than configured auto-failover time. If the count-down was at 100 and
+the zombie time was 100 then the node would be declared down in 19 more tick
+for a total of 219 (significantly more than configured). If the count-down
+was at 100 and the zombie time is 1000000000 then the node being declared
+down in 19 more ticks isn’t a big deal.
+
+Dilemma:
+
+When awakening from zombie node it’s possible a node being counted down
+has come up and gone back down while we were a zombie. We might have been
+a zombie for 60 ticks and the suspect node was responsive until 5 ticks ago.
+We would be declaring the node down too soon whether or not the accumulated
+ticks are eaten.
+
+My inclination is to eat the extra auto-failover ticks.
+
+It's the right thing to do when no nodes are being counted down
+The circumstances when this occurs should normally not occur
+If it does occur, most times we'll not be counting down a node
+
+Change-Id: I3dc615f54b746e14115ffb2a6666eac21c1bb5e3
+Reviewed-on: http://review.couchbase.org/122012
+Well-Formed: Build Bot <build@couchbase.com>
+Tested-by: Steve Watanabe <steve.watanabe@couchbase.com>
+Reviewed-by: Aliaksey Artamonau <aliaksey.artamonau@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Steve Watanabe
+Date: 2020-02-19 23:54:29.000000000
+Message: 
+Change has been successfully cherry-picked as 26e1745774fe53a7da17fdcf83e36d31ae9a952d by Steve Watanabe
+----------------------------------------------------------------------------------------------------------------------

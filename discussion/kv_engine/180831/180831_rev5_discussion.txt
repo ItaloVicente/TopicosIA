@@ -1,0 +1,156 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-51498: Yield between read/writes for an SSL_accept
+
+Remove the "while(true)" loop that forces many recv/send syscalls and
+replace with a loop that moves SSL to a successful accept using socket
+events.
+
+Test coverage of the various WANT_READ/WRITE clauses occurs in
+testapp_tls as it uses a very small OpenSSL BIO. This coverage is
+now extended by adding a much larger key/certificate that pushes the
+accept function through many cycles.
+
+The new key/certificate was generated using openssl:
+
+openssl genrsa -out 16k_testapp.pem 16384
+openssl req -new -x509  -days 3650 -sha256 -key 16k_testapp.pem \
+ -out 16k_testapp.cert -subj '/C=NO/O=Couchbase Inc/OU=kv eng/CN=Root CA'
+
+Change-Id: I6477899f94e81657b99b3bb6eba71dfcd56c50d2
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jim Walker
+Date: 2022-10-06 13:45:34.000000000
+Message: 
+Uploaded patch set 5.
+----------------------------------------------------------------------------------------------------------------------
+Author: Restriction Checker
+Date: 2022-10-06 13:45:46.000000000
+Message: 
+Patch Set 5: Well-Formed+1
+
+Permission granted to commit: 
+
+https://server.jenkins.couchbase.com/job/restricted-branch-check/318571/artifact/restricted.html : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2022-10-06 13:49:28.000000000
+Message: 
+Patch Set 5:
+
+(1 comment)
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-10-06 14:03:52.000000000
+Message: 
+Patch Set 5: Code-Review-1
+
+(1 comment)
+Line:829, daemon/connection.cc -> I wonder if can construct things so we just perform a single call to SLL_accept() in each call to Connection::sslAccept() - to avoid blocking the other connections assigned to this thread (as per the original issue). 
+
+(I know we aren't performing a blocking read(), but SSL_accept I believe can do quite a bit of computation for crypto in each call).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-10-06 14:10:42.000000000
+Message: 
+Patch Set 5: Verified+1
+
+Build Successful 
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_format/26676/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/2308/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/2064/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.macos/job/mad-hatter/1514/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/mad-hatter/216/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/1945/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/2164/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/2164/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/2148/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2022-10-07 10:54:04.000000000
+Message: 
+Patch Set 5:
+
+(1 comment)
+Line:829, daemon/connection.cc -> I had tried that, but if the connection has read all data from the socket (it's all in input pipe) nothing triggers memcached to run the connection again  (tried a few variations)
+
+I'll ping Trond see if he has anyidea
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2022-10-07 12:39:53.000000000
+Message: 
+Patch Set 5:
+
+(1 comment)
+Line:829, daemon/connection.cc -> So far the current ideas don't work without having to change the memcached state-machine. 
+
+if we do just return from ssLAccept (after indicating a yield) the connection does later get another run but the state-machine wants to do a network read (tryAndReadNetwork) and that gets upset when there is no data to read and disconnects
+
+At the moment, the line 829 case was only really seen in test code when the BIO was smaller than the input-pipe (e.g. the 64b BIO from the unit tests).
+
+Taking the 16k cert and running everything with default config, or even when I had a 512b BIO, the line 829 case doesn't trigger.
+
+The other case where we will "spin" in this function is the "standard" want_write behaviour, SSL_accept has filled the output BIO - this certainly occurs when the certificate is large (e.g. the 16k cert) and SSL_accept is trying to send that large amount of data to the client (BIO keeps filling) - this is certainly the case we're likely to encounter
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-10-07 12:48:19.000000000
+Message: 
+Patch Set 5:
+
+(1 comment)
+Line:829, daemon/connection.cc -> Nod.
+
+I assume even with this modified while() loop we are only performing non-blocking calls inside it (copying data between BIOs, doing crypto inside openssl)?
+
+If so, then I assume the time taken in here _should_ only be of the order of milliseconds - and if so that's probably ok for 6.6.6 IMO.
+
+(Out of interest - if you look at the libevent TLS code we use in 7.0.0+, does that yield back to the event loop in this case, or does it also "spin" and process all the outstanding BIOs etc?)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-10-07 12:58:01.000000000
+Message: 
+Patch Set 5:
+
+(1 comment)
+Line:829, daemon/connection.cc -> (Aa an aside, I checked Folly's code for running the SSL_accept in a background thread - https://github.com/facebook/folly/blob/main/folly/io/async/AsyncSSLSocket.cpp#L1287-L1296 - and they essentially run each each call to SLL_accept() in the provided runner; meaning if multiple calls to SSL_accept() were needed to complete the handshake they would not block other connections from being serviced).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2022-10-10 08:26:43.000000000
+Message: 
+Patch Set 5:
+
+(1 comment)
+Line:829, daemon/connection.cc -> re: libevent - it's hard to say for sure from their code - it certainly doesn't loop "directly" around SSL_accept https://github.com/libevent/libevent/blob/5df3037d10556bfcb675bc73e516978b75fc7bc7/bufferevent_openssl.c#L1019
+
+
+I'll make some tweaks to this code though - it would be interesting to record actual time spent in SSL_accept along side actual time to full process the accept (with all read/write/wait time).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2022-10-11 14:23:05.000000000
+MISMATCHED INLINE COMMENT
+Line:829, daemon/connection.cc -> Ack
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-10-10 09:26:25.000000000
+MISMATCHED INLINE COMMENT
+Line:829, daemon/connection.cc -> On the topic of time, probably worth adding one (or more) phosphor trace spans around TLS handshake - it's probably rare enough we can unconditionally add them.
+----------------------------------------------------------------------------------------------------------------------

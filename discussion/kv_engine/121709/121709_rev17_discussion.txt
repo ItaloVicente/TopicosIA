@@ -1,0 +1,189 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-37546: Introduce the "backup persistence cursor" in CM
+
+We introduce the concept of "backup persistence cursor" for getting rid
+of the (old) broken VBucket::rejectQueue.
+
+The main reason behind the rejectQueue was the way getItemsForCursor()
+works:
+  1) move the cursor forward
+  2) pick-up the item
+  3) repeat (1) until we get all (or up to a limit) items for cursor
+  4) return items
+Given that the cursor has moved, if the flusher fails we cannot rely on
+the CM for retrieving again the same items.
+So, the rejectQueue was used at flush to re-queueing all the items of a
+failed flush-batch and pulling them from the queue when re-attempting
+the flush.
+
+With the new backup pcursor we do exactly the same as before in
+getItemsForCursor(). But (only for persistence) we register a copy of
+the cursor before the cursor move. Then:
+  1) if flush succeeds, we just remove the copy
+  2) if flush fails, we reset the pcursor to the copy
+
+That allows to rely entirely on the CM for re-attemping the flush after
+failure.
+
+In this patch the backup cursor is already used at
+EPBucket::flushVBucket. That fixes the issue tracked in this MB (ie, new
+persisted vbstate could be lost at re-attempting flush after storage
+failure at replica). The fix is covered by test.
+
+@todo in follow-ups:
+ - test backup pcursor placed at different queue_op
+ - test backup pcursor and reset at Checkpoint deduplication
+ - test all pcursor reset code-paths at flush
+ - remove all the reject-queue code
+
+Change-Id: Icc03e8c18dd1e5998b384efeff777ffff9699106
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2020-02-18 17:32:48.000000000
+Message: 
+Uploaded patch set 17.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-02-18 17:33:01.000000000
+Message: 
+Patch Set 17: Well-Formed+1
+
+Permission granted to commit: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/168840/artifact/restricted.html : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-02-18 17:33:59.000000000
+Message: 
+Patch Set 17:
+
+(1 comment)
+Line:364, engines/ep/src/ep_bucket.cc -> :(
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-02-18 20:26:29.000000000
+Message: 
+Patch Set 17: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/893/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/24589/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/961/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-mad-hatter-cv-perf/225/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/759/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/mad-hatter/321/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/981/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/985/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/975/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-02-19 09:06:45.000000000
+Message: 
+Patch Set 17: Code-Review-1
+
+(1 comment)
+Line:354, engines/ep/src/ep_bucket.cc -> As DR spotted, this is useless here now, as the backup pcursor prevents checkpoint-removal.
+Note that the backup pcursor will be removed only when 'toFlush' goes out of scope (ie, when the function returns), which triggers the 'toFlush.flushHandle'.
+
+
+I see the following options to solve:
+
+
+1) we do this operation as part of the cleanup in flushHandle -> this would be nice, but flushHandle is a VBucket handle, it doesn t know anything about KVBucket::wakeUpCheckpointRemover
+
+
+2) we play with the lifetime of toFlush manually here -> I would avoid this as it is error prone and it voids the benefits of having a RAII flushHandle
+
+
+3) we play with the scope of toFlush -> I would avoid this as it voids the recent restructuring of this function. Note that reverting this function to before the restructuring is not enough anyway, as the scope of toFlush was designed to trigger memory-releasing /before/ flush
+
+
+4) we don't KVBucket::wakeUpCheckpointRemover here.
+We change the return value of EPBucket::flushVBucket from std::pair (moreAvailable + numFlushed) to a simple struct like:
+
+
+struct FlushResult {
+    bool moreAvailable;
+    size_t numFlush;
+    bool wakeupCktpRemover;
+}
+
+
+then the caller of EPBucket::flushVBucket makes the call depending on if the flag is set.
+
+
+Note that (4) is a small change in production code (only Flusher calls EPB::flushVBucket) + some tests to fix
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-02-19 11:45:30.000000000
+Message: 
+Removed reviewer Trond Norbye.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-02-19 11:45:35.000000000
+Message: 
+Removed reviewer Richard de Mellow.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-02-19 11:45:37.000000000
+Message: 
+Removed reviewer Paolo Cocchi with the following votes:
+
+* Code-Review-1 by Paolo Cocchi <paolo.cocchi@couchbase.com>
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-02-19 11:45:38.000000000
+Message: 
+Removed reviewer Jim Walker.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-02-19 11:45:40.000000000
+Message: 
+Removed reviewer James Harrison.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-02-19 11:45:41.000000000
+Message: 
+Removed reviewer Dave Rigby.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-02-19 11:45:43.000000000
+Message: 
+Removed reviewer Dave Finlay.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-02-19 11:45:45.000000000
+Message: 
+Removed reviewer Daniel Owen.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-02-19 11:45:46.000000000
+Message: 
+Removed reviewer Ben Huddleston.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-02-19 13:31:25.000000000
+Message: 
+Patch Set 17:
+
+(1 comment)
+Line:354, engines/ep/src/ep_bucket.cc -> Agreed on (4)
+
+----------------------------------------------------------------------------------------------------------------------

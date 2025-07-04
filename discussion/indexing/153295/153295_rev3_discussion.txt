@@ -1,0 +1,44 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-46054 Handle UNKNOWN_COLLECTION status at timekeeper
+
+Clean-up the keyspace when indexer receives UNKNOWN_SCOPE
+or UNKNOWN_COLLECTION status with StreamBegins
+
+Change-Id: Ie1d8530721263c0b8d4c10b56b5a3a9b3e88ba90
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: VarunVelamuri
+Date: 2021-05-10 20:07:13.000000000
+Message: 
+Uploaded patch set 3.
+----------------------------------------------------------------------------------------------------------------------
+Author: Deepkaran Salooja
+Date: 2021-05-10 22:05:45.000000000
+Message: 
+Patch Set 3:
+
+(2 comments)
+Line:1244, secondary/indexer/timekeeper.go -> for these control messages, it is okay to add to tk.supvRespch without a go func. This avoids messages racing ahead of each other after the lock has been released and keeps the control path serialized.
+
+Line:1245, secondary/indexer/timekeeper.go -> The collection metadata is first updated with ns-server and then propagated to memcached. At this point, ns-server has validated the collectionId(during MTR) but memcached doesn't know about it. It could be an issue with eventual consistency. It would be better to let indexer try MTR at this point(KVStreamRepair) and validate the collection with ns-server again. If it is gone from there, it confirms the collection got deleted. Otherwise, memcached may have got the collection metadata(in which case, index build will continue rather than prematurely deleting the indexes) or memcached will again return error and indexer will need to check with ns-server again. So, until both ns-server and memcached come to an agreement, indexer will retain the indexes and keep retrying.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: VarunVelamuri
+Date: 2021-05-11 12:32:27.000000000
+MISMATCHED INLINE COMMENT
+Line:1244, secondary/indexer/timekeeper.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: VarunVelamuri
+Date: 2021-05-11 12:32:27.000000000
+MISMATCHED INLINE COMMENT
+Line:1245, secondary/indexer/timekeeper.go -> Done. Updated the logic to trigger KV repair when indexer receives UNKNOWN_SCOPE or UNKNOWN_COLLECTION error using the following logic:
+
+a. Timekeeper will reset the vbucket state to VB_INIT for the vbucket and set a flag to force MTR
+b. After the on-going MTR is done, timekeeper will call repairMissingStreamBegin. This will check for vbuckets in state VBS_INIT
+c. After 30 seconds, repair is initiated and as the flag to force MTR is true, timekeeper will send a message to indexer to trigger repair
+d. During repair indexer will validate collection Id
+----------------------------------------------------------------------------------------------------------------------

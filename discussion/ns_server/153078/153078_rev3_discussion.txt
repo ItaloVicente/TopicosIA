@@ -1,0 +1,103 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-46044 Purge ns_config tombstones periodically.
+
+There's a tombstone_purger process running on the leader to
+orchestrate this. Each node (including the leader) also runs
+tombstone_agent and tombstone_keeper.
+
+tombstone_purger checks for new tombstones once a minute. Any deletion
+that is more than five minutes old will get designated for
+purging. When tombstone_purger makes these decisions, it uses its
+local time. The time needs to be approximately synchronized across the
+cluster for the leader to be able to purge anything. But time
+synchronization is not required for safety.
+
+When tombstone_purger decides to purge some tombstones, it proceeds in
+multiple steps. It writes the tentative purge timestamp to chronicle
+and makes a prepare_purge call on every node. The point of the call is
+multifold. First, all nodes will pick the new tentative purge
+timestamp up and will make sure that any new modifications to
+ns_config get assigned a timestamp that is strictly greater than the
+tentative purge timestamp. This ensures that no new qualifying
+tombstones can be added by any of the nodes after this point. Second,
+each of the nodes sends its local tombstones back to the
+leader. Absent ns_config crashes, this should ensure that the leader
+will have all qualifying tombstones once prepare_purge phase is done.
+
+After that point, the leader proceeds to push all local tombstones
+back to all nodes. At this point, all nodes must have seen all the
+deletions that are going to get purged.
+
+The leader proceeds by writing the tentative purge timestamp into
+chronicle as the "effective" purge timestamp. The tombstone_agent
+process is subscribed to notifications about purge timestamp
+updates. Each of the nodes will act on it independently by erasing the
+tombstones from the local copy of ns_config.
+
+Since it's impossible to guarantee that all nodes observe the
+committed purge timestamp at the same time, care needs to be taken to
+prevent slow nodes from replicating yet-to-be-purged tombstones back
+to fast nodes. This is achieved by ns_config_rep filtering out any
+deletions that are below the locally known purge timestamp when
+merging changes from other nodes.
+
+Additionally, some of the purged keys may get recreated by the user
+around the time when purging happens. If a recreate hits one of the
+slow nodes, it will inherit the vector clock from "before" the
+purge. Yet if it hits one of the fast nodes, the vector clock will be
+started anew. And an even more interesting case is when there are
+recreate conflicts hitting fast and slow nodes. Regular rules can't be
+used to compare vector clocks from before and after the purge. In
+order to capture this, every time a key is created, the current purge
+timestamp is attached to it. So when ns_config merging logic
+encounters such conflicting recreates, it can tell that such vector
+clocks can't be compared. Instead the conflict is resolved per
+vclock:get_latest_timestamp() and the ties are broken using the
+attached purge timestamps. Unlike with normal conflict resolution,
+when such conflict is resolved, the conflicting vector clocks are not
+merged (because they are incompatible). Instead, we simply carry over
+the winning vector clock. This may generate more spurious
+conflicts but should still be convergent.
+
+BACKWARD COMPATIBILITY
+
+The purge timestamp that is attached to ns_config values is
+incompatible with pre-7.0 cluster. Purging itself doesn't start until
+the cluster is fully 7.0. In mixed clusters, the purge timestamp is
+assumed to be 0 and it's not attached to any values (so the metadata
+is still compatible with older nodes). Vector clocks on the values
+that are preserved when a node leaves or joins a cluster are cleared
+out. That is so that even after being a part of a 7.0 cluster nodes
+can still be added to pre-7.0 clusters.
+
+Change-Id: Id68124e69984c42743100bf6a1af528d4363d24c
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Finlay
+Date: 2021-05-08 01:15:54.000000000
+Message: 
+Patch Set 3: Patch Set 2 was rebased
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Finlay
+Date: 2021-05-08 01:16:00.000000000
+Message: 
+Patch Set 3: Verified+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-05-08 01:16:03.000000000
+Message: 
+Patch Set 3: -Well-Formed
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-test/23714/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-05-08 01:22:34.000000000
+Message: 
+Patch Set 3: Well-Formed+1
+
+Permission granted to commit to restricted branch
+----------------------------------------------------------------------------------------------------------------------

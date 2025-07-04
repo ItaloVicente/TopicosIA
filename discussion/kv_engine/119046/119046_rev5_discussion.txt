@@ -1,0 +1,336 @@
+======================================================================================================================
+DESCRIPTION:
+
+Add support for bumping soft limit for core files
+
+Breakpad will create a minidump of the process when it chrash,
+but it has a few problems / limitations:
+
+* The process is still running while the minidump is written
+  so other threads may cause other problems
+
+* The minidump is limited in its content (by design) and
+  may not contain the information you're looking for.
+
+This patch adds a new variable `create_full_core_dumps` in
+daemon/memcached.cc which is set to false by default. When
+set to true breakpad will _NOT_ be initialized, but instead
+we'll try to bump the soft corefile soft limit and set the
+working directory to <root>/var/lib/couchbase/crash
+
+Change-Id: I9c1a4428b611ee1cb21f666fc80c153485551b3d
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Trond Norbye
+Date: 2019-12-09 14:07:42.000000000
+Message: 
+Uploaded patch set 5: Patch Set 4 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-12-09 15:01:26.000000000
+Message: 
+Patch Set 5: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/25006/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/21318/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/14523/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/23125/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/652/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/731/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/670/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/8555/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-12-09 15:18:35.000000000
+Message: 
+Patch Set 5: Code-Review-1
+
+This feels like something which should be handled by the environment - as long as the appropriate ulimit has been set at the system level we shouldn't need to do anything inside memcached; and this adds _another_ config param which 99% of users won't need.
+
+(Furthermore, at least the hard ulimit isn't setup correctly in the system this patch isn't going to succeed anyway - so it's not like you can avoid system level ulimit setitings).
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2019-12-09 15:25:31.000000000
+Message: 
+Patch Set 5:
+
+> This feels like something which should be handled by the
+ > environment - as long as the appropriate ulimit has been set at the
+ > system level we shouldn't need to do anything inside memcached; and
+ > this adds _another_ config param which 99% of users won't need.
+ > 
+ > (Furthermore, at least the hard ulimit isn't setup correctly in the
+ > system this patch isn't going to succeed anyway - so it's not like
+ > you can avoid system level ulimit setitings).
+
+That means that you need to do special setup on the jenkins slaves we've got (for instance the perf builders). That adds extra work whenever we want to do such a thing. we could of course always configure our jenkins slaves all over to always write coredumps, but then we'd got them even if we don't want them. To me this feels like the most "pagmatic" solution to make sure that we can get full coredumps when we need them..
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2019-12-09 15:31:59.000000000
+Message: 
+Patch Set 5:
+
+> > This feels like something which should be handled by the
+ > > environment - as long as the appropriate ulimit has been set at
+ > the
+ > > system level we shouldn't need to do anything inside memcached;
+ > and
+ > > this adds _another_ config param which 99% of users won't need.
+ > >
+ > > (Furthermore, at least the hard ulimit isn't setup correctly in
+ > the
+ > > system this patch isn't going to succeed anyway - so it's not
+ > like
+ > > you can avoid system level ulimit setitings).
+ > 
+ > That means that you need to do special setup on the jenkins slaves
+ > we've got (for instance the perf builders). That adds extra work
+ > whenever we want to do such a thing. we could of course always
+ > configure our jenkins slaves all over to always write coredumps,
+ > but then we'd got them even if we don't want them. To me this feels
+ > like the most "pagmatic" solution to make sure that we can get full
+ > coredumps when we need them..
+
+Even if we "rip out this" and leave this up to the environment we'd need a couple of additions:
+
+1) set the current working directory to a well defined directory the system may write to for the core dump to be present
+2) Disable initialization of breakpad (that we install our own handler)
+
+All of this means that we'd need to create a larger changeset every time we need core dumps (and then reconfigure the jenkins servers so that they don't set the soft limit to 0)
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-12-09 15:57:04.000000000
+Message: 
+Patch Set 5:
+
+> > > This feels like something which should be handled by the
+ > > > environment - as long as the appropriate ulimit has been set at
+ > > the
+ > > > system level we shouldn't need to do anything inside memcached;
+ > > and
+ > > > this adds _another_ config param which 99% of users won't need.
+ > > >
+ > > > (Furthermore, at least the hard ulimit isn't setup correctly in
+ > > the
+ > > > system this patch isn't going to succeed anyway - so it's not
+ > > like
+ > > > you can avoid system level ulimit setitings).
+ > >
+ > > That means that you need to do special setup on the jenkins
+ > slaves
+ > > we've got (for instance the perf builders). That adds extra work
+ > > whenever we want to do such a thing. we could of course always
+ > > configure our jenkins slaves all over to always write coredumps,
+ > > but then we'd got them even if we don't want them. To me this
+ > feels
+ > > like the most "pagmatic" solution to make sure that we can get
+ > full
+ > > coredumps when we need them..
+ > 
+ > Even if we "rip out this" and leave this up to the environment we'd
+ > need a couple of additions:
+ > 
+ > 1) set the current working directory to a well defined directory
+ > the system may write to for the core dump to be present
+
+On Linux the core dump location isn't the PWD, it's controlled via a /proc setting (/proc/sys/kernel/core_pattern). 
+
+On most recent distros this is actually set to apportion - a crash reporting binary; so root needs to change this in the first place before you can get any core file out.
+
+ > 2) Disable initialization of breakpad (that we install our own
+ > handler)
+
+We don't need to disable breakpad. Breakpad always re-raises the caught signal, so as long as core-dumps are enabled then you should get one.
+
+ > 
+ > All of this means that we'd need to create a larger changeset every
+ > time we need core dumps (and then reconfigure the jenkins servers
+ > so that they don't set the soft limit to 0)
+
+My point is you need to change the Linux environment anyway, and once you've done that there's zero extra code or setup (memcached variables, etc) needed on the product side.
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2019-12-09 16:22:27.000000000
+Message: 
+Patch Set 5:
+
+> > > > This feels like something which should be handled by the
+ > > > > environment - as long as the appropriate ulimit has been set
+ > at
+ > > > the
+ > > > > system level we shouldn't need to do anything inside
+ > memcached;
+ > > > and
+ > > > > this adds _another_ config param which 99% of users won't
+ > need.
+ > > > >
+ > > > > (Furthermore, at least the hard ulimit isn't setup correctly
+ > in
+ > > > the
+ > > > > system this patch isn't going to succeed anyway - so it's not
+ > > > like
+ > > > > you can avoid system level ulimit setitings).
+ > > >
+ > > > That means that you need to do special setup on the jenkins
+ > > slaves
+ > > > we've got (for instance the perf builders). That adds extra
+ > work
+ > > > whenever we want to do such a thing. we could of course always
+ > > > configure our jenkins slaves all over to always write
+ > coredumps,
+ > > > but then we'd got them even if we don't want them. To me this
+ > > feels
+ > > > like the most "pagmatic" solution to make sure that we can get
+ > > full
+ > > > coredumps when we need them..
+ > >
+ > > Even if we "rip out this" and leave this up to the environment
+ > we'd
+ > > need a couple of additions:
+ > >
+ > > 1) set the current working directory to a well defined directory
+ > > the system may write to for the core dump to be present
+ > 
+ > On Linux the core dump location isn't the PWD, it's controlled via
+ > a /proc setting (/proc/sys/kernel/core_pattern).
+ 
+At least our perf builders use the cwd... I've been using this while trying to track down the libevent bug
+
+> 
+ > On most recent distros this is actually set to apportion - a crash
+ > reporting binary; so root needs to change this in the first place
+ > before you can get any core file out.
+ > 
+
+not on our builders at least...
+
+ > > 2) Disable initialization of breakpad (that we install our own
+ > > handler)
+ > 
+ > We don't need to disable breakpad. Breakpad always re-raises the
+ > caught signal, so as long as core-dumps are enabled then you should
+ > get one.
+ > 
+
+The problem with that is that the binary keeps on running (the other threads) while breakpad is doing its thing which may cause other problems (which I've been struggling with), so yes I need to
+
+ > >
+ > > All of this means that we'd need to create a larger changeset
+ > every
+ > > time we need core dumps (and then reconfigure the jenkins servers
+ > > so that they don't set the soft limit to 0)
+ > 
+ > My point is you need to change the Linux environment anyway, and
+ > once you've done that there's zero extra code or setup (memcached
+ > variables, etc) needed on the product side.
+
+As I said: I need to disable breakpad... and it is easier to enable core files when we want them rather to have them "always on" just because we might need them (on our builders)...
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-12-09 16:56:22.000000000
+Message: 
+Patch Set 5:
+
+> > > > > This feels like something which should be handled by the
+ > > > > > environment - as long as the appropriate ulimit has been
+ > set
+ > > at
+ > > > > the
+ > > > > > system level we shouldn't need to do anything inside
+ > > memcached;
+ > > > > and
+ > > > > > this adds _another_ config param which 99% of users won't
+ > > need.
+ > > > > >
+ > > > > > (Furthermore, at least the hard ulimit isn't setup
+ > correctly
+ > > in
+ > > > > the
+ > > > > > system this patch isn't going to succeed anyway - so it's
+ > not
+ > > > > like
+ > > > > > you can avoid system level ulimit setitings).
+ > > > >
+ > > > > That means that you need to do special setup on the jenkins
+ > > > slaves
+ > > > > we've got (for instance the perf builders). That adds extra
+ > > work
+ > > > > whenever we want to do such a thing. we could of course
+ > always
+ > > > > configure our jenkins slaves all over to always write
+ > > coredumps,
+ > > > > but then we'd got them even if we don't want them. To me this
+ > > > feels
+ > > > > like the most "pagmatic" solution to make sure that we can
+ > get
+ > > > full
+ > > > > coredumps when we need them..
+ > > >
+ > > > Even if we "rip out this" and leave this up to the environment
+ > > we'd
+ > > > need a couple of additions:
+ > > >
+ > > > 1) set the current working directory to a well defined
+ > directory
+ > > > the system may write to for the core dump to be present
+ > >
+ > > On Linux the core dump location isn't the PWD, it's controlled
+ > via
+ > > a /proc setting (/proc/sys/kernel/core_pattern).
+ > 
+ > At least our perf builders use the cwd... I've been using this
+ > while trying to track down the libevent bug
+
+So I assume that means the machines have already been (partially) configured to set a core_pattern, as out of the box on CentOS 7 and Ubuntu 16.04 they use apport from my experience.
+
+If the machines have been partially configured we should probably just _fully_ configure them and then no code change is needed. 
+
+ > 
+ > >
+ > > On most recent distros this is actually set to apportion - a
+ > crash
+ > > reporting binary; so root needs to change this in the first place
+ > > before you can get any core file out.
+ > >
+ > 
+ > not on our builders at least...
+ > 
+ > > > 2) Disable initialization of breakpad (that we install our own
+ > > > handler)
+ > >
+ > > We don't need to disable breakpad. Breakpad always re-raises the
+ > > caught signal, so as long as core-dumps are enabled then you
+ > should
+ > > get one.
+ > >
+ > 
+ > The problem with that is that the binary keeps on running (the
+ > other threads) while breakpad is doing its thing which may cause
+ > other problems (which I've been struggling with), so yes I need to
+ > 
+ > > >
+ > > > All of this means that we'd need to create a larger changeset
+ > > every
+ > > > time we need core dumps (and then reconfigure the jenkins
+ > servers
+ > > > so that they don't set the soft limit to 0)
+ > >
+ > > My point is you need to change the Linux environment anyway, and
+ > > once you've done that there's zero extra code or setup (memcached
+ > > variables, etc) needed on the product side.
+ > 
+ > As I said: I need to disable breakpad... and it is easier to enable
+ > core files when we want them rather to have them "always on" just
+ > because we might need them (on our builders)...
+----------------------------------------------------------------------------------------------------------------------

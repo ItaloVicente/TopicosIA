@@ -1,0 +1,130 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-44079: Eph - Don't send backfilled committed prepares to replicas
+
+A node may send a committed prepare to another if it's either backfilling
+or streaming from memory. Streaming from memory guarantees that the
+replica will see the committed item for the prepare. Streaming from the
+seqlist does not if the committed item is purged before the committed
+prepare. The issue with this is that the replica does not know that the
+prepare has been committed already and it tries to recommit it.
+
+The question that needs to be addressed here is does a replica need to
+receive committed prepares in a backfill? There's a few cases to consider.
+
+1) [Prepare + Commit]. In this case not having the prepare is fine as the
+commit will exist already. If it were not received by the replica this
+would be a partial snapshot for which we make no guarantees.
+
+2) Prepare + Commit + [Prepare + Commit]. Replica received a snapshot of
+some sort before the backfill snapshot. Not having the (second)  prepare
+here is fine as in case 1.
+
+3) Prepare + [Prepare + Commit]. Replica would not replace the first prepare
+with the second if it was not sent. The commit would set the prepare to
+be completed in the HashTable and remove it from the DurabilityMonitor.
+
+One interesting part of this to note is the HCS check in the backfill scan.
+We can't just skip all completed prepares as we need to send all of the
+prepares that are incomplete at the time of the seqlist iterator creation.
+This is required because we'll stream anything newer from memory and apply
+stricter sanity checks. Currently when we complete a prepare we set the
+state of the prepare to be PrepareCommitted without replacing it. This means
+that we are modifying items in the middle of the seqlist. This is done
+without regard for range reads but this doesn't matter as the only other
+task that needs to check this is the HTTombstoneCleaner (just iterates over
+the HashTable). This leads though to a window in backfill where we may
+complete a prepare and update it to be PrepareCommitted. In this case we
+must actually send it.
+
+Change-Id: Ic3f569425d8e00782cfd89c13b16fac62cc03c59
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Ben Huddleston
+Date: 2021-02-26 12:12:16.000000000
+Message: 
+Uploaded patch set 6.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-02-26 12:12:31.000000000
+Message: 
+Patch Set 6:
+
+Branch restricted. PLEASE READ this URL: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/225652/artifact/restricted.html : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2021-02-26 12:13:30.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2021-02-26 12:18:21.000000000
+Message: 
+Patch Set 6: Code-Review+1
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2021-02-26 12:20:36.000000000
+Message: 
+Patch Set 6: Code-Review-1
+
+(1 comment)
+Line:241, engines/ep/src/dcp/backfill_memory.cc -> Wait, shouldn't this increment, then continue? otherwise if two prepares one after another, won't the second one be visited unconditionally? and hbl above would be wrong while working on the second prepare?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2021-02-26 12:21:07.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+Line:241, engines/ep/src/dcp/backfill_memory.cc -> `continue` to the next while loop iteration I mean.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2021-02-26 12:23:16.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+Line:241, engines/ep/src/dcp/backfill_memory.cc -> :doh:
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-02-26 12:25:55.000000000
+Message: 
+Patch Set 6: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/1983/ : ABORTED
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/1983/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/1654/ : ABORTED
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/1871/ : ABORTED
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/1871/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/1874/ : ABORTED
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/1874/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/1844/ : ABORTED
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/1844/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/mad-hatter/1214/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2021-02-26 12:26:13.000000000
+MISMATCHED INLINE COMMENT
+Line:241, engines/ep/src/dcp/backfill_memory.cc -> Done
+----------------------------------------------------------------------------------------------------------------------

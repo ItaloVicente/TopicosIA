@@ -1,0 +1,152 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 574131: Do not concurrently call Spawner#destroy()
+
+As the Object#wait() voids the synchronization, more threads can call
+destroy() before the Reaper thread has identified that the process
+exited or the timeout occured.
+The change ensures that only one call actually raises the signal while
+the others are in a wait state until the process exited.
+
+Contributed by STMicroelectronics
+
+Change-Id: I64722b17138582a76bb9cf604a6b0c14685f1720
+Signed-off-by: Torbjörn Svensson <torbjorn.svensson@st.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Torbjörn Svensson
+Date: 2021-10-18 15:13:30.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Torbjörn Svensson
+Date: 2021-10-18 15:15:52.000000000
+Message: 
+Patch Set 1:
+
+When running Terminate and Relaunch, the Spawner#destroy() is called for more than one thread. This changeset ensures that only one thread will raise the signal to the process.
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonah Graham
+Date: 2021-10-18 15:16:47.000000000
+Message: 
+Patch Set 1:
+
+(3 comments)
+
+I wonder aloud whether we should be using the new API in Java 8/9 that didn't exist when Spawner was written. i.e. #destroyForcibly and #supportsNormalTermination
+Line:268, core/org.eclipse.cdt.core.native/src/org/eclipse/cdt/utils/spawner/Spawner.java -> Debug code.
+
+Line:311, core/org.eclipse.cdt.core.native/src/org/eclipse/cdt/utils/spawner/Spawner.java -> Please don't wrap "catch InterruptedException" in a while loop.
+
+Line:313, core/org.eclipse.cdt.core.native/src/org/eclipse/cdt/utils/spawner/Spawner.java -> I am concerned about this change in behaviour - if the process does not die it can leave callers hanging. While I don't like the idea of leaving idle or zombie processes behind, I don't like the idea of leaving debug sessions in a "stuck" state either.
+
+This change would be fine if we provided real UI to handle this case, but I don't think that is likely anytime soon.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Torbjörn Svensson
+Date: 2021-10-18 15:24:36.000000000
+Message: 
+Patch Set 1:
+
+(3 comments)
+
+> Patch Set 1:
+> 
+> (3 comments)
+> 
+> I wonder aloud whether we should be using the new API in Java 8/9 that didn't exist when Spawner was written. i.e. #destroyForcibly and #supportsNormalTermination
+
+I have to read up on those two.
+Line:268, core/org.eclipse.cdt.core.native/src/org/eclipse/cdt/utils/spawner/Spawner.java -> Ack
+
+Line:311, core/org.eclipse.cdt.core.native/src/org/eclipse/cdt/utils/spawner/Spawner.java -> So, how should be ensure that this thread does not return before the state has changed?
+
+Line:313, core/org.eclipse.cdt.core.native/src/org/eclipse/cdt/utils/spawner/Spawner.java -> I don't think this should be a problem as that case is handled on line 305 with the call to kill(). Hill will raise the SIGKILL and it should cut the process without any delay.
+
+What I want to achieve here is to not return the callers before the thread that first called destroy() has finished the sequence.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: CDT Bot
+Date: 2021-10-18 15:37:55.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-ui-only-pipeline/3567/ : SUCCESS
+
+https://ci.eclipse.org/cdt/job/cdt-verify-code-cleanliness-pipeline/3360/ : SUCCESS. Formatting, whitespace, version numbers and other checks appear to be correct. See https://github.com/eclipse-cdt/cdt-infra/tree/master/jenkins/pipelines/cdt/verify#cdt-verify-code-cleanliness for documentation on what is checked.
+
+https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-other-pipeline/3786/ : SUCCESS. p2 repository available on https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-other-pipeline/3786/artifact/releng/org.eclipse.cdt.repo/target/repository/ - please mark build as "Keep this build forever" if the p2 repo is needed for testing. Otherwise it will be deleted shortly.
+----------------------------------------------------------------------------------------------------------------------
+Author: Torbjörn Svensson
+Date: 2021-10-18 15:38:56.000000000
+Message: 
+Patch Set 1:
+
+> Patch Set 1:
+> 
+> (3 comments)
+> 
+> > Patch Set 1:
+> > 
+> > (3 comments)
+> > 
+> > I wonder aloud whether we should be using the new API in Java 8/9 that didn't exist when Spawner was written. i.e. #destroyForcibly and #supportsNormalTermination
+> 
+> I have to read up on those two.
+
+After reading a bit about those two, it appears that it would be good to support them. However, as long as nobody is invoking those methods, it would not matter and I don't thing Eclipse debug core is doing that. Do you have other insights @Jonah?
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonah Graham
+Date: 2021-10-18 16:01:24.000000000
+Message: 
+Patch Set 1:
+
+> > I have to read up on those two.
+> 
+> Do you have other insights @Jonah?
+
+No other insights. (I'll respond to the line comments in a moment)
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonah Graham
+Date: 2021-10-18 16:55:23.000000000
+Message: 
+Patch Set 1:
+
+(2 comments)
+
+I added line comments - but I think the error here is at the toplevel.
+
+Most of the time when processes are launched and destroyed the calling code does not care if the the process is immediately terminated when destroy is called.
+
+For those cases that do care, they should be using waitFor.
+
+So, IIUC the second thread that is calling destroy should have destroy return immediately, but if they care that the process is really done, that second thread should call waitFor.
+
+The new three-state system is good, that prevents multiple threads from issuing terminate/kill, just don't block on destroy at all.
+Line:311, core/org.eclipse.cdt.core.native/src/org/eclipse/cdt/utils/spawner/Spawner.java -> You probably can't - or the code can be "rude" and just not return (i.e. leave it as you have it here) :-)
+
+BTW CDT's code base is filled with terrible code in this regard (including the handling of the wait 1000 a few lines up), for the most part it doesn't matter because of how it is used in practice. This new loop though can cause this thread to hang if there is any interrupting happening. The Spawner is used directly by other projects that don't use any other part of CDT.
+
+Line:313, core/org.eclipse.cdt.core.native/src/org/eclipse/cdt/utils/spawner/Spawner.java -> The problem is that SIGKILL does not guarantee the process will terminate. Most processes, most of the time will of course be terminated. On Linux this is most likely to occur with processes accessing devices in kernel mode - something that is more likely than most to be buggy, see uninterruptible sleep. On Windows processes running in compatibility mode (for example) cannot be added to the job group (AssignProcessToJobObject will fail).
+
+In the above examples, if the processes do eventually terminate normally (i.e don't require special user intervention) then no one may notice, but here your code is hanging where it used to be fine.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Torbjörn Svensson
+Date: 2021-10-18 17:53:07.000000000
+Message: 
+Patch Set 1:
+
+(2 comments)
+Line:311, core/org.eclipse.cdt.core.native/src/org/eclipse/cdt/utils/spawner/Spawner.java -> Based on that the Spawner#destroy() is synchronized while Process#destroy() is not, I thought the intention was that the function should not return until the process was dead.
+Anyway, switching it to return early is easy :)
+I'll push a new changeset without the loop in a few.
+
+Line:313, core/org.eclipse.cdt.core.native/src/org/eclipse/cdt/utils/spawner/Spawner.java -> Okay, point taken!
+
+----------------------------------------------------------------------------------------------------------------------

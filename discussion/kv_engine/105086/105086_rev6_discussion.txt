@@ -1,0 +1,63 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-30247: Use weak_ptr in non owning ConnMap containers
+
+The MB backtrace shows an UBSan error because a chain of destruction is
+'recursive'.
+
+Here's the flow:
+
+1) The engine destruction destroys the DcpConnMap
+2) DcpConnMap destructs ConnMap (it's parent)
+3) If ConnMap::pendingNotificationsQueue is emptied and can destroy the
+ ConnHandler objects it references, but only if the shared_ptr count is
+ just right.
+4) A DcpProducer destructs and destroys it's backfill-manager
+5) The backfill manager destructor accesses the DcpConnMap, which was
+ destroyed at step 1, it's no longer technically a valid DcpConnMap and
+ the warning is raised.
+
+To fix this recursive chain, the ConnMap::pendingNotificationsQueue and
+ConnMap::vbConns containers should hold weak_ptrs and obtain the real
+shared_ptr via lock(), this breaks the cycle, shut down paths should
+no longer be able to allow a DcpProducer::backfillManager to touch the
+destructed DcpConnMap
+
+Validation:
+
+Reverting the engine->getDcpConnMap().processPendingNotifications();
+added by 14dc7321 exposes some tests to the same cycle, and they were
+seeing a use-after-free error (under ASAN). Next an explicit
+dcpConnMap_.reset(nullptr) was temporarily added to the engine DTOR so
+those tests segfaulted and allowed the weak_ptr update to be validated.
+
+Change-Id: Ib9ee1bfbd1f2edde6cc5c5cb429e2bc0b26ec562
+Reviewed-on: http://review.couchbase.org/105086
+Reviewed-by: Dave Rigby <daver@couchbase.com>
+Tested-by: Build Bot <build@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jim Walker
+Date: 2019-02-20 10:14:44.000000000
+Message: 
+Change has been successfully cherry-picked as 27bc9e7900184911c762be6a5c54320f989c8ba3 by Jim Walker
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-02-20 10:23:19.000000000
+Message: 
+Patch Set 6:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/330/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-02-20 11:13:53.000000000
+Message: 
+Patch Set 6:
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/330/ : SUCCESS'
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,80 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 399829 - Wrong context for name lookup in dependent expression
+
+Change-Id: Iab800a2264c56bdf01498c238b08a2948ca3cfc8
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Sergey Prigogin
+Date: 2013-02-13 18:54:31.000000000
+Message: 
+Patch Set 1:
+
+I'm seeing infinite recursion when writing to the index:
+	at org.eclipse.cdt.internal.core.pdom.dom.cpp.PDOMCPPLinkage.addBinding(PDOMCPPLinkage.java:338)
+	at org.eclipse.cdt.internal.core.pdom.dom.cpp.PDOMCPPLinkage.addTypeBinding(PDOMCPPLinkage.java:1087)
+	at org.eclipse.cdt.internal.core.pdom.db.TypeMarshalBuffer.marshalBinding(TypeMarshalBuffer.java:88)
+	at org.eclipse.cdt.internal.core.dom.parser.cpp.semantics.CPPEvaluation.marshalTemplateDefinition(CPPEvaluation.java:59)
+	at org.eclipse.cdt.internal.core.dom.parser.cpp.semantics.EvalFixed.marshal(EvalFixed.java:140)
+	at org.eclipse.cdt.internal.core.pdom.db.TypeMarshalBuffer.marshalTemplateArgument(TypeMarshalBuffer.java:195)
+	at org.eclipse.cdt.internal.core.pdom.dom.PDOMLinkage.storeArgument(PDOMLinkage.java:615)
+	at org.eclipse.cdt.internal.core.pdom.dom.PDOMLinkage.storeTemplateArgument(PDOMLinkage.java:609)
+	at org.eclipse.cdt.internal.core.pdom.dom.cpp.PDOMCPPTemplateParameterMap.storeArgument(PDOMCPPTemplateParameterMap.java:76)
+	at org.eclipse.cdt.internal.core.pdom.dom.cpp.PDOMCPPTemplateParameterMap.putMap(PDOMCPPTemplateParameterMap.java:61)
+	at org.eclipse.cdt.internal.core.pdom.dom.cpp.PDOMCPPSpecialization.<init>(PDOMCPPSpecialization.java:53)
+	at org.eclipse.cdt.internal.core.pdom.dom.cpp.PDOMCPPClassSpecialization.<init>(PDOMCPPClassSpecialization.java:75)
+	at org.eclipse.cdt.internal.core.pdom.dom.cpp.PDOMCPPClassInstance.<init>(PDOMCPPClassInstance.java:45)
+	at org.eclipse.cdt.internal.core.pdom.dom.cpp.PDOMCPPLinkage.createSpecialization(PDOMCPPLinkage.java:506)
+	at org.eclipse.cdt.internal.core.pdom.dom.cpp.PDOMCPPLinkage.createBinding(PDOMCPPLinkage.java:420)
+	at org.eclipse.cdt.internal.core.pdom.dom.cpp.PDOMCPPLinkage.addBinding(PDOMCPPLinkage.java:355)
+	at org.eclipse.cdt.internal.core.pdom.dom.cpp.PDOMCPPLinkage.addTypeBinding(PDOMCPPLinkage.java:1087)
+	at org.eclipse.cdt.internal.core.pdom.db.TypeMarshalBuffer.marshalBinding(TypeMarshalBuffer.java:88)
+	at org.eclipse.cdt.internal.core.dom.parser.cpp.semantics.CPPEvaluation.marshalTemplateDefinition(CPPEvaluation.java:59)
+	at org.eclipse.cdt.internal.core.dom.parser.cpp.semantics.EvalFixed.marshal(EvalFixed.java:140)
+	at org.eclipse.cdt.internal.core.pdom.db.TypeMarshalBuffer.marshalTemplateArgument(TypeMarshalBuffer.java:195)
+	at org.eclipse.cdt.internal.core.pdom.dom.PDOMLinkage.storeArgument(PDOMLinkage.java:615)
+	at org.eclipse.cdt.internal.core.pdom.dom.PDOMLinkage.storeTemplateArgument(PDOMLinkage.java:609)
+	at org.eclipse.cdt.internal.core.pdom.dom.cpp.PDOMCPPTemplateParameterMap.storeArgument(PDOMCPPTemplateParameterMap.java:76)
+	at org.eclipse.cdt.internal.core.pdom.dom.cpp.PDOMCPPTemplateParameterMap.putMap(PDOMCPPTemplateParameterMap.java:61)
+	at org.eclipse.cdt.internal.core.pdom.dom.cpp.PDOMCPPSpecialization.<init>(PDOMCPPSpecialization.java:53)
+	at org.eclipse.cdt.internal.core.pdom.dom.cpp.PDOMCPPClassSpecialization.<init>(PDOMCPPClassSpecialization.java:75)
+	at org.eclipse.cdt.internal.core.pdom.dom.cpp.PDOMCPPClassInstance.<init>(PDOMCPPClassInstance.java:45)
+	at org.eclipse.cdt.internal.core.pdom.dom.cpp.PDOMCPPLinkage.createSpecialization(PDOMCPPLinkage.java:506)
+	at org.eclipse.cdt.internal.core.pdom.dom.cpp.PDOMCPPLinkage.createBinding(PDOMCPPLinkage.java:420)
+	at org.eclipse.cdt.internal.core.pdom.dom.cpp.PDOMCPPLinkage.addBinding(PDOMCPPLinkage.java:355)
+
+Haven't yet looked at the ways to prevent it.
+----------------------------------------------------------------------------------------------------------------------
+Author: Sergey Prigogin
+Date: 2013-02-13 19:13:19.000000000
+Message: 
+Patch Set 1:
+
+The same infinite recursion happens in IndexCPPTemplateResolutionTest.testConstantPropagationFromHeader
+----------------------------------------------------------------------------------------------------------------------
+Author: Sergey Prigogin
+Date: 2013-02-13 21:56:08.000000000
+Message: 
+Patch Set 1:
+
+The infinite recursion in both IndexCPPTemplateResolutionTest.testConstantPropagationFromHeader and my test project can be avoided by not marshalling the template definition when serializing EvalFixed. In fact EvalFixed doesn't need to know the template definition since it doesn't do any lookups dependent on it. It probably makes sense to split CPPEvaluation into two classes, one derived from another, with fTemplateDefinition in the derived class. EvalFixed would then be able to derive from a more light-weight superclass.
+
+Another change I would suggest is adding a constructor to all evaluations except EvalFixed that takes IASTNode pointOfDefinition parameter. This would allow for making DeferredResolutionBinding a nested class of CPPEvaluation and replacing SemanticUtil.findEnclosingTemplate(IASTNode) by a private method in CPPEvaluation.
+----------------------------------------------------------------------------------------------------------------------
+Author: Sergey Prigogin
+Date: 2013-02-14 00:19:37.000000000
+Message: 
+Patch Set 1:
+
+There are also few regressions caused by this change, for example: Indexer: unresolved name at .../boost/range/iterator_range_core.hpp(388); A template id provides illegal arguments for the instantiation: iterator_range<IteratorT>
+----------------------------------------------------------------------------------------------------------------------
+Author: Gerrit Code Review
+Date: 2013-02-20 04:12:53.000000000
+Message: 
+Your change could not be merged due to a path conflict.
+
+Please merge (or rebase) the change locally and upload the resolution for review.
+----------------------------------------------------------------------------------------------------------------------

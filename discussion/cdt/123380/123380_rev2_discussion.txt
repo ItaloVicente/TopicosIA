@@ -1,0 +1,152 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 413527: [C++14] Support Lambda init-captures
+
+This patch adds parsing and semantic support for lambda init-captures.
+
+Change-Id: Ia5f39ea6f8780ecd6a9685f432bcbdf39e09c82a
+Signed-off-by: Hansruedi Patzen <hansruedi.patzen@hsr.ch>
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Hansruedi Patzen
+Date: 2018-05-26 14:55:27.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-05-26 14:55:37.000000000
+Message: 
+Patch Set 2:
+
+Build Started https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-ui-only/1257/ (1/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-05-26 14:55:38.000000000
+Message: 
+Patch Set 2:
+
+Build Started https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-other/1308/ (2/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-05-26 15:23:10.000000000
+Message: 
+Patch Set 2: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-ui-only/1257/ : SUCCESS
+
+https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-other/1308/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Nathan Ridge
+Date: 2018-05-27 02:25:28.000000000
+Message: 
+Patch Set 2:
+
+(13 comments)
+Line:104, core/org.eclipse.cdt.core.tests/parser/org/eclipse/cdt/core/parser/tests/ast2/cxx14/GenericLambdaTests.java -> These tests are not testing generic lambdas (which are another C++14 feature). Please move them into their own file, cxx14/InitCaptureTests.java.
+
+Line:19, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/core/dom/ast/cpp/ICPPASTInitCapture.java -> C++0x -> C++14
+
+Line:26, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/core/dom/ast/cpp/ICPPASTInitCapture.java -> No one is using this; it can be removed.
+
+However, we probably want a DECLARATOR property for the declarator.
+
+Line:35, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/core/dom/ast/cpp/ICPPASTInitCapture.java -> Since the entire interface is marked '@since 6.5', you don't need this annotation on individual methods.
+
+Line:40, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/core/dom/ast/cpp/ICPPASTInitCapture.java -> Likewise.
+
+Line:24, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/CPPASTInitCapture.java -> I find the implementation choice of extending CPPASTCapture a bit awkward: we still have the field CPPASTCapture.fIdentifier, but we are not using it, as the identifier is now stored by fDeclarator.
+
+Possible options here are:
+
+  - Do not extend CPPASTCapture, and instead duplicate
+    fByReference and fPackExpansion and the related logic.
+
+  - Factor out an abstract CPPASTCaptureBase class to
+    store fByReference and fPackExpansion.
+
+  - Leave it as is, but add a comment to clarify that
+    CPPASTInitCapture ignores CPPASTCapture.fIdentifier.
+
+Line:58, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/CPPASTInitCapture.java -> Some visitors may be confused by seeing the same node first as a capture, and then as a declaration, but it might be OK.
+
+Line:74, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/CPPASTInitCapture.java -> leave() calls should be in the reverse order of visit() calls, so if we visit() the node as a capture first and then as a declaration, we should leave() it as a declaration first and then as a capture.
+
+Line:103, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/CPPASTInitCapture.java -> After adding the ICPPASTInitCapture.DECLARATOR property that I suggested, this should do fDeclarator.setPropertyInParent(DECLARATOR).
+
+Line:113, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/CPPASTInitCapture.java -> Add comment: "Callers should use setDeclarator() instead".
+
+Line:2133, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/GNUCPPSourceParser.java -> The declarator and the equals-initializer need setRange() called on them too.
+
+Line:2142, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/GNUCPPSourceParser.java -> The declarator needs setRange() called on it too.
+
+Line:2113, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/semantics/CPPVisitor.java -> The logic in this function isn't entirely correct. The standard specifies the type of the init-capture in terms of the 'auto' type deduction rules, so let's reuse the 'auto' type deduction logic.
+
+If we factor out the logic in this 'else' branch [1] into a helper function getAutoInitClauseForDeclarator() that takes a declarator and returns an ICPPASTInitializerClause, we can compute the type as follows:
+
+  IASTDeclarator declarator = capture.getDeclarator();
+  ICPPASTInitializerClause initClause = 
+      getAutoInitClauseForDeclarator(declarator);
+  if (initClause == null) {
+    return ProblemType.CANNOT_DEDUCE_AUTO_TYPE;
+  }
+  return createAutoType(initClause.getEvaluation(), null,
+      declarator);
+
+[1] http://git.eclipse.org/c/cdt/org.eclipse.cdt.git/tree/core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/semantics/CPPVisitor.java?id=35b4bf02de354d0ec7d4ae3f96cc3951218a5ffb#n2273
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Nathan Ridge
+Date: 2018-05-27 02:49:06.000000000
+Message: 
+Patch Set 2:
+
+Also, the semantic support in this patch is incomplete.
+
+In the following testcase:
+
+    int main() {
+	int foo = 3;
+	[bar = foo] {
+	    return bar;
+	}();
+    }
+
+the use of 'bar' inside the lambda does not resolve.
+----------------------------------------------------------------------------------------------------------------------
+Author: Nathan Ridge
+Date: 2018-05-27 16:13:51.000000000
+Message: 
+Patch Set 2:
+
+> Also, the semantic support in this patch is incomplete.
+
+(Feel free to fix this issue in a different patch. That may allow us to merge this patch into Photon.)
+----------------------------------------------------------------------------------------------------------------------
+Author: Hansruedi Patzen
+Date: 2018-05-27 16:36:10.000000000
+Message: 
+Patch Set 2:
+
+> > Also, the semantic support in this patch is incomplete.
+ > 
+ > (Feel free to fix this issue in a different patch. That may allow
+ > us to merge this patch into Photon.)
+
+Hey Nathan
+
+Thank you for your review and feedback. I'll update this patch tomorrow. I hope that's not too late. I'll also look into fixing semantic support since the current implementation cleary does not work. A big thank you for the mentioned test case, should have added it to begin with...
+----------------------------------------------------------------------------------------------------------------------
+Author: Nathan Ridge
+Date: 2018-05-27 23:43:40.000000000
+Message: 
+Patch Set 2:
+
+> I'll update this patch
+ > tomorrow. I hope that's not too late.
+
+Sounds good, thanks!
+----------------------------------------------------------------------------------------------------------------------

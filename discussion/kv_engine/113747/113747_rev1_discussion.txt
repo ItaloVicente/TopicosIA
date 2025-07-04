@@ -1,0 +1,145 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-35458 [SR]: Move SyncWrite completion to bg DurabilityCompletionTask
+
+[[Re-apply after fixing error in DurabilityCompletionTask::run
+   (skipping last vBucket).]]
+
+Change how SyncWrites which are Resolved and awaiting Completion are
+handled, by moving the final VBucket::commit() / abort() into a
+background task - DurabilityCompletionTask.
+
++Background+
+
+There are two reasons for making this change:
+
+a) Performance - specifically latency of front-end worker threads.
+
+By moving completion into a background task, we reduce the amount of
+work done on the thread which actually detected the SyncWrite was
+resolved - typically the front-end DCP threads when a DCP_SEQNO_ACK
+is processed.
+Given that we SEQNO_ACK at the end of Snapshot, A single SEQNO_ACK
+could result in committing multiple SyncWrites. Committing one
+SyncWrite is similar to a normal front-end Set operation, so there is
+potentially a non-trivial amount of work needed to be done when
+completing SyncWrites, which could tie up the front-end thread (causing
+other Connections to have to wait) for a noticable amount of time.
+
+b) Simplification of lock management.
+
+Doing completion in a background task simplifies lock management, for
+example we avoid lock inversions with earlier locks acquired during
+dcpSeqnoAck when attemping to later call notifySeqnoAvailable when this
+was done on the original thread.
+
++Problem+
+
+While (a) was the first reason identified for making this change
+(see MB-33092), (b) is the reason this change is being made now. During
+testing the following lock-order-inversion was seen:
+
+    WARNING: ThreadSanitizer: lock-order-inversion (potential deadlock)
+    Cycle in lock order graph:
+
+    Stream::streamMutex => StreamContainer::rwlock => Stream::streamMutex
+
+The crux of the issue is the processing of DCP_SEQNO_ACKNOWLEDGED
+messages by the DcpProducer - this acquires the Stream::streamMutex
+before calling VBucket::seqnoAcknowledged(), however that function
+currently results in VBucket::commit() being called to synchronously
+complete the SyncWrite; which in turn must nodify all connected
+replica that a new seqno is available, requiring
+StreamContainer::rwlock to be acquired:
+
+  Mutex StreamContainer::rwlock acquired here while holding mutex Stream::streamMutex in thread T15:
+    ...
+    #6 StreamContainer<std::shared_ptr<Stream> >::rlock()
+    #7 DcpProducer::notifySeqnoAvailable(Vbid, unsigned long)
+    ...
+    #13 VBucket::commit(...)
+    #14 ActiveDurabilityMonitor::commit(...)
+    #15 ActiveDurabilityMonitor::processCompletedSyncWriteQueue()
+    #16 ActiveDurabilityMonitor::seqnoAckReceived(...)
+    #17 VBucket::seqnoAcknowledged(...)
+    #18 ActiveStream::seqnoAck(...)
+    #19 DcpProducer::seqno_acknowledged(...)
+    ...
+
+  Mutex Stream::streamMutex previously acquired by the same thread here:
+    ...
+    #3 std::lock_guard<std::mutex>::lock_guard(std::mutex&)
+    #4 ActiveStream::seqnoAck(...)
+    #5 DcpProducer::seqno_acknowledged(...)
+    ...
+
+This conflicts with the ordering seen when sending items out on the
+DCP connection - inside DcpProducer::step() where the
+StreamContainer::rwlock is acquired first, then ActiveStream::mutex
+acquired later:
+
+  Mutex Stream::streamMutex acquired here while holding mutex StreamContainer::rwlock in thread T15:
+    ...
+    #3 std::lock_guard<std::mutex>::lock_guard(std::mutex&)
+    #4 ActiveStream::next()
+    #5 DcpProducer::getNextItem()
+    #6 DcpProducer::step(dcp_message_producers*)
+    ...
+
+  Mutex StreamContainer::rwlock previously acquired by the same thread here:
+    #0 pthread_rwlock_rdlock <null> (libtsan.so.0+0x00000002c98b)
+    ...
+    #4 std::shared_lock<cb::RWLock>::shared_lock(cb::RWLock&)
+    #5 StreamContainer<>::ResumableIterationHandle::ResumableIterationHandle()
+    #6 StreamContainer<>::startResumable()
+    #7 DcpProducer::getNextItem()
+    #8 DcpProducer::step(dcp_message_producers*)
+    ...
+
++Solution+
+
+The processing of resolved SyncWrites moved into a new background task.
+Instead of immediately processing them within
+ActiveDM::seqnoAckReceived(), that function notifies the new NonIO
+DurabilityCompletionTask that there are SyncWrites waiting for
+completion.
+
+DurabilityCompletionTask maintains a bool per vBucket indicating if
+there are SyncWrites for that vBucket pending completion. When the
+task is run, for each flag which is true it calls
+VBucket::processResolvedSyncWrites() for the associated VBucket.
+
++Implementaiton Notes+
+
+Currently there is just a single DurabilityCompletionTask (per Bucket),
+this was chosen as 1 task per vBucket (i.e. 1024 per Bucket) would
+be inefficient for our current background task scheduler (both in terms
+of latency to schedule each task for only one vBucket's worth of work,
+and in terms of managing that many tasks in the future queue).
+
+However, that does _potentially_ mean there's fewer resources (threads)
+available to complete SyncWrites on - previously that work could be
+done concurrently on all frontend threads (~O(num_cpus). Now the same
+work only has 1 thread available to run on (there's only a single
+DurabilityCompletionTask).
+
+_If_ this becomes a bottleneck we could look at increasing the number of
+DurabilityCompletionTask - e.g. sharding all vBuckets across multiple
+tasks like flusher / bgfetcher.
+
+Change-Id: I57c8d344853360363401b0677e3c33ab9e053c80
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2019-08-23 11:49:44.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-08-23 12:23:41.000000000
+Message: 
+Abandoned
+----------------------------------------------------------------------------------------------------------------------

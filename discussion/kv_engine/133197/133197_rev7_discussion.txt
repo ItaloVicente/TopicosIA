@@ -1,0 +1,98 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-40531: Prefer paging from replicas if possible
+
+Prior to this change, the pager would try to page out X% of items in
+replica vbuckets, but if this did not bring memory usage below the low
+water mark, it would flip phase to ACTIVE_AND_PENDING_ONLY - meaning
+the next run of the pager would page immediately try to page from
+active and pending vbuckets.
+
+Now, replica vbuckets will always be considered first. In the event
+that paging _every_ possible item from replicas would not free enough
+memory to drop below the low water mark, it will then also evict from
+active vbuckets.
+
+Change-Id: I46e578bf163fa2e12834173595c8aa3f52f1593d
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: James H
+Date: 2020-07-28 15:13:48.000000000
+Message: 
+Uploaded patch set 7.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-07-28 15:14:04.000000000
+Message: 
+Patch Set 7:
+
+Branch restricted. PLEASE READ this URL: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/194055/artifact/restricted.html : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-07-28 15:35:21.000000000
+Message: 
+Patch Set 7: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/25951/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/1364/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/1525/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/mad-hatter/840/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/1274/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/1488/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/1476/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/1496/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-07-29 08:08:04.000000000
+Message: 
+Patch Set 7: Code-Review-1
+
+(2 comments)
+Line:59, engines/ep/src/item_pager.cc -> This looks very similar to the new resetPhase() method.
+
+Line:35, engines/ep/src/item_pager.h -> Not sure this is the best way to do this. The new "phase" you've introduced is really a decision point - i.e. should I go on to ACTIVE_AND_PENDING_ONLY after replicas have been handled.
+
+Would it not be simpler (and reduce code churn) if we kept the two original phases, deciding at the end of REPLICA phase if to change to ACTIVE based on the initial calculation of how much memory needs to be freed?
+
+Alternatively, maybe we just go back to your version which removed the phase, and simply decide up front (based on how much memory needs to be freed) the set of vBuckets (replica-only, active+pending+replica) to be visited. Each vBucket type (active+pending, replica) is assigned a ratio of how much data to remove - where replica would always be 100% if active+pending is non-zero?
+
+(I'm also thinking ahead a little, where I'd like to be able to speed up the temPagr by visiting multiple vBuckets concurrently with multiple visitor tasks - I think that is much more straightforward if we just decide up-front once what needs to be done and run it.)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-07-29 09:02:04.000000000
+Message: 
+Patch Set 7:
+
+(2 comments)
+Line:59, engines/ep/src/item_pager.cc -> It does, but I'd have to make resetPhase work like this, rather than make this call the existing resetPhase, as the KVBucket isn't available when this constructor is called.
+
+Bit moot now though, removing the phases again :P
+
+Line:35, engines/ep/src/item_pager.h -> Indeed, that was my previous suggestion: separating the percentages out ;)
+
+I added a new phase to encode the difference between "replica, and when I'm done if I need to do more, do replica again" vs "replica, but I think at the end of this run I need to move to actives because I've just tried to empty the replicas fully" - if it ran the existing logic in both cases it would either:
+
+1. never move to active if there was anything at all in the replicas (including prepares and such)
+or
+2. do a replica run, then move to actives even though there's plenty left in the replicas (i.e., the old behaviour)
+
+The new state isn't specifically needed; that distinction could be encoded in many ways, but if it's phased run 2 should be made to "know" that run 1 tried to empty the replicas, so it can consider actives. If run 1 didn't try to evict everything from replicas, run 2 should definitely not consider actives.
+
+I'll flip back and break out the percentages, non-phased is way easier to reason about.
+
+----------------------------------------------------------------------------------------------------------------------

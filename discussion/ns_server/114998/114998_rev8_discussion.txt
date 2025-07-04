@@ -1,0 +1,85 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-35782 do not create replications during delta recovery all at the
+
+..same time. Let the replications be created only after the backfill
+is done on the corresponding vbucket.
+
+solution:
+1. Do not add vbuckets from delta nodes to pre rebalance map, but
+instead store them in an aditional structure (delta_vbuckets) in
+bucket configuration.
+
+2. Consider vbuckets from delta_vbuckets structure to be replicas in
+janitor_agent:handle_apply_new_config which will effectively warm up
+vbuckets on delta node and keep them alive despite the fact that they
+are missing from the map.
+
+3. At the same time in handle_apply_new_config_replicas_phase
+do not establish replications for these vbuckets, so replications
+will be extablished by vbucket mover after the backfill.
+
+4. Make sure that at the same time as vbucket appears in the bucket
+map, it is deleted from delta_vbuckets
+
+5. Make sure that if node leaves the cluster, it is cleaned up from
+delta_vbuckets
+
+6. remove delta_vbuckets from bucket configuration after succesfull
+rebalance.
+
+Change-Id: I29ea43da619ad7fb8ce50d452ffaeac83bb268c2
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Artem Stemkovski
+Date: 2019-10-10 18:02:45.000000000
+Message: 
+Uploaded patch set 8: Patch Set 7 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-10-10 18:02:52.000000000
+Message: 
+Patch Set 8: -Well-Formed
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-test/15139/
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2019-10-10 18:03:54.000000000
+Message: 
+Patch Set 8: Verified+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-10-10 18:17:25.000000000
+Message: 
+Patch Set 8: Well-Formed+1
+
+Permission granted to commit to restricted branch
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Artamonau
+Date: 2019-10-11 20:56:47.000000000
+Message: 
+Patch Set 8:
+
+Still looking. But one thing I noticed is that delta_vbuckets are not cleaned up properly.
+
+- Start with a two node cluster (nodes A and B).
+- Fail B over.
+- Start delta recovery for node B.
+- Interrupt delta recovery.
+- Add node C.
+- Rebalance.
+
+Node B will continue having all "recovered" vbuckets until the very end of the rebalance.
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Artamonau
+Date: 2019-10-12 00:31:07.000000000
+Message: 
+Patch Set 8:
+
+- The patch currently causes ns_janitor to sync config unnecessarily, because ns_janitor finds replica vbuckets where it doesn't expect to.
+- More generally, it seems that ns_janitor needs to be aware of delta vbuckets. Otherwise it's making its decisions using only partial information. But to what degree it needs to be aware of delta vbuckets, and how much more complicated it's going to make it is not immediately clear to me.
+- There are probably more places were similar logic applies. What immediately comes to mind is failover. Imagine two nodes A and B. Node B is undergoing delta recovery. This gets interrupted. Node A gets failed over. Previously, in most cases we would be able to activate vbuckets on node B and salvage most of the data. Now that's not going to be the case.
+----------------------------------------------------------------------------------------------------------------------

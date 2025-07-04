@@ -1,0 +1,130 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 575490: "No rule" after removing last source file from root
+
+Include the top-level subdir.mk only when one was actually generated
+(i.e. when there are source files there), just like for all other
+subdir.mk, otherwise a stale one from earlier when there were source
+files that have since been removed may be picked up, causing "No rule to
+make target" errors.
+
+In some cases (from bug 303953), the removal would be noticed and the
+stale subdir.mk be overwritten by a correct empty one, avoiding the
+error, but not in the following cases:
+- When CommonBuilder.performCleanning() decides that a full rebuild is
+needed, regenerateMakefiles() is called instead of generateMakefiles(),
+which doesn't get the delta.
+- When the refresh in which Eclipse notices the removed source file
+happens as part of a build (one that probably failed because the
+makefiles weren't updated yet), the next build after that apparently
+does not get the delta containing the removal anymore.
+
+For some reason, removing the line 'buffer.append("-include subdir.mk")
+.append(NEWLINE);' appears to change the iteration order of
+buildDepVars.entrySet() and buildOutVars.entrySet(), requiring
+additional adjustments to the expected output of some tests. (Maybe
+these HashMaps should be LinkedHashMaps to avoid that.)
+
+Change-Id: Id15b424f02dd5c513d2124620c0c8699d61874fd
+Signed-off-by: Christian Walther <walther@indel.ch>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Christian Walther
+Date: 2021-08-18 18:09:46.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: CDT Bot
+Date: 2021-08-18 18:31:31.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-ui-only-pipeline/3468/ : SUCCESS
+
+https://ci.eclipse.org/cdt/job/cdt-verify-code-cleanliness-pipeline/3236/ : SUCCESS. Formatting, whitespace, version numbers and other checks appear to be correct. See https://github.com/eclipse-cdt/cdt-infra/tree/master/jenkins/pipelines/cdt/verify#cdt-verify-code-cleanliness for documentation on what is checked.
+
+https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-other-pipeline/3671/ : SUCCESS. p2 repository available on https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-other-pipeline/3671/artifact/releng/org.eclipse.cdt.repo/target/repository/ - please mark build as "Keep this build forever" if the p2 repo is needed for testing. Otherwise it will be deleted shortly.
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonah Graham
+Date: 2021-08-19 14:27:37.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+
+This is good to me - but let me know if you can fix the order issue in a parent commit so that this diff does not have the essentially unrelated changes.
+Line:30, /COMMIT_MSG -> +1 - I think there should be a new parent commit of this change that stabilizes the order if possible. However, rather than a linkedhashmap my guess is a treemap is more appropriate so that the items stay sorted on the output regardless of how the code is rewritten.
+
+If not straightforward it isn't the most serious thing as these makefiles should not be committed to source control (outside of our test system) so random changes (while undesirable) are not fatal.
+
+I saw another change come through recently that the order changed on and was going to make a similar comment. Maybe that change is still in my review queue.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Walther
+Date: 2021-08-19 15:18:33.000000000
+Message: 
+Patch Set 1:
+
+> This is good to me - but let me know if you can fix the order issue in a parent commit so that this diff does not have the essentially unrelated changes.
+
+That’s a good idea, I’ll give that a try. I don’t insist on the LinkedHashMap, that was just the first thing that popped into my mind when I saw it used for some other fields. Certainly something sorted would be even better.
+
+> I saw another change come through recently that the order changed on and was going to make a similar comment. Maybe that change is still in my review queue.
+
+I’m guessing it might be bug 505882 (rm command line length), which also messes with the GnuMakefileGenerator (and which I still haven’t looked at).
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Walther
+Date: 2021-08-23 16:12:02.000000000
+Message: 
+Patch Set 1:
+
+Quick question before I dig deeper:
+
+In GnuMakefileGenerator,
+  public HashMap<String, List<IPath>> getBuildOutputVars()
+is API - changing the internal variable to a TreeMap (not a subclass of HashMap, unlike LinkedHashMap) would probably require breaking that. Is this worth breaking API or should I look for a different solution?
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonah Graham
+Date: 2021-08-23 16:24:33.000000000
+Message: 
+Patch Set 1:
+
+> Patch Set 1:
+> 
+> Quick question before I dig deeper:
+> 
+> In GnuMakefileGenerator,
+>   public HashMap<String, List<IPath>> getBuildOutputVars()
+> is API - changing the internal variable to a TreeMap (not a subclass of HashMap, unlike LinkedHashMap) would probably require breaking that. Is this worth breaking API or should I look for a different solution?
+
+If LinkedHashMap gives stability I think that should be fine - I assume that will keep the output order stable enough. It is a shame that HashMap is the return type and not Map, but that decision was made a long time ago (2005). The method returns a modifiable map too, so can't return a copy either.
+
+If you don't think that is stable enough, lets discuss further. For example we could copy contents into a TreeMap before writing to get the order?
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Walther
+Date: 2021-08-24 15:24:22.000000000
+Message: 
+Patch Set 1:
+
+Plot twist: It’s not that my seemingly unrelated code change changed the iteration order of the HashMap. It’s that the tests use a reordering-tolerant file comparator (org.eclipse.cdt.managedbuilder.testplugin.ManagedBuildTestHelper.compareMakefiles()) that let the test succeed as long as reorderings were the only differences. Only when my change caused a removed line, the comparison failed and output a diff *including* the reordering that was not caused by my change but had been there all along.
+
+It’s probably still worth going ahead with the LinkedHashMap. It preserves the insertion order, which as far as I examined seems to come from the toolchain definitions (not from other nondeterministic sources), which is probably good enough. I’m still figuring out the best way of finding which benchmark files should be adjusted to the new (hopefully stable) ordering so that future test failures will not generate spurious reordering diffs.
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonah Graham
+Date: 2021-08-24 16:24:41.000000000
+Message: 
+Patch Set 1:
+
+> Patch Set 1:
+> 
+> Plot twist: It’s not that my seemingly unrelated code change changed the iteration order of the HashMap. It’s that the tests use a reordering-tolerant file comparator (org.eclipse.cdt.managedbuilder.testplugin.ManagedBuildTestHelper.compareMakefiles()) that let the test succeed as long as reorderings were the only differences. Only when my change caused a removed line, the comparison failed and output a diff *including* the reordering that was not caused by my change but had been there all along.
+> 
+> It’s probably still worth going ahead with the LinkedHashMap. It preserves the insertion order, which as far as I examined seems to come from the toolchain definitions (not from other nondeterministic sources), which is probably good enough. I’m still figuring out the best way of finding which benchmark files should be adjusted to the new (hopefully stable) ordering so that future test failures will not generate spurious reordering diffs.
+
+Thanks for continuing the detective work. More lost institutional knowledge has been found.
+----------------------------------------------------------------------------------------------------------------------

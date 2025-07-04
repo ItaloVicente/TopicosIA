@@ -1,0 +1,111 @@
+======================================================================================================================
+DESCRIPTION:
+
+Cleanup diverged vbuckets on delta recovery nodes.
+
+Before adding these vbuckets to the vbucket maps. This served us well
+over the years, but is problematic in the context of "promote max
+replica" failover. The issue is that the vbuckets on the nodes being
+recovered are potentially from a divergent history. While the stats
+that we use to choose the maximal replica during failover are not
+comparable across different histories. This patch addresses the
+problem by ensuring that vbuckets that truly diverged are cleaned up
+prior to the node being activated. Assuming there are no
+implementation bugs, failover will always observe only compatible
+vbuckets.
+
+Incidentally, this also addresses the issue with ns_janitor seeing two
+active vbuckets in the same chain due to the fact that delta nodes
+preserve their pre-failover vbucket states: this patch explicitly sets
+all vbuckets to replica states on delta nodes before proceeding with
+recovery.
+
+New process called rebalance_agent is dedicated to rebalance related
+tasks that are not per bucket. As of this patch it only deals with
+delta recovery, but there are some other rebalance tasks (like
+cleaning unnecessary buckets) that are currently performed via rpc
+calls that should move here.
+
+On delta recovery the rebalancer process will use rebalance_agent to
+start temporary instances of buckets on delta nodes. This is necessary
+because normally we start bucket related processes on a node only once
+it becomes part of the corresponding bucket server list. This
+temporary bucket will exist on the node for the duration of delta
+recovery and is automatically torn down if delta recovery fails or is
+otherwise interrupted.
+
+Once the temporary buckets are started, the rebalancer proceeds to
+cleaning up delta recovery buckets one by one. This can be
+parallelized, but for now for the sake of simplicity this is done
+sequentially.
+
+For each bucket rebalancer supplies delta nodes with the set of
+vbuckets it expects to find on those nodes and failover logs for those
+vbuckets grabbed from their corresponding active nodes.
+
+Delta nodes compare this information to their local failover logs and
+local high sequence number. A vbucket is deemed compatible if the
+mutation corresponding to the local high seqno was made in the same
+failover id both on the delta nodes and the new owner of the
+vbucket. In practice this means that graceful failover or hard
+failover with no ongoing mutations against the cluster produce
+compatible vbuckets. On the other hand, hard failover with ongoing
+mutations or mutations made against the failed over node after
+failover produce divergent vbuckets. So this potentially degrades the
+performance of delta recovery. We'll have to look at the performance
+comparisons of the old vs new approach and decide if this is
+acceptable. Intuitively though, it seems that in many cases were we'll
+choose to delete a vbucket, that would have happened anyway with the
+old approach only as part of establishing replications. One potential
+way to address this issue (if we decide that it needs to be addressed)
+is to make the compatibility determination be based on the local high
+prepared seqno instead of the high seqno. This will ensure
+non-divergence with respect to durable writes, but not regular writes.
+
+Once all buckets are rid of divergent vbuckets on delta nodes,
+rebalancer updates bucket configs, replicates these changes to delta
+nodes and instructs them to complete delta recovery preparation. Delta
+nodes will release the temporary buckets started previously. The
+expectation here is that these temporary buckets become regular
+buckets at this point (that is, we don't need to tear down the
+temporary buckets and start them up again as permanent ones).
+
+Change-Id: Ifc6f903822dac503c9a5a7e589858ce18cc17a78
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Aliaksey Artamonau
+Date: 2019-05-31 20:46:50.000000000
+Message: 
+Uploaded patch set 4: Patch Set 3 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-05-31 20:46:58.000000000
+Message: 
+Patch Set 4: -Well-Formed
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-test/12635/
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Artamonau
+Date: 2019-05-31 20:47:09.000000000
+Message: 
+Removed reviewer Poonam Dhavale.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-05-31 22:04:51.000000000
+Message: 
+Patch Set 4: Well-Formed+1
+
+Permission granted to commit to restricted branch
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2019-06-04 00:40:49.000000000
+Message: 
+Patch Set 4: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Artamonau
+Date: 2019-06-04 08:01:03.000000000
+Message: 
+Patch Set 4: Verified+1
+----------------------------------------------------------------------------------------------------------------------

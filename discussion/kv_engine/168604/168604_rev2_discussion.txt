@@ -1,0 +1,81 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-36996: Simplify and remove reentrancy from NotifyTest
+
+NotifyTest/test_mb19503_connmap_notify tests the functionality of the
+DCP Connmap. As part of this it overrides the normal ServerCookieApi
+to track when notify_io_complete() is called against a DCP Cookie.
+
+However, the way it does this includes calling
+Connmap::addConnectionToPending() from the notify_io_complete
+override(), which itself is called from
+ConnMap::processPendingNotifications() - i.e. there is a re-entrant
+call back into ConnMap. Note that notify_io_complete() is normally
+called from a non-frontend thread, in this case when a background DCP
+task has data ready for the front-end.
+
+This is not the structure of the real ServerCookieApi, which simply
+queues a notification event for the front-end worker thread to later
+pickup and dispatch.
+
+Currently this inconsistent notification behaviour in NotifyTest is
+bengin, as ConnMap::processPendingNotifications() is implemented by
+dequeuing all items currently in the queue, then processing them
+(calling notify_io_complete), then returning. As such, re-enqueuing an
+item while processPendingNotifications() is still running on the stack
+has no negative behaviour - it will simply return with the pending
+notificatin queue having an item remaining on it.
+
+However, a subsequent patch changes ConnMap to use folly::UMPMCQueue
+instead of our custom AtomicQueue, which does not support dequing all
+items directly, and hence dequeues each present item individually and
+calling notify_io_complete() on each. When using that implementation,
+NotifyTest/test_mb19503_connmap_notify hangs as the pending
+notification queue is never empty and hence
+processPendingNotifications never returns.
+
+Address by modifying the way the test is implmented to no longer call
+addConnectionToPending() from notify_io_complete, instead just call
+addConnectionToPending() from outside notify_io_complete().
+
+Also remove some unused variables.
+
+Change-Id: Ia0744c9aaede97db43b41ab1d8f3dff8ce691755
+Reviewed-on: https://review.couchbase.org/c/kv_engine/+/168604
+Tested-by: Build Bot <build@couchbase.com>
+Reviewed-by: Paolo Cocchi <paolo.cocchi@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2022-01-18 13:41:38.000000000
+Message: 
+Change has been successfully cherry-picked as 3bd5accf8e632d6f8c59ad2015deca3691538e7a by Dave Rigby
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-01-18 13:43:35.000000000
+Message: 
+Patch Set 2:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-master/10001/ (1/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-01-18 13:46:14.000000000
+Message: 
+Patch Set 2:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-TSan-master/6594/ (2/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-01-18 14:40:22.000000000
+Message: 
+Patch Set 2:
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-master/10001/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-TSan-master/6594/ : SUCCESS'
+----------------------------------------------------------------------------------------------------------------------

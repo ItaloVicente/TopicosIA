@@ -1,0 +1,174 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-35135: Deal with old PRE in trackedWrites due to partial snapshot
+
+Due to out of order completion of prepares, we must start searching
+for a SyncWrite to complete in trackedWrites from the beginning of
+the list as opposed to the HighCompletedSeqno. If we have not
+received a full snapshot before disconnect then we can have a
+prepare in the PDM that has a seqno high than the HPS as we only
+move the HPS on snapshot boundary. If we then receive a disk
+snapshot containing both a prepare and a commit for the same key
+as the prepare before the disconnect then we will throw an exception
+as we have two prepares in the PDM for the same key but only the
+first is found which will have a different seqno to the one that we
+are trying to complete.
+
+Change-Id: Ie27b9073faea79c8b2737d7751521a67e66ad5c9
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Ben Huddleston
+Date: 2019-07-19 09:04:57.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2019-07-19 09:51:13.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:235, engines/ep/src/durability/passive_durability_monitor.cc -> Is it worth also restricting this to disk snapshots?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-07-19 09:56:28.000000000
+Message: 
+Patch Set 1: Code-Review-1
+
+(5 comments)
+Line:20, /COMMIT_MSG -> I think an example in there would be helpful - perhaps include the scenario you have in the unit test in the commit message?
+
+Line:237, engines/ep/src/durability/passive_durability_monitor.cc -> why is this valid? Worth expanding the comment. 
+
+(the reader probably assumes it's valid given the code explicitly checks and allows it, but that doesn't explain the rationale...)
+
+Line:259, engines/ep/src/durability/passive_durability_monitor.cc -> Given you're in here might be worth including the `prepareSeqno` if we have it.
+
+Line:2146, engines/ep/tests/module_tests/dcp_durability_stream_test.cc -> What was the item at seqno:2 - does it matter, or is that just needed to deny a complete snapshot?
+
+Line:2153, engines/ep/tests/module_tests/dcp_durability_stream_test.cc -> Should we just discard 1:PRE at this point (given it's essentially been superseded)? 
+
+That would make the trackedWrites match the HashTable, and also only have one of each key in the trackedWrites?
+
+Obviously that requires us to check for / locate the 1:PRE in the trackedWrites - which would be an O(n) operation, but I think it might be worth it given a) we expect this scenario (partial snapshot) to be rare and b) 'n' should be relatively small. Moreover, we'd only need to do this scan if the insert of the prepare into the HashTable found a duplicate outstanding prepare. 
+
+(This would also allow us to add some sanity-checks to trackedWrites, that there's only one of each key in it).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2019-07-19 09:56:29.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:235, engines/ep/src/durability/passive_durability_monitor.cc -> Or maybe just a sanity Expects(...) to say we never expect to enter this case unless it is a disk snapshot :shrug:
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-07-19 10:05:18.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/19852/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/12192/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/18885/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/13019/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/22025/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/21210/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/2870/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/5779/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2019-07-19 10:40:04.000000000
+Message: 
+Patch Set 1:
+
+(6 comments)
+Line:20, /COMMIT_MSG -> Done
+
+Line:235, engines/ep/src/durability/passive_durability_monitor.cc -> Split the logic so that we throw the original exception (but more verbose) if not disk and a new one if we are disk and do not find the prepare we need.
+
+Line:237, engines/ep/src/durability/passive_durability_monitor.cc -> Done
+
+Line:259, engines/ep/src/durability/passive_durability_monitor.cc -> Done
+
+Line:2146, engines/ep/tests/module_tests/dcp_durability_stream_test.cc -> Item at seqno 2 does not matter, just required to prevent the update of HPS due to snapshot end.
+
+Line:2153, engines/ep/tests/module_tests/dcp_durability_stream_test.cc -> The sanity check you mentioned to ensure a lack of duplicate keys would have to go into addSyncWrite which is currently a O(1) operation and not a O(n) and would impact the general case. Also, for a disk snapshot, n may not be that small.
+
+I think we could remove the SyncWrite for 1:PRE when we receive 4:PRE instead of the code change in this patch
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-07-19 10:54:30.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:2153, engines/ep/tests/module_tests/dcp_durability_stream_test.cc -> Agreed the sanity check would be costly, but we could make that a development-only assert (CB_DEVELOPMENT_ASSERTS), assuming that was an invariant of the trackedWrites.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2019-07-19 11:29:37.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:2153, engines/ep/tests/module_tests/dcp_durability_stream_test.cc -> We actually have to allow it temporarily as we can't call completeSyncWrite for the original prepare until after we have called processSetInner (see VBucket::prepare) because the set may fail due to lack of memory. I can verify that there is another prepare in there before removing the original though or flip back to the original fix.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-07-19 12:35:27.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:2153, engines/ep/tests/module_tests/dcp_durability_stream_test.cc -> > I can verify that there is another prepare in there before removing the original though or flip back to the original fix.
+
+Not sure I completely follow. Once we are inside addSyncWrite, we can check for the dupe there and remove before tracking the new one. 
+
+That will probably require passing a new optional arg to addSyncWrite() specifying the seqno of the dup SyncWrite (so we know to search and remove).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2019-07-19 12:49:17.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:2153, engines/ep/tests/module_tests/dcp_durability_stream_test.cc -> Would also require passing something extra in queueItmCtx as we should only do this from VBucket::prepare and I remember that we were reluctant to add such things there in the past.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-07-19 13:18:51.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:2153, engines/ep/tests/module_tests/dcp_durability_stream_test.cc -> So ultimately it's a question of whether the simplification of the model (only a single Prepare should exist in the trackedWrites for a given) is worth adding complexity elsewhere.
+
+Having a single prepare feels to me like it does make it easier to reason about the trackedWrites and how to deal with them (if we don't do that, can we end up with 3, 4, 5, ... prepares for a single key if we keep disconnecting? Is that going to get hard to keep track of (pun intended)?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2019-07-19 13:33:44.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:2153, engines/ep/tests/module_tests/dcp_durability_stream_test.cc -> Current implementation should leave us with max 2 for a short window but only ever 1 outside of a HBL. Will look into adding it.
+
+----------------------------------------------------------------------------------------------------------------------

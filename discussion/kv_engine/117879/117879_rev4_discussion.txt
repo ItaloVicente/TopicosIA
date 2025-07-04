@@ -1,0 +1,131 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-36887: Perf: Split keyIndex into separate indexes for prepared & committed
+
+MB-34685 (commit 257fbd353) added the ability to have prepares and
+commits (to the same key) in the same checkpoint; to be consistent
+with Disk snapshots.
+
+To implement this the keyIndex (an unordred_map from StoredDocKey to
+index_entry) was modified so the 'key' was a pair of (StoredDocKey,
+CheckpointIndexKeyNamespace):
+
+    enum class CheckpointIndexKeyNamespace : uint8_t {
+        Committed = 0,
+        Prepared,
+    };
+
+    using CheckpointIndexKey = std::pair<StoredDocKey,
+                                         CheckpointIndexKeyNamespace>
+
+Functionally this is fine, however it introduces a number of temporary
+heap allocations due to the need to create temporary
+CheckpointIndexKey objects when calling checkpoint_index::find().
+
+Recall that an Item contains a StoredDocKey, so before
+CheckpointIndexKey was added, it was possible to search
+checkpoint_index via find(const StoredDocKey&) without creating a
+temporary.
+
+However, when the key was changed to CheckpointIndexKey it is
+necessary to create a temporary CheckpointIndexKey object to pass to
+find(). This typically requires a heap allocation as StoredDocKey is
+internally a std::string and most keys exceed the internal buffer of
+std::string (16 bytes on libstdc++). This heap allocation is freed
+immediately after find() returns and hence we also pay for a heap
+free.
+
+Avoid this extra heap cost by splitting keyIndex into separare indexes
+for prepared and commit keys, checking the appropriate index for the
+given queued_item.
+
+Not only does this avoid the extra heap alloc/free; but it also
+reduces the memory footprint of checkpoint_index - the key type is now
+just sizeof(StoredDocKey) and not sizeof(CheckpointIndexKeyNamespace)
+- which due to alignment is generally a rection from 32B to 24B.
+
+Change-Id: Ic8602346689d1cd64854c087386f15732944472a
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2019-12-05 16:13:26.000000000
+Message: 
+Patch Set 4: Patch Set 3 was rebased
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-12-05 16:13:32.000000000
+Message: 
+Patch Set 4: Verified-1
+
+Targeted for 6.5.1, not to be merged to mad-hatter yet.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-12-05 16:13:37.000000000
+Message: 
+Patch Set 4:
+
+Branch restricted. PLEASE READ this URL: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/160069/artifact/restricted.html : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2019-12-05 16:33:18.000000000
+Message: 
+Patch Set 4:
+
+(3 comments)
+Line:13, /COMMIT_MSG -> nit
+
+Line:49, /COMMIT_MSG -> nit
+
+Line:283, engines/ep/tests/module_tests/checkpoint_remover_test.cc -> I'm blind - where is this selected?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-12-05 16:42:14.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:283, engines/ep/tests/module_tests/checkpoint_remover_test.cc -> nowhere really, we just put everything in the same index for this test.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2019-12-05 16:43:17.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:283, engines/ep/tests/module_tests/checkpoint_remover_test.cc -> Ahhh gotcha gotcha
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-12-05 16:47:44.000000000
+Message: 
+Patch Set 4: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/556/ : FAILURE
+
+Failure of a GoogleTest test:
+
+CleanOrUnclean/PersistToTest.ConsistentStateAfterShutdown/Unclean, where GetParam() = Unclean (112 ms) ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/556/ )
+
+Failure of a CTest test 165/187 Test #164: memcached_testapp.ep.CleanOrUnclean/PersistToTest ............................ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/556/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/560/ : FAILURE
+
+Failure of a CTest test [2019-12-05T16:32:10.878Z]  92/193 Test  #94: memcached_testapp.default.MaxConnectionTest .................................. ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/560/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/23069/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/508/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/557/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/566/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

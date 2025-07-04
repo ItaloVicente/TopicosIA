@@ -1,0 +1,129 @@
+======================================================================================================================
+DESCRIPTION:
+
+Repository.incrementOpen(): return refcount after the increment
+
+This can help to decide if another thread did decrement the refcount to
+0 shortly before this increment. In that case we would skip execution of
+a background auto-gc to avoid e.g. an application trying to shut down
+has to wait until the background task finished. This is implemented in a
+follow-up change.
+
+Change-Id: I306af3ad186b633470d2ea44b4a2204636550d9a
+Signed-off-by: Matthias Sohn <matthias.sohn@sap.com>
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Matthias Sohn
+Date: 2019-11-26 16:35:32.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2019-11-26 16:35:46.000000000
+Message: 
+Patch Set 1:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/2092/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2019-11-26 16:50:21.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/2092/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2019-11-26 19:10:18.000000000
+Message: 
+Patch Set 1: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2019-11-26 19:12:46.000000000
+Message: 
+Patch Set 1: -Code-Review
+
+Actually, does that really help? What if we have three threads? One works on the repo and decrements to 0. 2nd thread increments to 1, does nothing. Third thread increments to 2, thinks the repo is still open.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2019-11-27 01:38:34.000000000
+Message: 
+Patch Set 1:
+
+> Actually, does that really help? What if we have three threads? One
+ > works on the repo and decrements to 0. 2nd thread increments to 1,
+ > does nothing. Third thread increments to 2, thinks the repo is
+ > still open.
+
+Doesn't that mean there is at least one more thread having incremented the refcount for some reason? I'd expect this happens since the thread wants to access the repository.
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Halstrick
+Date: 2019-11-27 08:31:24.000000000
+Message: 
+Patch Set 1: Code-Review+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2019-11-27 08:46:36.000000000
+Message: 
+Patch Set 1: Code-Review-1
+
+> > Actually, does that really help? What if we have three threads?
+ > One
+ > > works on the repo and decrements to 0. 2nd thread increments to
+ > 1,
+ > > does nothing. Third thread increments to 2, thinks the repo is
+ > > still open.
+ > 
+ > Doesn't that mean there is at least one more thread having
+ > incremented the refcount for some reason? I'd expect this happens
+ > since the thread wants to access the repository.
+
+Why? My point is returning the count and having threads do
+
+  if (repo.incrementOpen() < 2) {
+    // Oops, closed or closing
+    return;
+  }
+  // Do work
+  repo.close()
+
+doesn't work. It works for the first thread that gets a value < 2. But that thread increments, so if there's another (third) thread also doing this, that third thread
+will get the value 2, and will enter the "Do work" despite the repo already being
+closed.
+
+The counter must not increment again once it has reached zero. Which is not doable
+with an AtomicInteger.
+
+This would have to be something like
+
+  int useCount = 1;
+
+  // A return value < 2 indicates that the repository is closing or closed already
+  public int incrementOpen() {
+    synchronized(this) {
+      if (useCount > 0) {
+        return ++useCount;
+      }
+    }
+    return 0;
+  }
+
+  public void close() {
+    int next;
+    synchronized(this) {
+      next = --useCount;
+    }
+    ...
+  }
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2019-11-27 08:56:22.000000000
+Message: 
+Patch Set 1: -Code-Review
+
+> The counter must not increment again once it has reached zero.
+
+Though I see that the JGit RepositoryCache works differently, allows for this, and Repository doesn't close anyway if it's in that JGit RepositoryCache. Hm.
+----------------------------------------------------------------------------------------------------------------------

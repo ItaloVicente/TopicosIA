@@ -1,0 +1,138 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-32558: Persist Pending SyncWrites
+
+Pending SyncWrites are stored on disk with a "pending" key prefix.
+To avoid any clash with Collection, the prefix is a reserved Collection
+ID.
+
+Issues identified and deferred to follow-up patches:
+
+- Backfill. While a Pending must not be found at point-lookup, it must
+  at sequence-scan. Note that a Pending key comes out prefixed from the
+  storage, so the actual key needs to be restored before passing to the
+  Cache and Disk callbacks. In this patch I temporarily skip Pendings at
+  KVStore::scan.
+
+- Disk counters. Currently a Pending is accounted into all disk-counters,
+  which is wrong (e.g., curr_items should account a SyncWrite only when
+  it is Committed).
+  
+- Commit Pending SyncWrite. At commit, we have to deleted the previous
+  temporary Pending. Currently a persisted Pending is never deleted from
+  disk.
+
+Change-Id: I2dcbeb4148cd102d907857f645c4bde89caf9518
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2019-01-17 10:57:23.000000000
+Message: 
+Patch Set 5: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-01-17 11:26:31.000000000
+Message: 
+Patch Set 5: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/7284/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/15416/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/4936/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/15923/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/14160/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/7304/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/13775/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-01-17 14:25:28.000000000
+Message: 
+Patch Set 5: Code-Review-1
+
+(2 comments)
+Line:48, engines/ep/src/storeddockey.cc -> This feels somewhat verbose / repetitive. I don't think calling resize() potentially twice (once for each of the prefixes) is a big deal - esp given anything less than ~20 bytes is stored inside std::string (small string optimisation).
+
+Suggest you use simplify to first add prepare prefix (if necessary), then add collection Id (if necessary) , then the actual key.
+
+Line:65, engines/ep/src/storeddockey.cc -> Similary here, just conditionally do the prepend of the prepare namespace id; and then append the key (i.e. move the std::copy() out of the conditionals).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2019-01-17 14:30:00.000000000
+Message: 
+Patch Set 5: Code-Review-1
+
+(1 comment)
+
+There's also a case in rollback to consider where we are processing the chunk of keys we're discarding, there's an open bug regarding system events on that code path, but we may need some work as well to rollback prepared keys
+Line:36, utilities/dockey.cc -> curious, did you change this function because something broke?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-01-21 11:03:34.000000000
+Message: 
+Patch Set 5:
+
+(3 comments)
+
+> There's also a case in rollback to consider where we are processing the chunk of keys we're discarding, there's an open bug regarding system events on that code path, but we may need some work as well to rollback prepared keys
+
+Thanks for this
+Line:48, engines/ep/src/storeddockey.cc -> Done
+
+Line:65, engines/ep/src/storeddockey.cc -> Done
+
+Line:36, utilities/dockey.cc -> Correct, meaning that there are good checks in the Collection code :)
+
+[ RUN      ] SingleThreadedEPBucketTest.Durability_PersistPendings
+unknown file: Failure
+C++ exception with description "VB::Manifest:incrementDiskCount: iterator is invalid, this:VB::Manifest: uid:0, defaultCollectionExists:1, greatestEndSeqno:-6, nDeletingCollections:0, scopes.size:1, map.size:1
+cid:0x0:ManifestEntry: scope:0, startSeqno:0, endSeqno:-6, persistedHighSeqno:0, diskCount:0
+scope:0x0
+" thrown in the test body.
+
+Also, this change is worth a small comment, adding it
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-01-21 12:43:49.000000000
+Message: 
+Patch Set 5:
+
+> There's also a case in rollback to consider where we are processing the chunk of keys we're discarding, there's an open bug regarding system events on that code path, but we may need some work as well to rollback prepared keys
+
+Currently evaluating if https://issues.couchbase.com/browse/MB-32571 is related to Pending SyncWrite also.
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2019-01-21 14:12:01.000000000
+Message: 
+Patch Set 5:
+
+(1 comment)
+Line:36, utilities/dockey.cc -> Interesting, so this change will mean a pending mutation would become included in the collection's item count, that's ok, I assume the same for the bucket curr_items.
+
+A comment would be good just so a reader knows that you're extracting the real collection-ID from the pending key
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-01-21 16:20:38.000000000
+Message: 
+Patch Set 5:
+
+(1 comment)
+Line:36, utilities/dockey.cc -> Comment added.
+Also, yes for now a Pending is accounted in curr_items, but that's only temporary as we want to account a SyncWrite only after it is committed.
+So, for consistency when we fix curr_items we have to fix also the Collection count.
+I added a "disk-count" note to the commit message.
+
+----------------------------------------------------------------------------------------------------------------------

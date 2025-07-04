@@ -1,0 +1,194 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-53326 Push CCCP payload on all kv nodes
+
+With serverless configurations, buckets may not be configured on all the
+kv nodes in the cluster. But memcached on all the kv nodes needs to have
+the CCCP payload so that SDKs can bootstrap across any kv node.
+
+Change-Id: I2fa2d476371f0e21cc8e1308554f349e7a952c0d
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Steve Watanabe
+Date: 2022-08-18 01:38:52.000000000
+Message: 
+Uploaded patch set 4.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-08-18 01:39:00.000000000
+Message: 
+Patch Set 4:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-test/31196/
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2022-08-18 01:39:32.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2022-08-18 01:39:46.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> make simple-test
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-08-18 01:39:53.000000000
+Message: 
+Patch Set 4:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-simple-test/3765/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-08-18 01:44:02.000000000
+Message: 
+Patch Set 4: Well-Formed+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/ns-server-test/31196/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-08-18 02:31:39.000000000
+Message: 
+Patch Set 4: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/ns-server-simple-test/3765/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2022-08-18 16:58:35.000000000
+Message: 
+Patch Set 4:
+
+(3 comments)
+File Comment: /PATCHSET_LEVEL -> I have some comments/concerns. Haven't looked closely though. 
+Line:175, src/memcached_bucket_config.erl -> Does memcached not return that this is a config_only_bucket?
+
+Line:164, src/ns_bucket_worker.erl -> 2 points,
+1. This will race with ns_memcached:terminate.
+2. there is no retry mechanism if the call fails.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2022-08-18 18:12:11.000000000
+Message: 
+Patch Set 4:
+
+(2 comments)
+Line:175, src/memcached_bucket_config.erl -> The EConfigOnly error is only returned when the connection has specified the "xerror". This changes the behavior of the connections so Dave recommended not using it as it would be a huge change.
+
+Line:164, src/ns_bucket_worker.erl -> If it's a real bucket then stop_bucket, which runs before this, does supervisor:terminate_child which should terminate that tree of processes including ns_memcached. At least that's my understanding.
+
+For config-only buckets there's no ns_memcached to race with.
+
+There's no retry mechanism for stop_bucket which this is patterned after.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2022-08-19 00:52:09.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:1405, src/ns_memcached.erl -> If the deselect_bucket fails then the attempt to create_bucket will fail with not_supported.
+
+Perhaps it should be
+
+    ok = mc_client_binary:deselect_bucket(),
+    
+So if the deselect fails we'll crash and start again.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Finlay
+Date: 2022-08-19 02:44:03.000000000
+Message: 
+Patch Set 4:
+
+(6 comments)
+Line:175, src/memcached_bucket_config.erl -> This needs a comment. We're interpreting the not_supported error from memcached to mean the bucket is config-only. We should comment that we're doing this based on memcached folks telling us we can rely on this.
+
+Line:250, src/memcached_bucket_config.erl -> Is a bit redundant / repetitive. You could just say:
+        Err ->
+            Err
+
+Line:50, src/ns_bucket_sup.erl -> Why are we adding this logging? If the child fails to start, there's going to be a lot of information in the logs anyway, I think. If it was just to help you debug when you were working through this, then perhaps this should go.
+
+Line:164, src/ns_bucket_worker.erl -> We shouldn't be trying to delete the config-only bucket, I don't think. It's too risky. As Abhi says, this code will race with ns_memcached:terminate. And - are you sure it's a config-only bucket? What happens if a new bucket with the same name got created after the old bucket was deleted and was placed on this node and this process didn't get scheduled for some cycles? Basically, this is incredibly risky and I think this code needs to go.
+
+If we want to clean up config only buckets, we should talk with memcached about the best way to accomplish this.
+
+Line:1405, src/ns_memcached.erl -> The problem with this is that if there's some reason that deselect_bucket fails consistently, then we'll end up in an infinite loop. Basically:
+* start & connect to memcached
+* select bucket and determine that it is a config-only bucket
+* deselect bucket which fails causing the process to crash & start again
+
+
+If deselect_bucket fails once, this isn't a problem. But if there's some change in memcached which causes it to fail constantly we have a problem.
+
+This might be overkill, but we could do the following: if we find out that the bucket is config-only, we create a new connection, then run the part of do_ensure_bucket/4 that creates the bucket, log a message that we did this and then exit normally. When ns_memcached gets restarted, the bucket will now have the correct type.
+
+I prefer this a little bit since it doesn't rely on being able to deselect a config only bucket.
+
+Line:97, src/terse_bucket_info_uploader.erl -> why are you choosing not to die in this case?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2022-08-19 17:04:35.000000000
+Message: 
+Patch Set 4:
+
+(6 comments)
+Line:175, src/memcached_bucket_config.erl -> Done
+
+Line:250, src/memcached_bucket_config.erl -> My thought was this matches the specific error and any new errors in the future would crash (and thus require examination on whether or not it is being handled)....but that can be done upstream by the caller
+
+Line:50, src/ns_bucket_sup.erl -> I've removed this and the below ?log_debug statements.
+
+Line:164, src/ns_bucket_worker.erl -> I have a hunch Trond would suggest using "mcstat 'bucket_details <bucket>' and confirm the "type" is "ConfigOnly"...which you've already indicated you're not too keen on. 
+
+For now I'll remove the deletion code. I believe the resource "leak" is minor in kv....until we finalize what should be done.
+
+Line:1405, src/ns_memcached.erl -> I'm not following the suggestion. I've changed it to
+
+    ok = mc_client_binary:deselect_bucket(),
+
+while I digest the suggestion.
+
+Line:97, src/terse_bucket_info_uploader.erl -> Uncertainty while developing this change...though there wasn't a single failure seen :-)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2022-08-22 17:29:52.000000000
+MISMATCHED INLINE COMMENT
+Line:164, src/ns_bucket_worker.erl -> MB-53460 tracks implementing "Safely delete config-only bucket" to utilize Trond's new option to delete_bucket.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Finlay
+Date: 2022-08-22 17:18:07.000000000
+MISMATCHED INLINE COMMENT
+Line:164, src/ns_bucket_worker.erl -> Checking if it's config-only and then deleting introduces yet another time-of-check-time-of-use race. Something like a delete-if-config-only command. Or a new command like clean-up-config-only-buckets where the current list of buckets is passed. 
+
+We need to be really careful about introducing these races. Everytime we do it we introduce complexity and it makes it hard to reason about our system and hard to investigate issues when they arise in production (because there are all these potential races to consider.)
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2022-08-19 19:50:48.000000000
+MISMATCHED INLINE COMMENT
+Line:1405, src/ns_memcached.erl -> > we could do the following: if we find out that the bucket is config-only, we create a new connection, then run the part of do_ensure_bucket/4 that creates the bucket, log a message that we did this and then exit normally. When ns_memcached gets restarted, the bucket will now have the correct type.
+
+The way a bucket is determined to be config-only is to successfully select the bucket and then try to get stats...which fails with not_supported. So at this point the bucket is selected and running create_bucket will fail. So the suggestion is to use another connection to create the bucket and then exit.
+
+IMO the likelihood the deselect of a bucket which we've just selected failing is small and seems better than adding additional complexity of a create and exit solution.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Finlay
+Date: 2022-08-22 17:18:07.000000000
+MISMATCHED INLINE COMMENT
+Line:1405, src/ns_memcached.erl -> this is fine
+----------------------------------------------------------------------------------------------------------------------

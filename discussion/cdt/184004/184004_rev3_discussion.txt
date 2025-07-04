@@ -1,0 +1,167 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 505882: Generate clean target per subdir.mk
+
+To avoid errors like "Command line too long" when removing build
+artifacts, split the clean command on multiple lines. In order to
+properly handle whitespace etc, generate a new clean target in each
+subdir.mk with the explicit list of files to remove in that directory.
+The command should be splited on a sane length, 6000 is used in the
+internal builder, so reuse that limit here.
+
+Contributed by STMicroelectronics
+
+Change-Id: I843e1ac896076d279173c421210b72f4a325296f
+Signed-off-by: Torbjörn Svensson <torbjorn.svensson@st.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Torbjörn Svensson
+Date: 2021-08-17 20:06:02.000000000
+Message: 
+Uploaded patch set 3.
+----------------------------------------------------------------------------------------------------------------------
+Author: Torbjörn Svensson
+Date: 2021-08-17 20:09:41.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+----------------------------------------------------------------------------------------------------------------------
+Author: CDT Bot
+Date: 2021-08-17 20:27:22.000000000
+Message: 
+Patch Set 3: Verified-1
+
+Build Unstable 
+
+https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-other-pipeline/3670/ : UNSTABLE. p2 repository available on https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-other-pipeline/3670/artifact/releng/org.eclipse.cdt.repo/target/repository/ - please mark build as "Keep this build forever" if the p2 repo is needed for testing. Otherwise it will be deleted shortly.
+
+https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-ui-only-pipeline/3467/ : SUCCESS
+
+https://ci.eclipse.org/cdt/job/cdt-verify-code-cleanliness-pipeline/3234/ : SUCCESS. Formatting, whitespace, version numbers and other checks appear to be correct. See https://github.com/eclipse-cdt/cdt-infra/tree/master/jenkins/pipelines/cdt/verify#cdt-verify-code-cleanliness for documentation on what is checked.
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonah Graham
+Date: 2021-08-19 14:42:58.000000000
+Message: 
+Patch Set 3:
+
+(5 comments)
+Line:4846, build/org.eclipse.cdt.managedbuilder.core/src/org/eclipse/cdt/managedbuilder/makegen/gnu/GnuMakefileGenerator.java -> should this become static field? It feels like overhead to recalculate the bitset each call to toCleanTarget
+
+Line:4853, build/org.eclipse.cdt.managedbuilder.core/src/org/eclipse/cdt/managedbuilder/makegen/gnu/GnuMakefileGenerator.java -> +1 for iterating over codePoints and not chars.
+
+Line:4856, build/org.eclipse.cdt.managedbuilder.core/src/org/eclipse/cdt/managedbuilder/makegen/gnu/GnuMakefileGenerator.java -> Only thing I would add is that I special cased / to encode as - to increase readability. As now your encoding of:
+
+   src/dir
+
+is
+
+   src-0002fdir
+
+rather than
+
+   src-dir
+
+Of course you have to make sure that doesn't conflict with the line below - so good luck on that :-)
+
+Line:4858, build/org.eclipse.cdt.managedbuilder.core/src/org/eclipse/cdt/managedbuilder/makegen/gnu/GnuMakefileGenerator.java -> AFAICT your code coverts values from non-alpha to - followed by 4 hex chars? That leaves a little gap when codePoints are greater than 16-bits. My example was based on URL encoding. In URL encoding each byte is encoded as %XX, so the code point could be broken up into its individual bytes and encoded as -XX-XX-XX (for a 3-byte code point).
+
+However, for brevity and simplicity, you can just add an end to the encoding like this (replace lines 4857-4862):
+   sb.append("-");
+   sb.append(c);
+   sb.append("-");
+
+No actual need to hex encode or add leading zeros if you mark beginning and end of the character.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Torbjörn Svensson
+Date: 2021-08-19 15:14:22.000000000
+Message: 
+Patch Set 3:
+
+(3 comments)
+
+I think it's important to finalize the scheme now instead of having to redo part of it later on.
+
+@Jonah, please take a quick look at my 2 followup questions :)
+Line:4846, build/org.eclipse.cdt.managedbuilder.core/src/org/eclipse/cdt/managedbuilder/makegen/gnu/GnuMakefileGenerator.java -> It could, but then there would either need to be some synchronous block to init it, or need a static block. Not sure if it's better.
+The time to init this part is rather low, so I considered it ok to do every time.
+
+Line:4856, build/org.eclipse.cdt.managedbuilder.core/src/org/eclipse/cdt/managedbuilder/makegen/gnu/GnuMakefileGenerator.java -> > Only thing I would add is that I special cased / to encode as - to increase readability. As now your encoding of:
+> 
+>    src/dir
+> 
+> is
+> 
+>    src-0002fdir
+> 
+> rather than
+> 
+>    src-dir
+> 
+> Of course you have to make sure that doesn't conflict with the line below - so good luck on that :-)
+
+The problem with this is that if you have a path like src/ö/foo, it would be encoded (with your scheme) as src-f6-foo, but so would also the literal src-b6-foo. What I'm trying to say is that the marker for a the illegal bytes cannot be an allowed character or there will be an ambiguity.
+
+So my followup question is; how should these be encoded?
+
+src/dir
+src-dir
+src_dir
+src-ö-dir
+src/ö/dir
+
+
+By the way, with my version, "src/dir" is encoded as "src-2fdir", but yes, it's harder to read than "src-dir" or something similar.
+
+Line:4858, build/org.eclipse.cdt.managedbuilder.core/src/org/eclipse/cdt/managedbuilder/makegen/gnu/GnuMakefileGenerator.java -> It takes the CP and finds the first byte that has at least one bit set (removing the leading zeros) and that byte and all after and transform them into 2 characters, one for each nibble, per byte.
+So one CP will be max 8 characters, but can be as low as 2 characters.
+To be similar to the URL encoding, maybe the initial "-" should be moved inside the loop, or we could add another "-" as a terminator for the hex encoded CP. What would you prefer?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonah Graham
+Date: 2021-08-19 17:18:40.000000000
+Message: 
+Patch Set 3:
+
+(3 comments)
+Line:4846, build/org.eclipse.cdt.managedbuilder.core/src/org/eclipse/cdt/managedbuilder/makegen/gnu/GnuMakefileGenerator.java -> > The time to init this part is rather low, so I considered it ok to do every time.
+
+OK.
+
+
+> It could, but then there would either need to be some synchronous block to init it, or need a static block. Not sure if it's better.
+
+If you decide to change it, a static block is probably best, synchronous is built in that way.
+
+Line:4856, build/org.eclipse.cdt.managedbuilder.core/src/org/eclipse/cdt/managedbuilder/makegen/gnu/GnuMakefileGenerator.java -> :-) Hence the good luck part - my brain didn't seem up to it at the time. Not sure brain still is - so here you go.
+
+Actually, forget the special case, having - on both sides of the encoding makes it easy enough to read:
+
+    src-2f-dir
+    src-2d-dir
+    src_dir
+    src-2d--c3b6--2d--dir
+    src-2f--c3b6--2f--dir
+
+I am agnostic to lower vs uppercase for hex - just be consistent.
+
+Line:4858, build/org.eclipse.cdt.managedbuilder.core/src/org/eclipse/cdt/managedbuilder/makegen/gnu/GnuMakefileGenerator.java -> The - as terminator because it solves the src/dir readability.
+
+But I don't have a strong opinion. Once you generate the tests you will see how it looks and feels and if it seems right to you then.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Torbjörn Svensson
+Date: 2021-08-19 20:22:27.000000000
+MISMATCHED INLINE COMMENT
+Line:4856, build/org.eclipse.cdt.managedbuilder.core/src/org/eclipse/cdt/managedbuilder/makegen/gnu/GnuMakefileGenerator.java -> It's implemented and I think I got all the test cases updated.
+Will get a confirmation in a bit.
+----------------------------------------------------------------------------------------------------------------------
+Author: Torbjörn Svensson
+Date: 2021-08-19 20:22:27.000000000
+MISMATCHED INLINE COMMENT
+Line:4858, build/org.eclipse.cdt.managedbuilder.core/src/org/eclipse/cdt/managedbuilder/makegen/gnu/GnuMakefileGenerator.java -> I read your earlier comment one more time and decided to go with that (-c- instead of the for-loop).
+----------------------------------------------------------------------------------------------------------------------

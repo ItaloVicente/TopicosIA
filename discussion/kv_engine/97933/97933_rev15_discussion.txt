@@ -1,0 +1,174 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-30020 Use new helper function in mcbp_validators.cc
+
+Modify validators in mcbp_validators.cc to use a common function to
+verify the request cookie's header fields, and set the error context
+should the validation fail.
+
+Change-Id: Idf2f08081027cfd5e71eb4b5b177921431a375bb
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Sven Signer
+Date: 2018-08-17 15:30:34.000000000
+Message: 
+Uploaded patch set 15.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-08-17 15:57:45.000000000
+Message: 
+Patch Set 15: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/10162/ : FAILURE
+
+<p>clang-format suggested the following changes:
+
+<pre>
+cat <<"EOF" | patch -p1
+diff --git a/tests/mcbp/mcbp_bench.cc b/tests/mcbp/mcbp_bench.cc
+index 5a3a565..69c22e8 100644
+--- a/tests/mcbp/mcbp_bench.cc
++++ b/tests/mcbp/mcbp_bench.cc
+@@ -15,15 +15,14 @@
+  *   limitations under the License.
+  */
+ 
++#include &quot;mock_connection.h&quot;
+ #include &lt;benchmark/benchmark.h&gt;
+ #include &lt;daemon/mcbp_validators.h&gt;
+-#include &quot;mock_connection.h&quot;
+ 
+ class ValidatorBench : public ::benchmark::Fixture {
+ public:
+-
+     ValidatorBench()
+-    : request(*reinterpret_cast&lt;protocol_binary_request_no_extras*&gt;(blob)) {
++        : request(*reinterpret_cast&lt;protocol_binary_request_no_extras*&gt;(blob)) {
+     }
+ 
+     void SetUp(benchmark::State&amp; st) override {
+@@ -37,12 +36,10 @@ protected:
+     McbpValidatorChains validatorChains;
+     MockConnection connection;
+ 
+-    protocol_binary_request_no_extras &amp;request;
++    protocol_binary_request_no_extras&amp; request;
+     uint8_t blob[4096];
+-
+ };
+ 
+-
+ BENCHMARK_DEFINE_F(ValidatorBench, GetBench)(benchmark::State&amp; state) {
+     request.message.header.request.extlen = 0;
+     request.message.header.request.keylen = htons(10);
+
+EOF
+</pre> ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/10162/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/11348/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/11171/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/892/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/3045/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/9970/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-08-17 16:28:07.000000000
+Message: 
+Patch Set 15:
+
+(9 comments)
+
+Getting there - still a few comments below.
+
+Could you also include the before / after benchmark times in your comment message.
+Line:67, daemon/mcbp_validators.cc -> Note that not all bits in datatype are currently valid - see mcbp::datatype::highest in protocol_binary.h. Therefore suggest you change the default to that.
+
+Line:107, daemon/mcbp_validators.cc -> This looks incorrect -you're testing expected_keylen, but the error message talks about extras.
+
+Line:110, daemon/mcbp_validators.cc -> In general for anything to do with on-the-wire data don't use int / long etc as their sizes vary depending on the archicture. Prefer the correct sized type - uint8_t, uint16_t, uint32_t etc.
+
+Line:119, daemon/mcbp_validators.cc -> Generally bad practice to treat enumeration values as integers - they are different types. 
+
+Prefer something like:
+
+ if (expected_valuelen != ExectedLen::Zero) {
+
+Line:133, daemon/mcbp_validators.cc -> Style: When you have a specific set of possible enumeration values, prefer using a switch statement instead of multiple if() statements:
+
+ switch (expected_cas) {
+ case ExpectedCas::NotSet:
+     ...
+ case ExpectedCas::Set:
+    ...
+ };
+
+This has a couple of advantages:
+
+- It reduces duplication - you remove the repeated `if ((expected_cas == ` code
+- It makes it more explicit (to the reader) this is actually a disjoint choice - i.e you're only going to perform one of N code paths.
+- The compiler can check that all specified enum values are "covered" by the switch, so if you forget to handle a case you'll get an error (unlike the if above).
+
+(Same for expected_Extras / keylen).
+
+Line:186, daemon/mcbp_validators.cc -> So I might have mis-read the code earlier / mis-interpreted what you were trying to do,  but I thought you only needed the "any / non-zero etc" checks for a limited set of the fields (say key, but not extras).
+
+As such, while this is better for CAS (we can tell that's Any here), it's still pretty unclear what the other fields are for - and I think it ambiguous / unnecessary to have an "Any" value for extras. Unless I'm mistaken every command has a fixed value / set of values for extra_len.
+
+Similary, I don't think any commands require a specific keylen - it's either zero or non-zero.
+
+As such I'd adjust your function / enums to make this more tightly defined, using the correct type for each expected value which doesn't allow any more variability than it needs - something along the lines of:
+
+ enum class ExpectedKeyLen { Zero, NonZero };
+ enum class ExpectedValueLen {Zero, NonZero };
+ ...
+ verify_header(Cookie& cookie,
+    uint8_t expected_extlen // extras is always a specific value, right?
+    ExpectedKeyLen expected_keylen, // keylen is always zero or non-zero, right?
+    ExpectedValueLen expected_valuelen,// mostly zero / non-zero, right?
+    ExpectedCas expected_cas = ExpectedCas::Any,
+    uint8_t expected_datatype_mask = mcbp::datatype::highest);
+
+For the few, occasional times when value_len is a fixed amount I'd just special-case that in the specific validator; which simplifies the handling in your common validator function.
+
+Line:20, tests/mcbp/mcbp_bench.cc -> Style: Please order these in the correct order - see https://github.com/couchbase/kv_engine/blob/master/docs/CodingStandards.rst#include-style
+
+Line:22, tests/mcbp/mcbp_bench.cc -> Probably worth qualifying this name with "Mcbp" or similar as "ValidatorBench" is somewhat ambiguous (the name has scope across the whole of KV-Engine in test results).
+
+Please add a description of what this class is for / what is being tested.
+
+Line:41, tests/mcbp/mcbp_bench.cc -> Style: probably nicer to implement this as a union - unless the reader looks at the constructor for ValidatorBench they won't know that request and blob alias (and changing one changes the other).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-08-21 10:18:13.000000000
+Message: 
+Patch Set 15:
+
+> (1 comment)
+ > 
+ > On my local machine the benchmark times increase from 29ns to 35ns
+ > compared to the current master branch. Is this significant enough
+ > to require improvement?
+
+Great - thanks for the numbers.
+
+re: the increase from 29ns to 35ns - What do you think? :)
+----------------------------------------------------------------------------------------------------------------------
+Author: Sven Signer
+Date: 2018-08-21 10:01:36.000000000
+MISMATCHED INLINE COMMENT
+Line:186, daemon/mcbp_validators.cc -> The majority of validators accept a single extlen (either fixed or specified by some function). There are, however, also several cases (flush, get_all_vb_seqnos, get_meta, mutate_with_meta, get_locked) where extlen can take multiple values. 
+
+I originally thought this necessitated an any value to allow the extlen check to be special-cased in the validator. However, one can simply pass the headers actual extlen value as the expected extlen to achieve the same effect.
+
+While only two validators need a specific value length, there are several that can accept both a zero or non-zero key, and several that accept both a zero or non-zero value, so both ExpectedKeyLen and ExpectedValueLen still need an any option.
+----------------------------------------------------------------------------------------------------------------------

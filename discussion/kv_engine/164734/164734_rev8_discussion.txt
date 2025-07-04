@@ -1,0 +1,77 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-47451: Avoid FollyExecutorPool::schedule/cancel use-after-free race
+
+Scenario: A use-after-free can occur when the asynchronous task deletion
+(which runs on a NonIO thread) is executed _after_ the task has already
+been re-scheduled.
+Specifically the following sequence of calls across threads - note
+numbering indicates logical order of the 6 steps, but vertical position
+indicates when tasks _actually_ are executed temporally:
+
+  IO (futurePool) thread               CPU (NonIO) thread
+  ----------------------               ------------------
+  1. scheduleTask()
+  2. cancelTask()
+     calls resetTaskPtrViaCpuPool()
+     - enqueue work on NonIO
+       thread to reset GlobalTask
+       shared_ptr.
+  4. scheduleTask()
+  5. cancelTask()
+     (same as step 2).
+
+                                       3. <<enqueued at 2>>
+                                          call resetTaskPtrViaCpuPool
+                                          lamba
+                                          - Reset GlobalTaskShared ptr
+                                          - enqueue work on futurePool
+                                            to remove Proxy from
+                                            taskOwners.
+
+                                       6. <<enqueued at 2>>
+                                          call resetTaskPtrViaCpuPool
+                                          lamba
+                                          - Reset GlobalTaskShared ptr
+                                          - enqueue work on futurePool
+                                            to remove Proxy from
+                                            taskOwners.
+                                          *** user-after-free of Proxy
+                                          ***
+
+The use-after-free occurs during the second resetTaskPtrViaCpuPool
+lambda (6) is executing; as we are essentially re-freeing the Proxy
+which was freed at (3). This is because the code assumes that (6) will
+be executed after (4) - when a new Proxy would normally be created.
+
+Note that we don't currently see any failure at (4) - where we are
+logically re-using the same proxy (it's not yet deleted at (3) as one
+might expect) - as that is a "valid" scenario as per the changes made for
+MB-42029 which allow a TaskProxy to be re-used if a task is re-scheduled
+before the cancel cleanup is completed.
+
+The above scenario highlights that the fix for MB-42029 (and allowing
+reuse of TaskProxy objects) is flawed :(
+
+Solution:
+
+Keep the reset of GlobalTask on the CPU background thread, but erase
+(and delete) the TaskProxy from taskOwners immediately during
+cancel. This means that we don't re-use the same TaskProxy at (4) from
+(2); and hence avoid the use-after-free which previoulsy occurred at
+(6). This also means that TaskProxy objects are no longer re-used,
+which arguabely simplifies the model.
+
+See also: "MB-42029: FollyExecPool: Wait for tasks cancelled in unregisterTaskable" (c370cd5)
+
+Change-Id: I3f8401d7ddd34ed8ca96cb8a446fd6d439074027
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2021-11-08 11:20:33.000000000
+Message: 
+Patch Set 8: Patch Set 7 was rebased
+----------------------------------------------------------------------------------------------------------------------

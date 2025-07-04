@@ -1,0 +1,110 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-38102 Add response time to http_access logs
+
+This changes the format of the entries in the http_access.log and
+http_access_internal.log files to add the response time at the end.
+
+127.0.0.1 - @cbq-engine-cbauth [04/Mar/2020:11:48:07 -0800] \
+        "GET /pools/default/buckets/default/ddocs HTTP/1.1" 200 11 \
+         - "Go-http-client/1.1" 7
+                                ^
+                                +-- response time (msecs)
+
+Logging the response time taken by ns_server provides a datapoint for
+cases where it appears ns_server isn't being responsive.  Keep in mind
+this does not include the mochiweb time, network latency, or client overhead.
+
+Change-Id: Ifd905320c9d515ab6badbc42d7ebbd46167016c2
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Steve Watanabe
+Date: 2020-03-16 22:33:23.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-03-16 22:33:31.000000000
+Message: 
+Patch Set 2:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-test/16394/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-03-16 22:38:58.000000000
+Message: 
+Patch Set 2: Well-Formed+1
+
+Permission granted to commit to restricted branch
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2020-03-17 16:46:36.000000000
+Message: 
+Patch Set 2:
+
+Adding some informative email exchanges...
+
+= SW ===================
+Hi Aliaksey,
+In my change to add the response time (http://review.couchbase.org/#/c/123520/) you commented about measuring the impact of updating the headers.  I made this change to my change:
+ 
++++ b/src/menelaus_web.erl
+@@ -126,9 +126,12 @@ webconfig() ->
+ 
+loop(Req0, Config) ->
+     ok = menelaus_sup:barrier_wait(),
++    S = erlang:monotonic_time(microsecond),
+     StartTime = integer_to_list(erlang:system_time(millisecond)),
+     Req = menelaus_auth:apply_headers(Req0,
+                                       [{"menelaus-start-time", StartTime}]),
++    E = erlang:monotonic_time(microsecond),
++    ?log_debug(">>> Adding start time took ~p microseconds", [E - S]),
+ 
+And running on my macbook it adds 5 – 9 microseconds.  Is the above code what you had in mind?  What amount of time would be acceptable?
+= AA ====================
+What I was thinking about is that it's already a recurring complaint that ns_server eats a lot of CPU when bombarded with requests by the services. So I'd like to know how much worse we are making it. To be fair, if the services simply used APIs that we "endorse", the situation would be much better. And it's unlikely the case that per-request book-keeping is the bottle-neck.
+
+5 to 10 microseconds doesn't seem like a lot, but at the same time it seems like too much to get the current time and just store it.
+
+My comments were mostly driven by abundance of caution and the fact that it seems wasteful/ugly to store the time as a string.
+= SW ====================
+In this code, down in the code in mochiweb_headers:enter it does a any_to_list so I'll remove the integer_to_list here.
+
+loop(Req0, Config) ->
+    ok = menelaus_sup:barrier_wait(),
+    StartTime = integer_to_list(erlang:system_time(millisecond)),
+    Req = menelaus_auth:apply_headers(Req0,
+                                      [{"menelaus-start-time", StartTime}]),
+
+
+Also I did a new experiment so that only the menelaus_auth:apply_headers is measured and it's the thing taking the 5 to 10 microseconds.
+
+127 loop(Req0, Config) ->
+128     ok = menelaus_sup:barrier_wait(),
+129     StartTime = erlang:monotonic_time(millisecond),
+130     S = erlang:monotonic_time(microsecond),
+131     Req = menelaus_auth:apply_headers(Req0,
+132                                       [{"menelaus-start-time", StartTime}]),
+133     E = erlang:monotonic_time(microsecond),
+134     ?log_debug(">>> Adding start time took ~p microseconds", [E - S]),
+
+The small number of microseconds added is in the noise considering the requests take milliseconds to complete.   I'll tweak my change while this is considered.
+= AA ===================
+Yes, I noticed that too. But it hardly changes anything. We still have to decode the value back, when in reality we just want to store a number cheaply, with no extra fuss that mochiweb_headers implies.
+= SW ===================
+Are you suggesting that I change mochiweb to make storing the response start time a part of the mochiweb metadata independent of the headers?  I don’t know if this is possible or if it is, how hard to do.  Just want to clarify what you'd like before drilling into the code.
+= AA ===================
+I wasn't suggesting any specific approach. I wouldn't want to deviate from the upstream mochiweb (however dead it is) too much. Though this would be the most straightforward solution.
+
+Let me think about it a bit.
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2020-03-20 12:43:17.000000000
+Message: 
+Patch Set 2: Verified+1
+
+This information would be beneficial in cases such as CBSE-7968.  I think the small additional overhead out weighs the benefit of having the timing.
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,207 @@
+======================================================================================================================
+DESCRIPTION:
+
+RevWalk: integrate commit-graph with commit parsing
+
+Teach JGit to inspect a commit graph file to supply the contents of a
+RevCommit when calling RevWalk#parseHeadersInGraph(RevCommit), including
+parents, the root tree, the commit date and the generation number.
+By loading commits from the graph instead of parsing commit buffers,
+we save a lot of time on long commit walks.
+
+The startup cost of reading the entire commit graph is small. After
+testing, reading a commit-graph with 1 million commits takes less than
+50ms. If we use RepositoryCache, it will not be initialized util the
+commit-graph is rewritten.
+
+If core.commitGraph is false, then do not check graph files.
+When core.commitGraph is true, it's important to know that RevCommit may
+not contain buffer after calling RevWalk#parseHeadersInGraph(RevCommit).
+
+Bug: 574368
+Change-Id: I90d0f64af24f3acc3eae6da984eae302d338f5ee
+Signed-off-by: kylezhao <kylezhao@tencent.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Kyle Zhao
+Date: 2022-12-19 02:21:00.000000000
+Message: 
+Uploaded patch set 41: Patch Set 40 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2022-12-19 02:21:24.000000000
+Message: 
+Patch Set 41:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline.java11/2698/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2022-12-19 02:35:02.000000000
+Message: 
+Patch Set 41: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline.java11/2698/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Ivan Frade
+Date: 2022-12-19 21:08:44.000000000
+Message: 
+Patch Set 41:
+
+(1 comment)
+Line:147, org.eclipse.jgit/src/org/eclipse/jgit/revwalk/RevCommit.java -> This explicit #parseHeadersInGraph() muddles the life-cycle of RevCommit. e.g. It is not obvious what happens if you invoke #parseHeaders() and then #parseHeadersInGraph() (or the other way around). Or why should the caller care if the data comes from graph or pack?
+
+This would be clearer to implement in a subclass of RevCommit (eg. RevCommitCG). A RevCommitCG IS-A RevCommit with a graph position.
+
+Then RevCommitCG would keep the same life-cycle than RevCommit, only that #parseHeaders would read from the commit-graph, instead of the pack.
+ 
+RevCommitCG could be instantiated in RevWalk#createCommit(), which chooses between RevCommit/RevCommitCG depending if the requested commit is in the graph.
+
+With a subclass, any current usage of RevWalk using only the headers would benefit from the commit graph without change. It also keeps the API of RevCommit consistent.
+
+Alternatively, this could be an "if" inside #parseHeaders() but then we pay the int of the graph position for every RevCommit instance (even when there is no graph) and make more complicated the parsing (for a case that looks pretty well fitted for overriding).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ivan Frade
+Date: 2023-01-04 18:32:24.000000000
+MISMATCHED INLINE COMMENT
+Line:147, org.eclipse.jgit/src/org/eclipse/jgit/revwalk/RevCommit.java -> > Some users might use RevWalk#parseHeaders() and then call RevCommit#getFullMessage() to get message, but when they enable commit-graph, they will find that this method may be not work because RevCommit#buffer is null.
+
+Currently that only works if they set #retainBody(), and we want to keep that behaviour:
+
+#parseHeaders -> Read from commit-graph or pack
+#parseHeaders + #retainBody -> read from pack (as we need to read the bytes anyway)
+#parseBody -> read from pack
+
+#retainBody or #parseBody makes the commit-graph useless because we will need the full data from disk anyway.
+
+> I wonder if it will be more complicated to use the RevCommitCG subclass because of this.
+
+The equality is implemented in AnyObjectId and the ...Map.Entry, based only in the object-id, so it shouldn't be a problem.
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2023-01-04 08:34:53.000000000
+MISMATCHED INLINE COMMENT
+Line:147, org.eclipse.jgit/src/org/eclipse/jgit/revwalk/RevCommit.java -> > From the caller point of view, why do they need to know about the graph (#parseInGraph())? Callers just indicate "I will access headers" with #parseHeaders and where do those headers come from is irrelevant for them. 
+
+I agree with this. 
+Setting these methods as protect can avoid this problem.
+
+
+> From the caller point of view, why do they need to know about the graph (#parseInGraph())? Callers just indicate "I will access headers" with #parseHeaders and where do those headers come from is irrelevant for them. 
+> Plus any existing code would benefit from the commit-graph without further change.
+
+But there is a difference between parseHeaders from commit-graph and pack:
+
+In order to ensure smaller storage, commit-graph does not record commit
+message and other information, so even if RevWalk#isRetainBody() is true, the commit parsed from the commit-graph will not contain the buffer.
+
+And this is why I implemented RevCommit#parseHeadersInGraph() instead of parsing the commit-graph directly in the RevCommit#parseHeaders() method.
+
+Some users might use RevWalk#parseHeaders() and then call RevCommit#getFullMessage() to get message, but when they enable commit-graph, they will find that this method may be not work because RevCommit#buffer is null.
+
+
+> The instances are still created/kept by the RevWalk (not in the commit graph), e.g. in RevWalk#createCommit() so all that is the same.
+> Not sure what do you mean in #2. We dont need to subclass RevWalk. DepthWalk.Commit maybe needs some rework to benefit from the commit graph. It adds a depth member to RevCommit... maybe a wrapper is better than a subclass?
+
+I mean:
+
+In the same RevWalk, the RevCommit instance of the same object is unique.
+
+a <- b 
+( a is b's parent )
+
+For example, we get a RevCommit instance (called a) through RevWalk#parseCommit(), and mark its flag with RevWalk#TEMP_MARK.
+
+Then we get b and parse its header. When we call RevCommit#getParent(0), the obtained instance will be the same as the one mentioned above, and we can still find that its flag is TEMP_MARK.
+
+I wonder if it will be more complicated to use the RevCommitCG subclass because of this.
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2022-12-21 02:56:09.000000000
+MISMATCHED INLINE COMMENT
+Line:147, org.eclipse.jgit/src/org/eclipse/jgit/revwalk/RevCommit.java -> > 1.  If we still use RevWalk to generate RevCommitCG, whenever we want to obtain graphPos or generation information, we need to add addtional "instead of RevCommitCG" statement for judgment. 
+
+typo:  "instead of RevCommitCG" -> "instanceof RevCommitCG"
+----------------------------------------------------------------------------------------------------------------------
+Author: Ivan Frade
+Date: 2023-01-03 23:24:30.000000000
+MISMATCHED INLINE COMMENT
+Line:147, org.eclipse.jgit/src/org/eclipse/jgit/revwalk/RevCommit.java -> > You means "RevCommitCG extends RevCommit"?
+
+Right
+
+> 1.  If we still use RevWalk to generate RevCommitCG, whenever we want to obtain graphPos or generation information, we need to add addtional "instead of RevCommitCG" statement for judgment. 
+> It can be avoided if we add a default value to RevCommit#getGeneration(), but in this case, it feels that subclass does not make much sense.
+
+As a concept, it is easy to reason that a RevCommitCG is a RevCommit loading its data from a different source. You can replace one with the other and the caller doesn't need to know. This maps cleanly into a subclass.
+
+From the caller point of view, why do they need to know about the graph (#parseInGraph())? Callers just indicate "I will access headers" with #parseHeaders and where do those headers come from is irrelevant for them. 
+
+Plus any existing code would benefit from the commit-graph without further change.
+
+> Of course, we also need to consider the issues I mentioned above[1] about RevCommit instance reuse in RevWalk#objects.
+
+The instances are still created/kept by the RevWalk (not in the commit graph), e.g. in RevWalk#createCommit() so all that is the same.
+
+Not sure what do you mean in #2. We dont need to subclass RevWalk. DepthWalk.Commit maybe needs some rework to benefit from the commit graph. It adds a depth member to RevCommit... maybe a wrapper is better than a subclass?
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2022-12-20 07:37:09.000000000
+MISMATCHED INLINE COMMENT
+Line:147, org.eclipse.jgit/src/org/eclipse/jgit/revwalk/RevCommit.java -> > This explicit #parseHeadersInGraph() muddles the life-cycle of RevCommit. e.g. It is not obvious what happens if you invoke #parseHeaders() and then #parseHeadersInGraph() (or the other way around). Or why should the caller care if the data comes from graph or pack?
+
+If RevWalk#isRetainBody() is false, #parseHeadersInGraph() can cover all informations of #parseHeaders() and contains additional graphPos and generation.
+
+1. If we call #parseHeaders() and then #parseHeadersInGraph(), RevWalk will try to add graphPos and generation informations if commit is in commit-graph.
+
+2. If we call #parseHeadersInGraph() and then #parseHeaders(), commit will not have any changes.
+
+> 
+> This would be clearer to implement in a subclass of RevCommit (eg. RevCommitCG). A RevCommitCG IS-A RevCommit with a graph position.
+> 
+> Then RevCommitCG would keep the same life-cycle than RevCommit, only that #parseHeaders would read from the commit-graph, instead of the pack.
+>  
+> RevCommitCG could be instantiated in RevWalk#createCommit(), which chooses between RevCommit/RevCommitCG depending if the requested commit is in the graph.
+> 
+> With a subclass, any current usage of RevWalk using only the headers would benefit from the commit graph without change. It also keeps the API of RevCommit consistent.
+> 
+> Alternatively, this could be an "if" inside #parseHeaders() but then we pay the int of the graph position for every RevCommit instance (even when there is no graph) and make more complicated the parsing (for a case that looks pretty well fitted for overriding).
+
+You means "RevCommitCG extends RevCommit"?
+I've thought about this before, but it also brings some new problems:
+
+1.  If we still use RevWalk to generate RevCommitCG, whenever we want to obtain graphPos or generation information, we need to add addtional "instead of RevCommitCG" statement for judgment. 
+It can be avoided if we add a default value to RevCommit#getGeneration(), but in this case, it feels that subclass does not make much sense.
+Of course, we also need to consider the issues I mentioned above[1] about RevCommit instance reuse in RevWalk#objects.
+
+2. If we refer to the code of DepthWalk, use a subclass of RevWalk (eg. CGRevWalk) to generate RevCommitCG. In this way, it feels like implementing a RevWalk v2 version, which can cover all the features of RevWalk. 
+Then users need to replace all RevWalk in their own code with CGRevWalk to enjoy the acceleration of commit-graph, which will bring a lot of work.
+
+[1] https://git.eclipse.org/r/c/jgit/jgit/+/183079/comments/bc0f78e5_3347850e
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2023-01-05 12:04:22.000000000
+MISMATCHED INLINE COMMENT
+Line:147, org.eclipse.jgit/src/org/eclipse/jgit/revwalk/RevCommit.java -> > > Some users might use RevWalk#parseHeaders() and then call RevCommit#getFullMessage() to get message, but when they enable commit-graph, they will find that this method may be not work because RevCommit#buffer is null.
+> 
+> Currently that only works if they set #retainBody(), and we want to keep that behaviour:
+> 
+> #parseHeaders -> Read from commit-graph or pack
+> #parseHeaders + #retainBody -> read from pack (as we need to read the bytes anyway)
+> #parseBody -> read from pack
+> 
+> #retainBody or #parseBody makes the commit-graph useless because we will need the full data from disk anyway.
+
+If so, that should make sense. 
+
+If users want to filter the commit history faster, they need to execute "walk.setRetainBody(false)". This causes less impact and I feel it's better than I thought before!
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2023-01-09 03:42:19.000000000
+MISMATCHED INLINE COMMENT
+Line:147, org.eclipse.jgit/src/org/eclipse/jgit/revwalk/RevCommit.java -> Done
+----------------------------------------------------------------------------------------------------------------------

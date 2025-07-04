@@ -1,0 +1,106 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-36146 Fix a race condition in CheckpointManager
+
+Fix a race condition in the CheckpointManager when the following
+sequence of events occur:
+
+1. An active stream needs to be moved to the dead state so we can call
+the destructor ActiveStream::~ActiveStream()
+
+2. This then in turn calls ActiveStream::removeCheckpointCursor() which
+gets a shared pointer to the checkpoint cursor
+
+3. The removeCheckpointCursor() method then gets a lock on the queueLock
+
+4. ActiveStream::getItemsRemaining() is called and gets hold of a
+shared pointer to the same cursor as removeCheckpointCursor() has
+
+5. CheckpointManager::getNumItemsForCursor() is then called with the
+raw pointer to the cursor but has to wait till removeCheckpointCursor()
+has finished executing as queueLock is locked
+
+6. removeCursor_UNLOCKED() is called by removeCheckpointCursor() which
+decrements the number of cursors on checkpoint
+
+7. The checkpoint remover task then runs removing the checkpoint that
+the cursor points to as its cursor count is now 0 and its closed.
+
+8. removeCheckpointCursor() then frees the queueLock so
+getNumItemsForCursor() can call getNumItemsForCursor_UNLOCKED()
+
+9. getNumItemsForCursor_UNLOCKED() then tries to access the member
+CheckpointList::iterator currentCheckpoint which points to the freed
+Checkpoint and then when trying to access it we crash.
+
+The fix for this is to set CheckpointCursor::currentCheckpoint to the
+checkpointList.end() when we are deleting the current courser. Then
+check before we dereference a given currentCheckpoint that we make sure
+its not null and is not equal to checkpointList.end().
+
+Change-Id: I4e9ed18188fe4b182e87d1a8d5320a094df64e8d
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Richard de Mellow
+Date: 2019-10-01 14:11:39.000000000
+Message: 
+Uploaded patch set 5.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-10-01 14:49:37.000000000
+Message: 
+Patch Set 5: Code-Review-1
+
+(4 comments)
+Line:38, /COMMIT_MSG -> Style: When I'm describing race conditions it's helpful to highlight what activities happen on which thread, so the reader can more easily see how the race unfolds.
+
+For example in http://review.couchbase.org/114121 I layout the two different threads in different indents.
+
+Line:361, engines/ep/src/checkpoint_manager.cc -> I don't follow why this is conditional - surely if we have removed a cursor from a checkpoint, we can just unconditionally set the currentCheckpoint to invalid (i.e. end()). ?
+
+Line:78, engines/ep/src/checkpoint_manager.h -> Please document this. Also, given this is a testing-only method (most normal clients of the class don't care about it), prefer to order it at the end of the public methods.
+
+Line:150, engines/ep/src/checkpoint_manager.h -> Suggest documenting why this is now non-const.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-10-01 15:41:24.000000000
+Message: 
+Patch Set 5: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/22682/ : FAILURE
+
+Failure of a CTest test  34/213 Test  #35: ep_testsuite.full_eviction.rocksdb ........................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/22682/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/20225/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/23676/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/4360/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/21307/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/13496/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/14636/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/7320/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2019-10-01 15:42:12.000000000
+Message: 
+Patch Set 5:
+
+(3 comments)
+Line:361, engines/ep/src/checkpoint_manager.cc -> Done
+
+Line:78, engines/ep/src/checkpoint_manager.h -> Done
+
+Line:150, engines/ep/src/checkpoint_manager.h -> Done
+
+----------------------------------------------------------------------------------------------------------------------

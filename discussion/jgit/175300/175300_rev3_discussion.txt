@@ -1,0 +1,126 @@
+======================================================================================================================
+DESCRIPTION:
+
+Move reachability checker generation into the Repository object
+
+Reachability checkers are retrieved from RevWalk and ObjectWalk objects:
+* RevWalk.createReachabilityChecker()
+* ObjectWalk.createObjectReachabilityChecker()
+
+Since RevWalks and ObjectWalks are themselves directly instantiated
+in hundreds of places (e.g. UploadPack...) overriding them in a
+consistent way requires overloading 100s of methods, which isn't
+feasible. Moving reachability checker generation to a more central
+place solves that problem.
+
+The Repository object seems a good/natural place from which to get
+reachability checkers. It already provides methods to get
+ObjectReaders and RefDatabases, and will be available in all the
+places where RevWalks are created.
+
+The Bitmapped and Pedestrian reachability checker objects were
+package private in the org.eclipse.jgit.revwalk package. This change
+makes them public and moves them to the
+org.eclipse.jgit.internal.revwalk package. Corresponding tests are
+also moved.
+
+Motivation:
+1) Reachability checking algorithms need to scale. One of the
+   internal Android repositories has ~2.4 million refs/changes/*
+   references, causing bad long tail performance in reachability
+   checks.
+2) Reachability check performance is impacted by repository
+   topography: number of refs, number of objects, amounts of
+   related vs. unrelated history.
+3) Reachability check performance is also affected by per-branch
+   access (Gerrit branch permissions) since different users can
+   see different branches.
+4) Reachability check performance isn't affected by any state in a
+   RevWalk or ObjectWalk.
+
+I don't yet know if a single algorithm will work for all cases in #2
+and #3. We may need to evolve the ReachabilityChecker interfaces
+over time to solve the Gerrit branch permissions case, or use
+Gerrit-specific identity information to solve that in an efficient
+way.
+
+This change takes the existing public API and moves it to the
+repository level, which is where we can do consistent customizations
+for #2 and #3. We intend to upstream the best of whatever works, but
+anticipate the need for multiple rounds of experimentation.
+
+Change-Id: I9185feff43551fb387957c436112d5250486833d
+Signed-off-by: Terry Parker <tparker@google.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Terry Parker
+Date: 2021-01-27 00:55:18.000000000
+Message: 
+Uploaded patch set 3: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2021-01-27 00:55:27.000000000
+Message: 
+Patch Set 3:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/4377/
+----------------------------------------------------------------------------------------------------------------------
+Author: Terry Parker
+Date: 2021-01-27 00:55:41.000000000
+Message: 
+Patch Set 3:
+
+(3 comments)
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonathan Nieder
+Date: 2021-01-27 01:03:07.000000000
+Message: 
+Patch Set 3: Code-Review+2
+
+(3 comments)
+Line:53, /COMMIT_MSG -> I suspect at least some of this experimentation can happen directly upstream (in DfsRepository land where there are no API stability guarantees) but that doesn't change the motivation for this change. Sounds like a good idea.
+
+Line:184, org.eclipse.jgit/src/org/eclipse/jgit/revwalk/ObjectWalk.java -> Alas, this can't forward to repo.createObjectReachabilityChecker(this) because a RevWalk is not guaranteed to have an associated Repository (it only operates on the object store so it's possible to create one for an object store without associated refs).
+
+Alternatively, if we want to be able to forward, we could put createObjectReachabilityChecker in the ObjectReader instead of the Repository.
+
+Line:246, org.eclipse.jgit/src/org/eclipse/jgit/revwalk/RevWalk.java -> likewise
+
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2021-01-27 01:39:00.000000000
+Message: 
+Patch Set 3: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/4377/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Terry Parker
+Date: 2021-01-27 16:45:13.000000000
+Message: 
+Patch Set 3:
+
+(3 comments)
+Line:53, /COMMIT_MSG -> Probably. Our solution needs to take into account the eventual consistency inherent in our multi-homed system so it won't be a verbatim copy.
+
+Line:184, org.eclipse.jgit/src/org/eclipse/jgit/revwalk/ObjectWalk.java -> My first instinct was to make sure we don't do this solely for the convenience of being able to forward the existing RevWalk/ObjectWalk calls. But on looking more closely, ObjectReaders are where the reachability bitmaps are attached, so this idea is intriguing.
+
+Due to my current focus on user pain caused by poor ReachabilityChecker performance, I've been thinking of them as objects that reconcile the object database with the reference database, filtering objects from deleted/rewound branches or branches that are hidden by Gerrit. But looking more broadly, reachability checkers are answering questions about the relationships between any two objects. E.g., they are used to not only answer "is object A reachable from any commits visible to user U", but also more generally "is object A directly reachable from commit B or indirectly reachable from an ancestor of B".
+
+Since ReachabilityCheckers are truly about object relationships, I like this idea of moving the interface to ObjectReaders. Thanks Jonathan! I've got wall-to-wall meetings today but will try to get something out when I'm through with them.
+
+Line:246, org.eclipse.jgit/src/org/eclipse/jgit/revwalk/RevWalk.java -> Ack
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Terry Parker
+Date: 2021-01-27 17:33:35.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:184, org.eclipse.jgit/src/org/eclipse/jgit/revwalk/ObjectWalk.java -> ObjectDatabase might be a more natural place than ObjectReader. But ObjectDatabase delegates its open() and has() operations to ObjectReader, so I'm happy with ObjectReader.
+
+----------------------------------------------------------------------------------------------------------------------

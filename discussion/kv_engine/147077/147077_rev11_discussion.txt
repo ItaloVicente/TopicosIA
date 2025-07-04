@@ -1,0 +1,71 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-44079: Eph - Don't send backfilled committed prepares to replicas
+
+A node may send a committed prepare to another if it's either backfilling
+or streaming from memory. Streaming from memory guarantees that the
+replica will see the committed item for the prepare. Streaming from the
+seqlist does not if the committed item is purged before the committed
+prepare. The issue with this is that the replica does not know that the
+prepare has been committed already and it tries to recommit it.
+
+The question that needs to be addressed here is does a replica need to
+receive committed prepares in a backfill? There's a few cases to consider.
+
+1) [Prepare + Commit]. In this case not having the prepare is fine as the
+commit will exist already. If it were not received by the replica this
+would be a partial snapshot for which we make no guarantees.
+
+2) Prepare + Commit + [Prepare + Commit]. Replica received a snapshot of
+some sort before the backfill snapshot. Not having the (second)  prepare
+here is fine as in case 1.
+
+3) Prepare + [Prepare + Commit]. Replica would not replace the first prepare
+with the second if it was not sent. The commit would set the prepare to
+be completed in the HashTable and remove it from the DurabilityMonitor.
+
+One interesting part of this to note is the HCS check in the backfill scan.
+We can't just skip all completed prepares as we need to send all of the
+prepares that are incomplete at the time of the seqlist iterator creation.
+This is required because we'll stream anything newer from memory and apply
+stricter sanity checks. Currently when we complete a prepare we set the
+state of the prepare to be PrepareCommitted without replacing it. This means
+that we are modifying items in the middle of the seqlist. This is done
+without regard for range reads but this doesn't matter as the only other
+task that needs to check this is the HTTombstoneCleaner (just iterates over
+the HashTable). This leads though to a window in backfill where we may
+complete a prepare and update it to be PrepareCommitted. In this case we
+must actually send it.
+
+Change-Id: Ic3f569425d8e00782cfd89c13b16fac62cc03c59
+Reviewed-on: http://review.couchbase.org/c/kv_engine/+/147077
+Tested-by: Build Bot <build@couchbase.com>
+Reviewed-by: James Harrison <james.harrison@couchbase.com>
+Reviewed-by: Dave Rigby <daver@couchbase.com>
+Well-Formed: Build Bot <build@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2021-02-26 19:49:30.000000000
+Message: 
+Change has been successfully cherry-picked as ecfa8a186f268506eeb2eb4a05291efe55fcbf54 by Dave Rigby
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-02-26 20:01:06.000000000
+Message: 
+Patch Set 11:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-madhatter-post-commit/1187/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-02-26 20:26:50.000000000
+Message: 
+Patch Set 11:
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-madhatter-post-commit/1187/ : SUCCESS'
+----------------------------------------------------------------------------------------------------------------------

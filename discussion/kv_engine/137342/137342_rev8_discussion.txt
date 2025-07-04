@@ -1,0 +1,143 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-41866: [BP] Fix infinite loop due to HdrHistogram being reset
+
+Backport of commits: b888807bb1747b82b2c434966c76fbfc01fbb18c,
+b70c7331a9e21e6e9e4a8219a98cfe3f8c24e6d8 and
+fb7e114fddc3fa9a86a53f36770c991bd1b79c4b.
+
+MB-41510: Fix infinite loop due to HdrHistogram being reset
+
+Currently if a HdrHistogram has its reset() method called by one thread
+(T1) and is being read by another (T2) using an HdrHistoram::Iterator.
+There is the race that could cause the HdrHistoram::Iterator() to enter
+an infinite loop.
+
+This occurs as HdrHistogram's getNextValue() methods use HdrHistogam_c's
+hdr_iter_next() which intern uses the following function:
+static bool has_next(struct hdr_iter* iter)
+{
+        return iter->cumulative_count < iter->total_count;
+}
+Which logically checks that the total count the Iterator was
+initialize with is > than the sum of all the counts its read from the
+buckets in the histogram. The trouble is, that the reset() method
+changes the bucket counts back to 0. Thus, meaning the condition
+cumulative_count >= total_count may never be met.
+
+To fix this wrap the std::unique_ptr<struct hdr_histogram> with a
+folly::Synchronized<>. This allows us to take an exclusive lock on the
+pointer when performing a reset() of the histogram and allows us to
+ensure that no iterator is reading from the histogram, as the iterator
+takes a non exclusive read lock for the lifetime of the
+HdrHistogram::Iterator struct. This also ensures that
+HdrHistogram::resize() is thread safe as we now take a write lock.
+
+Change-Id: I8cf5eeb0ac3107ce20e915463be3db245c68c8b9
+Reviewed-on: http://review.couchbase.org/c/kv_engine/+/137228
+Reviewed-by: Dave Rigby <daver@couchbase.com>
+Tested-by: Build Bot <build@couchbase.com>
+
+Fix AddressSanitizer: stack-use-after-scope
+
+Move ThreadGate so it has a scope equal to the thread
+
+==16055==ERROR: AddressSanitizer: stack-use-after-scope on address 0x7ffceabf4548 at pc 0x00000520d834 bp 0x7fb4f0458520 sp 0x7fb4f0458518
+READ of size 8 at 0x7ffceabf4548 thread T3
+ #0 0x520d833 in ThreadGate::isComplete(std::unique_lock<std::mutex> const&) ../kv_engine/engines/ep/tests/module_tests/thread_gate.h:69
+ #1 0x520d833 in ThreadGate::threadUp()::{lambda()#1}::operator()() const ../kv_engine/engines/ep/tests/module_tests/thread_gate.h:45
+ #2 0x520d833 in void std::condition_variable::wait<ThreadGate::threadUp()::{lambda()#1}>(std::unique_lock<std::mutex>&, ThreadGate::threadUp()::{lambda()#1}) /usr/local/include/c++/7.3.0/condition_variable:98
+ #3 0x520d833 in ThreadGate::threadUp() ../kv_engine/engines/ep/tests/module_tests/thread_gate.h:45
+ #4 0x520d833 in resetThread(HdrHistogram&, ThreadGate&) ../kv_engine/engines/ep/tests/module_tests/hdrhistogram_test.cc:482
+ #5 0x5228687 in void std::__invoke_impl<void, void (*)(HdrHistogram&, ThreadGate&), Hdr2sfMicroSecHistogram&, ThreadGate&>(std::__invoke_other, void (*&&)(HdrHistogram&, ThreadGate&), Hdr2sfMicroSecHistogram&, ThreadGate&) /usr/local/include/c++/7.3.0/bits/invoke.h:60
+ #6 0x5228687 in std::__invoke_result<void (*)(HdrHistogram&, ThreadGate&), Hdr2sfMicroSecHistogram&, ThreadGate&>::type std::__invoke<void (*)(HdrHistogram&, ThreadGate&), Hdr2sfMicroSecHistogram&, ThreadGate&>(void (*&&)(HdrHistogram&, ThreadGate&), Hdr2sfMicroSecHistogram&, ThreadGate&) /usr/local/include/c++/7.3.0/bits/invoke.h:95
+ #7 0x5228687 in decltype (__invoke((_S_declval<0ul>)(), (_S_declval<1ul>)(), (_S_declval<2ul>)())) std::thread::_Invoker<std::tuple<void (*)(HdrHistogram&, ThreadGate&), Hdr2sfMicroSecHistogram&, ThreadGate&> >::_M_invoke<0ul, 1ul, 2ul>(std::_Index_tuple<0ul, 1ul, 2ul>) /usr/local/include/c++/7.3.0/thread:234
+ #8 0x5228687 in std::thread::_Invoker<std::tuple<void (*)(HdrHistogram&, ThreadGate&), Hdr2sfMicroSecHistogram&, ThreadGate&> >::operator()() /usr/local/include/c++/7.3.0/thread:243
+ #9 0x5228687 in std::thread::_State_impl<std::thread::_Invoker<std::tuple<void (*)(HdrHistogram&, ThreadGate&), Hdr2sfMicroSecHistogram&, ThreadGate&> > >::_M_run() /usr/local/include/c++/7.3.0/thread:186
+ #10 0x7fb4f66b295e in execute_native_thread_routine /tmp/deploy/objdir/../gcc-7.3.0/libstdc++-v3/src/c++11/thread.cc:83
+ #11 0x7fb4f51a76b9 in start_thread (/lib/x86_64-linux-gnu/libpthread.so.0+0x76b9)
+ #12 0x7fb4f4edd41c in clone (/lib/x86_64-linux-gnu/libc.so.6+0x10741c)
+
+Change-Id: Idb2dbb73d1a2e0b1beca570b38401009d3408906
+Reviewed-on: http://review.couchbase.org/c/kv_engine/+/137540
+Reviewed-by: Richard de Mellow <richard.demellow@couchbase.com>
+Tested-by: Build Bot <build@couchbase.com>
+
+MB-41510: Fix TSAN failure due to lock order inversion
+
+Fix a TSAN failure due to a lock order inversion observed on the
+mad-hatter TSAN cv machine. This was due to a potential deadlock while
+acquiring locks on this and other histogram in
+HdrHistogram::operator+=(). To fix this use folly::acquireLocked() to
+safely take write lock and read lock on this->histogram and
+other.histogram respectively. We also remove the nullptr for
+this->histogram as we don't guard any other access to the histograms
+pointer, in case cb_calloc() fails.
+
+TSAN failure:
+    WARNING: ThreadSanitizer: lock-order-inversion (potential deadlock) (pid=11208)
+    Cycle in lock order graph: M296533874179548048 (0x000000000000) => M174936684240544688 (0x000000000000) => M296533874179548048
+
+    Mutex M174936684240544688 acquired here while holding mutex M296533874179548048 in main thread:
+    #0 AnnotateRWLockAcquired <null> (libtsan.so.0+0x00000005b63d)
+    #1 folly::detail::annotate_rwlock_acquired_impl(void const volatile*, folly::annotate_rwlock_level, char const*, int) /home/couchbase/jenkins/workspace/cbdeps-platform-build-old/deps/packages/build/folly/follytsan-prefix/src/follytsan/folly/synchronization/SanitizeThread.cpp:99 (ep-engine_ep_unit_tests+0x00000139555e)
+    #2 annotate_rwlock_acquired tlm/deps/folly.exploded/include/folly/synchronization/SanitizeThread.h:111 (ep-engine_ep_unit_tests+0x000001362a06)
+    #3 folly::SharedMutexImpl<false, void, std::atomic, false, true>::annotateAcquired(folly::annotate_rwlock_level) tlm/deps/folly.exploded/include/folly/SharedMutex.h:726 (ep-engine_ep_unit_tests+0x000001362a06)
+    #4 folly::SharedMutexImpl<false, void, std::atomic, false, true>::lock_shared() tlm/deps/folly.exploded/include/folly/SharedMutex.h:400 (ep-engine_ep_unit_tests+0x000001362a06)
+    #5 folly::detail::LockTraitsImpl<folly::SharedMutexImpl<false, void, std::atomic, false, true>, (folly::detail::MutexLevel)1, false>::lock_shared(folly::SharedMutexImpl<false, void, std::atomic, false, true>&) tlm/deps/folly.exploded/include/folly/LockTraits.h:157 (ep-engine_ep_unit_tests+0x000001362a06)
+    #6 std::integral_constant<bool, true> folly::LockPolicyShared::lock<folly::SharedMutexImpl<false, void, std::atomic, false, true> >(folly::SharedMutexImpl<false, void, std::atomic, false, true>&) tlm/deps/folly.exploded/include/folly/LockTraits.h:499 (ep-engine_ep_unit_tests+0x000001362a06)
+    #7 folly::LockedPtrBase<folly::Synchronized<std::unique_ptr<hdr_histogram, HdrHistogram::HdrDeleter>, folly::SharedMutexImpl<false, void, std::atomic, false, true> > const, folly::SharedMutexImpl<false, void, std::atomic, false, true>, folly::LockPolicyShared>::LockedPtrBase(folly::Synchronized<std::unique_ptr<hdr_histogram, HdrHistogram::HdrDeleter>, folly::SharedMutexImpl<false, void, std::atomic, false, true> > const*) tlm/deps/folly.exploded/include/folly/Synchronized.h:1089 (ep-engine_ep_unit_tests+0x000001362a06)
+    #8 folly::LockedPtr<folly::Synchronized<std::unique_ptr<hdr_histogram, HdrHistogram::HdrDeleter>, folly::SharedMutexImpl<false, void, std::atomic, false, true> > const, folly::LockPolicyShared>::LockedPtr(folly::Synchronized<std::unique_ptr<hdr_histogram, HdrHistogram::HdrDeleter>, folly::SharedMutexImpl<false, void, std::atomic, false, true> > const*) tlm/deps/folly.exploded/include/folly/Synchronized.h:1394 (ep-engine_ep_unit_tests+0x000001360063)
+    #9 folly::SynchronizedBase<folly::Synchronized<std::unique_ptr<hdr_histogram, HdrHistogram::HdrDeleter>, folly::SharedMutexImpl<false, void, std::atomic, false, true> >, (folly::detail::MutexLevel)1>::rlock() tlm/deps/folly.exploded/include/folly/Synchronized.h:140 (ep-engine_ep_unit_tests+0x000001360063)
+    #10 HdrHistogram::operator+=(HdrHistogram const&) ../kv_engine/utilities/hdrhistogram.cc:83 (ep-engine_ep_unit_tests+0x000001360063)
+    #11 HdrHistogramTest_aggregationTest_Test::TestBody() ../kv_engine/engines/ep/tests/module_tests/hdrhistogram_test.cc:317 (ep-engine_ep_unit_tests+0x00000106945c)
+    #12 void testing::internal::HandleSehExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) ../googletest/googletest/src/gtest.cc:2402 (ep-engine_ep_unit_tests+0x0000013276cb)
+    #13 void testing::internal::HandleExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) ../googletest/googletest/src/gtest.cc:2438 (ep-engine_ep_unit_tests+0x00000132e814)
+    #14 testing::Test::Run() ../googletest/googletest/src/gtest.cc:2474 (ep-engine_ep_unit_tests+0x00000131d649)
+    #15 testing::TestInfo::Run() ../googletest/googletest/src/gtest.cc:2656 (ep-engine_ep_unit_tests+0x00000131d91d)
+    #16 testing::TestCase::Run() ../googletest/googletest/src/gtest.cc:2774 (ep-engine_ep_unit_tests+0x00000131dac5)
+    #17 testing::internal::UnitTestImpl::RunAllTests() ../googletest/googletest/src/gtest.cc:4649 (ep-engine_ep_unit_tests+0x00000131fe3e)
+    #18 bool testing::internal::HandleSehExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) ../googletest/googletest/src/gtest.cc:2402 (ep-engine_ep_unit_tests+0x000001327972)
+    #19 bool testing::internal::HandleExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) ../googletest/googletest/src/gtest.cc:2438 (ep-engine_ep_unit_tests+0x00000132edc8)
+    #20 testing::UnitTest::Run() ../googletest/googletest/src/gtest.cc:4257 (ep-engine_ep_unit_tests+0x00000131d741)
+    #21 RUN_ALL_TESTS() ../googletest/googletest/include/gtest/gtest.h:2237 (ep-engine_ep_unit_tests+0x000000d30e6a)
+    #22 main ../kv_engine/engines/ep/tests/module_tests/ep_unit_tests_main.cc:144 (ep-engine_ep_unit_tests+0x000000d30e6a)
+
+Change-Id: I7f7448627d20c753add8c92eaf1186fb350aaab0
+Reviewed-on: http://review.couchbase.org/c/kv_engine/+/137548
+Reviewed-by: Dave Rigby <daver@couchbase.com>
+Tested-by: Build Bot <build@couchbase.com>
+
+Change-Id: I9e671d9ff675a449e85c9f66f72d0af3b3dfc2c4
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Richard de Mellow
+Date: 2020-10-07 13:49:46.000000000
+Message: 
+Uploaded patch set 8: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-10-07 13:50:00.000000000
+Message: 
+Patch Set 8: Well-Formed-1
+
+Branch restricted. PLEASE READ this URL: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/204061/artifact/restricted.html : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-10-07 14:43:05.000000000
+Message: 
+Patch Set 8: Code-Review-1
+
+(3 comments)
+Line:7, /COMMIT_MSG -> I suggest you merge / re-write the commit message - it's not really necessary to include the details of the various bug fixes to your original patch now they are merged, given those bugs have never actually existed in the alice branch and hence arn't reverent to a reader.
+
+Line:41, /COMMIT_MSG -> All the previous "Reviewed..." tags should be removed in the cherry-pick, given this patch hasn't actually been reviewer yet.
+
+Line:110, /COMMIT_MSG -> Similary here, it will be confusing if you include multiple Change-Ids.
+
+----------------------------------------------------------------------------------------------------------------------

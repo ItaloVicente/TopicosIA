@@ -1,0 +1,70 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-37546: Early-return if nothing to flush in EPBucket::flushVBucket
+
+Before this change, the logic is:
+
+  if (have-something-to-flush) {
+    <many lines of code for flushing to disk>
+  }
+  <epilogue>
+
+The epilogue, which is executed regardless of whether we have flushed
+or not, performs:
+  - KVStore::pendingTasks()
+  - Notify HighPriority Requests (ie, Seqno Persistence reqs)
+  - Checkpoint related operations:
+    - Wakeup CheckpointRemover if CM has checkpoints that can be removed
+    - Notify satisfied CheckpointPersistence requests, if any
+
+With this change we remove the extra indentation of many lines of code:
+
+  if (nothing-to-flush) {
+    return;
+  }
+  <many lines of code for flushing to disk>
+  <epilogue>
+
+The side effect of this is that we do /not/ execute the <epilogue> if we
+early-return. But:
+  - KVStore::pendingTasks() does not need to be executed as by
+    definition "is called after persisting a batch of data to perform
+    any pending tasks on the underlying store"
+  - There is definitely no HighPrio reqs to notify as we have not
+    persisted anything
+So that is fine.
+
+Now about the Checkpoint related operations.
+I am keeping those even for when 'nothing-to-flush' by executing them
+just after the call to VB::getItemsForPersistence(), as the persistence
+cursor could have just moved to the beginning of a new checkpoint, which
+may:
+  - make the previous checkpoint available for removal
+  - satisfy some pending CheckpointPersistence request
+
+Note that before this change we missed to execute both Checkpoint
+operations before some nested return statement. Which is fixed here.
+
+For reference, the CheckpointPersistence command seems to be just legacy
+from TAP, so we can probably remove it in a follow-up.
+
+Change-Id: I12fb3f0afffcfca2db768d3179592f0eda2a2f18
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2020-01-24 08:08:04.000000000
+Message: 
+Uploaded patch set 7: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-01-24 08:08:14.000000000
+Message: 
+Patch Set 7:
+
+Branch restricted. PLEASE READ this URL: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/165427/artifact/restricted.html : FAILURE
+----------------------------------------------------------------------------------------------------------------------

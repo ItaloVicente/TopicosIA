@@ -1,0 +1,79 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-35744 [SR]: Complete all resolved SyncWrites on vbState change
+
++Problem+
+
+If a vbucket is changed from active when there are SyncWrites which
+have been resolved (i.e. we have decided to commit / abort) but *not*
+yet completed, then the commit/abort never happens
+(DurabilityCompletionTask ignores non-active VBs).
+
+As a consequence, the vBucket is in an inconsistent state - it will
+still have the prepared SyncWrite in the HashTable, but no matching
+prepare in the DM trackedWrites.
+
+If this vBucket then becomes a replica, an error is seen when
+receiving DCP mutations from the new active - when that sends the
+DCP_COMMIT/ DCP_ABORT for the given prepare, a prepare _is_ found in
+the HashTable, but the call to
+PassiveDurabilityMonitor::completeSyncWrite() will fail as there is no
+item in the trackedWrites:
+
+    ERROR 149: exception occurred in runloop during packet execution.
+    ...
+    PassiveDurabilityMonitor::completeSyncWrite vb:368 No tracked, but received commit for key <ud>cid:0x0:00000000000000001037</ud>
+
+This results in a failed rebalance (as the DCP connection is closed).
+
+This problem was introduced by the asynchronous completion of
+SyncWrites (in f6ed489642) - prior to that patch the resolved items we
+immediately committed so it wasn't possible for there to be any
+outstanding when the vBucket state changed.
+
++Solution+
+
+Address this by ensuring that any resolved (but not completed)
+SyncWrites are completed before we change away from active in
+VBucket::setState_UNLOCKED().
+
+Note that VBucket::setState_UNLOCKED() must have acquired an exclusive
+lock on the vbStateLock, and hence there cannot be an instance of
+DurabilityCompletionTask already procesing the vBuckets' resolved
+SyncWrites.
+
+Change-Id: Ic04ec422a8490f6c53e1fc7ee719383caced3462
+Reviewed-on: http://review.couchbase.org/114025
+Tested-by: Build Bot <build@couchbase.com>
+Reviewed-by: Richard de Mellow <richard.demellow@couchbase.com>
+Reviewed-by: James Harrison <james.harrison@couchbase.com>
+Reviewed-by: Daniel Owen <owend@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2019-08-30 10:33:44.000000000
+Message: 
+Change has been successfully cherry-picked as 86e28e3eb6ab0f869cd8d8356712cb9117068729 by Dave Rigby
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-08-30 10:33:50.000000000
+Message: 
+Patch Set 2:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/2127/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-08-30 11:24:20.000000000
+Message: 
+Patch Set 2:
+
+Build Unstable 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/2127/ : UNSTABLE
+
+ERROR: rebalance_in_with_ops (rebalance.rebalancein.RebalanceInTests)
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/2127/ )'
+----------------------------------------------------------------------------------------------------------------------

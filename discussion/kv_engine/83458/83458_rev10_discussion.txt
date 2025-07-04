@@ -1,0 +1,184 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-26010 [RocksDB] Correctly call Persistence Callbacks
+
+Persistence Callbacks are currently called just after a mutation is
+queued for flushing.
+With this change we execute the Callbacks when the mutation is actually
+flushed to disk.
+
+Change-Id: Ibf5dbc7e77ca1825686e85c487967baf084d3060
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2017-09-19 08:46:47.000000000
+Message: 
+Patch Set 10: Patch Set 9 was rebased
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2017-09-19 08:56:29.000000000
+Message: 
+Patch Set 10: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/2403/ : FAILURE
+
+Compile error at /home/couchbase/jenkins/workspace/kv_engine-clang_analyzer-master/kv_engine/engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc:731:49:
+error: cannot convert "__gnu_cxx::__alloc_traits<std::allocator<std::unique_ptr<vbucket_state> > >::value_type {aka std::unique_ptr<vbucket_state>}" to "vbucket_state*" in initialization
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/2403/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/2652/ : FAILURE
+
+Compile error at /home/couchbase/jenkins/workspace/kv_engine-linux-master/kv_engine/engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc:731:49:
+error: cannot convert "__gnu_cxx::__alloc_traits<std::allocator<std::unique_ptr<vbucket_state> > >::value_type {aka std::unique_ptr<vbucket_state>}" to "vbucket_state*" in initialization
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/2652/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master/2557/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/1210/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/2677/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/2694/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2017-09-19 10:10:27.000000000
+Message: 
+Patch Set 10:
+
+(21 comments)
+Line:122, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> Why remove the code here? Seems like it was useful to validate we don't try to start two batches. Should at least have something similar to CouchKVStore where we set an in_transaction flag.
+
+Line:131, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> Given you don't use `pendingCommitCnt` for anything else; I think it's simpler & clearer to remove the local variable and just inline it into the `if` check.
+
+Line:132, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> Prefer returning a direct `true` here - then the reader doesn't have to scan up to see what current value success has.
+
+Line:136, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> Prefer KVStatsCtx - which is the class under the typedef.
+
+Line:152, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> Syle - I think you can shorten the scope the write lock significantly here - just swap `pendingReqs` with a temporary (under lock), then release the lock before calling `saveDocs`. 
+
+That allows other writers to add to (the next) pendingReqs while you flush this batch.
+
+Line:154, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> Appears that `success` is always true here - in which case just return the constant ;)
+
+Line:173, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> Suggest you remove this - if possible we should enumerate all the expected errors from RocksDB; if we see something unexpected (default) suggest we throw.
+
+Line:186, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> Prefer auto here
+
+Line:202, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> This code looks common to both cases of the if - extract as a common expression.
+
+Line:218, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> I think you can just do the same thing as CouchKVStore here.
+
+Line:510, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> Suggest you change this to return an owning object, otherwise it becomes very error-prone for memory management - the caller has to remember to free the result.
+
+Take a look at rocksdb::PinnableSlice which is a subclass of Slice - I think that might be suitable here.
+
+Line:739, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> Style: Invert this if() and just add an early return; that way you get rid of the extra indent. See https://github.com/couchbase/memcached/blob/master/docs/CodingStandards.rst#use-early-exits-and-continue-to-simplify-code
+
+Line:758, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> Let's remove this for now - you're adding a read to every write; just to keep the statistics updated. That feels like an expensive design decision at the moment.
+
+(In other words - try to limit the scope of this patch to just calling the commit callback in the correct way).
+
+Line:764, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> I think this seems reasonable - seems like it's equivalent to the same thing in couchstore.
+
+Line:767, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> Prefer ProcessClock::now (see Eugen's recent patch).
+
+Line:31, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.h -> By definition you shouldn't need to include the private header from the public header (otherwise there's no point in keeping them separate!)
+
+Line:104, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.h -> I think you can move this to the .cc (and just forward-declared in the header).
+
+Line:142, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.h -> Probably wants documenting - what is this a slice of - the body?
+
+Line:143, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.h -> Suggest you make these private.
+
+Line:179, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.h -> Does this need to be public?
+
+Line:396, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.h -> Please document this.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2017-09-21 15:41:03.000000000
+Message: 
+Patch Set 10:
+
+(12 comments)
+Line:122, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> I removed the member variable `batch` to use `pendingReqs` for queueing mutation requests. 
+`intransaction` is used for achieving a kind of mutual exclusion of the `set`, `del` and `commit` operations in Couchstore. But, it seems we never execute those operation in parallel under the same KVShard, so we do not need synchronization, not even for Couchstore.
+
+Line:136, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> Done
+
+Line:152, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> I was thinking about reviewing the scope of this lock, but the synchronization is only between `commit` and `delVBucket`. Do we want to do that anyway? Copying the entire `pendingReqs` in a temporary could be expensive if pending mutations contain large documents.
+
+Line:154, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> The fact that `success` is always true is itself an error, fixed.
+
+Line:173, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> Done
+
+Line:218, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> In Couchstore we do the following:
+
+    void rollback(void) override {
+        if (isReadOnly()) {
+            throw std::logic_error("CouchKVStore::rollback: Not valid on a "
+                    "read-only object.");
+        }
+        if (intransaction) {
+            intransaction = false;
+        }
+    }
+
+`readOnly` is something I considered to implement for RocksDB in a dedicated change.
+`intransaction` can be omitted for reasons said above.
+
+Line:510, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> Removed this function to avoid memory allocation and copy.
+
+Line:739, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> Done
+
+Line:758, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> Done
+
+Line:767, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> Done
+
+Line:179, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.h -> Not really, changed to private.
+
+Line:396, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.h -> Done
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2017-09-21 16:12:22.000000000
+MISMATCHED INLINE COMMENT
+Line:122, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> Well, we "need" it in the sense that if someone later attempted to use the interface incorrectly (called begin() twice, or end() twice, we wouldn't be able to detect it.
+
+The contract for KVStore is one calls:
+
+* begin() x1
+* set() / del() xN
+* commit()
+
+As such, we need something like `in_transaction` to verify that the API is being used correctly.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2017-09-25 11:31:19.000000000
+MISMATCHED INLINE COMMENT
+Line:122, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2017-09-21 16:12:22.000000000
+MISMATCHED INLINE COMMENT
+Line:152, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> > I was thinking about reviewing the scope of this lock, but the synchronization is only between `commit` and `delVBucket`. Do we want to do that anyway?
+
+What does couchstore do?
+
+> Copying the entire `pendingReqs` in a temporary could be expensive if pending mutations contain large documents.
+
+The copy will be close to free (or at least O(1)) as you can just swap() it with the old one and hence it becomes a move.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2017-09-25 11:31:19.000000000
+MISMATCHED INLINE COMMENT
+Line:152, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> > What does couchstore do?
+
+No synchronization between `commit` and `delVBucket` in Couchstore.
+Shortening the lock scope with `swap`.
+----------------------------------------------------------------------------------------------------------------------

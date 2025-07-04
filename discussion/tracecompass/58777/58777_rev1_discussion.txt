@@ -1,0 +1,160 @@
+======================================================================================================================
+DESCRIPTION:
+
+tmf: Also dispose the inner table of TmfSimpleTableViewer
+
+Calling dispose() on a TmfSimpleTableViewer does not clear it from its
+view, because the inner Table object also needs to be disposed.
+
+Change-Id: I3b05643e93223e4a4a24fd0f1ef5399905e05c4c
+Signed-off-by: Alexandre Montplaisir <alexmonthy@voxpopuli.im>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Alexandre Montplaisir
+Date: 2015-10-22 23:30:49.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2015-10-23 03:31:08.000000000
+Message: 
+Patch Set 1:
+
+Build Started https://hudson.eclipse.org/tracecompass/job/tracecompass-gerrit/4500/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2015-10-23 05:31:13.000000000
+Message: 
+Patch Set 1: Verified-1
+
+Build Failed 
+
+https://hudson.eclipse.org/tracecompass/job/tracecompass-gerrit/4500/ : ABORTED
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2015-10-23 14:53:13.000000000
+Message: 
+Patch Set 1: -Verified
+
+Build Started https://hudson.eclipse.org/tracecompass/job/tracecompass-gerrit/4514/
+----------------------------------------------------------------------------------------------------------------------
+Author: Patrick Tasse
+Date: 2015-10-23 15:31:38.000000000
+Message: 
+Patch Set 1: Code-Review-1
+
+We have a few instance in Trace Compass where dispose is not implemented correctly. For example, the time graph's resources are never actually disposed even though it implements a dispose() in both the viewer and the control. We have plans to address it but haven't had time yet. In any case... If we're going to change something here let's try to do it correctly.
+
+I think the main confusion lies here:
+
+1. A view's (IWorkbenchPart) dispose() method always gets called when the view is disposed.
+
+2. A widget's dispose() method does *not* get called when the widget is disposed (FYI, what gets called recursively is the non-public release() method).
+
+The dispose() method is meant to be called when an application wants to programmatically dispose the widget while keeping its parent. Is this the use case you are trying to achieve?
+
+Now we have a third kind of dispose() in Trace Compass, it is the one in TmfComponent, which is not related to UI.
+
+In our case here the TmfSimpleTableViewer extends TmfViewer which is a TmfComponent. Its dispose() method needs to be called to release its resources.
+
+Note that normally a JFace 'viewer' does not have a dispose method.
+
+Here is what I think should be the correct design:
+
+1. It is not the responsibility of LatencyView to dispose the LatencyViewer. Its dispose() method could be removed.
+
+2. The viewer should release its resources when its associated control gets disposed, and this should be done in a DisposeListener.
+
+3. Ideally this DisposeListener should be implemented in TmfViewer which is the top parent class where a TmfComponent is first associated with a widget (Composite).
+
+4. To programmatically trigger the disposal of a  TmfSimpleTableViewer, what should get called is viewer.getControl().dispose().
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2015-10-23 16:53:21.000000000
+Message: 
+Patch Set 1: Verified-1
+
+Build Failed 
+
+https://hudson.eclipse.org/tracecompass/job/tracecompass-gerrit/4514/ : ABORTED
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2015-10-23 17:28:35.000000000
+Message: 
+Patch Set 1:
+
+Thanks for the thorough explanation!
+
+> The dispose() method is meant to be called when an application wants to 
+> programmatically dispose the widget while keeping its parent. Is this 
+> the use case you are trying to achieve?
+
+Pretty much, I'm working on a view where you have buttons to enable/disable different viewers, so for example a table or a bar chart viewer of the same data, and you can show either one or both at the same time.
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2015-10-23 20:40:23.000000000
+Message: 
+Patch Set 1:
+
+Thinking a bit more on this, I don't think it's that bad to cram all these notions of "dispose" together. It doesn't make much sense to remove a view but not clear its resources, just as it doesn't make sense to keep a view open but clear its resources. When we want to remove a view/viewer, it should remove/clear everything related to it.
+
+I made this patch because dispose()'ing a SWTChart viewer removes it from its view, but dispose()'ing a TmfSimpleTableViewer did not. I think we should align that behavior.
+----------------------------------------------------------------------------------------------------------------------
+Author: Patrick Tasse
+Date: 2015-10-23 21:38:12.000000000
+Message: 
+Patch Set 1: Code-Review+1
+
+Be careful not mixing view, viewer and widget.
+
+> Thinking a bit more on this, I don't think it's that bad to cram all these notions of "dispose" together.
+
+I could agree with that. A viewer is not supposed to have a dispose() method, but since this class has to have a public one (because of TmfComponent inheritance), it might be less confusing for the user to dispose its control at the same time. It doesn't make sense to allow a user to dispose the viewer's resources but not its control.
+
+> It doesn't make much sense to remove a view but not clear its resources
+
+If you remove a view, dispose() of the view should clear the view resources. The viewers and controls that are children of the view's parent composite are not part of that, they are cleared automatically by the platform. The dispose() should only clear other resources that are specifically allocated by the view.
+
+> just as it doesn't make sense to keep a view open but clear its resources.
+
+That would mean programmatically calling dispose() on a view. This doesn't actually dispose the view, so you're right, it doesn't make sense. It's also not allowed by the Javadoc of IWorkbenchPart.dispose(): "Clients should not call this method (the workbench calls this method at appropriate times)."
+
+> When we want to remove a view/viewer, it should remove/clear everything related to it.
+
+For a view, we don't want to remove it, it gets removed by the platform.
+
+For a viewer, yes the resources should be cleared, but by a DisposeListener. You don't want to rely on user code to have to call dispose().
+
+So in conclusion, I'm OK to call dispose() on the table/control. But I think that a DisposeListener should be added to the viewer's table/control that would call the viewer's dispose() (it's OK if the widget's dispose() is called twice). And the view should not dispose the table viewer.
+
+This could be considered out of scope of this patch and be changed in a broader correction of the dispose handling on the whole project.
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2015-10-23 23:07:52.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:197, tmf/org.eclipse.tracecompass.tmf.ui/src/org/eclipse/tracecompass/tmf/ui/viewers/table/TmfSimpleTableViewer.java -> ok so just to be sure, here it should be
+
+  fTableViewer.getControl().dispose();
+
+instead? I tested and that also clears up the viewer from the view.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Patrick Tasse
+Date: 2015-10-24 06:32:36.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:197, tmf/org.eclipse.tracecompass.tmf.ui/src/org/eclipse/tracecompass/tmf/ui/viewers/table/TmfSimpleTableViewer.java -> Well it would be the more correct thing to do if we didn't know how the viewer was implemented, but in practice both method implementations are identical in TableViewer and they return the same control.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Gerrit Code Review
+Date: 2015-10-26 19:16:02.000000000
+Message: 
+Change has been successfully cherry-picked as b3ddb2d009f4bdc743a63392791cb33ab8a419eb by Alexandre Montplaisir
+----------------------------------------------------------------------------------------------------------------------

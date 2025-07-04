@@ -1,0 +1,102 @@
+======================================================================================================================
+DESCRIPTION:
+
+NCBC-2675: Optimize VBucketKeyMapper.GetIndex
+
+Motivation
+----------
+Increase speed of the calculation of the assigned vBucket for a given
+key.
+
+Modifications
+-------------
+Rewrite the CRC32 algorithm used by VBucketKeyMapper.GetIndex. The new
+approach has improved inlining, reduced heap allocations, makes better
+use of CPU optimizations, and uses Span<T>.
+
+Added some benchmarks and unit tests. Note that the unit test expected
+values were acquired from running the same unit tests before the
+refactor.
+
+Results
+-------
+The CRC32 algorithm is seeing the following performance benchmarks. Span
+is the new algorithm, Array is the old one.
+
+| Method |       Runtime | KeySize |      Mean |    Error |   StdDev | Ratio | Rank |  Gen 0 | Gen 1 | Gen 2 | Allocated |
+|------- |-------------- |-------- |----------:|---------:|---------:|------:|-----:|-------:|------:|------:|----------:|
+|  Array | .NET Core 2.1 |      10 | 102.64 ns | 0.827 ns | 0.733 ns |  1.00 |    2 | 0.0165 |     - |     - |     104 B |
+|   Span | .NET Core 2.1 |      10 |  15.39 ns | 0.078 ns | 0.069 ns |  0.15 |    1 |      - |     - |     - |         - |
+|        |               |         |           |          |          |       |      |        |       |       |           |
+|  Array | .NET Core 3.0 |      10 |  91.96 ns | 0.527 ns | 0.493 ns |  1.00 |    2 | 0.0166 |     - |     - |     104 B |
+|   Span | .NET Core 3.0 |      10 |  15.10 ns | 0.060 ns | 0.056 ns |  0.16 |    1 |      - |     - |     - |         - |
+|        |               |         |           |          |          |       |      |        |       |       |           |
+|  Array | .NET Core 2.1 |      40 | 192.05 ns | 1.798 ns | 1.594 ns |  1.00 |    2 | 0.0165 |     - |     - |     104 B |
+|   Span | .NET Core 2.1 |      40 |  31.16 ns | 0.083 ns | 0.078 ns |  0.16 |    1 |      - |     - |     - |         - |
+|        |               |         |           |          |          |       |      |        |       |       |           |
+|  Array | .NET Core 3.0 |      40 | 182.18 ns | 0.812 ns | 0.760 ns |  1.00 |    2 | 0.0165 |     - |     - |     104 B |
+|   Span | .NET Core 3.0 |      40 |  31.21 ns | 0.134 ns | 0.119 ns |  0.17 |    1 |      - |     - |     - |         - |
+|        |               |         |           |          |          |       |      |        |       |       |           |
+|  Array | .NET Core 2.1 |     100 | 375.20 ns | 2.100 ns | 1.964 ns |  1.00 |    2 | 0.0162 |     - |     - |     104 B |
+|   Span | .NET Core 2.1 |     100 |  58.63 ns | 0.295 ns | 0.261 ns |  0.16 |    1 |      - |     - |     - |         - |
+|        |               |         |           |          |          |       |      |        |       |       |           |
+|  Array | .NET Core 3.0 |     100 | 364.69 ns | 1.401 ns | 1.311 ns |  1.00 |    2 | 0.0162 |     - |     - |     104 B |
+|   Span | .NET Core 3.0 |     100 |  59.35 ns | 0.385 ns | 0.360 ns |  0.16 |    1 |      - |     - |     - |         - |
+
+This results in the following overall change in
+VBucketKeyMapper.GetIndex. Note that the change appears less significant
+on longer keys due to the overhead of UTF-8 encoding the string. We may
+be able to improve this in the future by sharing the UTF-8 encoding load
+between the operation header write and the vBucket mapper.
+
+| Method |       Runtime | KeySize |      Mean |    Error |   StdDev | Ratio | Rank |  Gen 0 | Gen 1 | Gen 2 | Allocated |
+|------- |-------------- |-------- |----------:|---------:|---------:|------:|-----:|-------:|------:|------:|----------:|
+|  Array | .NET Core 2.1 |      10 | 156.96 ns | 2.370 ns | 2.101 ns |  1.00 |    2 | 0.0226 |     - |     - |     144 B |
+|   Span | .NET Core 2.1 |      10 |  65.71 ns | 1.256 ns | 1.113 ns |  0.42 |    1 | 0.0101 |     - |     - |      64 B |
+|        |               |         |           |          |          |       |      |        |       |       |           |
+|  Array | .NET Core 3.0 |      10 | 130.62 ns | 2.472 ns | 2.192 ns |  1.00 |    2 | 0.0229 |     - |     - |     144 B |
+|   Span | .NET Core 3.0 |      10 |  59.25 ns | 0.548 ns | 0.486 ns |  0.45 |    1 | 0.0101 |     - |     - |      64 B |
+|        |               |         |           |          |          |       |      |        |       |       |           |
+|  Array | .NET Core 2.1 |      40 | 263.08 ns | 1.271 ns | 1.189 ns |  1.00 |    2 | 0.0262 |     - |     - |     168 B |
+|   Span | .NET Core 2.1 |      40 | 174.20 ns | 0.445 ns | 0.416 ns |  0.66 |    1 | 0.0138 |     - |     - |      88 B |
+|        |               |         |           |          |          |       |      |        |       |       |           |
+|  Array | .NET Core 3.0 |      40 | 234.86 ns | 0.650 ns | 0.608 ns |  1.00 |    2 | 0.0267 |     - |     - |     168 B |
+|   Span | .NET Core 3.0 |      40 | 161.28 ns | 0.612 ns | 0.572 ns |  0.69 |    1 | 0.0138 |     - |     - |      88 B |
+|        |               |         |           |          |          |       |      |        |       |       |           |
+|  Array | .NET Core 2.1 |     100 | 478.91 ns | 2.382 ns | 2.228 ns |  1.00 |    2 | 0.0362 |     - |     - |     232 B |
+|   Span | .NET Core 2.1 |     100 | 392.28 ns | 1.209 ns | 1.009 ns |  0.82 |    1 | 0.0238 |     - |     - |     152 B |
+|        |               |         |           |          |          |       |      |        |       |       |           |
+|  Array | .NET Core 3.0 |     100 | 438.56 ns | 1.541 ns | 1.366 ns |  1.00 |    2 | 0.0367 |     - |     - |     232 B |
+|   Span | .NET Core 3.0 |     100 | 366.58 ns | 5.092 ns | 4.763 ns |  0.84 |    1 | 0.0238 |     - |     - |     152 B |
+
+Change-Id: Ic78cbe839704539ad9861d5e98027be25e512042
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Brant Burnett
+Date: 2020-10-16 22:49:16.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-10-16 22:49:23.000000000
+Message: 
+Patch Set 1:
+
+Build Started http://sdk.jenkins.couchbase.com/job/dotnet/job/sdk/job/couchbase-net-client-cv-trigger/1970/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-10-16 22:52:11.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+http://sdk.jenkins.couchbase.com/job/dotnet/job/sdk/job/couchbase-net-client-cv-trigger/1970/ : success
+----------------------------------------------------------------------------------------------------------------------
+Author: Jeffry Morris
+Date: 2020-10-19 06:13:42.000000000
+Message: 
+Patch Set 1: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------

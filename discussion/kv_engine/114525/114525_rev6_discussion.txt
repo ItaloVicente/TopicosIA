@@ -1,0 +1,255 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-35150 Ensure GetReplica returns only committed values
+
+Ensure GetReplica returns committed values instead of
+ENGINE_SYNC_WRITE_RECOMMIT_IN_PROGRESS when a new item is pending for
+the key specified by the GetReplica op.
+
+To ensure we do this, VBucket::getInternal() must be informed it is
+called for a GetReplica. If so we want to make sure we only look for
+committed values in the hash table using findOnlyCommitted() otherwise
+we need to use fetchValidValue(). The same modification has also been
+made to EPVBucket::completeBGFetchForSingleItem() so that when we are
+performing a bgfetch for an item requested by a GET_REPLICA op we
+correctly fetch only committed values from disk.
+
+Also refactor KVBucketIface::getInternal() interface and
+implementations so that they take a bool to inform the method if the
+get is for a replica vbucket or not. As apposed to the allowedState
+parameter which is only ever in the vbucket_state_active or
+vbucket_state_replica state.
+
+Change-Id: I11fe1fecdf66ee5c0abad3119becc5039eb96375
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Richard de Mellow
+Date: 2019-09-12 14:27:44.000000000
+Message: 
+Uploaded patch set 6.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-09-12 15:06:40.000000000
+Message: 
+Patch Set 6: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/23289/ : FAILURE
+
+Failure of a CTest test  25/184 Test  #26: ep_testsuite.value_eviction.comp_active ...................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/23289/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/14230/ : FAILURE
+
+Failure of a GoogleTest test:
+
+CheckpointRemoverEPTest.CursorDropMemoryFreed (4307 ms) ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/14230/ )
+
+Failure of a CTest test  30/179 Test  #23: ep-engine_ep_unit_tests ...................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/14230/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/19888/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/22319/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/3992/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/20914/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/13182/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/6941/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-09-12 15:53:02.000000000
+Message: 
+Patch Set 6: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/19888/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/23294/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/22319/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/3992/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/20914/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/13182/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/6941/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/14235/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2019-09-16 14:54:16.000000000
+Message: 
+Patch Set 6:
+
+(3 comments)
+Line:22, /COMMIT_MSG -> this needs updating
+
+Line:149, engines/ep/src/ep_types.h -> empty comment
+
+Line:285, engines/ep/src/ep_vb.h -> BGFetch should never return a non-committed item (in current master) so I don't think this change is necessary. Could make the completion unconditonally get the committed item.
+
+http://src.couchbase.org/source/xref/trunk/kv_engine/engines/ep/src/ep_vb.cc#489
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2019-09-16 14:54:20.000000000
+Message: 
+Patch Set 6: Code-Review-1
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2019-09-17 12:53:27.000000000
+Message: 
+Patch Set 6: Code-Review-1
+
+(6 comments)
+Line:1466, engines/ep/src/kv_bucket.cc -> I realise this is a translation of the logic that was here before, but it has lost a little meaning over the patchsets - someone reading this needs to understand why only committed means disallow active.
+
+The disallowed state is used to trigger a notmyvbucket response, which made sense when the allowed state was passed in. Now it doesn't correlate as well with `statesToFind`. Kinda violates "least surprise", a user of the method has to know the details of the implementation to know why they are getting a notmyvbucket, when all they wanted was to just get commits :shrug:
+
+Line:1510, engines/ep/src/kv_bucket.cc -> haven't followed it all the way through, but potential solution for my above comment - could the statesToFind being passed down to the vb be worked out /here/ from allowedState, and keep allowedState as it was? Then the NMVB response logic still makes sense, and the vb->getInternal call gets a meaningful WantedItemState
+
+Line:806, engines/ep/src/kv_bucket_iface.h -> Not strictly true any more - it says what item states are acceptable to return, it just happens that that currently directly correlates with get replica ops
+
+Line:1229, engines/ep/src/vbucket.h -> ditto
+
+Line:2205, engines/ep/src/vbucket.h -> does this want a description?
+
+Line:2215, engines/ep/src/vbucket.h -> Ooooo, check the docs but IIRC it is not advised to have default args on virtual methods. Again, IIRC the default args are not dynamically determined - calling 
+
+ struct A {
+     virtual void do(int x = 4) {...}
+ };
+ struct B {
+     virtual void do(int x = 12) {...}
+ };
+
+A* a = new B();
+
+A->do();
+
+will call B::do(4);
+
+/I think/
+
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2019-09-17 12:54:55.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+Line:2215, engines/ep/src/vbucket.h -> yeah that snippet is entirely wrong but you get the idea,
+
+B should inherit from A, the second virtual doesn't want to be there etc etc etc
+
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2019-09-17 12:56:35.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+Line:2215, engines/ep/src/vbucket.h -> struct A {
+     virtual void do(int x = 4) {...}
+ };
+ struct B : public A {
+     void do(int x = 12) override {...}
+ };
+
+ A* a = new B();
+
+ a->do();
+
+ will call B::do(4);
+
+That is a bit better. Forgive the spam :badpokerface:
+
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2019-09-17 13:42:34.000000000
+Message: 
+Patch Set 6:
+
+(10 comments)
+Line:2626, engines/ep/src/vbucket.cc -> I think Ben noted something related to this too, but I thought prepares were always resident?
+
+Line:267, engines/ep/tests/module_tests/evp_store_durability_test.cc -> EXPECT isn't a fatal failure so if the get does fail this will still dereference a (I guess) potentially null ptr. (not the end of the world or anything as the test has already logically failed at that point, just thought I'd mention it)
+
+Line:313, engines/ep/tests/module_tests/evp_store_durability_test.cc -> default
+
+Line:314, engines/ep/tests/module_tests/evp_store_durability_test.cc -> could/should this be const static? :shrug:
+
+Line:2503, engines/ep/tests/module_tests/evp_store_durability_test.cc -> This sets the item as pending may be visible while the vb is active - probably fine (as the goal is to check getReplica) but doesn't seem reflective of normal behaviour.
+
+Alternatively, setPendingItem could store the item through KVBucket::prepare or VBucket::prepare, with the vb in state_replica.
+
+Line:2511, engines/ep/tests/module_tests/evp_store_durability_test.cc -> could pull this out into a variable like pendingValue
+
+Line:2532, engines/ep/tests/module_tests/evp_store_durability_test.cc -> could this be from the variable?
+
+Line:2553, engines/ep/tests/module_tests/evp_store_durability_test.cc -> possibly better to use DurabilityEPBucketTest
+
+Line:2611, engines/ep/tests/module_tests/evp_store_durability_test.cc -> Sync?
+
+Line:2650, engines/ep/tests/module_tests/evp_store_durability_test.cc -> *narrows eyes* I personally vote for British spellings, but I'm not sure that is actually in the code guidelines.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2019-09-18 10:26:08.000000000
+MISMATCHED INLINE COMMENT
+Line:22, /COMMIT_MSG -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2019-09-18 10:26:08.000000000
+MISMATCHED INLINE COMMENT
+Line:149, engines/ep/src/ep_types.h -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2019-09-18 10:26:08.000000000
+MISMATCHED INLINE COMMENT
+Line:267, engines/ep/tests/module_tests/evp_store_durability_test.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2019-09-18 10:26:08.000000000
+MISMATCHED INLINE COMMENT
+Line:313, engines/ep/tests/module_tests/evp_store_durability_test.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2019-09-18 10:26:08.000000000
+MISMATCHED INLINE COMMENT
+Line:314, engines/ep/tests/module_tests/evp_store_durability_test.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2019-09-18 10:26:08.000000000
+MISMATCHED INLINE COMMENT
+Line:2503, engines/ep/tests/module_tests/evp_store_durability_test.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2019-09-18 08:06:27.000000000
+MISMATCHED INLINE COMMENT
+Line:2511, engines/ep/tests/module_tests/evp_store_durability_test.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2019-09-18 08:06:27.000000000
+MISMATCHED INLINE COMMENT
+Line:2532, engines/ep/tests/module_tests/evp_store_durability_test.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2019-09-18 08:06:27.000000000
+MISMATCHED INLINE COMMENT
+Line:2611, engines/ep/tests/module_tests/evp_store_durability_test.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2019-09-18 08:06:27.000000000
+MISMATCHED INLINE COMMENT
+Line:2650, engines/ep/tests/module_tests/evp_store_durability_test.cc -> Given the flag is called HONOR_STATES, I'll use the same spelling :)
+----------------------------------------------------------------------------------------------------------------------

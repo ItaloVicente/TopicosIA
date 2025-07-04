@@ -1,0 +1,153 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-48506: Introduce the expel-cursor
+
+At ItemExpel we need to change multiple times the state of the
+checkpoint touched by the operation. The CM::queueLock is
+acquired/released at every state-change, so we need to ensure that the
+checkpoint is not removed between calls.
+
+For ensuring that, the prologue of the ItemExpel code path registers a
+temporary cursor (named expel-cursor for convenience) into the
+checkpoint. That makes the checkpoint not eligible for removal.
+The cursor is also not droppable, so nothing can remove it other than
+an explicit user call to the proper API.
+
+When expel has done with all the checkpoint state-changes, then the
+expel-cursor is removed.
+
+Expel-cursor logic fully introduced and tested in this patch but not
+effectively used yet. In a follow-up we'll exploit the presence of the
+expel-cursor for implementing the acquire/release/re-acquire
+CM::queueLock pattern described above.
+
+Change-Id: I1747387204ccaeab84e025f292a76a619171b990
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2021-10-06 09:36:53.000000000
+Message: 
+Uploaded patch set 14: Patch Set 13 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-10-06 10:47:46.000000000
+Message: 
+Patch Set 14: Code-Review-1
+
+(4 comments)
+Line:619, engines/ep/src/checkpoint_manager.cc -> Note that if gsl asserts are disabled (unlikely but possible in theory) then this becomes a no-op - i.e. don't have Expects() or Ensures() calls have side-effects we depend on:
+
+ bool removed = removeCursor(...);
+ Ensures(removed);
+
+Line:1901, engines/ep/src/checkpoint_manager.cc -> Thinking about this some more, I think you probably _are_ better off having the returned object (ExtractItemsResult) own the cursor; and unregister it in the dtor. that pretty much removes all knowledge of the expel cursor being something special from all but this method in CheckpointManager. (I hadn't appreciated beforehand that we had to create and then destroy the expel cursor in different methods).
+
+Line:504, engines/ep/src/checkpoint_manager.h -> Given the expel cursor is just owned by the expel method, why do we need an explicit method to access it? I think we can just have it register a normal cursor; then remove at the end of the function.
+
+In terms of cursor dropping, you could add a new bool on each Cursor - "supportsDropping" and set to false for persistence and the expel cursor.
+
+Line:874, engines/ep/src/checkpoint_manager.h -> As above, if this isn't a "special" cursor then no need for this.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-10-06 11:02:14.000000000
+Message: 
+Patch Set 14: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/23065/ : FAILURE
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/34701/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/40799/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/13181/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/11967/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/15636/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/14779/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/13926/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/15049/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/2798/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/2833/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2021-10-06 11:05:29.000000000
+Message: 
+Patch Set 14:
+
+(4 comments)
+Line:619, engines/ep/src/checkpoint_manager.cc -> Turning in a non-assert check, thanks
+
+Line:1901, engines/ep/src/checkpoint_manager.cc -> Also on that, we discussed the same on the backup/persistence cursor 😊
+Essentially in the current model a Cursor is owned by the CM. True that there's shared ownership across CM and other components (eg, Stream) but all is registered in the CM::cursors map so in the end you always need to call down into CM::removeCursor for the full removal.
+That means, ExtractItemsResult will still need to do something like this anyway:
+
+ExtractItemsResult::~ExtractItemsResult() {
+    if(manager) {
+        manager->removeCursor(cursor);
+    }
+}
+
+I can surely bring the ExtractItemsResult::dtor thing back but I don't see any benefit of it.. In the end I still agree on more on your old comment than your new one 😊
+
+Line:504, engines/ep/src/checkpoint_manager.h -> > Given the expel cursor is just owned by the expel method, why do we need an explicit method to access it? I think we can just have it register a normal cursor; then remove at the end of the function.
+
+Ugly function (same as the above for persistence) for inspecting in tests.
+
+> In terms of cursor dropping, you could add a new bool on each Cursor - "supportsDropping" and set to false for persistence and the expel cursor.
+
+We discussed the same months ago for the backup/persistence cursor and then didn't do that for some reason that I don't recall now :)
+That would be nice to do in refactor for all cursors, so I m just following the existing model here.
+
+Line:874, engines/ep/src/checkpoint_manager.h -> Answer's above, essentially the existing code for excluding cursors from dropping uses cursors' names
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-10-06 11:29:45.000000000
+Message: 
+Patch Set 14:
+
+(1 comment)
+Line:1901, engines/ep/src/checkpoint_manager.cc -> So if the cursor is in the returned object, there's no need for a magic name / class-level shared_ptr to locate it - it's just a variable which is passed between the specific functions which care about it.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2021-10-06 11:41:32.000000000
+Message: 
+Patch Set 14:
+
+(1 comment)
+Line:1901, engines/ep/src/checkpoint_manager.cc -> Unfortunately currently every cursor is registered by name in the CM::cursors map<name, cursor>.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2021-10-06 11:42:38.000000000
+Message: 
+Patch Set 14:
+
+(1 comment)
+Line:1901, engines/ep/src/checkpoint_manager.cc -> And yes, ideally we should review the ownership model so that we can get rid of names I believe 👍
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-10-06 12:16:30.000000000
+Message: 
+Patch Set 14:
+
+(1 comment)
+Line:1901, engines/ep/src/checkpoint_manager.cc -> > Unfortunately currently every cursor is registered by name in the CM::cursors map<name, cursor>.
+
+That's fine, my point is we don't need an extra "expel-cursor" member variable (and ideally backup-cursor) for each cursor.
+
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,84 @@
+======================================================================================================================
+DESCRIPTION:
+
+LargePackedWholeObject: Do not reuse released inflater
+
+LargePackedWholeObject.openStream produces a stream that allows
+reading a large object.  This stream holds a DfsReader that takes care
+of caching delta bases etc and in particular holds zlib Inflater for
+use while reading the each delta in the packfile.
+
+At DfsReader creation time, the Inflater is acquired from a global
+InflaterCache to avoid initialization overhead in case there is an
+existing Inflater available for reuse.  When done with the Inflater,
+the DfsReader is responsible for returning it to the cache for reuse.
+The DfsReader is AutoClosable to remind the caller to close it and
+release the Inflater when finished with it.
+
+b0ac5f9c8907a4034612543a92eb465e88a9c6f2 (LargePackedWholeObject:
+Refactor to open DfsReader in try-with-resource, 2018-04-11) tried to
+clarify the lifetime of the DfsReader but was too aggressive: when
+this function returns, PackInputStream owns the DfsReader and is
+already going to release it.  Worse, the returned InflaterInputStream
+holds a reference to the DfsReader's inflater, making releasing the
+DfsReader not only unnecessary but unsafe.
+
+The Inflater gets released into the InflaterCache's pool, to be
+acquired by another caller that uses it concurrently with the
+InflaterInputStream.  This results in errors, such as
+
+ java.util.zip.ZipException: incorrect header check
+        at java.util.zip.InflaterInputStream.read(InflaterInputStream.java:164)
+        at java.util.zip.InflaterInputStream.skip(InflaterInputStream.java:208)
+        at java.io.BufferedInputStream.skip(BufferedInputStream.java:377)
+
+and
+
+ java.util.zip.DataFormatException: incorrect header check
+        at java.util.zip.Inflater.inflateBytes(Native Method)
+        at java.util.zip.Inflater.inflate(Inflater.java:259)
+        at org.eclipse.jgit.internal.storage.dfs.DfsReader.inflate(DfsReader.java:783)
+        at org.eclipse.jgit.internal.storage.dfs.DfsPackFile.decompress(DfsPackFile.java:420)
+        at org.eclipse.jgit.internal.storage.dfs.DfsPackFile.load(DfsPackFile.java:767)
+
+and
+
+ Caused by: java.util.zip.ZipException: incorrect header check
+        at java.util.zip.InflaterInputStream.read(InflaterInputStream.java:164)
+        at java.io.BufferedInputStream.fill(BufferedInputStream.java:246)
+        at java.io.BufferedInputStream.read1(BufferedInputStream.java:286)
+        at java.io.BufferedInputStream.read(BufferedInputStream.java:345)
+        at org.eclipse.jgit.lib.ObjectStream$Filter.read(ObjectStream.java:219)
+        at org.eclipse.jgit.util.IO.readFully(IO.java:233)
+        at org.eclipse.jgit.transport.PackParser.checkObjectCollision(PackParser.java:1173)
+
+Verified in production.  It should be possible to make a
+straightforward unit test for this using the InflaterCache state but
+that can wait for a followup commit.
+
+Change-Id: Iaf1d6fd368b64f76c520d215fd270a6098a1f236
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jonathan Nieder
+Date: 2018-04-26 22:52:53.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-04-26 22:53:03.000000000
+Message: 
+Patch Set 1:
+
+Build Started https://ci.eclipse.org/jgit/job/jgit.gerrit/13070/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-04-26 23:13:44.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/jgit.gerrit/13070/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,117 @@
+======================================================================================================================
+DESCRIPTION:
+
+[WIP] JGit blame very slow for large merge commits that rename files
+
+This change adds a trivial heuristic to BlameGenerator.findRename().
+First, try to find a rename among diffs with files with the same name
+and files in the same directory, as the blame path. Failing that,
+proceed as usual.
+
+This reduces JGit blame time in very bad cases (thousands of removed and
+added files in the same merge commit) from unknown running time to a few
+seconds.
+
+Still TODO:
+
+Settle on diffs threshold after which the new heuristic is applied
+(currently 100): the heuristic costs execution time too and is likely
+not helpful if there is a small number of diffs.
+
+Bug: 578900
+Change-Id: I6580004e81102d685081b8180da1587a35073d36
+Signed-off-by: Simeon Andreev <simeon.danailov.andreev@gmail.com>
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Simeon Andreev
+Date: 2022-06-15 20:23:58.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2022-06-15 20:24:09.000000000
+Message: 
+Patch Set 1:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline.java11/1387/
+----------------------------------------------------------------------------------------------------------------------
+Author: Simeon Andreev
+Date: 2022-06-15 20:27:12.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> I'm still trying to understand how to reproduce the merge commits that rename files, which we see in the Advantest repositories.
+
+Other than trying some simple heuristics to find a rename quickly, I don't see what we can do here. There is a massive commit with a lot of adds and removes, that also touches the file for which JGit blame is called. So JGit tries to find a plausible rename match, by computing a (sparse) matrix between the thousands of adds and removes. That takes forever. 
+----------------------------------------------------------------------------------------------------------------------
+Author: Simeon Andreev
+Date: 2022-06-15 20:32:17.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> Maybe its possible to go back in the git history and identify the commit that actually renamed the file, instead of using the merge commit. Though I guess that means traversing the ancestors of the merge commit until a commit is found that adds the file with the git blame path... That might be expensive too? 
+
+I'll also try to clarify how the merge commit that takes forever (it has 16k added files and 9k removed files) came to be. I'll need help from Advantest git experts for this, so it might take a while. If you have suggestions how such merge commits can be created, please let me know.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2022-06-15 20:35:42.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline.java11/1387/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Simeon Andreev
+Date: 2022-06-15 20:40:00.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> Also its possible this change produces different results, if e.g. there is a "better match" when looking at all the diffs. When compared to the match found by the added heuristic. So we maybe want a preference for enabling the new code, if we are adding it.
+
+(I assume JGit finds the best match in terms of similar file content and returns that)
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2022-06-15 22:34:22.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> Maybe coordinate with the Google people on this? See https://git.eclipse.org/r/c/jgit/jgit/+/193911 . The problem doesn't seem to be limited to blame, and it looks as if Google (Marija?) is working or planning to work on it. (Blame is maybe a special case since it is interested in one file only; it shouldn't build a 16000x9000 matrix for your case, should it?) Some kind of directory rename detection might help (unless all your 25000 added/deleted files were in the same directory :-)).
+
+Also, the new "ort" merge strategy[1] might have improvements. Elijah's blog posts are very well written and might give additional insights.
+
+[1] https://github.blog/2021-08-16-highlights-from-git-2-33/
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2022-06-16 09:17:48.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> > [For blame,] it shouldn't build a 16000x9000 matrix for your case, should it?
+
+Seems to me the RenameDetector should get the path filter, and this heuristic should perhaps go inside the rename detector. In blame for a single file, I would expect that filter to have exactly one path. That should scale down the rename detection considerably:
+
+- if MODIFY is not broken apart: if the DiffEntry for that path is a MODIFY: no rename occurred, done. That's O(1).
+- if MODIFY is broken apart into an ADD and a DELETE: the rename detector needs to consider "only" 16001 + 9001 combinations (check the ADD against the 9001 DELETEs, and the DELETE against the 16001 ADDs), not all 16000*9000 ones.
+
+Whether MODIFY is broken apart is configurable. Also, there's a upper limit on the number of adds/deletes that can be set on the rename detection.
+
+Plus some heuristics taking the similarity of file/path names into account might perhaps reduce the work even more.
+
+Additionally, consider moving a Java source file from A to B: at least the package and maybe some imports will change. It'll never be an exact rename. But there may be a reasonable upper threshold of the similarity score that signifies "this is good enough, let's stop and don't keep looking for a perhaps even better match". (E.g., if the score says the two candidates are 95% similar, it may not be worth looking further for a 96-99% match. (A 100% match would have been found by the exact rename detection earlier, which uses the blob SHA1.)) If such an upper threshold exists, it may make sense to consider candidates for the similarity check in order of decreasing path/file name similarity.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Simeon Andreev
+Date: 2022-06-16 09:28:12.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> OK, sounds good. I'll take a look when I can.
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,236 @@
+======================================================================================================================
+DESCRIPTION:
+
+Measure file timestamp resolution used in FileSnapshot
+
+FileSnapshot.notRacyClean() assumed a worst case filesystem timestamp
+resolution of 2.5 sec (FAT has a resolution of 2 sec). Instead measure
+timestamp resolution to avoid unnecessary IO caused by false positives
+in detecting the racy git problem caused by finite filesystem timestamp
+resolution [1].
+
+Cache the measured resolution per FileStore since timestamp resolution
+depends on the respective filesystem type. If timestamp resolution
+cannot be measured or fails due to an exception fallback to the worst
+case FAT timestamp resolution and avoid caching this value.
+
+Measured Java file timestamp resolution: [2]
+
+[1] https://github.com/git/git/blob/master/Documentation/technical/racy-git.txt
+[2] https://docs.google.com/spreadsheets/d/1imy0y6WmRqBf0kjCxzxj2X7M50eIVfa7oaUIzEOHmjo
+
+Bug: 546891
+Change-Id: I493f3b57b6b306285ffa7d392339d253e5966ab8
+Signed-off-by: Matthias Sohn <matthias.sohn@sap.com>
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Matthias Sohn
+Date: 2019-05-05 22:26:50.000000000
+Message: 
+Uploaded patch set 6.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2019-05-05 22:26:57.000000000
+Message: 
+Patch Set 6:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit/16116/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2019-05-05 22:57:58.000000000
+Message: 
+Patch Set 6: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit/16116/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2019-05-06 06:10:46.000000000
+Message: 
+Patch Set 6:
+
+Looks OK now, but could you please explain all these magic numbers? For instance, why is the initial sleep 512ns? Using a power of two is just computer science aesthetics, right? Since the final calculation in FileSnapshot is in milliseconds, we could start with 0.5ms, couldn't we? And why do we need a safety margin in FileSnapshot at all, and why are the margins as computed now sufficient?
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2019-05-06 06:10:55.000000000
+Message: 
+Patch Set 6: Code-Review+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2019-05-06 11:52:09.000000000
+Message: 
+Patch Set 6: Code-Review+1
+
+(5 comments)
+Line:228, org.eclipse.jgit.test/tst/org/eclipse/jgit/util/FSTest.java -> Debug code leftover?
+
+I believe we need a bit more testing on this though, such as that *IF* we create two files with a sleep in between of the resolution, they should have two different update timestamp.
+
+Line:291, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/FileSnapshot.java -> All the magic numbers here need a bit of commenting on why they have been chosen.
+
+Line:213, org.eclipse.jgit/src/org/eclipse/jgit/util/FS.java -> Do we need to log the exception at warning level? Otherwise it would be difficult to understand why the timestamp resolution detection isn't working.
+
+Line:230, org.eclipse.jgit/src/org/eclipse/jgit/util/FS.java -> What if we have no write access to the filesystem?
+(Scenario: a Gerrit slave running on a read-only file share)
+
+Line:234, org.eclipse.jgit/src/org/eclipse/jgit/util/FS.java -> why 512?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2019-05-06 14:02:23.000000000
+Message: 
+Patch Set 6:
+
+(5 comments)
+Line:228, org.eclipse.jgit.test/tst/org/eclipse/jgit/util/FSTest.java -> yes, leftover and needs more tests
+
+Line:291, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/FileSnapshot.java -> I agree :-)
+
+Line:213, org.eclipse.jgit/src/org/eclipse/jgit/util/FS.java -> ok, I can add that
+
+Line:230, org.eclipse.jgit/src/org/eclipse/jgit/util/FS.java -> I think if the filesystem is read-only there is no way to determine the timestamp resolution automatically from Java.
+
+We could add new options to allow manual configuration: 
+
+[filesystem "/dev/disk1s1"]
+    mountpath = /
+    timestampResolution = 5ms
+
+Line:234, org.eclipse.jgit/src/org/eclipse/jgit/util/FS.java -> * I have no exhaustive list of file timestamp resolutions across the many filesystems existing so it's a guess based on what we found out so far
+* exponent of 2 ;-)
+* not too small to avoid unnecessary iterations
+* I didn't run any benchmark on the measuring code hence I don't know the size of systematic error introduced by the finite performance of the measuring code
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2019-05-06 14:11:59.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+Line:230, org.eclipse.jgit/src/org/eclipse/jgit/util/FS.java -> Yes, that's a very cool idea. On the Gerrit slaves the admin knows what are the "right params" and can set them out.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2019-05-07 06:31:43.000000000
+Message: 
+Patch Set 6:
+
+A wild idea: for the case of pack (index) files, can we do even better? We know that GC always writes new files that it then moves into place, it doesn't modify existing files. (I hope canonical git does the same; didn't check.) At least on typical Linux file systems, that should mean that BasicFileAttributes.fileKey() should be different if the file has been changed (new inode number). And if it hasn't, fileKey() is unchanged.
+
+So: remember fileKey() when the index is read, and later check whether the current fileKey() is still equal to the remembered one: if so, the file was not changed.
+
+Would that be a viable way to check for modified pack files without relying on file time stamps at all? On which file systems could this work at all?
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Halstrick
+Date: 2019-05-07 07:17:21.000000000
+Message: 
+Patch Set 6:
+
+> A wild idea: for the case of pack (index) files, can we do even
+ > better? We know that GC always writes new files that it then moves
+ > into place, it doesn't modify existing files. (I hope canonical git
+ > does the same; didn't check.) At least on typical Linux file
+ > systems, that should mean that BasicFileAttributes.fileKey() should
+ > be different if the file has been changed (new inode number). And
+ > if it hasn't, fileKey() is unchanged.
+
+If a file f1 is deleted and then recreated as file f2 with the same path could
+it be that f1.fileKey() is equal to f2.fileKey(). If that would be the case
+I am not sure that your proposal works. [1] says that "Whether a file system
+re-uses identifiers after a file is deleted is implementation dependent and
+therefore unspecified."
+
+[1] https://docs.oracle.com/javase/7/docs/api/java/nio/file/attribute/BasicFileAttributes.html
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2019-05-07 07:25:56.000000000
+Message: 
+Patch Set 6:
+
+> If a file f1 is deleted and then recreated as file f2 with the same
+ > path could it be that f1.fileKey() is equal to f2.fileKey().
+
+I know, whence my question on which file systems it might work. With inodes it should work I think.
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Halstrick
+Date: 2019-05-07 07:50:36.000000000
+Message: 
+Patch Set 6:
+
+(2 comments)
+Line:146, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/FileSnapshot.java -> Why Duration.ZERO? For the current snapshot we may have already determined the timer resolution. Why don't we reuse that info for the new snapshot instance as in "return new FileSnapshot(read, modified, -1, fsTimerResolution)".
+
+Imagine the following steps happen in the same slot of a filesystem timer: you modify a file, you create a filesnapshot on it, you call save(lastmodified), some external process modifies the file.
+
+If later you ask for isModified() you fail to detect the modification
+because fsTimeStampResolution=0.
+
+Line:190, org.eclipse.jgit/src/org/eclipse/jgit/util/FS.java -> Have you thought about persisting the value in the repo config? 
+For long-running processes like gerrit, eclipse  what we have here is
+ok. But if you use JGit with short living processes (e.g. calls to PGM, inside jenkins tasks) then we do the timer resolution detection over and over again.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2019-05-08 22:25:14.000000000
+Message: 
+Patch Set 6:
+
+(2 comments)
+Line:230, org.eclipse.jgit/src/org/eclipse/jgit/util/FS.java -> not yet done, but yes this should be done in a separate change
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2019-05-07 09:51:27.000000000
+MISMATCHED INLINE COMMENT
+Line:228, org.eclipse.jgit.test/tst/org/eclipse/jgit/util/FSTest.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2019-05-07 09:51:27.000000000
+MISMATCHED INLINE COMMENT
+Line:146, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/FileSnapshot.java -> I think this isn't possible since this is a static method and there is no way to find out which timer resolution to use if the observed file is unknown since there might be multiple filesystems and in this method we don't know which file is meant. If the caller knows the file it should use the other method save(File)
+
+This method isn't used in jgit, egit and gerrit so I am not sure if it's used by anyone. Maybe we should deprecate it.
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Halstrick
+Date: 2019-05-24 12:23:06.000000000
+MISMATCHED INLINE COMMENT
+Line:146, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/FileSnapshot.java -> sorry, I overlooked the 'static'. I thought thats a member function where you can create a new FileSnapshot based on the existing one.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2019-05-07 09:51:27.000000000
+MISMATCHED INLINE COMMENT
+Line:291, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/FileSnapshot.java -> see explanation in commit message
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2019-05-08 20:21:51.000000000
+MISMATCHED INLINE COMMENT
+Line:291, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/FileSnapshot.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2019-05-07 09:51:27.000000000
+MISMATCHED INLINE COMMENT
+Line:190, org.eclipse.jgit/src/org/eclipse/jgit/util/FS.java -> Could make sense for short-lived processes. In case of migration to another filesystem or upgrading to another Java version the persisted timestamp resolution might become stale. E.g. if Java is upgraded from Java 8 to Java 11 on Mac using APFS according to my measurements the timer resolution shrinks from 1s to 5ms.
+So if we persist timer resolution we should also persist filesystem type and Java version and only reuse the stored value if filesystem type and Java version didn't change.
+
+Though I think the repository configuration is not the right place to store filesystem timestamp resolution since typically many repositories are located in the same filesystem. We can try to store it in the user global git configuration, the system level configuration is probably read-only for most processes.
+
+I think this improvement should be implemented in another change. Could be implemented on top of manual configuration of timestamp resolution.
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2019-05-08 20:21:51.000000000
+MISMATCHED INLINE COMMENT
+Line:213, org.eclipse.jgit/src/org/eclipse/jgit/util/FS.java -> Thanks, that helps.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2019-05-07 12:49:59.000000000
+MISMATCHED INLINE COMMENT
+Line:213, org.eclipse.jgit/src/org/eclipse/jgit/util/FS.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2019-05-08 20:21:51.000000000
+MISMATCHED INLINE COMMENT
+Line:230, org.eclipse.jgit/src/org/eclipse/jgit/util/FS.java -> Is the manual configured timestampResolution addressed in a follow-up change?
+----------------------------------------------------------------------------------------------------------------------

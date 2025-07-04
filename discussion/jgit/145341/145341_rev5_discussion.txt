@@ -1,0 +1,119 @@
+======================================================================================================================
+DESCRIPTION:
+
+RefDirectory: improve scanning performance
+
+RefDirectory is now using a shared timestamp resolution cache for the
+creation of per-ref FileSnapshots. This saves redundant, expensive calls
+to FS.getFsTimerResolution().
+
+Experimental results: on Windows, for 10K loose refs, this saves roughly
+85% of overall processing time for the initial call to
+RefDirectory.getRefs().
+
+Change-Id: I51bd7d5e987064416badd6a9cb1e217d580fea52
+Signed-off-by: Marc Strapetz <marc.strapetz@syntevo.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Marc Strapetz
+Date: 2019-07-02 22:17:11.000000000
+Message: 
+Uploaded patch set 5.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2019-07-02 22:17:19.000000000
+Message: 
+Patch Set 5:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit/16642/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2019-07-02 22:52:06.000000000
+Message: 
+Patch Set 5: Verified-1
+
+Build Failed 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit/16642/ : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Halstrick
+Date: 2019-07-03 05:00:53.000000000
+Message: 
+Patch Set 5:
+
+> I was actually considering such a cache in FS (I guess you would
+ > expect it there, too)? But such a static cache would be long-lived
+
+Yes, I was thinking about a cache in FS (parentDir of file to be snapshoted -> FilesystemStore)
+
+ > From the discussion with Matthias I now think that having one
+ > constant timestamp resolution per FileRepository would be
+ > preferable and would make the code only slightly more complex.
+
+Yes, I agree, that would be my favourite. Would it be per FileRepository? That would mean the filesystem timer resolution of ref storage and of working tree files have to be the same. Or would it be per RefDatabase, saying that at least all refs are on the same fileysytem store? Maybe assuming that refs and also workingtree files are located on the same filesystem store is too strong.
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc Strapetz
+Date: 2019-07-03 07:27:46.000000000
+Message: 
+Patch Set 5:
+
+> Yes, I agree, that would be my favourite. Would it be per FileRepository? That would mean the filesystem timer resolution of ref storage and of working tree files have to be the same.
+
+That would have been my first understanding.
+
+> Or would it be per RefDatabase, saying that at least all refs are on the same fileysytem store? Maybe assuming that refs and also workingtree files are located on the same filesystem store is too strong.
+
+Good point. This is especially a problem if the admin area and working tree are stored at different locations (.git-file, core.worktree). Hence, it should probably be limited to the .git/-admin area. We have also .git/objects/info/alternates for which chances are real that it points to a different FileStore.
+
+Hence, I would probably implement some FileSnapshotFactory:
+
+FileSnapshotFactory {
+    FileSnapshot save(File file)
+}
+
+which has an internal, lazy(?) timestamp resolution stored. With this approach we could also quickly check whether the requested FileSnapshot is located below our repository root (or admin root?) and only in this case use the cached timestamp resolution, otherwise use FS.getFsTimestampResolution as currently.
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Halstrick
+Date: 2019-07-03 08:08:02.000000000
+Message: 
+Patch Set 5:
+
+> Good point. This is especially a problem if the admin area and
+ > working tree are stored at different locations (.git-file,
+ > core.worktree). Hence, it should probably be limited to the
+
+Think about multiple worktree support or even the situation with repositories containing submodules. In the latter case the worktree of a repo may start far away from the $GIT_DIR and those submodules have a .git file (not folder) pointing to a location multiple level upwards. Probability raises that $GIT_DIR and worktree are on different FileStores. 
+
+ > .git/-admin area. We have also .git/objects/info/alternates for
+ > which chances are real that it points to a different FileStore.
+
+But that's a problem on it own. With alternates we may have even the $GIT_DIR content spread over multiple FileStores, right? So: theoretically one timer resolution per gitdir would not be sufficient.
+
+ > 
+ > Hence, I would probably implement some FileSnapshotFactory:
+ > 
+ > FileSnapshotFactory {
+ > FileSnapshot save(File file)
+ > }
+ > 
+ > which has an internal, lazy(?) timestamp resolution stored. With
+ > this approach we could also quickly check whether the requested
+ > FileSnapshot is located below our repository root (or admin root?)
+ > and only in this case use the cached timestamp resolution,
+ > otherwise use FS.getFsTimestampResolution as currently.
+
+If I get this correctly you would invent mutliple instances of FileSnapshotFactory which may have clever constructors. E.g. "fsf=new FileSnapshotFactory(FileStore fs); ... ; fsf.save(f); ..." and inside the save() method you would use cached timer resolutions and you would check that f is on fs (you may even skip this check and assume that a FileSnapshotFactory created for a FileStore fs is only used for files located on fs)? That would look good to me.
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc Strapetz
+Date: 2019-07-03 10:00:25.000000000
+Message: 
+Patch Set 5:
+
+> If I get this correctly you would invent mutliple instances of FileSnapshotFactory which may have clever constructors. E.g. "fsf=new FileSnapshotFactory(FileStore fs); ... ; fsf.save(f); ..." and inside the save() method you would use cached timer resolutions and you would check that f is on fs (you may even skip this check and assume that a FileSnapshotFactory created for a FileStore fs is only used for files located on fs)? That would look good to me.
+
+I have sketched my idea at https://git.eclipse.org/r/#/c/145364/ . Currently it seems sufficient to have a single FileSnapshotFactory per repository which works around the expensive FS.getFsTimerResolution() call. FileSnapshotFactory.ON_THE_FLY represents the old behavior where for each FileSnapshot the expensive FS.getFsTimerResolution() will be called.
+
+In production code FS.getFsTimerResolution() is now only called from FileSnapshotFactory, so we could move it there. This makes FileSnapshotFactory somehow more self-contained and relieves FS a bit :)
+----------------------------------------------------------------------------------------------------------------------

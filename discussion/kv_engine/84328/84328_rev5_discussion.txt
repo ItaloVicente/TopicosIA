@@ -1,0 +1,169 @@
+======================================================================================================================
+DESCRIPTION:
+
+[MB-26220]: Add support for request tracing
+
+Adds support for tracing/timing different block of code in a
+specific request. Currently does not use phospor.
+
+Change-Id: I3ce23b91e62648b5ab223a3f1f47bb575eb5a81f
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Premkumar
+Date: 2017-10-13 21:53:23.000000000
+Message: 
+Uploaded patch set 5.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2017-10-13 22:54:40.000000000
+Message: 
+Patch Set 5: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master/2966/ : FAILURE
+
+Failure of a CTest test   6/107 Test   #7: mcbp_feature_test ................................ ( http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master/2966/ )
+
+Failure of a GoogleTest  ( http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master/2966/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/3116/ : FAILURE
+
+Compile error at C:\Jenkins\workspace\kv_engine-windows-master\kv_engine\utilities/tracer.h(31): error C2332: "struct": missing tag name ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/3116/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/3093/ : FAILURE
+
+Failure of a CTest test  25/110 Test  #25: ep_testsuite.full_eviction ....................... ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/3093/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/3161/ : FAILURE
+
+Failure of a CTest test  11/121 Test   #8: mcbp_feature_test ................................ ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/3161/ )
+
+Failure of a GoogleTest  ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/3161/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/1647/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/2798/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2017-10-15 07:00:42.000000000
+Message: 
+Patch Set 5:
+
+(32 comments)
+
+Hi Prem,
+
+This looks interesting :) Looking forward to a demo!
+Line:1008, daemon/connection_mcbp.cc -> Should we rename to to_string to match the "standard" naming?
+
+Line:1029, daemon/connection_mcbp.cc -> This should probably be NOTICE? (and use nullptr instead of NULL for new code).
+
+Line:1030, daemon/connection_mcbp.cc -> It seems to me like we're missing a word or something in this sentence:
+
+    32: for GET operation on connection xxx
+
+Should it be something like:
+
+    32: Trace of GET operation on connection xxxx 
+
+???
+
+Line:39, daemon/cookie.h -> replace with override (applies to all methods we override)
+
+Line:52, daemon/cookie.h -> This looks a bit hairy to me... It should either return a const tracer, or not be a const method...
+
+Line:22, daemon/icookie.h -> Should go next to the class, and not in front of the forward decl of the tracer class
+
+Line:23, daemon/icookie.h -> should it be cb::tracing to avoid future collisions with other tracing namespaces?
+
+Line:27, daemon/icookie.h -> We don't use the naming scheme typically used on windows with I for interfaces etc.
+
+(I think I personally would have extended the existing cookie object, but made the connection "optional" and made the constructor using that "optional" connection protected so it would only be available through a mock cookie).
+
+Line:33, daemon/icookie.h -> What is the purpose of this method? 
+
+The validate method was added when we started moving over to greenstack where the cookie no longer represented the connection object. We needed to be sure that we had changed all of the places where we passed a cookie object through the engine interface (and coming back to the core) over to the new cookie as we did a cast from the void cookie to a connection object. If that wasn't the case there was nothing we could do, so we wanted to catch that instead of using random memory.
+
+The intent was to remove the validate method when we're done migrating over greenstack. We killed the greenstack project, but we are going to make "out of order commands" where we'll be using the cookie as the command context, so it hasn't been nuked yet.
+
+I don't think we want this method. If it is being used from "test frameworks" to allow testing with mock connections we should implement enough stuff in the mock connections to be able to use them (we could provide a MockCookie which inherrits from the real cookie for instance provides its subclass of a Connection object...)
+
+Line:43, daemon/icookie.h -> rename to setTracingEnabled ?
+
+Line:49, daemon/icookie.h -> This API looks a bit bad. From looking at cookie.h it cannot be nullptr, but always returns the address of the tracer object. Perhaps it would have been better to make the tracer itself part of this class and return tracing::Tracer& ? 
+
+As it stands today everyone needs to check for nullptr after calling getTracer() (given that the function is virtual someone could override the Cookie objects getTracer() and return nullptr... (swapping out the connection object as part of someone disabling tracing)...
+
+Line:55, daemon/icookie.h -> what does the f means? we don't use this kind of naming.
+
+Line:502, daemon/mcbp_executors.cc -> could be nullptr
+
+Line:1350, daemon/mcbp_executors.cc -> ditto
+
+Line:148, daemon/protocol/mcbp/hello_packet_executor.cc -> That's implied by the switch case name ;-)
+
+Line:301, engines/ep/src/ep_engine.cc -> Perhaps be consistent with _ and .  (get_if vs get.locked)
+
+Line:313, engines/ep/src/ep_engine.cc -> no trace for unlock?
+
+Line:330, engines/ep/src/ep_engine.cc -> should probably be store?
+
+Line:1201, engines/ep/src/kv_bucket.cc -> seems unrelated
+
+Line:58, include/mcbp/protocol/feature.h -> Change to Tracing, and the BinaryProtocol doc needs to be updated
+
+Line:58, include/mcbp/protocol/feature.h -> Remove this
+
+Line:59, include/mcbp/protocol/feature.h -> Drop this. In a hello message you always include all of the features you want to enable. If Tracing isn't listed it means tracing off.
+
+Line:96, programs/engine_testapp/mock_server.cc -> seems like debug output
+
+Line:53, protocol/mcbp/libmcbp/feature.cc -> Tracing
+
+Line:55, protocol/mcbp/libmcbp/feature.cc -> kill
+
+Line:7, utilities/CMakeLists.txt -> perhaps we should just build a separate shared object for this?
+
+Line:23, utilities/trace_helpers.h -> We shouldn't be calling this method with a bogus cookie in the first place! (same for the next ones). And does it make sense to have a nullptr as a cookie?
+
+Line:58, utilities/trace_helpers.h -> Why not just initialise ck at line 61? as you set it to nullptr at line 64 (the common case)
+
+Line:59, utilities/trace_helpers.h -> Does it make sense to have a nullptr as a cookie? I'd rather throw an exception for that in debug builds. isValid should be nuked.
+
+Line:103, utilities/trace_helpers.h -> We don't use that kind of naming (what does the f really means?)
+
+Line:83, utilities/tracer.cc -> Why does the "formatted" printout include the trailing comma, but the non-formatted one not?
+
+Line:60, utilities/tracer.h -> should we use the more common to_string() name? (or make a friend to_string(Tracer) free function?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2017-10-16 11:21:14.000000000
+Message: 
+Patch Set 5: Code-Review-1
+
+(8 comments)
+Line:3, daemon/icookie.h -> 2017
+
+Line:27, daemon/icookie.h -> `CookieIface` would be more consistent with our current naming.
+
+Line:245, engines/ep/src/ep_engine.cc -> Note we already have a very similar scoped trace - see the BlockTimer in http://src.couchbase.org/source/xref/trunk/kv_engine/engines/ep/src/ep_engine.h#154.
+
+I don't think we want both of these timings - they will be virtually the same either way - so I suggest you unify them.
+
+Additionally, you'll probably want to include the engine name (ep) in the name of this trace span, given we have a few different levels of method called "Get" or similar.
+
+Line:35, engines/ep/src/kv_bucket.cc -> trace_helpers isn't a system (or external library) header, pleas use `#include ""` instead.
+
+Line:953, engines/ep/src/kv_bucket.cc -> This looks like just a whitespace change - please revert.
+
+Line:55, engines/ep/src/tasks.cc -> This won't ever run in the scope of a front-end client connection; so we probably don't want to add client tracing here.
+
+Line:1662, engines/ep/src/vbucket.cc -> This is probably more detailed than we'll need in the client view of the trace. Suggest you remove it for now.
+
+Line:198, engines/ep/tests/module_tests/kvstore_test.cc -> Looks like you've added this in the wrong place - the comment above should be referring to the function; not the map :)
+
+----------------------------------------------------------------------------------------------------------------------

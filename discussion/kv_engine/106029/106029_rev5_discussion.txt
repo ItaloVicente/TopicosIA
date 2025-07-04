@@ -1,0 +1,181 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-33276 [SR]: Never leave iterators invalid at SyncWrite removal
+
+DurabilityMonitor::removeSyncWrite could make ReplicatinChain's
+itrerators invalid. Details follow.
+
+The following scenario may happens when multiple clients issue durable
+writes with mixed Majority and PersistToMajority concerns (example with
+1-replica, majority=2):
+
+Caption:
+sX(L) -> seqno X, Level L [M]ajority / [P]ersistToMajority
+N(T) -> node N, Tracking for [m]emory / [d]isk
+
+1) s1(P) and s2(M) added for tracking into the DurabilityMonitor
+
+End        s1(P)        s2(M)
+^^
+A(m)/A(d)
+^^
+R(m)/R(d)
+
+2) both Active and Replica ack memSeqno:2
+
+End        s1(P)        s2(M)
+^                       ^
+A(d)                    A(m)
+^                       ^
+R(d)                    R(m)
+
+3) s2(M) is satisfied, committed and removed from tracking; iterators
+A(m) and R(m) are repositioned to 'prev' (i.e., s1(P))
+
+End        s1(P)        x
+^          ^
+A(d)       A(m)
+^          ^
+R(d)       R(m)
+
+4) both Active and Replica ack diskSeqno:1
+
+End        s1(P)        x
+           ^^
+           A(m)/A(d)
+           ^^
+           R(m)/R(d)
+
+5) s1(P) is satisfied, committed and removed from tracking; /all/
+iterators should be repositined to 'prev' (i.e., End), but actually A(m)
+and R(m) are invalidated:
+
+End        x        x
+^          ^
+A(d)       A(m)
+^          ^
+R(d)       R(m)
+
+At this point any call to DurabilityMonitor::addSyncWrite could lead to
+crash caused by actions on A(m) (dereferencing/moving/etc..).
+
+The root cause of this issue is that at step (5) we reposition only
+iterators that satisfy the (lastWriteSeqno == removeSeqno) condition.
+While the condition is satisfied for A(d) and R(d), it is not for A(m)
+and R(m) as their lastWriteSeqno is 2 (that is because they originally
+pointed to s2; note that lastWriteSeqno is the "highest SyncWrite seqno
+pointed by a ReplicationChain iterator").
+
+Change-Id: I70bbb473351294d7c8001d06172a59fd720e45f1
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2019-03-12 07:50:49.000000000
+Message: 
+Patch Set 5: Published edit on patch set 4.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-03-12 07:53:37.000000000
+Message: 
+Patch Set 5: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/18311/ : ABORTED
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/18311/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/9434/ : FAILURE
+
+CMake error: kv_engine/engines/ep/management/CMakeLists.txt:2 (PyVenv) ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/9434/ )
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/9018/ : FAILURE
+
+CMake error: kv_engine/engines/ep/management/CMakeLists.txt:2 (PyVenv) ( http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/9018/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/16208/ : FAILURE
+
+<p>clang-format suggested the following changes:
+
+<pre>
+cat <<"EOF" | patch -p1
+diff --git a/engines/ep/tests/module_tests/durability_monitor_test.cc b/engines/ep/tests/module_tests/durability_monitor_test.cc
+index 3479ac5..0a82eac 100644
+--- a/engines/ep/tests/module_tests/durability_monitor_test.cc
++++ b/engines/ep/tests/module_tests/durability_monitor_test.cc
+@@ -522,8 +522,8 @@ TEST_F(DurabilityMonitorTest, MajorityAndPersistActive) {
+ /*
+  * MB-33276: ReplicationChain iterators may stay invalid at Out-of-Order Commit.
+  * That may lead to crash as soon as an invalid iterator is processed.
+- * Note that dereferencing/moving and invalid iterator is undefined behaviour, so the way we crash
+- * is not deterministic.
++ * Note that dereferencing/moving and invalid iterator is undefined behaviour,
++ * so the way we crash is not deterministic.
+  */
+ TEST_F(DurabilityMonitorTest, DontInvalidateIteratorsAtOutOfOrderCommit) {
+     ASSERT_NO_THROW(
+@@ -537,7 +537,7 @@ TEST_F(DurabilityMonitorTest, DontInvalidateIteratorsAtOutOfOrderCommit) {
+      * ^^
+      * R(m)/R(d)
+      */
+-  
++
+     ASSERT_EQ(2, monitor-&gt;public_getNumTracked());
+     assertNodeMemTracking(active, 2 /*lastWriteSeqno*/, 2 /*lastAckSeqno*/);
+     assertNodeDiskTracking(active, 0 /*lastWriteSeqno*/, 0 /*lastAckSeqno*/);
+@@ -548,7 +548,7 @@ TEST_F(DurabilityMonitorTest, DontInvalidateIteratorsAtOutOfOrderCommit) {
+     ASSERT_EQ(ENGINE_SUCCESS,
+               monitor-&gt;seqnoAckReceived(
+                       replica, 2 /*memSeqno*/, 0 /*diskSeqno*/));
+-  
++
+     /*
+      * End        s1(P)        x
+      * ^          ^
+@@ -579,9 +579,8 @@ TEST_F(DurabilityMonitorTest, DontInvalidateIteratorsAtOutOfOrderCommit) {
+               monitor-&gt;seqnoAckReceived(
+                       replica, 2 /*memSeqno*/, 1 /*diskSeqno*/));
+ 
+-  
+     /*
+-     * This is what happens before the fix (A(m) and R(m) stay invalid): 
++     * This is what happens before the fix (A(m) and R(m) stay invalid):
+      *
+      * End        x        x
+      * ^          ^
+@@ -589,13 +588,14 @@ TEST_F(DurabilityMonitorTest, DontInvalidateIteratorsAtOutOfOrderCommit) {
+      * ^          ^
+      * R(d)       R(m)
+      */
+-  
++
+     ASSERT_EQ(0, monitor-&gt;public_getNumTracked());
+     assertNodeMemTracking(active, 2 /*lastWriteSeqno*/, 2 /*lastAckSeqno*/);
+     assertNodeDiskTracking(active, 1 /*lastWriteSeqno*/, 1 /*lastAckSeqno*/);
+     assertNodeMemTracking(replica, 2 /*lastWriteSeqno*/, 2 /*lastAckSeqno*/);
+     assertNodeDiskTracking(replica, 1 /*lastWriteSeqno*/, 1 /*lastAckSeqno*/);
+ 
+-    // This crashes with SEGFAULT before the fix (caused by processing the invalid A(m) iterator)
++    // This crashes with SEGFAULT before the fix (caused by processing the
++    // invalid A(m) iterator)
+     addSyncWrite(10 /*seqno*/);
+ }
+
+EOF
+</pre> ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/16208/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/17627/ : FAILURE
+
+CMake error: kv_engine/engines/ep/management/CMakeLists.txt:2 (PyVenv) ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/17627/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/15661/ : FAILURE
+
+CMake error: kv_engine/engines/ep/management/CMakeLists.txt:2 (PyVenv) ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/15661/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/2160/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/2160/ )
+----------------------------------------------------------------------------------------------------------------------

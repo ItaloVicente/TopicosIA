@@ -1,0 +1,133 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-39864: Generate correct collection meta when multiple events exist
+
+It is possible for a single commit batch to contain multiple system
+events for a single collection-id. This occurs if state is lost from
+the cluster configuration and then we make forward progress. For
+example KV could end up in a single flush batch
+
+1) Create collection id:8 name:fruit
+2) mutate(key={fruit, apple})
+3) Drop collection id:8
+4) Create collection id:8 name:vegetable
+
+If that sequence of events occurred KV must generate correct collection
+meta-data. KV stores 4 'pieces' of meta-data so that we can recover the
+collection state at warm-up, these are:
+
+1) A list of open collections (id, name, TTL, start-seqno)
+2) A list of dropped collections (id, start-seqno, end-seqno)
+3) A list of open scopes (id, name, start-seqno)
+4) The highest manifest ID (of the events)
+
+So when our sequence of events occurs to the same collection:
+
+1) generate meta-data that says only collection with id:8,
+   name:vegetable is open
+2) collection with id:8 is dropped (with the start/end seqnos covering
+   its span)
+
+Without the fixes in this commit we generated meta-data that would
+cause a failure at warm-up. For example each collection create in a
+single commit batch, lead to a new (duplicate) entry in the list of
+open collections.
+
+This commit contains a number of unit tests that generate such
+conditions and validate the final meta-data.
+
+A number of issues were found that contributed to failure when running
+various create/drop cycles.
+
+1) The VB::Manifest created new checkpoints only for drop-events. This
+   is code which wrongly made the assumption that create(id:8),
+   drop(id:8) was the only sequence, so only needed to split
+   checkpoints on the drop.
+2) The Flusher was de-duplicating when multiple events occurred, this
+   meant that the code generating the collection meta-data would miss
+   any collection drops that occurred between two creates.
+3) The Collections::KVStore 'commit meta-data' used data-structures
+   that allowed us to capture multiple events and the 'encode'
+   functions blindly 'copied' those multiple events to the output.
+
+Summary of fixes:
+
+1) Every system event splits the checkpoint
+2) The flusher still de-duplicates system events when writing to the
+   KVStore, but all system-events (even de-duped ones) now 'inform'
+   the KVStore of their presence.
+3) maps are now used so we can detect if multiple events occurred to
+   the same collection/scope and the encode functions now generate
+   the correct meta-data when create/drop cycles occur.
+
+Change-Id: Ia4d8b6071b3ca15aba04ab02bd77861039beee27
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jim Walker
+Date: 2020-08-27 14:27:03.000000000
+Message: 
+Uploaded patch set 7: Patch Set 6 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-08-27 15:10:14.000000000
+Message: 
+Patch Set 7: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/2565/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/29835/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/25860/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/4039/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/4370/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/5258/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/5451/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/5351/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/13169/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-08-28 13:32:37.000000000
+Message: 
+Patch Set 7:
+
+(2 comments)
+Line:276, engines/ep/src/collections/kvstore.cc -> nit
+
+Line:55, engines/ep/src/collections/kvstore.h -> Would it be worth adding != at the same time for completeness?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-09-01 10:53:36.000000000
+Message: 
+Patch Set 7: Code-Review-1
+
+(1 comment)
+Line:136, engines/ep/src/collections/kvstore.h -> At at glance it looks like this is only called via record{Create,Drop}... below - can it be made private?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2020-09-02 08:27:28.000000000
+Message: 
+Patch Set 7:
+
+(3 comments)
+
+update coming soon, thanks for the comments! next -1 patch updating as well
+Line:276, engines/ep/src/collections/kvstore.cc -> Done
+
+Line:55, engines/ep/src/collections/kvstore.h -> Done
+
+Line:136, engines/ep/src/collections/kvstore.h -> done - also gone a bit further and moved the free "encode" functions into this class, as they read most members of this object and return flatbuffer encodings, also private all data members etc... This actually lead to spotting some dead code hanging over from when we used to keep the dropped and open collections in the same meta, so kvstore (magam/couch) has minor simplifications in the next update
+
+----------------------------------------------------------------------------------------------------------------------

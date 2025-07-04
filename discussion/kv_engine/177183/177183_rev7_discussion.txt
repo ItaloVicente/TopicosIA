@@ -1,0 +1,117 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-52633: Do not consider freq counters of items in replicas
+
+Frequency counter values are not replicated and so do not reflect the
+state of the active vBucket. Should the active failover and this
+replica be promoted then the data that is resident is not neccessarily
+the hottest data. It's simpler to just evict the first data we see for
+replica vBuckets.
+
+Change-Id: I74bf5ec17d7f2fe2980738bbafea144742ee80fc
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Ben Huddleston
+Date: 2022-07-25 13:55:31.000000000
+Message: 
+Uploaded patch set 7: Patch Set 6 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-07-25 14:43:51.000000000
+Message: 
+Patch Set 7: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/18300/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/47966/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/19132/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/40307/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/8818/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/8915/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/22104/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/20286/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/21040/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/21403/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/29435/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-08-03 12:50:05.000000000
+Message: 
+Patch Set 7: Code-Review-1
+
+(1 comment)
+Line:122, engines/ep/src/paging_visitor.cc -> As you mention, the CAS (for mutations which are replicated) does give us a useful signal that an item is hot.
+
+I do think there's still value in trying to prioritise the hotter replica values when eviction; as if/when we do promote to active we reduce the cold cache problem.
+
+Unless there's benefit to not tracking replicas somewhere else, I think we should keep the current behaviour.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2022-08-04 11:28:19.000000000
+Message: 
+Patch Set 7:
+
+(1 comment)
+Line:122, engines/ep/src/paging_visitor.cc -> > Frequency counter values are not replicated
+
+That would be a nice thing to have - We could move the Frequency Counter info from SV to some struct that stays ref-counted in memory (ie same as Blob), so that in-memory streams have that info ready to be streamed to replicas
+
+(just a digression from me :) )
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-08-04 11:32:08.000000000
+Message: 
+Patch Set 7:
+
+(1 comment)
+Line:122, engines/ep/src/paging_visitor.cc -> To clarify - we _do_ replicate the NRU value in DCP_MUTATION messages (as long as the item came from memory and wasn't backfilled), the issue is that given that reads are not replicated, a replica has no idea how hot items are which are read but not written.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2022-08-04 11:56:40.000000000
+Message: 
+Patch Set 7:
+
+(1 comment)
+Line:122, engines/ep/src/paging_visitor.cc -> Oh right, that information is in TaggedPtr
+
+      value(TaggedPtr<Blob>(nullptr, initialFreqCount))
+      
+👍
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2022-08-08 10:53:26.000000000
+Message: 
+Patch Set 7:
+
+(1 comment)
+Line:122, engines/ep/src/paging_visitor.cc -> More of a thought dump than a specific reply...
+
+Benefits:
+
+1) Sanity - currently we use the hotness values but they should only be reflective of some workload if the customer is only modifying items or using GetReplica so using them as though they are reflective of the workload here is a bit of a smell.
+
+2) Perf - paging out (from replicas) is faster as we can avoid tracking histograms for freq counters (next change in branch).
+
+I think that this still makes sense as we don't expect write only workloads and GetReplica usage feels questionable at best. Re-introducing age would be slightly useful here, but we want to remove age entirely from the calculation here to make the ItemPager work without having to learn which makes the cross-vBucket MFU changes to the ItemPager significantly easier. Additionally, assuming that everything is working as intended we evict from replicas before actives so there's only a narrow window of residency ratios for which trying to optimize for some cold cache (replica promotion) case is useful. We could express that range as [100 / (NumberOfReplicas + 1), 100], i.e. with 1 replica only having a residency of 50%+ should mean keeping items for replicas in memory, with 3 replicas that's 25%+. Making the pager always evict from replicas before active basically screws you over if you care about cold caches after promotion, unless you're 100% resident.
+
+I think I'll leave this as it is for now, and we can look at this again later when we've made the other changes for cross-vBucket MFU.
+
+----------------------------------------------------------------------------------------------------------------------

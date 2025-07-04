@@ -1,0 +1,150 @@
+======================================================================================================================
+DESCRIPTION:
+
+ss: Add a cache for String state values
+
+The string state is create in a kernel trace typically 1.6 times
+per event. This patch buffers the string values. This accelerates
+state system creation by about 5% for a kernel state system.
+
+Change-Id: I5cbb6303dcda441c3f50bc35253e1cba36eeb777
+Signed-off-by: Matthew Khouzam <matthew.khouzam@ericsson.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Matthew Khouzam
+Date: 2016-02-09 21:23:55.000000000
+Message: 
+Uploaded patch set 5.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2016-02-09 21:44:56.000000000
+Message: 
+Patch Set 5:
+
+Build Started https://hudson.eclipse.org/tracecompass/job/tracecompass-gerrit/6185/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2016-02-09 22:20:40.000000000
+Message: 
+Patch Set 5: Code-Review+1
+
+Build Successful 
+
+https://hudson.eclipse.org/tracecompass/job/tracecompass-gerrit/6185/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2016-02-09 22:41:55.000000000
+Message: 
+Patch Set 5:
+
+Random replacement is usually much better than what we'd think intuitively, especially as the cache size increases. However I don't think of any case where random would be better than LRU.
+
+The downside of LRU is slightly more overhead and more complex implementation. However with the LinkedHashMap protected method trick, it becomes *simpler* to implement than a Random. So not sure why we'd still go with random.
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2016-02-09 22:44:09.000000000
+Message: 
+Patch Set 5:
+
+(1 comment)
+Line:39, statesystem/org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/statesystem/core/statevalue/TmfStateValue.java -> > 512 to cover for system calls
+
+Well it's not just going to be system calls here, you have process names, and also all the strings used by all other state systems. So you're going to have swapping out anyway. What I mean is we can assume the cache will be full, so we should try to gauge the memory usage.
+
+512 seems like a good number though, we can try it out and see how it goes.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2016-02-09 22:58:15.000000000
+Message: 
+Patch Set 5:
+
+> I [can't] think of any case where random would be better than LRU.
+
+Ok I thought of one: If you are cyclically going through a set of element, and the cache size is slightly smaller than the size of the data set. You'll have cache misses every single time.
+
+Still, I don't think this is the case with our usage here ;)
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthew Khouzam
+Date: 2016-02-09 23:22:28.000000000
+Message: 
+Patch Set 5:
+
+With periodic traces, this possibility becomes surprisingly real.
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2016-02-10 23:43:43.000000000
+Message: 
+Patch Set 5: Code-Review-1
+
+(3 comments)
+Line:155, statesystem/org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/statesystem/core/statevalue/TmfStateValue.java -> spacing
+
+Line:170, statesystem/org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/statesystem/core/statevalue/TmfStateValue.java -> Shouldn't there be some synchronization around this block? In case two threads are trying to remove from the map at the same time (might have to change to a ConcurrentHashMap too, to allow remove operations to happen at the same time as the get() above).
+
+Line:171, statesystem/org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/statesystem/core/statevalue/TmfStateValue.java -> Iterables.get() on a Set will be relatively slow, it will iterate on all entries.
+
+A more efficient way to do this would be to also keep track of keys in a List, since getting a random element in a list is O(1). Wait doesn't this ring a bell? Like CtfIterator!
+
+We could abstract this Map+List container (RandomRemoveMap or something) into its own class, then reuse it in CtfIterator and in here.
+
+Since this patch here is not an important bugfix, I'd prefer to do it cleanly before merging it.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Patrick Tasse
+Date: 2016-02-11 00:02:10.000000000
+Message: 
+Patch Set 5:
+
+(2 comments)
+Line:47, statesystem/org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/statesystem/core/statevalue/TmfStateValue.java -> Would some kind of prime number be better here? I'm guessing the array index 0 could be over-used?
+
+Line:154, statesystem/org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/statesystem/core/statevalue/TmfStateValue.java -> Just a thought, would using an array for the cache, with an offset calculated as strValue.hashCode() % STRING_CACHE_SIZE have the desired characteristics?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2016-02-11 00:15:29.000000000
+Message: 
+Patch Set 5:
+
+(1 comment)
+Line:154, statesystem/org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/statesystem/core/statevalue/TmfStateValue.java -> That would turn it into a direct-mapping cache, making it more similar to the existing int/long/double caches. Should work too, I'd be curious to see it run against the current solution in Matthew's mysterious benchmark.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthew Khouzam
+Date: 2016-02-15 03:31:59.000000000
+Message: 
+Patch Set 5:
+
+> I'd be curious to see it run against the current solution in Matthew's mysterious benchmark.
+
+You can test it yourself, it's called "AnalysisBenchmark.java", it's in the git tree, It is also the main test highlighted in http://istmffastyet.dorsal.polymtl.ca/. I am not going to continue trying to improve the state system.
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2016-02-15 19:18:48.000000000
+Message: 
+Patch Set 5:
+
+> You can test it yourself, it's called "AnalysisBenchmark.java", it's in the git tree, It is also the main test highlighted in http://istmffastyet.dorsal.polymtl.ca/.
+
+Ok great, this is exactly the kind of information that should be in the commit message, so that others can reproduce the results.
+
+Just to clear I am very open to this patch, the approach was used for int/long/double state values, so at first glance it makes sense. However, like all optimizations, we should provide clear, reproducible benchmarks results. (Perhaps we should update the guidelines in the contributor guide for these types of patches? Something to think about.)
+
+For this patch in particular, we should look at the following metrics:
+
+* State system construction time
+* Query time / UI response time
+* Memory usage
+
+The first metric was already covered, however I would like to make sure it is not at the expense of the other two, which I would say are much more important.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthew Khouzam
+Date: 2016-02-16 20:16:19.000000000
+Message: 
+Abandoned
+
+I would need to implement too many benchmarks to prove this, I have too many things to do right now.
+----------------------------------------------------------------------------------------------------------------------

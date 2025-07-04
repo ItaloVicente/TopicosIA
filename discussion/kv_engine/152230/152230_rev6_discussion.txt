@@ -1,0 +1,92 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-45378: Fix static init fiasco with ExecutorPool & GoogleLog
+
+When converting platform to be statically linked, a crash is seen
+during shutdown of ep-engine_ep_unit_tests.DcpConnMapTest tests on
+MSVC. The ExecutorPool is consuming messages on the background threads
+(I believe to coordinate shutdown), and during that it attempts to log
+a warning message to Google Log.
+
+The cause of the crash is a change in the static initialisation (and
+deinitialization) order - the GoogleLog singleton instance as used
+internally by Folly is deinitialized before ExecutorPool singleton. As
+such, when the ExecutorPool singleton is shutting down, it attempts to
+log a message to a non-existant GLog instance and a nullptr is
+deferenced.
+
+Fix by changing ExecutorPool singleton to use C++11 magic static
+(Meyer singleton); which ensures it is destructed earlier, before
+GLog.
+
+Additionally, while the above is sufficient to fix this issue on macOS
+Catalina, on Mojave this introduces _another_ crash as some Folly
+hazard pointer singletons appear to already have been destructed and
+the following crash is seen:
+
+    * thread #1, queue = 'com.apple.main-thread', stop reason = signal SIGABRT
+      * frame #0: 0x00007fff7412f2c6 libsystem_kernel.dylib`__pthread_kill + 10
+        frame #1: 0x00007fff741eabf1 libsystem_pthread.dylib`pthread_kill + 284
+        frame #2: 0x00007fff740996a6 libsystem_c.dylib`abort + 127
+        frame #3: 0x00007fff741a8077 libsystem_malloc.dylib`malloc_vreport + 545
+        frame #4: 0x00007fff741a7e38 libsystem_malloc.dylib`malloc_report + 151
+        frame #5: 0x00007fff73ff3cf9 libdyld.dylib`_tlv_atexit + 155
+        frame #6: 0x000000010143cb2d ep-engine_ep_unit_tests`folly::SingletonThreadLocal<folly::hazptr_tc<std::__1::atomic>, folly::hazptr_tc_tls_tag, folly::detail::DefaultMake<folly::hazptr_tc<std::__1::atomic> >, folly::hazptr_tc_tls_tag>::getSlow(cache=0x000000010b5606b8) at SingletonThreadLocal.h:157 [opt]
+        frame #7: 0x0000000101437a19 ep-engine_ep_unit_tests`folly::UnboundedBlockingQueue<folly::CPUThreadPoolExecutor::CPUTask>::add(folly::CPUThreadPoolExecutor::CPUTask) [inlined] folly::SingletonThreadLocal<folly::hazptr_tc<std::__1::atomic>, folly::hazptr_tc_tls_tag, folly::detail::DefaultMake<folly::hazptr_tc<std::__1::atomic> >, folly::hazptr_tc_tls_tag>::get() at SingletonThreadLocal.h:167 [opt]
+        frame #8: 0x0000000101437a08 ep-engine_ep_unit_tests`folly::UnboundedBlockingQueue<folly::CPUThreadPoolExecutor::CPUTask>::add(folly::CPUThreadPoolExecutor::CPUTask) [inlined] folly::hazptr_tc<std::__1::atomic>& folly::hazptr_tc_tls<std::__1::atomic>() at HazptrThrLocal.h:166 [opt]
+        frame #9: 0x0000000101437a08 ep-engine_ep_unit_tests`folly::UnboundedBlockingQueue<folly::CPUThreadPoolExecutor::CPUTask>::add(folly::CPUThreadPoolExecutor::CPUTask) at HazptrHolder.h:64 [opt]
+        frame #10: 0x0000000101437a08 ep-engine_ep_unit_tests`folly::UnboundedBlockingQueue<folly::CPUThreadPoolExecutor::CPUTask>::add(folly::CPUThreadPoolExecutor::CPUTask) [inlined] folly::hazptr_holder<std::__1::atomic>::hazptr_holder(this=<unavailable>, domain=<unavailable>) at HazptrHolder.h:61 [opt]
+        frame #11: 0x0000000101437a08 ep-engine_ep_unit_tests`folly::UnboundedBlockingQueue<folly::CPUThreadPoolExecutor::CPUTask>::add(folly::CPUThreadPoolExecutor::CPUTask) at UnboundedQueue.h:374 [opt]
+        frame #12: 0x00000001014379e7 ep-engine_ep_unit_tests`folly::UnboundedBlockingQueue<folly::CPUThreadPoolExecutor::CPUTask>::add(folly::CPUThreadPoolExecutor::CPUTask) [inlined] folly::UnboundedQueue<folly::CPUThreadPoolExecutor::CPUTask, false, false, false, 6ul, 7ul, std::__1::atomic>::enqueue(this=0x00007ffeefbff770, arg=0x00007ffeefbff690) at UnboundedQueue.h:271 [opt]
+        frame #13: 0x00000001014379e7 ep-engine_ep_unit_tests`folly::UnboundedBlockingQueue<folly::CPUThreadPoolExecutor::CPUTask>::add(this=0x000000010ba00f80, item=CPUTask @ 0x00007ffeefbff690) at UnboundedBlockingQueue.h:31 [opt]
+        frame #14: 0x0000000101437bfc ep-engine_ep_unit_tests`folly::BlockingQueue<folly::CPUThreadPoolExecutor::CPUTask>::addWithPriority(this=0x000000010ba00f80, item=CPUTask @ 0x00007ffeefbff770, (null)=<unavailable>) at BlockingQueue.h:57 [opt]
+        frame #15: 0x0000000101436b00 ep-engine_ep_unit_tests`folly::CPUThreadPoolExecutor::stopThreads(this=0x000000010bf8de00, n=2) at CPUThreadPoolExecutor.cpp:281 [opt]
+        frame #16: 0x000000010144bae3 ep-engine_ep_unit_tests`folly::ThreadPoolExecutor::stop() [inlined] folly::ThreadPoolExecutor::removeThreads(this=<unavailable>, n=<unavailable>) at ThreadPoolExecutor.cpp:233 [opt]
+        frame #17: 0x000000010144bad0 ep-engine_ep_unit_tests`folly::ThreadPoolExecutor::stop(this=0x000000010bf8de00) at ThreadPoolExecutor.cpp:251 [opt]
+        frame #18: 0x00000001014352d4 ep-engine_ep_unit_tests`folly::CPUThreadPoolExecutor::~CPUThreadPoolExecutor(this=0x000000010bf8de00, vtt=0x00000001019fd6c8) at CPUThreadPoolExecutor.cpp:126 [opt]
+        frame #19: 0x0000000101435465 ep-engine_ep_unit_tests`folly::CPUThreadPoolExecutor::~CPUThreadPoolExecutor() [inlined] folly::CPUThreadPoolExecutor::~CPUThreadPoolExecutor(this=0x000000010bf8de00) at CPUThreadPoolExecutor.cpp:124 [opt]
+        frame #20: 0x0000000101435459 ep-engine_ep_unit_tests`folly::CPUThreadPoolExecutor::~CPUThreadPoolExecutor(this=0x000000010bf8de00) at CPUThreadPoolExecutor.cpp:124 [opt]
+        frame #21: 0x000000010023240a ep-engine_ep_unit_tests`FollyExecutorPool::~FollyExecutorPool(this=0x000000010b7eed40) at folly_executorpool.cc:757 [opt]
+        frame #22: 0x00000001002325ee ep-engine_ep_unit_tests`FollyExecutorPool::~FollyExecutorPool(this=0x000000010b7eed40) at folly_executorpool.cc:751 [opt]
+        frame #23: 0x00007fff7409a3cf libsystem_c.dylib`__cxa_finalize_ranges + 319
+        frame #24: 0x00007fff7409a6b3 libsystem_c.dylib`exit + 55
+
+Address _this_ with a somewhat belt-and-braces approach - also
+manually shutdown the ExecutorPool in DcpConnMapTest::TearDown - as is
+done in other tests.
+
+Change-Id: I87f13bc3a7cdf616b52d18502dd724fcf630d3b9
+Reviewed-on: http://review.couchbase.org/c/kv_engine/+/152230
+Tested-by: Build Bot <build@couchbase.com>
+Reviewed-by: Richard de Mellow <richard.demellow@couchbase.com>
+Reviewed-by: Trond Norbye <trond.norbye@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Trond Norbye
+Date: 2021-04-29 06:22:48.000000000
+Message: 
+Change has been successfully cherry-picked as 5c90329b8cb4e8fddd34fafa5252e2b06646fd7e by Trond Norbye
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-04-29 06:22:55.000000000
+Message: 
+Patch Set 6:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/7499/ (2/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-04-29 08:48:44.000000000
+Message: 
+Patch Set 6:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv-engine-master-perf/4769/ : FAILURE
+
+CMake error: tlm/cmake/Modules/FindCouchbaseErlang.cmake:68 (MESSAGE) ( http://cv.jenkins.couchbase.com/job/kv-engine-master-perf/4769/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/7499/ : SUCCESS'
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,122 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-30119: Fix errors reported by ASAN after forcing C++14
+
+* We're using operator new to allocate the size of the StoredValue
+  object, so we should use operator delete to release the memory
+  as well (otherwise asan reports mismatch of allocation and
+  release size)
+
+* Base class should have a virtual destructor
+
+Change-Id: Id9b9170379b1845e12b65ca4e374feb7290fafbd
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Trond Norbye
+Date: 2018-06-14 12:51:32.000000000
+Message: 
+Uploaded patch set 3.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-06-14 12:54:12.000000000
+Message: 
+Patch Set 3: Code-Review-1
+
+(2 comments)
+Line:131, engines/ep/src/stored-value.h -> I don't believe this should be necessary - I believe this is doing exactly what the compiler-generated operator is doing.
+
+Line:845, engines/ep/src/stored-value.h -> ditto
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2018-06-14 12:58:52.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:131, engines/ep/src/stored-value.h -> Without it ASAN complaints, with it it works ;)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-06-14 13:03:36.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:131, engines/ep/src/stored-value.h -> Hmm - something seems wrong then - all deletes should go via the deleteImpl() method below which you can see already adds the appropriate typecast. Can you point me at a backtrace where this gets called?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-06-14 13:17:49.000000000
+Message: 
+Patch Set 3: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master/1478/ : FAILURE
+
+AddressSanitizer issue: new-delete-type-mismatch (/usr/local/lib64/libasan.so.4+0xdbd38) in operator delete(void*, unsigned long) ( http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master/1478/ )
+
+Failure of a CTest test  48/143 Test  #51: client_cert_config_test ...................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master/1478/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/1539/ : FAILURE
+
+Failure of a GoogleTest  ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/1539/ )
+
+Failure of a CTest test  38/145 Test  #36: ep_testsuite_dcp.ephemeral ................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/1539/ )
+
+ThreadSanitizer issue: unlock of an unlocked mutex (or by a wrong thread) (/usr/local/lib64/libtsan.so.0+0x3889b) in pthread_mutex_unlock  ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/1539/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/8626/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/8642/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/9741/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/9733/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-undefinedsanitizer-master/642/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-06-14 13:20:45.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:131, engines/ep/src/stored-value.h -> ok, so I think I see how this "fixes" the warning - by defining this we force the class to be deleted using the non-sized operator delete. Normally it will call the sized one and that's why it warns:
+
+ Continuing.
+    #0 0x7ffff6efca18 in operator delete(void*, unsigned long) (/usr/lib/x86_64-linux-gnu/libasan.so.4+0xe1a18)
+    #1 0x14c4890 in StoredValue::Deleter::operator()(StoredValue*) /home/daver/repos/couchbase/server/kv_engine/engines/ep/src/stored-value.cc:254
+    #2 0x1383ee5 in TaggedPtrDeleter<StoredValue, StoredValue::Deleter>::operator()(TaggedPtr<StoredValue>) /home/daver/repos/couchbase/server/kv_engine/engines/ep/src/tagged_ptr.h:143
+    #3 0x1383ee5 in std::unique_ptr<StoredValue, TaggedPtrDeleter<StoredValue, StoredValue::Deleter> >::~unique_ptr() /usr/include/c++/7/bits/unique_ptr.h:268
+    #4 0x1383ee5 in HashTable::clear_UNLOCKED(bool) /home/daver/repos/couchbase/server/kv_engine/engines/ep/src/hash_table.cc:124
+
+I think the underlying issue here is that the object is created via a call to new() which is larger than sizeof(StoredValue); as we embed the key at the end of the fixed data. When the compiler / ASan calls operator delete(void*, unsigned long); it doesn't know this and passes in the fixed size.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-06-14 13:40:40.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:131, engines/ep/src/stored-value.h -> Indeed, this what cppreference.com[1] says (note this is new in C++14) about how delete is called:
+
+ ...
+ * Otherwise, lookup reached global scope, and:
+     * If the type is complete and if, for the delete[] only, the operand is a pointer to a class type with a non-trivial destructor or a (possibly multi-dimensional) array thereof, the global size-aware global function (with a parameter of type std::size_t) is selected
+    * Otherwise, it is unspecified whether the global size-aware deallocation function (with a parameter of type std::size_t) or the global size-unaware deallocation function (without a parameter of type std::size_t) is selected
+
+[1]: http://en.cppreference.com/w/cpp/language/delete
+
+So previously (C++11) we always had the non-sized delete() called; now we have the sized one called.
+
+Based on all of this, I agree that the current solution in this patch (defining a non-sized class-specific delete()) is the correct one - but for a somewhat subtle reason - as discussed here.
+
+Could you add a comment to both operator delete() functions explaining why need them please?
+
+----------------------------------------------------------------------------------------------------------------------

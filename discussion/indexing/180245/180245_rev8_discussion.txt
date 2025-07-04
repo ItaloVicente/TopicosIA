@@ -1,0 +1,178 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-53664, MB-52790 - fixing intermediate index build failures
+
+cbindex tool attempts to get index information from metadata cache
+
+This info can be stale if we did not sync with GSI completely first
+Sync issue is happening mainly due to uninitialised clusterVer in
+clientAuth which results in unauthorised syncWithPeer which is
+rejected by the server. clusterVer can be uninitialised as it is
+fetched in a separate goroutine.
+Due to this sync issue, watchers are not started but we have async
+routines in background waiting for them to start
+
+Hence introducing a new Catchup func to synchronously wait for the
+background helpers to finish. It polls to check if all watchers
+are alive at interval duration for a max duration of:
+    (10000*interval+1)ms
+
+Change-Id: I7d3cd32974dfd803353141bc511aa5388c357688
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dhruvil Shah
+Date: 2022-09-21 17:47:43.000000000
+Message: 
+Patch Set 8: Patch Set 7 was rebased
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2022-09-21 23:36:52.000000000
+Message: 
+Patch Set 8: Code-Review+1
+
+PASS sanity,unit,functional,integration with storage fdb. See http://ci2i-unstable.northscale.in/gsi-22.09.2022-00.43.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: VarunVelamuri
+Date: 2022-09-21 23:37:50.000000000
+Message: 
+Patch Set 8:
+
+(3 comments)
+Line:5745, secondary/manager/client/metadata_provider.go -> I usually don't recommend doing it this way as it becomes difficult for grep based searches. Any reason why you want to add this log tag instead of hard coding the method name?
+
+Line:129, secondary/queryport/client/cbq_client.go -> What is interval used for?
+
+Line:164, secondary/queryport/client/client.go -> It is a good idea not to change the interface unless absolutely required. Can you can not workaround without adding this method
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dhruvil Shah
+Date: 2022-09-22 06:00:32.000000000
+Message: 
+Patch Set 8:
+
+(3 comments)
+Line:5745, secondary/manager/client/metadata_provider.go -> i was going through some code paths and found this tag based logging at a lot of places so I went ahead with this in ClientAuth too.
+
+Line:129, secondary/queryport/client/cbq_client.go -> it is to make sure Catchup matches parent interface signature
+
+Line:164, secondary/queryport/client/client.go -> The problem is currently we don't have read only interface APIs to wait for the background helpers (like watchers) to finish. We can run Refresh followed by Sync, it will unwatch everything and then start watching again but that still won't give a method where I just want to wait for the background syncs to finish
+
+----------------------------------------------------------------------------------------------------------------------
+Author: SAI KRISHNA TEJA KOMMARAJU
+Date: 2022-09-22 07:47:31.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:259, secondary/queryport/client/meta_client.go -> interval * 10000 + 1 looks bit different may be you can take number of retries from user and assume the interval with which you retry
+
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2022-09-22 09:27:05.000000000
+Message: 
+Patch Set 8:
+
+PASS sanity,unit,functional,integration with storage plasma. See http://ci2i-unstable.northscale.in/gsi-22.09.2022-09.30.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2022-09-22 14:02:09.000000000
+Message: 
+Patch Set 8:
+
+PASS sanity,unit,functional,integration with storage memdb. See http://ci2i-unstable.northscale.in/gsi-22.09.2022-15.08.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2022-09-22 18:38:04.000000000
+Message: 
+Patch Set 8:
+
+PASS sanity,unit,functional,integration with storage fdb. See http://ci2i-unstable.northscale.in/gsi-22.09.2022-19.43.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: VarunVelamuri
+Date: 2022-09-22 19:48:22.000000000
+Message: 
+Patch Set 8:
+
+(3 comments)
+Line:5745, secondary/manager/client/metadata_provider.go -> No. Please don't do this. There is no valid reason why it was done that way earlier. When you do grep based search from command line, it becomes real simple if we don't have log tags. Otherwise, one needs to scroll entire function to find a line of interest.
+
+Line:5750, secondary/manager/client/metadata_provider.go -> I think we need not get the cluster version from common here. Instead, when a metadata provider starts, it will already have a cluster version. See "NewMetadataProvider". That way, we know that when watcher starts, we will have a valid cluster version and not something from common.
+
+Line:831, secondary/querycmd/docmd.go -> I see two issues here:
+
+a. Waiting for watcher to finish sync ups
+b. Asynchronous update of cluster version
+
+I see this catchup is trying to solve (a) but not (b) i.e. let's say I add time.Sleep(100 * time.Second) in the go-routine that updates cluster version, will it still work? Because, watchers can go alive with out having a valid cluster version in which case, we will still have the cluster version problem. For (b) you can read the cluster version of metadata provider rather than waiting for catchup.
+
+For (a), it is not expected for watcher to synchronously wait for sync ups to finish. Watcher has been designed that way - That's why there is a notifyReady and there is a timeout. So, even if you wait for catchUp here for a long time, if watcher timeout is hit, then the metadata provider will be cleaned up and started again. I am not sure if this would solve (a) either
+
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2022-09-23 03:42:29.000000000
+Message: 
+Patch Set 8: -Code-Review
+
+MAYBE FAIL sanity,unit,functional,integration with storage plasma. See http://ci2i-unstable.northscale.in/gsi-23.09.2022-03.58.fail.html
+----------------------------------------------------------------------------------------------------------------------
+Author: VarunVelamuri
+Date: 2022-09-23 03:43:28.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:831, secondary/querycmd/docmd.go -> Actually, even if cluster version is available, internalVersion can still hit the issue. We should fix this from internal version perspective and not by waiting on watchers.
+
+If you want to isolate the changes on cbindex, why not sleep for watcherTimeout * num_retries. That will guarantee the updates right?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dhruvil Shah
+Date: 2022-09-23 06:28:59.000000000
+Message: 
+Patch Set 8:
+
+(4 comments)
+Line:831, secondary/querycmd/docmd.go -> yes agreed that there are 2 issues here. Issue 'a' is a smaller fix with limited impact on just tools hence I'm not updating fetching of clusterVer here. 
+
+To fix 'a', we need correct info in metadataClient caches for which we want to the watchers to be alive and synced up. agreed that we have notifyReady but if we want to use that, we will have to sync for multiple channels and keep a count which will eventually look something like the codepath of AllWatchersAlive. Hence i'm polling on that function for the helpers to finish and watchers to be alive. This solves first part of the problem. Once watchers are alive, we can use Refresh to update the metadataClient cache. Also there is no specific timeout for watchers as far as I saw in the WatchMetadata. If we don't get watcher active in a specific time, we retry indefinitely in the background until UnwatchMetadata<-updateIndexerList<-Sync is called.
+
+Line:129, secondary/queryport/client/cbq_client.go -> Done
+
+Line:164, secondary/queryport/client/client.go -> Correction: background helpers (like retryHelpers, which makes sure watchers are alive) to finish (aka watcher is alive)
+
+Line:259, secondary/queryport/client/meta_client.go -> Ack
+
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2022-09-23 08:22:25.000000000
+Message: 
+Patch Set 8:
+
+MAYBE FAIL sanity,unit,functional,integration with storage memdb. See http://ci2i-unstable.northscale.in/gsi-23.09.2022-09.30.fail.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2022-09-23 12:58:01.000000000
+Message: 
+Patch Set 8: Code-Review+1
+
+PASS sanity,unit,functional,integration with storage fdb. See http://ci2i-unstable.northscale.in/gsi-23.09.2022-14.04.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: VarunVelamuri
+Date: 2022-09-23 18:55:44.000000000
+MISMATCHED INLINE COMMENT
+Line:831, secondary/querycmd/docmd.go -> What I am trying to understand is, if the issue is with "b", why fix "a"? Should we not focus in fixing "b" first. 
+
+>If we don't get watcher active in a specific time, we retry indefinitely in the background
+
+Can you check the implementation of notifyReady once
+----------------------------------------------------------------------------------------------------------------------
+Author: Dhruvil Shah
+Date: 2022-09-26 05:10:42.000000000
+MISMATCHED INLINE COMMENT
+Line:831, secondary/querycmd/docmd.go -> so there is also a chance that while GsiClient uses path "b" (synchronously get cluster version) the indexer services could be in bootstrap stage and not ready to send a response. In that case, we will have to wait for watchers to be alive in the background. So yes to completely fix the problem both "a" and "b" are required but they can go in different patches without breaking anything.
+
+For notifyReady, we pass retry as -1 and that results in an infinite loop and killch gets a message usually only from Unwatchmetadata
+----------------------------------------------------------------------------------------------------------------------

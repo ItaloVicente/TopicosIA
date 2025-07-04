@@ -1,0 +1,235 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 367256 - Debugger doesn't handle invalid breakpoints properly
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Marc Khouzam
+Date: 2012-05-24 15:14:03.000000000
+Message: 
+Patch Set 1: (2 inline comments)
+
+This is a nice improvement on the current situation.
+
+Before going deeper in the details let me ask if it wouldn't be better to handle the errors in the caller of IRunControl.resume() (for example)?  It seems more appropriate to report such an error in the UI code which triggered the failing operation.  For example, DsfResumeCommand would handle the failure and show the dialog.  I don't think the service should be showing errors to the user; instead it should report the error as it does now with a failed status, and the different callers should decide what to do with it.
+
+What do you think?
+Line:1579, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBRunControl_7_0_NS.java -> Is this fake event only to re-enable the resume button?    If we didn't get a *running event, I don't think we should need to issue a fake *stopped event.  Instead, we should force a refresh of the enablement of the resume command.  This should be possible if we deal with the failure in the UI code (DsfResumeCommand)
+
+Line:1589, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBRunControl_7_0_NS.java -> When and why do we need this logic if initialization?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Anonymous Coward
+Date: 2012-05-24 17:04:38.000000000
+Message: 
+Patch Set 1:
+
+I agree that's the right way to do it. This would requires to go through all commands and add error handlers. Some commands like 'Run To Line', 'Resume At Line' and 'Move To Line' already have error handles. 
+The problem is we don't exactly whether there are commands except 'Resume' and 'Step' that are affected by this problem. Should we fix it for 'resume' and 'step' and wait for bug reports for other cases?
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc Khouzam
+Date: 2012-05-24 17:52:47.000000000
+Message: 
+Patch Set 1:
+
+> I agree that's the right way to do it. This would 
+> requires to go through all commands and add error 
+> handlers. Some commands like 'Run To Line', 
+> 'Resume At Line' and 'Move To Line' already have 
+> error handles. The problem is we don't exactly 
+> whether there are commands except 'Resume' and 
+> 'Step' that are affected by this problem. Should 
+> we fix it for 'resume' and 'step' and wait for 
+> bug reports for other cases?
+
+I think that is fine.  It makes sense to focus our energies on the problem that come up, and avoid the ones that are not bothering anyone, even if they are there.
+----------------------------------------------------------------------------------------------------------------------
+Author: Mike Wrighton
+Date: 2012-05-24 17:55:30.000000000
+Message: 
+Patch Set 1: (2 inline comments)
+
+
+Line:1579, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBRunControl_7_0_NS.java -> Actually the problem here is that we do receive a ^running event, so if there is a subsequent ^error event (which is the case when an invalid breakpoint is inserted during startup), it's ignored and that's why we have fire our own suspended event.
+
+Line:1589, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBRunControl_7_0_NS.java -> When an error occurs during initialization, the initialization sequence will fail and the standard 'startup sequence failed' error dialog will be shown - so this check is to make sure we don't display 2 popups.
+
+The extra flag was added because there is case where we receive ^running, followed by an asynchronous ^error result, while initialization has not yet finished. In this case, initialization will complete successfully (the run command did not catch the error) so we need to always display the error popup.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc Khouzam
+Date: 2012-05-24 18:14:10.000000000
+Message: 
+Patch Set 1: (2 inline comments)
+
+
+Line:1579, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBRunControl_7_0_NS.java -> I see now.  What is worst is that we also get a *running event.  So I guess there is no way to distinguish this case from a valid one.
+
+This is a bug in GDB, but I guess we have to work around it.
+
+GDB knows the proper state of the threads even though it messed up the events, right?  What if we simply refreshed such state, instead of faking an event?  Would calling refreshThreadStates() be enough?
+
+Line:1589, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBRunControl_7_0_NS.java -> How can I reproduce this situation?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Anonymous Coward
+Date: 2012-05-24 18:16:06.000000000
+Message: 
+Patch Set 1: (1 inline comment)
+
+
+Line:1579, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBRunControl_7_0_NS.java -> The suspend event also updates the state of the current thread.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Mike Wrighton
+Date: 2012-05-24 18:46:06.000000000
+Message: 
+Patch Set 1: (1 inline comment)
+
+
+Line:1589, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBRunControl_7_0_NS.java -> Ok, to reproduce the case where isInitialized() == false, and checkIsInitialized == true, a command in the initialization sequence needs to fail. In our product, we use 'continue' instead of 'run' as we need to load the code first. After setting an invalid breakpoint, the continue command fails properly, that is, it produces a single ^error record, so this method is called but the error is skipped allowing for the initialization error to be subsequently displayed.
+
+The run command however, first produces ^running, so the run step actually completes successfully. In this case, we want to ignore the isInitialized() check.
+
+So unfortunately unless you have a setup where you're using continue instead of run, I don't know how you can reproduce this. Does that make sense?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc Khouzam
+Date: 2012-05-24 18:55:06.000000000
+Message: 
+Patch Set 1: (2 inline comments)
+
+
+Line:1579, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBRunControl_7_0_NS.java -> refreshThreadStates() also sends a fake event, for any thread that we think is running but GDB says is stopped (and vice versa) so I think it should work in this case.  I'm hoping it would make the code simpler by re-using existing code.
+
+And we shouldn't worry about the fact we would refresh all threads, instead of just one, because this will only happen in the error case.
+
+Line:1589, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBRunControl_7_0_NS.java -> When connecting to a remote target we use 'continue' instead of run, would that cause the problem?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Mike Wrighton
+Date: 2012-05-24 18:58:14.000000000
+Message: 
+Patch Set 1: (1 inline comment)
+
+
+Line:1589, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBRunControl_7_0_NS.java -> Yes, it should do.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Anonymous Coward
+Date: 2012-05-24 19:19:22.000000000
+Message: 
+Patch Set 1: (1 inline comment)
+
+
+Line:1579, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBRunControl_7_0_NS.java -> The current code uses MIErrorEvent as a stop reason which is essential - the error message is displayed as a stop reason. Would it be achieved by using refreshThreadStates()?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc Khouzam
+Date: 2012-05-24 19:27:40.000000000
+Message: 
+Patch Set 1: (1 inline comment)
+
+
+Line:1579, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBRunControl_7_0_NS.java -> I find it strange that we send a special event ourselves, to tell ourselves to display an error.  But maybe there is no way around that.  I haven't looked at the changes you made to the MIRunControlEventProcessor files, so I don't know all the details yet.
+
+Leave it as is, and we'll see once I look at the complete patch.  My current understanding is that you will update the patch to put the error handling in DsfResumeCommand et al., so I'm planning on waiting until that version is ready.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Anonymous Coward
+Date: 2012-05-24 19:32:21.000000000
+Message: 
+Patch Set 1: (1 inline comment)
+
+
+Line:1579, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBRunControl_7_0_NS.java -> Sounds good.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Mike Wrighton
+Date: 2012-05-24 20:22:05.000000000
+Message: 
+Patch Set 1: (1 inline comment)
+
+
+Line:1579, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBRunControl_7_0_NS.java -> There's one slight issue with moving the error handling into the DSF handlers that I can see. Because the MIRunControl methods take a RequestMonitor rather than a DataRequestMonitor, callers of these methods don't have access to the MIInfo of the command which was executed, which is very useful when parsing the results - in our product, for example, we require the command result to produce nice structured error messages.
+
+The other thing is that the asynchronous errors we receive are not really connected to any command, so we need to process these somewhere, although we could probably do this in the RunControlEventProcessor classes.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc Khouzam
+Date: 2012-05-25 13:48:59.000000000
+Message: 
+Patch Set 1: (1 inline comment)
+
+
+Line:1579, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBRunControl_7_0_NS.java -> I think you could create a new Status in which you can put the info you need from MIInfo, and use that for the RM.  I think it is fine to modify the RunControl services to adapt the error result, but I don't think the decision about what to do about this error should be in the service.
+
+For example, one can imagine that for an operation as runToLine, which can interrupt and then resume the target automatically, we may want to do something different than trigger an error dialog if the resume operation fails.
+
+As for the aync error, using RunControlEventProcessor sounds right to me.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Anonymous Coward
+Date: 2012-06-07 20:11:24.000000000
+Message: 
+Patch Set 1: (1 inline comment)
+
+
+Line:1579, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBRunControl_7_0_NS.java -> It doesn't seem that we can handle errors in 'DsfStep*Command'. 'SteppingController' simply ignores errors. What do we do in this case? Keep the error handling in the services?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Mike Wrighton
+Date: 2012-06-07 20:18:18.000000000
+Message: 
+Patch Set 1: (1 inline comment)
+
+
+Line:1579, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBRunControl_7_0_NS.java -> Can we not modify the code in handleFailure() in SteppingController.doStep() ?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Anonymous Coward
+Date: 2012-06-07 20:24:41.000000000
+Message: 
+Patch Set 1: (1 inline comment)
+
+
+Line:1579, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBRunControl_7_0_NS.java -> I am not sure about that. We would need to filter errors. It's easier to keep the error handling as it was before.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc Khouzam
+Date: 2012-07-19 14:47:16.000000000
+Message: 
+Patch Set 1: (1 inline comment)
+
+Sorry for the delay, I didn't realize it was my turn :)
+Line:1579, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBRunControl_7_0_NS.java -> Having to go through the SteppingController complicates things, but I still think it makes better sense.  If the solution is possible.
+
+Looking at handleFailure() in SteppingController.doStep(), in only ignores errors that are tagged IDsfStatusConstants.INVALID_STATE.  If the runControl service returns a different error code when we are in the situation you are trying to fix, couldn't we make it work? 
+
+In GDBRunControl_7_0_NS.step(), I tried having a step-return always set an error status.  In that case, I can see the following in the console:
+
+!ENTRY org.eclipse.cdt.dsf 4 10005 2012-07-19 10:44:15.469
+!MESSAGE Request for monitor: 'RequestMonitor (org.eclipse.cdt.dsf.debug.ui.viewmodel.SteppingController$3@15704bc): Status ERROR: org.eclipse.cdt.dsf.gdb code=10003 testing errors null' resulted in an error.
+!SUBENTRY 1 org.eclipse.cdt.dsf.gdb 4 10003 2012-07-19 10:44:15.470
+!MESSAGE testing errors
+
+Couldn't we trigger a dialog for the user in that case?
+
+The complexity will probably be that we may need to override the SteppingController, as it is part of DSF.
+
+Let me assure you that I am not looking to create more work :)  but it really seems wrong to have the service decide what to do with error situations.
+
+Let me know what you think.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Anonymous Coward
+Date: 2012-07-19 15:38:21.000000000
+Message: 
+Patch Set 1: (1 inline comment)
+
+
+Line:1579, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBRunControl_7_0_NS.java -> I agree with you, reporting errors from the UI components is a better approach. I'll take a better look at 'SteppingController'.
+Thanks
+
+----------------------------------------------------------------------------------------------------------------------

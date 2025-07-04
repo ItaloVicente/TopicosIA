@@ -1,0 +1,222 @@
+======================================================================================================================
+DESCRIPTION:
+
+Don't inline included configs on FileBasedConfig.save()
+
+Bug: 529825
+Change-Id: Id23d4602aa2082d7f2dfe15ae92d7b175b1b8944
+Signed-off-by: Marc Strapetz <marc.strapetz@syntevo.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Marc Strapetz
+Date: 2018-08-22 12:37:19.000000000
+Message: 
+Uploaded patch set 3: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-08-22 12:41:41.000000000
+Message: 
+Patch Set 3:
+
+Build Started https://ci.eclipse.org/jgit/job/jgit.gerrit/13712/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-08-22 12:54:24.000000000
+Message: 
+Patch Set 3: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/jgit.gerrit/13712/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2018-08-22 18:16:13.000000000
+Message: 
+Patch Set 3:
+
+Nice, but the following test I just wrote was green before and fails with this change:
+
+  @Test
+  public void testValueOverridesIncludeAfterChangeAndReload()
+      throws IOException, ConfigInvalidException {
+    File included = tmp.newFile("included");
+    String content = "[user]\nname=Alice Muller\nemail=alice@included";
+    Files.write(included.toPath(), content.getBytes());
+
+    File config = tmp.newFile("config");
+    content = "[user]\nname=Alice\n[include]\npath="
+        + pathToString(included) + "\n";
+    Files.write(config.toPath(), content.getBytes());
+
+    FileBasedConfig fbConfig = new FileBasedConfig(null, config,
+        FS.DETECTED);
+    fbConfig.load();
+    assertEquals("Alice Muller", fbConfig.getString("user", null, "name"));
+    assertEquals("alice@included", fbConfig.getString("user", null, "email"));
+    fbConfig.setString("user", null, "name", "Alice Parker");
+    fbConfig.save();
+    fbConfig = new FileBasedConfig(null, config, FS.DETECTED);
+    fbConfig.load();
+    assertEquals("Alice Parker", fbConfig.getString("user", null, "name"));
+    assertEquals("alice@included", fbConfig.getString("user", null, "email"));
+  }
+
+Should it be still green? Or is this test invalid? I believe it should be green since without save & reload this works:
+
+  @Test
+  public void testValueOverridesIncludeAfterChange()
+      throws IOException, ConfigInvalidException {
+    File included = tmp.newFile("included");
+    String content = "[user]\nname=Alice Muller\nemail=alice@included";
+    Files.write(included.toPath(), content.getBytes());
+
+    File config = tmp.newFile("config");
+    content = "[user]\nname=Alice\n[include]\npath="
+        + pathToString(included) + "\n";
+    Files.write(config.toPath(), content.getBytes());
+
+    FileBasedConfig fbConfig = new FileBasedConfig(null, config,
+        FS.DETECTED);
+    fbConfig.load();
+    assertEquals("Alice Muller", fbConfig.getString("user", null, "name"));
+    assertEquals("alice@included", fbConfig.getString("user", null, "email"));
+    fbConfig.setString("user", null, "name", "Alice Parker");
+    assertEquals("Alice Parker", fbConfig.getString("user", null, "name"));
+    assertEquals("alice@included", fbConfig.getString("user", null, "email"));
+  }
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc Strapetz
+Date: 2018-08-22 21:26:47.000000000
+Message: 
+Patch Set 3:
+
+Good point. Intuition says "yes", but Git says "no". It depends on the line order, though:
+
+Without the change, include.path breaks after saving because:
+
+ [user]
+   name = Alice Parker
+ [include]
+   path = ...
+
+becomes
+
+ [user]
+   name = Alice Parker
+ [include]
+ [user]
+   email = ...
+   path = ...
+
+and hence on a subsequent reload the loaded file won't be loaded anymore and the first user.name wins. So JGit without the fix currently works just "by accident".
+
+On the other hand, 'git config user.name "Alice Parker"' will change:
+
+ [user]
+   name = Alice
+ [include]
+   path = ...
+
+to
+
+ [user]
+   name = Alice Parker
+ [include]
+   path = ...
+
+And 'git config user.name' will still report "Alice Muller", exactly as JGit with the fix will do now.
+
+Still JGit (including fix) disagrees from Git for:
+
+ [include]
+   path = ...
+ [user]
+   name = Alice
+
+Here 'git config user.name "Alice Parker"' will (as expected) result in:
+
+ [include]
+   path = ...
+ [user]
+   name = Alice Parker
+
+and 'git config user.name' will report "Alice Parker". JGit modifies the "inlined" ConfigLine which will be lost on save and subsequent results will be wrong.
+
+I would make JGit work exactly as Git here, i.e. only fix the latter case.
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2018-08-23 10:31:14.000000000
+Message: 
+Patch Set 3:
+
+> Good point. Intuition says "yes", but Git says "no". It depends on
+ > the line order, though:
+ > 
+ > Without the change, include.path breaks after saving because:
+ > 
+ > [user]
+ > name = Alice Parker
+ > [include]
+ > path = ...
+ > 
+ > becomes
+ > 
+ > [user]
+ > name = Alice Parker
+ > [include]
+ > [user]
+ > email = ...
+ > path = ...
+ > 
+ > and hence on a subsequent reload the loaded file won't be loaded
+ > anymore and the first user.name wins. So JGit without the fix
+ > currently works just "by accident".
+ 
+Wow. That looks like another bug in JGit's updating the config file! The "path" line definitely should not suddenly become a sub-entry of [user].
+
+ > On the other hand, 'git config user.name "Alice Parker"' will
+ > change:
+ > 
+ > [user]
+ > name = Alice
+ > [include]
+ > path = ...
+ > 
+ > to
+ > 
+ > [user]
+ > name = Alice Parker
+ > [include]
+ > path = ...
+ > 
+ > And 'git config user.name' will still report "Alice Muller",
+ > exactly as JGit with the fix will do now.
+ 
+And that's what JGit should be doing, too.
+
+ > Still JGit (including fix) disagrees from Git for:
+ > 
+ > [include]
+ > path = ...
+ > [user]
+ > name = Alice
+ > 
+ > Here 'git config user.name "Alice Parker"' will (as expected)
+ > result in:
+ > 
+ > [include]
+ > path = ...
+ > [user]
+ > name = Alice Parker
+ > 
+ > and 'git config user.name' will report "Alice Parker". JGit
+ > modifies the "inlined" ConfigLine which will be lost on save and
+ > subsequent results will be wrong.
+ > 
+ > I would make JGit work exactly as Git here, i.e. only fix the
+ > latter case.
+
+Yes, this should be fixed, and the cases with and without save & reload must work the same way, for both [user] before or after [include]. Otherwise this is a gruesome pitfall leading to hard to track bugs.
+----------------------------------------------------------------------------------------------------------------------

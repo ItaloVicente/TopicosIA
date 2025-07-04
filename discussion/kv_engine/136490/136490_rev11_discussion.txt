@@ -1,0 +1,106 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-41510: Fix infinite loop due to HdrHistogram being reset
+
+Currently if a HdrHistogram has its reset() method called by one thread
+(T1) and is being read by another (T2) using an HdrHistoram::Iterator.
+There is the race that could cause the HdrHistoram::Iterator() to enter
+an infinite loop.
+
+This occurs as HdrHistogram's getNextValue() methods use HdrHistogam_c's
+hdr_iter_next() which intern uses the following function:
+static bool has_next(struct hdr_iter* iter)
+{
+        return iter->cumulative_count < iter->total_count;
+}
+Which logically checks that the total count the Iterator was
+initialize with is > than the sum of all the counts its read from the
+buckets in the histogram. The trouble is, that the reset() method
+changes the bucket counts back to 0. Thus, meaning the condition
+cumulative_count >= total_count may never be met.
+
+To fix this make the std::unique_ptr<struct hdr_histogram> as
+std::shared_ptr. When we call HdrHistogram::reset(), we should create
+a new std::shared<> and store under the histogram member. This will
+mean that new calls to the HdrHistogram obj will see that the data has
+been reset. But we can keep around the old struct hdr_histogram for use
+with the Iterator as long as we keep a std::shared_ptr<> to it within
+the HdrHistogram::Iterator. Once we've finished using the
+HdrHistogram::Iterator the shared_ptr will destroy the struct for us
+along with all its data.
+
+We also need to a cb::RWLock to guard when modifying the
+std::shared_ptr<> as its pointer value is not thread safe.
+
+Change-Id: I5d7e579d8dba638fd0d2ef1c0d1896cc3676496f
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Richard de Mellow
+Date: 2020-09-23 13:53:07.000000000
+Message: 
+Uploaded patch set 11.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-09-23 13:53:16.000000000
+Message: 
+Patch Set 11: Well-Formed+1
+
+Permission granted to commit: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/201947/artifact/restricted.html : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2020-09-23 14:09:18.000000000
+Message: 
+Patch Set 11:
+
+(1 comment)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-09-23 14:11:34.000000000
+Message: 
+Patch Set 11: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/1559/ : ABORTED
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/1617/ : FAILURE
+
+Compile error at ..\kv_engine\engines\ep\tests\module_tests\hdrhistogram_test.cc(468): error C2039: "has_value": is not a member of "boost::optional<std::pair<uint64_t,double>>" ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/1617/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/1440/ : FAILURE
+
+Compile error at /home/couchbase/jenkins/workspace/kv_engine-clang_analyzer-mad-hatter/kv_engine/engines/ep/tests/module_tests/hdrhistogram_test.cc:468:19:
+error: no member named "has_value" in "boost::optional<std::pair<unsigned long, double> >"
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/1440/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/1360/ : FAILURE
+
+Compile error at [2020-09-23T13:55:44.710Z] ../kv_engine/engines/ep/tests/module_tests/hdrhistogram_test.cc:468:19:
+error: ?class boost::optional<std::pair<long unsigned int, double> >? has no member named ?has_value?; did you mean ?value??
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/1360/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/mad-hatter/922/ : FAILURE
+
+Compile error at [2020-09-23T13:58:45.226Z] ../kv_engine/engines/ep/tests/module_tests/hdrhistogram_test.cc:468:19:
+error: no member named "has_value" in "boost::optional<std::__1::pair<unsigned long long, double> >"
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/mad-hatter/922/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/1579/ : FAILURE
+
+Compile error at [2020-09-23T13:54:52.551Z] ../kv_engine/engines/ep/tests/module_tests/hdrhistogram_test.cc:468:19:
+error: ?class boost::optional<std::pair<long unsigned int, double> >? has no member named ?has_value?; did you mean ?value??
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/1579/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/1570/ : FAILURE
+
+Compile error at [2020-09-23T13:59:11.567Z] ../kv_engine/engines/ep/tests/module_tests/hdrhistogram_test.cc:468:19:
+error: ?class boost::optional<std::pair<long unsigned int, double> >? has no member named ?has_value?; did you mean ?value??
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/1570/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/26029/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

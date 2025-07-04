@@ -1,0 +1,201 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-53920: CheckpointQuota accounts detached checkpoints
+
+Since when introduced, the CheckpointQuota accounts the memory usage of
+checkpoints owned by CM. Ie, detached-to-be-destroyed checkpoints
+(owned by CheckpointDestroyer) aren't accounted.
+
+The problem with that approach is that in the case of slow checkpoint
+deallocation (for whatever reason), the checkpoint allocation in
+Destroyers can take up to the entire BucketQuota.
+
+With this patch we change CheckpointQuota to accounting mem-alloc in
+Destroyers too. The consequence is that the system will enter a TempOOM
+phase when checkpoint allocation is high (usual CheckpointQuota
+rules apply), regardless of what's owning those checkpoints.
+
+Note that this change has implications in the way we perform memory
+recovery from CM. By that:
+
+  a. If the memory releasable by detached-to-be-destroyed checkpoints
+     allows to push the overall checkpoint alloc down to the lower_mark
+     (which is our usual target), then the CheckpointMemRecoveryTask
+     isn't woken up at all
+  b. Otherwise, the CheckpointMemRecoveryTask is scheduled to run as
+     usual, but now it attempts mem-releasing from CM only to the extent
+     of what needs to be freed on top of detached-to-be-destroyed
+     checkpoints
+
+That is mainly for avoiding excessive ItemExpel/CursorDrop on CM, when
+CM isn't the problematic component.
+
+Note: This change might possibly make visible any suboptimal behaviour
+on checkpoint mem-releasing in Destroyers. In case, that is expected to
+show up as the system entering TempOOM phases in a state where the
+Destroyer-alloc component is prevalent compared to CM-alloc.
+Regardless of that, optimizations in the Destroyer deallocation area
+are already in-progress in MB-53531.
+
+Change-Id: I8540b7781b0929ea6006e1522ee3fe35f19d93ef
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2022-10-28 15:46:55.000000000
+Message: 
+Uploaded patch set 7.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-10-28 16:41:03.000000000
+Message: 
+Patch Set 7: Verified-1
+
+Build Failed 
+
+https://cv.jenkins.couchbase.com/job/kv_engine-windows-master/50816/ : FAILURE
+
+Failure of GoogleTest "EphemeralOrPersistent/STParameterizedBucketTest.slow_stream_backfill_expiry/ephemeral_auto_delete":
+
+<pre>
+[ RUN      ] EphemeralOrPersistent/STParameterizedBucketTest.slow_stream_backfill_expiry/ephemeral_auto_delete
+unknown file: error: C++ exception with description "KVStoreFactory ctor: Specified dbname "ep_engine_ep_unit_tests.db/test.738002" is not a directory" thrown in SetUp().
+unknown file: error: SEH exception with code 0xc0000005 thrown in TearDown().
+[  FAILED  ] EphemeralOrPersistent/STParameterizedBucketTest.slow_stream_backfill_expiry/ephemeral_auto_delete, where GetParam() = "bucket_type=ephemeral:ephemeral_full_policy=auto_delete" (2 ms)
+EphemeralOrPersistent/STParameterizedBucketTest.slow_stream_backfill_expiry/ephemeral_auto_delete
+</pre>
+ ( https://cv.jenkins.couchbase.com/job/kv_engine-windows-master/50816/ )
+
+Timeout of a CTest test 288/442 Test #288: ep_testsuite.value_eviction.comp_passive ................................................................} ( https://cv.jenkins.couchbase.com/job/kv_engine-windows-master/50816/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux-debug/job/master/326/ : FAILURE
+
+One of more core files found at the end of the build. Data for post-mortem saved to archived_core_dumps.tar.bz2 under "Build Artifacts". ( https://cv.jenkins.couchbase.com/job/kv_engine.linux-debug/job/master/326/ )
+
+Test exceeded the timeout:
+[2022-10-28T15:57:31.665Z] Running [159/160]: test bucket quota reduction.../usr/bin/timeout: the monitored command dumped core ( https://cv.jenkins.couchbase.com/job/kv_engine.linux-debug/job/master/326/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/23625/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [159/160]: test bucket quota reduction.../usr/bin/timeout: the monitored command dumped core
+[2022-10-28T16:00:39.293Z] 
+[2022-10-28T16:00:39.293Z] 
+[2022-10-28T16:00:39.293Z] 99% tests passed, 6 tests failed out of 444
+[2022-10-28T16:00:39.293Z] 
+[2022-10-28T16:00:39.293Z] Total Test time (real) = 416.65 sec
+[2022-10-28T16:00:39.293Z] 
+[2022-10-28T16:00:39.293Z] The following tests FAIL
+</pre>
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/23625/ )
+
+One of more core files found at the end of the build. Data for post-mortem saved to archived_core_dumps.tar.bz2 under "Build Artifacts". ( https://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/23625/ )
+
+Test exceeded the timeout:
+[2022-10-28T15:58:46.260Z] Running [159/160]: test bucket quota reduction.../usr/bin/timeout: the monitored command dumped core ( https://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/23625/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/24035/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [159/160]: test bucket quota reduction.../usr/bin/timeout: the monitored command dumped core
+[2022-10-28T16:05:42.973Z] 
+[2022-10-28T16:05:42.973Z] 
+[2022-10-28T16:05:42.973Z] 99% tests passed, 6 tests failed out of 464
+[2022-10-28T16:05:42.973Z] 
+[2022-10-28T16:05:42.973Z] Total Test time (real) = 496.13 sec
+[2022-10-28T16:05:42.973Z] 
+[2022-10-28T16:05:42.973Z] The following tests FAIL
+</pre>
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/24035/ )
+
+One of more core files found at the end of the build. Data for post-mortem saved to archived_core_dumps.tar.bz2 under "Build Artifacts". ( https://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/24035/ )
+
+Test exceeded the timeout:
+[2022-10-28T16:03:28.484Z] Running [159/160]: test bucket quota reduction.../usr/bin/timeout: the monitored command dumped core ( https://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/24035/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/24864/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [159/160]: test bucket quota reduction...
+[2022-10-28T16:31:06.468Z] 
+[2022-10-28T16:31:06.468Z] 
+[2022-10-28T16:31:06.468Z] 98% tests passed, 8 tests failed out of 436
+[2022-10-28T16:31:06.468Z] 
+[2022-10-28T16:31:06.468Z] Total Test time (real) = 2400.16 sec
+[2022-10-28T16:31:06.468Z] 
+[2022-10-28T16:31:06.468Z] The following tests FAIL
+</pre>
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/24864/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/23056/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [159/160]: test bucket quota reduction...
+[2022-10-28T16:18:28.935Z] 
+[2022-10-28T16:18:28.935Z] 
+[2022-10-28T16:18:28.935Z] 98% tests passed, 8 tests failed out of 464
+[2022-10-28T16:18:28.935Z] 
+[2022-10-28T16:18:28.935Z] Total Test time (real) = 1122.05 sec
+[2022-10-28T16:18:28.935Z] 
+[2022-10-28T16:18:28.935Z] The following tests FAIL
+</pre>
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/23056/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/11410/ : FAILURE
+
+Test exceeded the timeout:
+[2022-10-28T16:02:23.304Z] Running [159/160]: test bucket quota reduction.../usr/bin/timeout: the monitored command dumped core ( https://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/11410/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/32051/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [159/160]: test bucket quota reduction.../usr/bin/timeout: the monitored command dumped core
+[2022-10-28T16:18:41.005Z] 
+[2022-10-28T16:18:41.005Z] 
+[2022-10-28T16:18:41.005Z] 98% tests passed, 8 tests failed out of 445
+[2022-10-28T16:18:41.005Z] 
+[2022-10-28T16:18:41.005Z] Total Test time (real) = 1519.44 sec
+[2022-10-28T16:18:41.005Z] 
+[2022-10-28T16:18:41.005Z] The following tests FAIL
+</pre>
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/32051/ )
+
+One of more core files found at the end of the build. Data for post-mortem saved to archived_core_dumps.tar.bz2 under "Build Artifacts". ( https://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/32051/ )
+
+Test exceeded the timeout:
+[2022-10-28T16:13:31.008Z] Running [159/160]: test bucket quota reduction.../usr/bin/timeout: the monitored command dumped core ( https://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/32051/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/20863/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/42655/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/21590/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/11319/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2022-11-01 16:28:45.000000000
+Message: 
+Patch Set 7: Code-Review+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2022-11-02 09:08:17.000000000
+Message: 
+Patch Set 7: Code-Review-1
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> test_bucket_quota_reduction needs to be fixed
+Plus, adding comments on the CheckpointMemoryState enum entries
+----------------------------------------------------------------------------------------------------------------------

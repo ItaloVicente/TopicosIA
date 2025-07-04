@@ -1,0 +1,215 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-37537: Add Collections RBAC db support
+
+Add support for the new RBAC format containing collection
+related configuration.
+
+Change-Id: Ib4ffffcf378b36bd11808ff51cb0f1124d235367
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Trond Norbye
+Date: 2020-01-17 08:56:34.000000000
+Message: 
+Uploaded patch set 8: Patch Set 7 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-01-17 09:48:18.000000000
+Message: 
+Patch Set 8: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/25549/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/21787/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/14949/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/23748/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/1180/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/1243/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/1152/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/349/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/9072/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2020-01-17 12:04:09.000000000
+Message: 
+Patch Set 8: Code-Review-1
+
+(1 comment)
+
+Still looking, but thought this top level comment was worth posting
+Line:75, docs/rbac.md -> Does the collection object not belong here as well? I thought RBAC would allow the bucket state the scopes and/or collections?
+
+E.g. allowing:
+
+  {user:jim, {bucket1, {collection:99}}
+  
+  {user:jim, {bucket1, {scope:20}}
+
+I guess it's fine, as long as the user can configure without needing to think about scopes and the RBAC (ns_server) code generates the correct hierachy
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2020-01-17 12:15:22.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:75, docs/rbac.md -> I was under the impression that all collections was part of a scope (and scope could be the default scope?)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2020-01-17 13:43:30.000000000
+Message: 
+Patch Set 8:
+
+(2 comments)
+Line:113, docs/rbac.md -> So can you confirm, we don't allow a scope and a collection privilege? It's either the user has priv on the scope, or the user has a priv on a collection?
+
+I had thought you could configure RBAC as follows:
+
+  {user1 : buckets: {bucket1:priv:[read], scopes[1,privs:[write]}}
+
+User1 can read the bucket but only write to scope 1.
+
+In this spec, it seems you cannot do that?
+
+There's no product level spec to refer to, but having the flexibility to define bucket/scope and collection seems useful
+
+Line:106, include/memcached/rbac/privilege_database.h -> CollectionID (from include/memcached/dockey.h)
+
+Same for scopes, we have a ScopeID class
+
+Both just have some to_string functions (for debug) and isDefaultScope/isDefaultCollection which maybe useful?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2020-01-17 16:01:03.000000000
+Message: 
+Patch Set 8:
+
+(2 comments)
+Line:113, docs/rbac.md -> I'd rather have explicit rules to make it unambiguous to see the access.
+
+By "falling back" to another check if the first one fails makes it hard to debug (as I would first have to check the collection, then the scope, then the bucket and then the user entry).. As it stands now we go as deep as we can and run the check there. If the collection / scope / bucket isn't listed we fail.
+
+(there is one annoying fallback for "no-bucket", but I'm planning to clean that up.
+
+Line:106, include/memcached/rbac/privilege_database.h -> I'll fix this
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2020-01-17 16:19:09.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:106, include/memcached/rbac/privilege_database.h -> no wait... When used in this context I don't need the CollectionID class (as its only used for lookup into the unordered map. I thought about the check method in the privilege context (which we extend in the next changeset)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2020-01-20 09:16:33.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:113, docs/rbac.md -> I completely misread :/ (and my example wasn't at all what I was thinking).
+
+Can you check the following, it looks like it should do what I was thinking.
+
+First it looks like the following is legal. user1 can read everything in scope:1, but can additionally write collection:1
+
+  { user1: buckets:{ 
+    bucket1: {
+      scopes:{
+        1:{privs[read], collections:{1, privs:[write]}}
+      }
+    }
+  }
+
+Is the following legal for giving user1 read to the bucket and write to a collection, but no more?
+
+
+  { user1: buckets:{ 
+    bucket1: {
+      privs:[read],
+      scopes:{
+        1:{collections:{1, privs:[write]}}
+      }
+    }
+  }
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2020-01-20 09:43:06.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:113, docs/rbac.md -> The way I have implemented it is that ns_server needs to provide the exact spec.
+
+You can give access to _all_ collections in a scope by not listing _any_ collections. If a collection is listed then you only have access to the collections listed, and with the access provided for the collection. (same for buckets.. if a scope is listed you only have access to the scopes listed).
+
+Note that ns_server may present this completly different to the user, the expectation is however that the list here contains an explicit list of everything.
+
+You can:
+      {
+        "jim": {
+          "buckets": {
+            "foo": {
+              "scopes": {
+                "1": {
+                  "collections": {
+                    "32": {
+                      "privs": [
+                        "read",
+                        "write"
+                      ]
+                    },
+                    "33" : {
+                      "privs": [
+                       "read"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
+but you can't
+
+      {
+        "jim": {
+          "buckets": {
+            "foo": {
+              "scopes": {
+                "1": {
+                  "collections": {
+                    "32": {
+                      "privs": [
+                        "write"
+                      ]
+                    }
+                  }
+                },
+                "privs": "read"
+              }
+            }
+          }
+        }
+      }
+
+----------------------------------------------------------------------------------------------------------------------

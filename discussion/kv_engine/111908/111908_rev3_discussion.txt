@@ -1,0 +1,114 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-35001: Consumer: Avoid duplicate PREs after disk/mem transition
+
+Summary:
+
+When transitioning to the inMemory phase of an Active DCP stream,
+ensure that the initial in-memory Snapshot has the CKPT flag set, to
+avoid the replica potentially seeing duplicate keys in the same
+Checkpoint.
+
+Details:
+
+Consider the following scenario of items on disk and in memory
+(checkpoint manager):
+
+    Disk:
+    1:PRE(a), 2:CMT(a), 3:SET(b)
+
+    Memory:
+                        3:CKPT_START
+                        3:SET(b),     4:PRE(a), 5:SET(c)
+
+(items 1..2 were in a removed checkpoint and no longer in-memory.)
+
+An ep-engine replica attempting to stream all of this (0..infinity)
+will result in a backfill of items 1..3, with a checkpoint cursor
+being placed at seqno:4. Note this isn't the start of the Checkpoint
+(which is 3) and hence not pointing at a checkpoint_start item.
+
+As such when this is streamed over DCP (up to seqno:4) the consumer
+will see:
+
+    SNAPSHOT_MARKER(start=1, end=3, flags=DISK|CKPT)
+    1:PRE(a)
+    2:CMT(a)
+    3:SET(b)
+    SNAPSHOT_MARKER(start=4, end=5, flags=MEM)
+    4:PRE(a),
+    [[[missing seqno 5]]
+
+If the consumer puts all of these mutations in the same Checkpoint,
+then it will result in duplicate PRE(a) items (which breaks Checkpoint
+invariant).
+
+Address this by adding the CKPT flag to the Snapshot marker when
+transitioning between disk and memory snapshots.
+
+Note there is still an oustanding issue with the calculation of the
+failover table branch point as a consequence of this change; however
+that is being deferred for a second MB - see MB-35003.
+
+Change-Id: Idfb3b676136df0a3a6af7e626d793b6e696d7dfe
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2019-07-12 12:56:20.000000000
+Message: 
+Uploaded patch set 3.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-07-12 14:09:06.000000000
+Message: 
+Patch Set 3: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/12837/ : FAILURE
+
+Timeout of a CTest test 180/180 Test  #23: ep-engine_ep_unit_tests ......................................................} ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/12837/ )
+
+Failure of a GoogleTest test:
+
+PersistentAndEphemeral/StreamTest.ProcessItemsCheckpointStartIsLastItem/persistent, where GetParam() = "persistent" (124 ms) ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/12837/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/21870/ : FAILURE
+
+Failure of a CTest test  24/184 Test  #25: ep_testsuite.value_eviction.comp_passive ..................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/21870/ )
+
+Failure of a GoogleTest test:
+
+PersistentAndEphemeral/StreamTest.ProcessItemsCheckpointStartIsLastItem/persistent, where GetParam() = "persistent" (151 ms) ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/21870/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/21042/ : FAILURE
+
+Failure of a CTest test  28/201 Test  #26: ep-engine_ep_unit_tests ...................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/21042/ )
+
+Failure of a GoogleTest test:
+
+PersistentAndEphemeral/StreamTest.ProcessItemsCheckpointStartIsLastItem/persistent, where GetParam() = "persistent" (7 ms) ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/21042/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/2703/ : FAILURE
+
+Failure of a CTest test  30/201 Test  #26: ep-engine_ep_unit_tests ...................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/2703/ )
+
+Failure of a GoogleTest test:
+
+PersistentAndEphemeral/StreamTest.ProcessItemsCheckpointStartIsLastItem/persistent, where GetParam() = "persistent" (28 ms) ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/2703/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/5618/ : FAILURE
+
+Undefined Sanitizer: home/couchbase/jenkins/workspace/kv_engine.ASan-UBSan_master/kv_engine/engines/ep/src/dcp/passive_stream.cc:297:42: runtime error: downcast of address 0x603000086800 which does not point to an object of type "MutationConsumerMessage" ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/5618/ )
+
+Failure of a CTest test [2019-07-12T13:02:43.545Z]  26/181 Test  #25: ep-engine_ep_unit_tests ...................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/5618/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/19684/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/12058/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/18744/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

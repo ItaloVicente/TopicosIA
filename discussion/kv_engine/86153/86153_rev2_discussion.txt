@@ -1,0 +1,151 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-27036: Extend the scope of conn shared_ptr while logging in stream
+
+When a stream object uses a the connection logger object for logging
+it should ensure that the connection object is alive. For this,
+the Stream::getLogger() should also return the shared_ptr for the
+connection object (along with the logger obj), so that the connection
+object is not deleted while logging.
+
+Change-Id: If50e8e25532a99d51ff447f406154ab510dcc32b
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Manu Dhundi
+Date: 2017-11-30 04:14:26.000000000
+Message: 
+Uploaded patch set 2: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: Manu Dhundi
+Date: 2017-11-30 04:15:29.000000000
+Message: 
+Patch Set 2:
+
+Actual change is small..
+Most of the lines are due to clang-formatting
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2017-11-30 04:46:59.000000000
+Message: 
+Patch Set 2: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/4497/ : FAILURE
+
+Timeout of a CTest test 107/107 Test  #42: ep_perfsuite.ephemeral ...........................} ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/4497/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/3086/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/4545/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master/4336/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/4779/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/4142/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2017-11-30 05:50:48.000000000
+Message: 
+Patch Set 2: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/3086/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/4545/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master/4336/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/4779/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/4142/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/4498/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2017-11-30 09:47:55.000000000
+Message: 
+Patch Set 2: Code-Review-1
+
+I'm not sure this is the best solution:
+
+1. The API for using the logger is getting pretty ugly / complex - if we really need to return a proxy object to keep lifetime, then it should be a custom class which overrides `->` so we don't have this long getLogger().second.log()... call
+
+2. I'm not sure extending the lifetime like this is what we want to do - If you have s valid stream object (Which DCPBackfillDisk::complete() does) then there shouldn't be any more work required by the caller to ensure they have a valid logger - i.e. we shouldn't need the whole extra shared_ptr.
+
+One suggestion is to simplify the logging from streams - for example remove:
+
+ Logger& getLogger()
+
+and replace it with a direct log method (with the same prototype as Logger::log), something like:
+
+ void ActiveStream::log(...) {
+    auto producer = producerPtr.lock();
+    if (producer) {
+       producer->getLogger().log(args...);
+    } else {
+       static Logger defaultLogger = Logger("DCP (Notifier): **Deleted conn**");
+       defaultLogger.log(args...);
+    }
+
+This:
+
+(a) simplifies the code needed to log a message - from getLogger().second.log() to simply log()
+(b) simplifies the ownership - we are simply relying on the fact that if we have a valid steam object we can just call a method on it, and *it* handles any resource management.
+(c) Gives better encapsulation - the caller doesn't need to care about how the logging is implemented; they are just provided with a method which can do it.
+
+
+ }
+----------------------------------------------------------------------------------------------------------------------
+Author: Manu Dhundi
+Date: 2017-11-30 16:35:04.000000000
+Message: 
+Patch Set 2:
+
+The problem with 
+void ActiveStream::log(...) {
+    auto producer = producerPtr.lock();
+    if (producer) {
+       producer->getLogger().log(args...);
+    } else {
+       static Logger defaultLogger = Logger("DCP (Notifier): **Deleted conn**");
+       defaultLogger.log(args...);
+    }
+
+is that the function takes variables args. So I cannot directly call another function with variable args.
+----------------------------------------------------------------------------------------------------------------------
+Author: Manu Dhundi
+Date: 2017-11-30 16:36:13.000000000
+Message: 
+Patch Set 2:
+
+That is, ActiveStream::log(args...) takes variable args and hence it cannot directly call producer->getLogger().log(args...)
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2017-11-30 16:44:41.000000000
+Message: 
+Patch Set 2:
+
+> That is, ActiveStream::log(args...) takes variable args and hence
+ > it cannot directly call producer->getLogger().log(args...)
+
+True, but you can use the `vlog` variant of Logger - which is how logger forwards to the underlying logger:
+
+    va_list va;
+    va_start(va, fmt);
+    vlog(severity, fmt, va);
+    va_end(va);
+----------------------------------------------------------------------------------------------------------------------
+Author: Manu Dhundi
+Date: 2017-11-30 17:28:39.000000000
+Message: 
+Patch Set 2:
+
+Ok, had not relaized we could use vlog directly.
+ Done
+----------------------------------------------------------------------------------------------------------------------

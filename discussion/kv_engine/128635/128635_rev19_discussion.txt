@@ -1,0 +1,121 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-39505: Move StatCollector to using stats.def.h StatSpecs
+
+Change-Id: I56ec2dcf56c9a2aa29453d585894e1a7444f01c3
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: James H
+Date: 2020-08-07 14:20:58.000000000
+Message: 
+Uploaded patch set 19: Patch Set 18 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-08-07 14:46:50.000000000
+Message: 
+Patch Set 19: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/25527/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/3700/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/2215/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-08-08 21:40:11.000000000
+Message: 
+Patch Set 19:
+
+This change is ready for review.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-08-08 21:56:59.000000000
+Message: 
+Patch Set 19: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/29495/ : FAILURE
+
+Compile error at c:\jenkins\workspace\kv_engine-windows-master\kv_engine\include\statistics\stat_units.h(85): error C2039: "string_view_literals": is not a member of "std" ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/29495/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/4064/ : FAILURE
+
+Failure of a CTest test [2020-08-08T21:50:36.256Z]  10/410 Test #240: ep_testsuite.full_eviction.magma ............................................................................ ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/4064/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/4947/ : FAILURE
+
+Compile error at [2020-08-08T21:49:17.481Z] ../kv_engine/include/statistics/all_stats.h:151:1:
+error: missing braces around initializer for ?std::__array_traits<cb::stats::StatSpec, 31>::_Type {aka cb::stats::StatSpec [31]}? [-Werror=missing-braces]
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/4947/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/5133/ : FAILURE
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/5036/ : FAILURE
+
+Compile error at [2020-08-08T21:56:12.705Z] ../kv_engine/include/statistics/all_stats.h:151:1:
+error: missing braces around initializer for ?std::__array_traits<cb::stats::StatSpec, 31>::_Type {aka cb::stats::StatSpec [31]}? [-Werror=missing-braces]
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/5036/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/12849/ : FAILURE
+
+Compile error at [2020-08-08T21:51:22.134Z] ../kv_engine/include/statistics/all_stats.h:151:1:
+error: missing braces around initializer for ?std::__array_traits<cb::stats::StatSpec, 31>::_Type {aka cb::stats::StatSpec [31]}? [-Werror=missing-braces]
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/12849/ )
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-08-10 15:38:35.000000000
+Message: 
+Patch Set 19: Code-Review-1
+
+(4 comments)
+Line:32, engines/ep/src/stats.h -> Style: the "stat_" prefix here is arguably redundant, if you're already under a "statistics/" namespace.
+
+Line:140, include/statistics/collector.h -> While this is generic, I think it doesn't help with understanding the rationale / use of the labels. I think more concrete example labels instead of baz / qux would help.
+
+Line:167, include/statistics/collector.h -> Not sure I like this - having StatCollector be unnecessarily (?) stateful makes it much harder for the reader to follow exactly when specific labels are in play,
+
+I understand it probably reduces boilerplate repetition, but how would thing look if you removed this functionality - at least the "removeDefaultLabel" ?
+
+Line:325, include/statistics/collector.h -> What's the expected API for a caller to use here? I would assume  addStat(StatKey, value) - with the StatSpec variants being essentially an implementation-detail, but that's not really clear from the comments nor the visibility of the methods - can the addStat(StatSpec) methods be private?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-08-17 15:16:58.000000000
+Message: 
+Patch Set 19:
+
+(4 comments)
+Line:32, engines/ep/src/stats.h -> Done
+
+Line:140, include/statistics/collector.h -> Done
+
+Line:167, include/statistics/collector.h -> Actually this comment doesn't reflect how it's currently expected to be used - with
+
+ auto h = withDefaultLabel("bucket", "bucketName");
+
+to scope the life of that label RAII-ish. I considered other methods, like having withDefaultLabel return a proxy StatCollector which "inserts" the given label into every addStat call, and forwards on to the original stat collector, but went with the current method for simplicity. addStat would need to take additional labels as parameters, and that doesn't really remove the fact that there is a collector holding state, just shuffles the state around.
+
+I can make removeDefaultLabel private and make LabelGuard a friend?
+
+Removing this state entirely will be very noisy - e.g., every single addStat for a collection stat would need to specify collection, scope and bucket. The hope was that the majority of the addStat code wouldn't need to know about these shared labels, it would be handled higher up the stack.
+
+Line:325, include/statistics/collector.h -> The _goal_ is everything comes in through `addStat(StatKey, value)` but there were cases where that wouldn't work - the only one I can remember off the top of my head was stats created from the configuration - we don't explicitly restate all of the config names, we iterate them and use the config key and value.
+
+This was meant to be temporary pending a better solution for those cases, but as they say "there's nothing more permanent than a temporary fix".  The best way to handle cases like this isn't clear (yet). Duplicating the names as StatKeys sounds Bad™, but there are things like units which need to be tied in to these stats through some route. Something evil could be done with the config code generation, but code generation _and_ x-macros does not sound promising - and if that required polluting configuration.json with stat specific stuff that would definitely not be good. That would comporomise the "central definition of all stats" too.
+
+Back to the point at hand: addStat(StatSpec, value) could be private if `addStat(std::string_view, value);` were added for that particular case. In any case, it needs documenting better whatever is done.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-08-17 15:27:49.000000000
+MISMATCHED INLINE COMMENT
+Line:167, include/statistics/collector.h -> I think `h = withDefaultLabel(...); h.addStat(...)` is fine, given it's clear to the user that only the stats added to `h` have the extra prefix.
+
+Basically the code should ideally read like "normal" C++ and magic is minimised.
+----------------------------------------------------------------------------------------------------------------------

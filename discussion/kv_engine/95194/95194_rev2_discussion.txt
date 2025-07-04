@@ -1,0 +1,111 @@
+======================================================================================================================
+DESCRIPTION:
+
+testapp: Use sendmsg() for transmitting requests
+
+memcached_testapp uses MemcachedConnection::sendBuffer() to transmit
+requests to memcached. This method currently uses the basic send()
+libc call to transmit data; which requires copying the sequence of
+requests buffers into a single contiguous region.
+
+For requests which are very large (e.g. those used by
+GetSetTest.ServerRejectsLargeSize tests which are ~20MB), this copying
+has a significant cost when run under Address/ThreadSanitizer. For
+example a subset of the GetSet tests under TSan takes 38s:
+
+    $ ./memcached_testapp "--gtest_filter=TransportProtocols/GetSetTest.*" "-E" "ep" --gtest_filter=TransportProtocols/GetSetTest.ServerRejectsLargeSize*/Mcbp_*
+    Note: Google Test filter = TransportProtocols/GetSetTest.ServerRejectsLargeSize*/Mcbp_*
+    [ RUN      ] TransportProtocols/GetSetTest.ServerRejectsLargeSize/Mcbp_XattrYes_JsonYes_SnappyYes
+    [       OK ] TransportProtocols/GetSetTest.ServerRejectsLargeSize/Mcbp_XattrYes_JsonYes_SnappyYes (2912 ms)
+    [ RUN      ] TransportProtocols/GetSetTest.ServerRejectsLargeSize/Mcbp_XattrYes_JsonNo_SnappyYes
+    [       OK ] TransportProtocols/GetSetTest.ServerRejectsLargeSize/Mcbp_XattrYes_JsonNo_SnappyYes (2927 ms)
+    [ RUN      ] TransportProtocols/GetSetTest.ServerRejectsLargeSizeCompressed/Mcbp_XattrYes_JsonYes_SnappyYes
+    [       OK ] TransportProtocols/GetSetTest.ServerRejectsLargeSizeCompressed/Mcbp_XattrYes_JsonYes_SnappyYes (560 ms)
+    [ RUN      ] TransportProtocols/GetSetTest.ServerRejectsLargeSizeCompressed/Mcbp_XattrYes_JsonNo_SnappyYes
+    [       OK ] TransportProtocols/GetSetTest.ServerRejectsLargeSizeCompressed/Mcbp_XattrYes_JsonNo_SnappyYes (548 ms)
+    [ RUN      ] TransportProtocols/GetSetTest.ServerRejectsLargeSizeWithXattr/Mcbp_XattrYes_JsonYes_SnappyYes
+    [       OK ] TransportProtocols/GetSetTest.ServerRejectsLargeSizeWithXattr/Mcbp_XattrYes_JsonYes_SnappyYes (10176 ms)
+    [ RUN      ] TransportProtocols/GetSetTest.ServerRejectsLargeSizeWithXattr/Mcbp_XattrYes_JsonNo_SnappyYes
+    [       OK ] TransportProtocols/GetSetTest.ServerRejectsLargeSizeWithXattr/Mcbp_XattrYes_JsonNo_SnappyYes (9908 ms)
+    [ RUN      ] TransportProtocols/GetSetTest.ServerRejectsLargeSizeWithXattrCompressed/Mcbp_XattrYes_JsonYes_SnappyYes
+    [       OK ] TransportProtocols/GetSetTest.ServerRejectsLargeSizeWithXattrCompressed/Mcbp_XattrYes_JsonYes_SnappyYes (3790 ms)
+    [ RUN      ] TransportProtocols/GetSetTest.ServerRejectsLargeSizeWithXattrCompressed/Mcbp_XattrYes_JsonNo_SnappyYes
+    [       OK ] TransportProtocols/GetSetTest.ServerRejectsLargeSizeWithXattrCompressed/Mcbp_XattrYes_JsonNo_SnappyYes (3819 ms)
+    [----------] 8 tests from TransportProtocols/GetSetTest (34640 ms total)
+
+    [----------] Global test environment tear-down
+    [==========] 8 tests from 1 test case ran. (38354 ms total)
+    [  PASSED  ] 8 tests.
+
+To speed up these tests; update sendBuffer() to use the libc sendmsg()
+call; which can transmit multiple disjoint iovectors without copying
+them. This results in a significant test runtime speedup - same tests now take 18s to run:
+
+    $ ./memcached_testapp --gtest_filter=TransportProtocols/GetSetTest.* -E ep --gtest_filter=TransportProtocols/GetSetTest.ServerRejectsLargeSize*/Mcbp_*
+    Note: Google Test filter = TransportProtocols/GetSetTest.ServerRejectsLargeSize*/Mcbp_*
+    [==========] Running 8 tests from 1 test case.
+    [----------] Global test environment set-up.
+    [----------] 8 tests from TransportProtocols/GetSetTest
+    [ RUN      ] TransportProtocols/GetSetTest.ServerRejectsLargeSize/Mcbp_XattrYes_JsonYes_SnappyYes
+    [       OK ] TransportProtocols/GetSetTest.ServerRejectsLargeSize/Mcbp_XattrYes_JsonYes_SnappyYes (541 ms)
+    [ RUN      ] TransportProtocols/GetSetTest.ServerRejectsLargeSize/Mcbp_XattrYes_JsonNo_SnappyYes
+    [       OK ] TransportProtocols/GetSetTest.ServerRejectsLargeSize/Mcbp_XattrYes_JsonNo_SnappyYes (537 ms)
+    [ RUN      ] TransportProtocols/GetSetTest.ServerRejectsLargeSizeCompressed/Mcbp_XattrYes_JsonYes_SnappyYes
+    [       OK ] TransportProtocols/GetSetTest.ServerRejectsLargeSizeCompressed/Mcbp_XattrYes_JsonYes_SnappyYes (446 ms)
+    [ RUN      ] TransportProtocols/GetSetTest.ServerRejectsLargeSizeCompressed/Mcbp_XattrYes_JsonNo_SnappyYes
+    [       OK ] TransportProtocols/GetSetTest.ServerRejectsLargeSizeCompressed/Mcbp_XattrYes_JsonNo_SnappyYes (441 ms)
+    [ RUN      ] TransportProtocols/GetSetTest.ServerRejectsLargeSizeWithXattr/Mcbp_XattrYes_JsonYes_SnappyYes
+    [       OK ] TransportProtocols/GetSetTest.ServerRejectsLargeSizeWithXattr/Mcbp_XattrYes_JsonYes_SnappyYes (2850 ms)
+    [ RUN      ] TransportProtocols/GetSetTest.ServerRejectsLargeSizeWithXattr/Mcbp_XattrYes_JsonNo_SnappyYes
+    [       OK ] TransportProtocols/GetSetTest.ServerRejectsLargeSizeWithXattr/Mcbp_XattrYes_JsonNo_SnappyYes (2765 ms)
+    [ RUN      ] TransportProtocols/GetSetTest.ServerRejectsLargeSizeWithXattrCompressed/Mcbp_XattrYes_JsonYes_SnappyYes
+    [       OK ] TransportProtocols/GetSetTest.ServerRejectsLargeSizeWithXattrCompressed/Mcbp_XattrYes_JsonYes_SnappyYes (3371 ms)
+    [ RUN      ] TransportProtocols/GetSetTest.ServerRejectsLargeSizeWithXattrCompressed/Mcbp_XattrYes_JsonNo_SnappyYes
+    [       OK ] TransportProtocols/GetSetTest.ServerRejectsLargeSizeWithXattrCompressed/Mcbp_XattrYes_JsonNo_SnappyYes (3370 ms)
+    [----------] 8 tests from TransportProtocols/GetSetTest (14322 ms total)
+
+    [----------] Global test environment tear-down
+    [==========] 8 tests from 1 test case ran. (18243 ms total)
+    [  PASSED  ] 8 tests.
+
+Change-Id: I059f6f1e9d94f642ecf24cee6a9953ae494aef82
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2018-06-05 15:32:59.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-06-05 16:10:01.000000000
+Message: 
+Patch Set 2: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-vulcan/579/ : ABORTED
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-vulcan/579/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-vulcan/517/ : ABORTED
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-vulcan/517/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-vulcan/481/ : ABORTED
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-vulcan/481/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-undefinedsanitizer-vulcan/510/ : ABORTED
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-undefinedsanitizer-vulcan/510/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-vulcan/649/ : FAILURE
+
+The warnings threshold for this job was exceeded - <a href="warningsResult">3 warnings</a> found. ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-vulcan/649/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-vulcan/467/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/8445/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

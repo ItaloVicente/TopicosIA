@@ -1,0 +1,231 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-32117: Track when pending SyncWrites should be committed
+
+This is the first real implementation of Durability Requirement (DR)
+verification in the DurabilityMonitor.
+In its first implememtation, the DurabilityMonitor has very simple
+internal structures that support only 1 replica. That makes the DR
+verification very simple.
+That is why this patch follows the change where I prepare the internal
+structures for multiple replicas.
+Note that multiple-replicas as DurabilityMonitor feature remains
+unsupported though.
+
+Change-Id: Ia8559cba0661c3d10ebe7089a6308c0cb01ed24c
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2018-12-07 16:24:53.000000000
+Message: 
+Uploaded patch set 15: Patch Set 14 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-12-07 18:06:46.000000000
+Message: 
+Patch Set 15: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/6359/ : FAILURE
+
+Failure of a CTest test  45/168 Test  #45: ep_testsuite_dcp.ephemeral.comp_active ....................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/6359/ )
+
+ThreadSanitizer issue: data race /home/couchbase/jenkins/workspace/kv_engine-threadsanitizer-master/kv_engine/engines/ep/src/objectregistry.cc:73 in ObjectRegistry::initialize(unsigned long (*)(void const*))  ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/6359/ )
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/6471/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/14922/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/4040/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/13292/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/12955/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/14428/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-12-08 11:29:33.000000000
+Message: 
+Patch Set 15: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/6471/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/14922/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/4040/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/13292/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/12955/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/14428/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/6368/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-12-10 09:44:51.000000000
+Message: 
+Patch Set 15: Code-Review-1
+
+(3 comments)
+Line:257, engines/ep/src/durability_monitor.cc -> queue?
+
+Line:279, engines/ep/src/durability_monitor.cc -> Is this worthwhile? You're doing another O(n) operation re-copying and freeing all the strings for what I assume is a temporary object anyway. Probably cheaper to keep the 8 bytes of seqno and then delete the whole thing again at the end.
+
+(Note you're also forcing the priority_queue to destruct each element individually here; which is probably more expensive than just keeping the whole queue and destructing the whole thing later).
+
+Line:97, engines/ep/src/durability_monitor.h -> What's the ownership semantics of this - i.e. given you're handing out a iterator reference, what happens if the underlying element is removed?
+
+Might be worth documenting if this is thread-safe or not etc.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2018-12-11 17:30:42.000000000
+Message: 
+Patch Set 15:
+
+(4 comments)
+Line:257, engines/ep/src/durability_monitor.cc -> Done
+
+Line:279, engines/ep/src/durability_monitor.cc -> Refactoring this
+
+Line:97, engines/ep/src/durability_monitor.h -> The DurabilityMonitor is the owner of all elements in trackedWrites.
+Given that:
+- trackedWrites is protected
+- getReplicaMemoryIterator (as other similar functions) is protected
+- getReplicaMemoryIterator requires a lock to trackedWrites.mutex
+
+then only other member functions can call this function.
+
+So in general it is safe to dereference the iterator under lock. Obviously this doesn't prevent the caller from doing something like:
+
+    lock(mutex);
+    iterator& it = getReplicaMemoryIterator(lock)
+    unlock(mutex)
+    it->func()
+
+I'll add a class-level comment on that.
+Given that currently element-removal is not implemented, are you happy to defer that the follow-up patch implementing that?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2018-12-12 12:15:50.000000000
+Message: 
+Patch Set 15: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2018-12-12 12:15:58.000000000
+Message: 
+Patch Set 15: -Code-Review
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-12-12 12:16:56.000000000
+Message: 
+Patch Set 15:
+
+(1 comment)
+Line:97, engines/ep/src/durability_monitor.h -> > Given that currently element-removal is not implemented, are you happy to defer that the follow-up patch implementing that?
+
+That's fine. I'm just thinking how we can make the API robust - "Easy to use correctly, hard to use incorrectly" :)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2018-12-12 12:19:44.000000000
+Message: 
+Patch Set 15: Code-Review-2
+
+Need to change the internal design for supporting multiple-replica and multiple-replication-chains in the general case where both FirstChain and SecondChain can transition to any new state.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2018-12-12 12:20:40.000000000
+Message: 
+Removed reviewer Trond Norbye.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2018-12-12 12:20:42.000000000
+Message: 
+Removed reviewer Tim Bradgate.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2018-12-12 12:20:43.000000000
+Message: 
+Removed reviewer Sven Signer.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2018-12-12 12:20:46.000000000
+Message: 
+Removed reviewer Paolo Cocchi with the following votes:
+
+* Code-Review-2 by Paolo Cocchi <paolo.cocchi@couchbase.com>
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2018-12-12 12:20:48.000000000
+Message: 
+Removed reviewer Richard de Mellow.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2018-12-12 12:20:50.000000000
+Message: 
+Removed reviewer Jim Walker.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2018-12-12 12:20:52.000000000
+Message: 
+Removed reviewer James Harrison.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2018-12-12 12:20:53.000000000
+Message: 
+Removed reviewer David Haikney.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2018-12-12 12:20:54.000000000
+Message: 
+Removed reviewer Dave Rigby with the following votes:
+
+* Code-Review-1 by Dave Rigby <daver@couchbase.com>
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2018-12-12 12:20:55.000000000
+Message: 
+Removed reviewer Dave Finlay.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2018-12-12 12:20:57.000000000
+Message: 
+Removed reviewer Daniel Owen.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2018-12-12 12:20:59.000000000
+Message: 
+Removed reviewer Chris Farman.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2018-12-12 12:21:01.000000000
+Message: 
+Removed reviewer Ben Huddleston.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2018-12-12 12:21:32.000000000
+Message: 
+Patch Set 15: Code-Review-2
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-02-08 16:55:45.000000000
+Message: 
+Patch Set 15: -Code-Review
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-02-08 16:55:48.000000000
+Message: 
+Abandoned
+----------------------------------------------------------------------------------------------------------------------

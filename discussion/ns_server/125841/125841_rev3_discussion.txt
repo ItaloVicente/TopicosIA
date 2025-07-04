@@ -1,0 +1,216 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-37060: Rework the way we order possible moves.
+
+Change the ordering logic for possible moves.
+We try to do the following,
+1. Make an attempt to always hit the backfill limit/parallelism across
+all nodes by spreading the load.
+2. Make sure any bottleneck nodes, i.e., nodes with most amount of
+moves, always have moves inflight.
+
+Change-Id: I2bbaa45a1a2e1967c124d446b1a4b5c86e49b8f9
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Abhijeeth Nuthan
+Date: 2020-04-18 00:54:33.000000000
+Message: 
+Uploaded patch set 3.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-04-18 00:54:46.000000000
+Message: 
+Patch Set 3: Well-Formed+1
+
+Permission granted to commit: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/177759/artifact/restricted.html : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2020-04-18 01:44:14.000000000
+Message: 
+Patch Set 3:
+
+make simple-test
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-04-18 01:44:20.000000000
+Message: 
+Patch Set 3:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-mad-hatter-simple-test/10/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-04-18 02:17:08.000000000
+Message: 
+Patch Set 3: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/ns-server-mad-hatter-simple-test/10/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2020-04-20 17:05:33.000000000
+Message: 
+Patch Set 3:
+
+Perf comparison results:
+
+KV rebalance results below, better rebalance time in each,
+Swap: http://cbmonitor.sc.couchbase.com/reports/html/?snapshot=titan_650-4960_rebalance_97c2&label=BaselineSwap&snapshot=titan_650-1000001_rebalance_62b1&label=FixMB-37060
+Rebalance In: http://cbmonitor.sc.couchbase.com/reports/html/?snapshot=titan_650-4960_rebalance_d4cc&label=BaselineIn&snapshot=titan_650-1000001_rebalance_6067&label=FixMB-37060
+Rebalance Out: http://cbmonitor.sc.couchbase.com/reports/html/?snapshot=titan_650-4960_rebalance_cb21&label=BaselineOut&snapshot=titan_650-1000001_rebalance_47e5&label=FixMB-37060
+
+Views Rebalance results below, Rebalance time is the same, ops do have a hit, but couch-view ops are the same if not better,
+Rebalance In: http://cbmonitor.sc.couchbase.com/reports/html/?snapshot=hestia_650-4960_rebalance_521f&label=BaselineViewsRebIn&snapshot=hestia_650-1000002_rebalance_37e7&label=FixMB-37060
+Swap: http://cbmonitor.sc.couchbase.com/reports/html/?snapshot=hestia_650-4960_rebalance_349a&label=BaselineViewsSwap&snapshot=hestia_650-1000002_rebalance_72c9&label=FixMB-37060
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2020-04-20 17:10:47.000000000
+Message: 
+Patch Set 3: Verified+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Artamonau
+Date: 2020-04-20 23:56:47.000000000
+Message: 
+Patch Set 3:
+
+(3 comments)
+
+See some comments inline. Some of them may require a significant amount of work that we don't necessarily have. I'm flexible there.
+
+But one thing that we certainly need to do is to document why each individual change to the goodness function was made. The function was already "magical" and with these changes it gets ever more magical.
+Line:393, src/vbucket_move_scheduler.erl -> Can you elaborate on why we indeed want this and how much gain it gives us? It's not obvious to me. If the gains are negligent, I'd prefer not to have a new concept to wrap my head around.
+
+Line:410, src/vbucket_move_scheduler.erl -> Again, it's not clear to me why we shouldn't count nodes building indexes here. If somehow there's a node that is going to build indexes for a 100 vbuckets while only 50 of those are new vbuckets, it would seem we'd still want to prioritize such node.
+
+Line:460, src/vbucket_move_scheduler.erl -> It's not clear how these two interact exactly. But it would seem that we actually always want to prioritize nodes with more work left to do. And only once those nodes are full, assign work to other nodes. And it also seems that preference for "light moves" (as measured by Heaviness) will actually contradict the objective at least in some cases.
+
+If I understand correctly, Heaviness is preferred because that's where the magic of selecting differing sources happens. It'd be great if the source selection was an explicit step disentangled from how loaded nodes are. That way it'd be easier to understand (right now, having spent some time looking at this code, I won't be able to explain to anybody else, or myself for that matter, how the source nodes are actually decided upon). And I think it'd also allow to resolve the issue I described in the first paragraph.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2020-04-21 17:29:32.000000000
+Message: 
+Patch Set 3:
+
+(3 comments)
+
+Will try to leave elaborate comments on why I settled on a particular methodology.
+Line:393, src/vbucket_move_scheduler.erl -> I tried this out, using backfill nodes(labelled 4BF_using backfill_nodes, contains http://review.couchbase.org/c/ns_server/+/125363/1)
+
+The results are here, we get worse rebalance times with this, counting the NewMaster which is also not a new replica leads to poor allocation of moves in KV rebalance without views as accounting for NewMaster gives us suboptimal moves.
+
+swap : http://cbmonitor.sc.couchbase.com/reports/html/?snapshot=titan_650-1000001_rebalance_4bb4&label=OPT4backfill&snapshot=titan_650-1000001_rebalance_092a&label=4BF_usingbackfillnodes
+
+reb out: http://cbmonitor.sc.couchbase.com/reports/html/?snapshot=titan_650-1000001_rebalance_ecaa&label=OPT4backfill&snapshot=titan_650-1000001_rebalance_6998&label=4BF_usingbackfillnodes
+
+reb in: http://cbmonitor.sc.couchbase.com/reports/html/?snapshot=titan_650-1000001_rebalance_4b8d&label=OPT4backfill&snapshot=titan_650-1000001_rebalance_c182&label=4BF_usingbackfillnodes
+
+Line:410, src/vbucket_move_scheduler.erl -> To be honest, I not sure why I didn't consider that. It makes sense to consider that here. Will try it out.
+
+Line:460, src/vbucket_move_scheduler.erl -> "It'd be great if the source selection was an explicit step disentangled from how loaded nodes are. "
+I will see what I can do w.r.t. Thanks for bringing it up, didn't think of it this way. 
+
+"it would seem that we actually always want to prioritize nodes with more work left to do. And only once those nodes are full, assign work to other nodes."
+Just wanted to point out one thing here. Consider swap rebalance(4 nodes, n3 out n4 in), if we prioritize nodes with more work left to do, active moves n3 -> n4 would be prioritized and we would end up not pulling from different sources. The first 256 moves would be active moves.
+The goal is to hit the parallelism number first. Perhaps, with the change in code with what you suggested in the 2nd paragraph might help will try it out.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2020-04-21 17:33:47.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:460, src/vbucket_move_scheduler.erl -> "The first 256 moves would be active moves." Correction, this is not true. 
+
+However, first few moves would definitely be all active moves, given the current scheme of things. Changing the scheme as pointed out will help.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Artamonau
+Date: 2020-04-21 18:15:01.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:393, src/vbucket_move_scheduler.erl -> I wonder if there's a pathological case with respect to views caused by this change.
+
+The old code would deprioritize new active moves to nodes already having incoming moves for the entire duration of each move (not just during the backfill phase). Since with views we declare the backfill phase to be over before indexing is done on the new active node and since we exclude indexing from consideration here, it might be possible that we pick such a schedule where nodes have to index many more vbcukets at any given time. Honestly, I don't know if it makes any less efficient. 
+
+Not sure what an action item would be here :)
+
+Can you share your results from runs with views?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2020-04-22 16:37:35.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:393, src/vbucket_move_scheduler.erl -> You mean the ones for the 4BF_using backfill_nodes? I don't have the runs for them, I can get them for you if you like.
+
+I have shared the view results for current implementation earlier.
+
+Pasting it again here,
+
+Views Rebalance results below, Rebalance time is the same, ops do have a hit, but couch-view ops are the same if not better,
+Rebalance In: http://cbmonitor.sc.couchbase.com/reports/html/?snapshot=hestia_650-4960_rebalance_521f&label=BaselineViewsRebIn&snapshot=hestia_650-1000002_rebalance_37e7&label=FixMB-37060
+
+Swap: http://cbmonitor.sc.couchbase.com/reports/html/?snapshot=hestia_650-4960_rebalance_349a&label=BaselineViewsSwap&snapshot=hestia_650-1000002_rebalance_72c9&label=FixMB-37060
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2020-04-22 17:03:29.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:410, src/vbucket_move_scheduler.erl -> I tried it out, seems like here again we end up with slower rebalance times for rebalance In and rebalance out, compared to using nodes_involved_move. However, it results in similar rebalance times as baseline.
+
+Swap: http://cbmonitor.sc.couchbase.com/reports/html/?snapshot=titan_650-4960_rebalance_97c2&label=BaselineSwap&snapshot=titan_650-1000001_rebalance_62b1&label=FixMB-37060&snapshot=titan_650-1000001_rebalance_5acc&label=NodeWeightsBackfillNodes
+
+Rebalance In : Sorry I don't know why the graph is shifted for this.
+http://cbmonitor.sc.couchbase.com/reports/html/?snapshot=titan_650-4960_rebalance_d4cc&label=BaselineIn&snapshot=titan_650-1000001_rebalance_6067&label=FixMB-37060&snapshot=titan_650-1000001_rebalance_b465&label=NodeWeightsBackfillNodes
+
+Rebalance Out: 
+http://cbmonitor.sc.couchbase.com/reports/html/?snapshot=titan_650-4960_rebalance_cb21&label=BaselineOut&snapshot=titan_650-1000001_rebalance_47e5&label=FixMB-37060&snapshot=titan_650-1000001_rebalance_8763&label=NodeWeightsBackfillNodes
+
+My view runs were killed, I will have to wait probably till thursday to run them. Weekly tests are running now. 
+Honestly, not sure what to make of this. But I am trying an altogether different approach of using Nodeweights, as http://review.couchbase.org/c/ns_server/+/126368/1/src/vbucket_move_scheduler.erl#422 . 
+
+Waiting for perf systems to clear up to run tests for them.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Artamonau
+Date: 2020-04-22 18:27:03.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:410, src/vbucket_move_scheduler.erl -> > I tried it out, seems like here again we end up with slower rebalance times for rebalance In and rebalance out, compared to using nodes_involved_move. However, it results in similar rebalance times as baseline.
+
+This is not entirely unexpected. But the question is what are the cases that such choice degrades. We should be very cautious not to overfit.
+
+As I mentioned in our conversations before, I believe that the issue here is that we try to predict how expensive a particular move is going to be ahead of time. And this prediction differs depending on presence of views. And the right solution to this is not making predictions at all, and instead tracking move complections more granularly, so we can schedule further moves without waiting for the entire vbucket move to complete. But as long as we don't do something like this, we need to be conservative and assume the worst. Or at least that's my tendency :)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2020-04-22 18:36:42.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:393, src/vbucket_move_scheduler.erl -> Apologies for using the wrong baseline.
+
+Views perf results comparison. The is a difference in ops, however, the ops drop is mainly due to resident ratio difference at the start of rebalance, and seems nothing to do with these changes. Having said that I will investigate this further to see if I can get that fixed. 
+
+Swap: http://cbmonitor.sc.couchbase.com/reports/html/?snapshot=hestia_651-6296_rebalance_9cbb&label=BaselineViewsSwap&snapshot=hestia_650-1000002_rebalance_72c9&label=FixMB-37060
+
+Reb in: http://cbmonitor.sc.couchbase.com/reports/html/?snapshot=hestia_651-6296_rebalance_6d7a&label=BaselineViewsIn&snapshot=hestia_650-1000002_rebalance_37e7&label=FixMB-37060
+
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,142 @@
+======================================================================================================================
+DESCRIPTION:
+
+RefDirectory: Throw exception if CAS of packed ref list fails
+
+The contents of the packedRefList AtomicReference should never differ
+from what we expect prior to writing, because this segment of the code
+is protected by the packed-refs lock file on disk. If it does happen,
+whether due to programmer error or a rogue process not respecting the
+locking protocol, it's better to let the caller know than to silently
+drop the whole commit operation on the floor.
+
+The existing concurrentOnlyOneWritesPackedRefs test is inherently
+nondeterministic as written, and was already about 6% flaky as measured
+by bazel:
+
+  $ bazel test --runs_per_test=200 //org.eclipse.jgit.test:org_eclipse_jgit_internal_storage_file_GcPackRefsTest
+  ...
+  INFO: Elapsed time: 42.608s, Critical Path: 10.35s
+  //org.eclipse.jgit.test:org_eclipse_jgit_internal_storage_file_GcPackRefsTest FAILED in 12 out of 200 in 1.6s
+    Stats over 200 runs: max = 1.6s, min = 1.1s, avg = 1.3s, dev = 0.1s
+
+This flakiness was caused by the assumption that exactly one of the 2
+threads would fail, when both might actually succeed in practice due to
+racing on the compare-and-swap.
+
+For whatever reason, this change affected the interleaving behavior in
+such a way that the flakiness jumped to around 50%. Making the
+interleaving of the test fully deterministic is beyond the scope of this
+change, but a simple tweak to the assertion is enough to make it pass
+consistently 200+ times both before and after this change.
+
+Change-Id: I5ff4dc39ee05bda88d47909acb70118f3d0c8f74
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Borowitz
+Date: 2017-07-17 15:56:40.000000000
+Message: 
+Uploaded patch set 7: Patch Set 6 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2017-07-17 17:14:32.000000000
+Message: 
+Patch Set 7:
+
+Build Started https://hudson.eclipse.org/jgit/job/jgit.gerrit/10487/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2017-07-17 17:44:55.000000000
+Message: 
+Patch Set 7: Verified-1
+
+Build Failed 
+
+https://hudson.eclipse.org/jgit/job/jgit.gerrit/10487/ : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2017-07-21 22:53:02.000000000
+Message: 
+Patch Set 7: -Verified
+
+Build Started https://hudson.eclipse.org/jgit/job/jgit.gerrit/10606/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2017-07-21 23:04:11.000000000
+Message: 
+Patch Set 7: Verified+1
+
+Build Successful 
+
+https://hudson.eclipse.org/jgit/job/jgit.gerrit/10606/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: David Pursehouse
+Date: 2017-07-24 07:38:42.000000000
+Message: 
+Change has been successfully merged by David Pursehouse
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2023-02-16 16:34:17.000000000
+Message: 
+Patch Set 7:
+
+(2 comments)
+File Comment: /PATCHSET_LEVEL -> I am experiencing packed-refs concurrency issues and looking at the test it doesn't really test what that only one should pass.
+Line:121, org.eclipse.jgit.test/tst/org/eclipse/jgit/internal/storage/file/GcPackRefsTest.java -> This assertion doesn't do what the code is testing.
+
+If we want to make sure that *ONLY ONE* succeeds, we should return 1 at L112 and return 0 at L114.
+
+If both succeed => the sum is 2 and therefore this assertion fails
+If only one (or none) succeed => the sum is 1 or 0
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2023-02-16 17:21:14.000000000
+Message: 
+Patch Set 7:
+
+(1 comment)
+Line:123, org.eclipse.jgit.test/tst/org/eclipse/jgit/internal/storage/file/GcPackRefsTest.java -> This was the correct assertion IMHO: one should always fail and the other should always succeed, isn't it?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Martin Fick
+Date: 2023-03-07 23:34:02.000000000
+Message: 
+Patch Set 7:
+
+(2 comments)
+Line:14, /COMMIT_MSG -> I believe this paragraph, and its related fix is incorrect since the packerefs file lock is no longer actually held at the time of the packedRefList update. :(
+
+Line:922, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/RefDirectory.java -> I believe this paragraph is wrong since despite the comment assertion that the file lock is held, the packerefs file lock is no longer actually held at the time of the packedRefList update, the lck.commit(), which releases the file lock, is done on line 913. This means that the on disk packedrefs file could already have changed by an external actor in another process, and another thread could have re-read that update and updated the in memory copy of packedRefList before the update on line 929 happens, and thus the if() on 931 could fail erroneously.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Kaushik Lingarkar
+Date: 2023-03-08 01:30:53.000000000
+Message: 
+Patch Set 7:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> These changes might help with some of the packed-refs concurrency issues:
+
+200220: PackedBatchRefUpdate: Ensure updates are applied on latest packed refs | https://git.eclipse.org/r/c/jgit/jgit/+/200220
+200221: RefDirectory.pack: Only rely on packed refs from disk | https://git.eclipse.org/r/c/jgit/jgit/+/200221
+----------------------------------------------------------------------------------------------------------------------
+Author: Martin Fick
+Date: 2023-03-08 02:43:55.000000000
+Message: 
+Created a revert of this change as I3acee7527bb542996dcdfaddfb2bdb45ec444db5
+----------------------------------------------------------------------------------------------------------------------
+Author: Martin Fick
+Date: 2023-03-08 15:29:05.000000000
+Message: 
+Patch Set 7:
+
+(1 comment)
+Line:121, org.eclipse.jgit.test/tst/org/eclipse/jgit/internal/storage/file/GcPackRefsTest.java -> The test is fundamentally flawed because GC.packRefs() makes no guarantees of throwing an Exception if it does not pack any refs (see #1). I don't think there is a good way without modifying GC.packRefs() itself and potentially more jgit internals to report whether it actually packed any refs to make this test reasonably test what it is intending to test. I think as you are pointing out, since the return values in the test are wrong anyway, this test currently only insures that both don't fail (instead of ensuring that both don't run)! We could rename it to concurrentOnlyOneFailsPackedRefs() or something like that? Or we could to the aforementioned jgit internal modifications? What would be better?
+
+
+# 1 GC.packRefs() as a for() loop which gathers the loose refs which need to be packed, and then passes them to the RefDirectory.pack() method, however the RefDirectory.pack() methods simply returns if (refs.isEmpty()), and thus will not throw an Exception if the other thread has already packed the loose refs! I believe there are other ways beyond that in which it can avoid throwing an exception also, but that one is the most obvious.
+
+----------------------------------------------------------------------------------------------------------------------

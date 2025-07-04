@@ -1,0 +1,178 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-35003: Set fail-over seqno to be the end seqno of previous complete snapshot
+
+This commit changes how the flushVBucket function updates the current
+snapshot range for pending/replica vbuckets only. Note the flusher is
+shared between active/pending/replica vbuckets and as such these changes
+are live for all vbucket states, however active vbuckets always
+overwrite the snapshot range with the high flushed seqno.
+
+This description first covers some examples of how the flusher managed
+the snapshot range prior to the change.
+
+*Note*: in all of these examples the current/final snapshot is partially
+received.
+
+ex1:
+
+Before this commit the flusher very much follows what the checkpoint
+manager tells it, e.g. a partially received snapshot {4,8} resulted in
+the following disk state:
+
+  vbstate.range = {4,8}
+  seqno index = 1,2,3,4,5,6
+
+ex2:
+
+Before this commit multiple checkpoint snapshots could be flushed as a
+combined set of items, e.g. receipt of snapshots {1,3} and {4,8}
+followed by a flush results in the following disk state:
+
+  vbstate.range = {1,8}
+  seqno index = 1,2,3,4,5,6
+
+ex3:
+
+A further important example is from MB-35003 itself, in that when the
+producer switches from 'backfill' to 'in-memory' the first in-memory
+snapshot is now tagged with the 'checkpoint' flag, this was introduced
+in MB-35001.
+
+Before MB-35001 a disk followed by memory snapshot looked as follows,
+here we have {1,3, disk} and {4,8, memory}. When a snapshot is received
+without the checkpoint flag, the snapshot items just enter the current
+checkpoint. Once the flusher is past the {1,3} snapshot, the subsequent
+snapshot is just an extension of the current one, tagging snapshots with
+the checkpoint flag means a new checkpoint is opened, which can yield a
+new outcome.
+
+With MB-35001, the addition of the checkpoint flag means the following
+is now a possible outcome of the flusher:
+
+  vbstate.range = {5,8}
+  seqno index = 1,2,3,4,5,6
+
+An important outcome of this commit is what happens during replica to
+active promotion, and where we set the seqno of the fail-over table
+entry. The logic is as follows:
+
+  if (highSeqno == vbstate.range.end) {
+    newEntry.seqno = highseqno
+  } else {
+    newEntry.seqno = vbstate.range.start
+  }
+
+With the examples above, promotion to active yields the following new
+fail-over entry seqno.
+
+ex1: 4
+ex2: 1
+ex3: 5
+
+In all of these examples, because of the partial snapshot the fail-over
+entry seqo is always the start of a snapshot, and ex3 it's the start of
+an artificial checkpoint.
+
+This commit changes the outcome of all of these examples, instead of the
+start of the partial snapshot, the fail-over entry seqno will become the
+end of the last complete snapshot.
+
+To achieve this the flusher now gets more information about the set of
+items it is flushing.
+
+The checkpoint manager is changed so that the flusher receives.
+
+* The entire set of items to flush.
+* A vector of snapshot_range_t for individual checkpoint that makes up
+  the set of items.
+
+As the flusher iterates through the set of items to flush, the seqno of
+each flushed item is compared against the end seqno of each snapshot. If
+there is a match, the flusher concludes it has all the items of that
+particular snapshot and it can now change the start seqno of the
+vbucket's range to be that of the completed snapshot.
+
+Each example from above now changes to have the following outcomes.
+
+ex1:
+  vbstate.range = {3,8}
+  seqno index = 1,2,3,4,5,6
+
+  fail-over = 3
+
+ex2:
+  vbstate.range = {3,8}
+  seqno index = 1,2,3,4,5,6
+
+  fail-over = 3
+
+ex3:
+  vbstate.range = {3,8}
+  seqno index = 1,2,3,4,5,6
+
+  fail-over = 3
+
+A final notable difference that this commit makes is that once the
+flusher has absolutely flushed to the very end of the range, the state
+now looks as follows.
+
+  vbstate.range = {8,8}
+  seqno index = 1,2,3,4,5,6,7,8
+
+I.e. start = end = high-seqno
+
+There seems to be no advantage to adapting the flusher further to
+maintain the prior behaviour, where in an absolutely flushed scenario we
+maintain the range.start to reflect some lower value. In all failure and
+fail-over scenarios, when the high-seqno matches the range.end, the
+range.start is not used.
+
+Change-Id: I54e3851378a9e19ad350fc17741fa19dfa69b2fa
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jim Walker
+Date: 2019-08-20 07:40:08.000000000
+Message: 
+Uploaded patch set 6.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-08-20 07:41:09.000000000
+Message: 
+Patch Set 6: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/19446/ : ABORTED
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/19446/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/22752/ : ABORTED
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/22752/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/13695/ : ABORTED
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/13695/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/21823/ : ABORTED
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/21823/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/3484/ : ABORTED
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/3484/ )
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/12752/ : ABORTED
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/12752/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/6445/ : ABORTED
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/6445/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/20436/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

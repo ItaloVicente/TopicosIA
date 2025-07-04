@@ -1,0 +1,164 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-52131: Optimize CheckpointCursor::operator< from O(num_items) to O(1)
+
+CheckpointCursor's operator< is currently O(n) in the case where two
+cursors are pointing at the same item.
+
+This is due to the fact that if they point to the same Checkpoint and
+seqno, we must check their distance along the Checkpoint (as one may
+be pointing to a meta-item which shares a seqno but it ahread of the
+cursor) - however to do so requires calling std::distance(begin(),
+cursorIterator), and as the CheckpointCursor itorator is not random
+access (it's essentially a std::list::iterator) we must perform an
+O(n) iteration from the beginning of the container to the cursor.
+
+This results in the following performance characteristics as the
+Checkpoint grows in items:
+
+    Running ./ep_engine_benchmarks
+    Run on (10 X 24.0102 MHz CPU s)
+    CPU Caches:
+      L1 Data 64 KiB (x10)
+      L1 Instruction 128 KiB (x10)
+      L2 Unified 4096 KiB (x5)
+    Load Average: 6.28, 11.37, 18.63
+    ---------------------------------------------------------------------------------
+    Benchmark                                       Time             CPU   Iterations
+    ---------------------------------------------------------------------------------
+    CheckpointBench/GetLowestCursor/1            13.8 ns         13.7 ns     51002565
+    CheckpointBench/GetLowestCursor/10           23.5 ns         23.4 ns     30190632
+    CheckpointBench/GetLowestCursor/100           200 ns          200 ns      3489427
+    CheckpointBench/GetLowestCursor/1000         2115 ns         2112 ns       332576
+    CheckpointBench/GetLowestCursor/10000       37857 ns        37799 ns        18850
+    CheckpointBench/GetLowestCursor/100000     270262 ns       269972 ns         2537
+
+However, as part of patch "MB-48506: Introduce
+CheckpointCursor::distance" (74b9cf4f) we added a 'distance' member to
+each CheckpointCursor which caches its distance from the start of the
+container, and is updated whenever a cursor moves.
+
+As such, we can use the cached distanece value in
+heckpointCursor::operator<, reducing the cost to O(1) in the case
+where two cursors point to the same item:
+
+    Running ./ep_engine_benchmarks
+    Run on (10 X 24.1207 MHz CPU s)
+    CPU Caches:
+      L1 Data 64 KiB (x10)
+      L1 Instruction 128 KiB (x10)
+      L2 Unified 4096 KiB (x5)
+    Load Average: 7.73, 12.32, 19.30
+    ---------------------------------------------------------------------------------
+    Benchmark                                       Time             CPU   Iterations
+    ---------------------------------------------------------------------------------
+    CheckpointBench/GetLowestCursor/1            13.8 ns         13.8 ns     50626686
+    CheckpointBench/GetLowestCursor/10           13.9 ns         13.8 ns     50958011
+    CheckpointBench/GetLowestCursor/100          13.8 ns         13.8 ns     50932798
+    CheckpointBench/GetLowestCursor/1000         13.9 ns         13.9 ns     50392340
+    CheckpointBench/GetLowestCursor/10000        14.0 ns         14.0 ns     50426827
+    CheckpointBench/GetLowestCursor/100000       13.9 ns         13.8 ns     50859526
+
+(cherry picked from commit 5b281366133f40b52137fb01e67231d571834de5)
+
+Change-Id: I1814155d7eff9773ab29c30f6b76836963a75ac8
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2022-05-23 09:18:53.000000000
+Message: 
+Patch Set 4: Patch Set 3 was rebased
+----------------------------------------------------------------------------------------------------------------------
+Author: Restriction Checker
+Date: 2022-05-23 09:19:03.000000000
+Message: 
+Patch Set 4: Well-Formed+1
+
+Permission granted to commit: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/299565/artifact/restricted.html : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-05-23 10:15:10.000000000
+Message: 
+Patch Set 4: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-neo/275/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [4/93]: test dcp consumer flow control dynamic...(407 ms) OK
+
+
+99% tests passed, 1 tests failed out of 423
+
+Total Test time (real) = 368.90 sec
+
+The following tests FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-neo/275/ )
+
+Timeout of a CTest test 423/423 Test #290: ep_testsuite_dcp.full_eviction.comp_passive ...................................................................................} ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-neo/275/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/neo/187/ : FAILURE
+
+Timeout of a CTest test [2022-05-23T10:09:43.098Z] 444/444 Test #442: cluster_test ................................................................................................} ( http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/neo/187/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-neo/194/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/16674/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-neo/191/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/neo/275/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/neo/193/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/neo/201/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/neo/206/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/neo/197/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/neo/198/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-05-23 10:33:55.000000000
+Message: 
+Patch Set 4: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-neo/194/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/16674/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-neo/191/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/neo/275/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/neo/189/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/neo/193/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/neo/201/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/neo/206/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/neo/197/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/neo/198/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-neo/276/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2022-05-24 13:23:57.000000000
+Message: 
+Patch Set 4: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------

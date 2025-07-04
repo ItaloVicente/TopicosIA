@@ -1,0 +1,110 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-54386, MB-54455, MB-54452: Add ConnectionLimitMode::Recycle
+
+Add a new mode for how the system should behave when one reach the
+maximum number of user connections. This logic does _not_ apply to
+the system interfaces (and the rest of the commit message only discuss
+the user interfaces).
+
+By default we continue to use the old mode of operation which is
+called "disconnect". In this mode any new connection to the system
+gets accepted and immediately closed.
+
+The other mode of operation is "recycle"; and once enabled the user
+is allowed up to 1% _additional_ connections, but when accepting one
+of these "additional" connections the system will try to disconnect
+one of the least recently connections. If the system experience a
+burst of new connections so fast that the entire 1% of the pool gets
+consumed faster than clients gets disconnected the system will
+immediately close the new connection just like in "disconnect" mode.
+
+To enable the new mode the following entry needs to be inserted in
+memcached.json:
+
+    "connection_limit_mode" : "recycle"
+
+If the entry is absent (or set to "disconnect") the system will use
+the good old mode we've learned to love over the years.
+
+Call me a chicken, but it is hard to predict a number which would be
+correct in all cases so it is possible to provide an absolute number
+for the number of connections to allow instead of 1%. To do so specify
+the following in memcached.json:
+
+    "free_connection_pool_size" : 100
+
+Change-Id: I477ed3ab60b3c0cdf92f59d915f1c62e070cffa9
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Trond Norbye
+Date: 2022-11-21 13:14:52.000000000
+Message: 
+Uploaded patch set 3: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: Restriction Checker
+Date: 2022-11-21 13:15:05.000000000
+Message: 
+Patch Set 3: Well-Formed-1
+
+Branch restricted. PLEASE READ this URL: 
+
+https://server.jenkins.couchbase.com/job/restricted-branch-check/325732/artifact/restricted.html : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2022-11-21 16:47:28.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:914, daemon/connection.h -> Is there any directed testing that can be done for the correctness of the lru? MockConnection or moving the data structure out to be an abstract container?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-11-21 17:00:23.000000000
+Message: 
+Patch Set 3: Code-Review-1
+
+(1 comment)
+Line:914, daemon/connection.h -> As per the previous master version, we could just use boot::intrusive_list for the low-level details (already used for Ephemeral): https://www.boost.org/doc/libs/1_80_0/doc/html/intrusive/list.html
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2022-11-21 21:12:10.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:914, daemon/connection.h -> I don't like the boost intrusive list as it needs to make the stuff public from the class or inherit from the list. I don't like any of those solutions to such a simple problem. In addition to that it doesn't solve the problem that Jim asks; to test that the LRU actually work the way we want.
+
+I'm not sure how easy it'll be to write a test to verify that the per-thread LRU gets updated at the right time (the connection gets moved as part of executing new commands and as part of resuming a blocked command). 
+
+I'll extend the connection test to at least make sure that the connection gets moved as part of starting executing a new command (it'll never get disconnected as part of recycling etc).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-11-21 21:32:10.000000000
+MISMATCHED INLINE COMMENT
+Line:914, daemon/connection.h -> So testing of the intrusive list functionality is handled for us if we use boost::intrusive.
+
+In terms of the LRU, if we already know the doubly-linked list is solid the it's pretty trivial to demonstrate that moving something to the head every time it's operated on means the last element in the list must be the least-recently used.
+
+I don't really understand the "complexity" argument - yes, there's certain constraints which boost intrusive (and pretty much C++) impose to provide this in a general way for any type, but I think it's a pretty minimal overhead.
+
+If you _really_ don't want that, then folly shows a way to use boost::instrusive and keep the hook private - see https://github.com/facebook/folly/blob/main/folly/IntrusiveList.h
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2022-11-22 10:21:50.000000000
+MISMATCHED INLINE COMMENT
+Line:914, daemon/connection.h -> So the "lru" part of the "intrusive list" wouldn't be tested even if I flip it with a boost intrusive list. We would be using a list where the code is tested elsewhere, but we still have no idea if the actual LRU part is working as expected (and that we update it at the correct locations).
+
+I've extended the maxconn test to now make sure that one connection is constantly being used (so it shouldn't end up as being the least recently used connection and disconnected) so the entire functionality is now tested and demonstrated to work as expected (both the list; and that it is being updated and elements moved around)
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2022-11-22 13:24:49.000000000
+MISMATCHED INLINE COMMENT
+Line:914, daemon/connection.h -> I'll recheck - my question was more around the more abstract use of the linked list to give the connection lru functionality - wasn't sure if we had some simpler tests that could show/cover the basics outside of a more complex test harness
+----------------------------------------------------------------------------------------------------------------------

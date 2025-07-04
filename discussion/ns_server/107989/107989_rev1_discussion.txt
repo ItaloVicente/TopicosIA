@@ -1,0 +1,117 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-33853 Don't use async:perform for leader_lease_acquire_worker.
+
+Use a regular spawn_link instead. The parent process traps exits
+anyway, so it just needs to handle those instead of the monitor DOWN
+messages.
+
+The problem in the referred bug is due to async:perform/1 not cleaning
+up PIDs of temporary processes that leader_lease_acquire_worker
+spawns (via misc:executing_on_new_process/1). Over a long time each
+worker will accumulate a significant number of PIDs of processes that
+has long been dead. Once the VM spawns enough new processes (on the
+order of 2²⁸ in our case, but the number can be significantly lower in
+certain situations), it starts recycling old PIDs. So what happens is
+that a newly spawned processes might take over some of the PIDs that
+some worker still holds on to. When such worker is terminated (most
+likely because another node became a master), at least two undesirable
+situations may arise:
+
+ - The worker terminates an unrelated process that has taken over one
+   of its PIDs.
+
+ - The worker might get stuck. This is possible because internally
+   misc:terminate_and_wait/2 first sends an exit signals to all PIDs
+   it's given and only then starts monitoring the PIDs to wait till
+   they terminate. So if one of the PIDs is overtaken right in between
+   these two steps, the worker will end up waiting for a process to
+   terminate when that process never received the exit signal. Hence
+   the worker gets stuck.
+
+It's the second case that was observed in couple of customer
+escalations. There are two factors that make it quite likely:
+
+ - Over time a worker will accumulate a lot of PIDs, so the window
+   between two steps in misc:terminate_and_wait/2 above becomes quite
+   large: each of the steps has to traverse this long list.
+
+ - Incidentally, long worker shutdown time (which slows down the
+   shutdown of mb_master_sup) causes mb_master process to get blocked
+   for some time. This in turn results in node_monitor and related
+   processes to crash and restart because mb_master:master_mode()
+   times out. So it's these processes that start at the exactly wrong
+   moment and lock up the entire shutdown sequence.
+
+Change-Id: I47dd29bf970c636669b5eea44f87ff281fc9c176
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Aliaksey Artamonau
+Date: 2019-04-17 22:59:56.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-04-17 23:00:03.000000000
+Message: 
+Patch Set 1: Well-Formed-1
+
+Branch restricted. PLEASE READ this URL: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/129814/artifact/restricted.html : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Artamonau
+Date: 2019-04-17 23:00:20.000000000
+Message: 
+Removed reviewer Amit Krishnan.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Finlay
+Date: 2019-04-17 23:06:38.000000000
+Message: 
+Patch Set 1:
+
+check approval
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-04-17 23:06:48.000000000
+Message: 
+Patch Set 1: Well-Formed+1
+
+Permission granted to commit: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/129815/artifact/restricted.html : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Artamonau
+Date: 2019-04-17 23:27:55.000000000
+Message: 
+Patch Set 1: Verified+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Finlay
+Date: 2019-04-18 01:52:06.000000000
+Message: 
+Patch Set 1: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Finlay
+Date: 2019-04-18 01:55:07.000000000
+Message: 
+Patch Set 1:
+
+This patch is very simple - simple enough that given the context I have on the issue I'm comfortable +2'ing. However, the issue and fix is interesting enough that others may want to look at it - and you may also want to get someone who programs more frequently to give the patch a going over. I note that you didn't bother removing the unsafe timeout from mb_master:shutdown_master_sup/0 - but I think that is fine for 5.5.x where we're trying to minimize change and keep things simple.
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2019-04-18 02:34:49.000000000
+Message: 
+Patch Set 1: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Artamonau
+Date: 2019-04-18 03:00:16.000000000
+Message: 
+Patch Set 1:
+
+> I note that you didn't bother removing the unsafe timeout from mb_master:shutdown_master_sup/0 - but I think that is fine for 5.5.x where we're trying to minimize change and keep things simple.
+
+The worst possible scenario here is when mb_master kills mb_master_sup after the latter unlinked one of its children but before it sent this children an exit signal. In this case the child in question will continue running as if nothing happened. But this window is pretty small. In all other cases the children will eventually realize that mb_master_sup got killed and will (at least attempt to) terminate themselves. So I decided that the improbability of the worst case scenario is a good enough reason to ignore it in the context of 5.5.x.
+----------------------------------------------------------------------------------------------------------------------

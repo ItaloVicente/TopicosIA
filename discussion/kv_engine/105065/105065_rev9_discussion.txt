@@ -1,0 +1,77 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-33081: Don't re-schedule VBCBAdapter once per vBucket
+
+VBCBAdapter is a Task which invokes a visitor object on each vBucket
+in a Bucket. Recently the DurabilityMonitorTimeout task was added
+which uses the VBCBAdapter to visit each vBucket and check for
+timed-out SyncWrites. The DurabilityMonitorTimeout task is scheduled
+to run every 25ms on each Bucket.
+
+However, this has exposed an ineffiency in the VBCBAdapter -
+specifically that it only processes one vBucket on each call to
+run(). This means that a single-node cluster will need to schedule the
+VBCBAdapter task 1024 times for each Bucket - every 24us in the case
+of the timeout task. Our current ExecutorPool / TaskQueue doesn't
+handle this frequency of schedling very well - a single-node cluster
+with 2 (empty) buckets results in idle CPU usage of 150% - essentially
+all that time is being spent re-scheduling the VBCBAdapter 1024 times,
+once for each vBucket.
+
+Address this by changing VBCBAdapter::run to process (up to) all
+vBuckets in each call - only if the visitor returns true from
+pauseVisitor() does VBCBAdapter::run() pause itself and allow other
+tasks to run.
+
+This change potentially introduces a regression in the opposite
+direction - if VBCBAdapter::run() no longer yields between vBuckets
+then slow-running visitors could cause delays in other background
+tasks running. To attempt to avoid this, restructure
+KVBucketIface::visitAsync():
+
+1. Add a new PausableVBucketVisitor base class, and change
+   KVBucketIface::visitAsync() to accept an instance of this
+   class. This tightens up the API for (async) visiting, making it
+   explicit that visitors are pausable.
+
+2. Add a CappedDurationVBucketVisitor subclass of
+   PausableVBucketVisitor. This class imposes a cap (currently 25ms)
+   on the amount of time it will run for before it pauses and allows
+   other tasks to be scheduled.
+
+3. Update all existing visitors to derive from
+   CappedDurationVBucketVisitor if they don't already implement
+   pauseVisitor().
+
+After this change the same test results in ~5% idle CPU usage.
+
+Change-Id: Icf8273626b411feb1786b30794a685d7d4032a3b
+Reviewed-on: http://review.couchbase.org/105065
+Tested-by: Build Bot <build@couchbase.com>
+Reviewed-by: Paolo Cocchi <paolo.cocchi@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2019-02-22 15:14:26.000000000
+Message: 
+Change has been successfully cherry-picked as 8ea82f923d74b13798f3137334833b81599d1ce8 by Dave Rigby
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-02-22 15:14:34.000000000
+Message: 
+Patch Set 9:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/359/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-02-22 15:56:44.000000000
+Message: 
+Patch Set 9:
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/359/ : SUCCESS'
+----------------------------------------------------------------------------------------------------------------------

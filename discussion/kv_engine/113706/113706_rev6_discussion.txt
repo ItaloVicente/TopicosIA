@@ -1,0 +1,105 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-35654: Make expelling only operate on the oldest checkpoint
+
+Currently, expelling will operate on the oldest checkpoint _containing
+cursors_, which may not be the _oldest checkpoint_.
+
+Expelling from a checkpoint which is _not_ the oldest is unsafe as it
+leaves holes in the items a cursor will read. This patch prevents this.
+
+If the oldest checkpoint is unref'd (i.e., all cursors are in other
+later checkpoints) it can be deleted as a whole; expelling from such a
+checkpoint would be inefficient. Given this, trying to expel in this
+state should be a noop - the oldest checkpoint will be dropped if it
+remains unreferenced, and no other checkpoints are valid candidates.
+
+Change-Id: Id72a613930909103fabd4265d63a5f500567d627
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: James H
+Date: 2019-08-23 10:40:58.000000000
+Message: 
+Uploaded patch set 6.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-08-23 11:20:32.000000000
+Message: 
+Patch Set 6: Code-Review-1
+
+(1 comment)
+Line:551, engines/ep/tests/module_tests/checkpoint_remover_test.cc -> You can still tighten this up - you can explicitly state how many items should be found after expelling. 
+
+Additionally I don't believe you need 6 items - wouldn't one item per checkpoint be sufficient?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-08-23 11:20:57.000000000
+Message: 
+Patch Set 6: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/22859/ : FAILURE
+
+Failure of a CTest test  33/184 Test  #33: ep_testsuite_basic.full_eviction.comp_passive ................................ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/22859/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/21912/ : FAILURE
+
+Failure of a CTest test  32/200 Test  #31: ep_testsuite.full_eviction.comp_active ....................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/21912/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/6539/ : FAILURE
+
+Failure of a CTest test [2019-08-23T10:55:05.893Z]  35/181 Test  #34: ep_testsuite_basic.value_eviction.comp_active ................................ ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/6539/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/19527/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/3579/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/20517/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/12831/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/13799/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2019-08-23 13:47:49.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+Line:551, engines/ep/tests/module_tests/checkpoint_remover_test.cc -> Roger, will tighten that up. However, looks like 3 in the first snapshot is the min thanks to logic in expelUnreferencedCheckpointItems
+
+ /*
+         * Walk backwards over the checkpoint if not yet reached the dummy item,
+         * and pointing to an item that either:
+         * 1. has a seqno equal to the checkpoint's high seqno, or
+         * 2. has a previous entry with the same seqno, or
+         * 3. is pointing to a metadata item.
+         */
+        while ((iterator != oldestCheckpoint->begin()) &&
+               (((*iterator)->getBySeqno() ==
+                 int64_t(oldestCheckpoint->getHighSeqno())) ||
+                ((*std::prev(iterator))->getBySeqno() ==
+                 (*iterator)->getBySeqno()) ||
+                ((*iterator)->isCheckPointMetaItem()))) {
+            --iterator;
+        }
+
+It won't expel anything if there are fewer than 3 non meta items (Or I am missing something, equally possible!)
+
+PS. there's a checkpoint start and a vbstate prior to the items, triggering the prev(..) case then the isCheckpointMetaItem case
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-08-23 14:03:01.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+Line:551, engines/ep/tests/module_tests/checkpoint_remover_test.cc -> Ok, fine - but probably worthy of a comment mentioning _why_ 3 items are added to each one.
+
+----------------------------------------------------------------------------------------------------------------------

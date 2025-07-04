@@ -1,0 +1,107 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-19892: Ensure backfills are terminated when closing DcpProducer's streams
+
+There is a memory and FD leak if a DCP Producer is closed when
+backfills are still present - for example if the connection is
+disconnected while backfill is still running.
+
+The issue is that there is a circular reference between DcpProducer
+and its ActiveStreams (in the `streams` map). This means that while
+all /external/ references to DcpProducer are correctly reduced to
+zero, the refcount is held at 1 by any ActiveStream objects, and
+vice-versa.
+
+The effect is that the DcpProducer object is never deleted, and in
+turn we do not close open couchstore files the DCPBackfill tasks have
+open.
+
+Arguably the issue is that the circular reference exists; however the
+simplest way to fix this issue is to:
+
+1. Ensure that when all streams are closed
+   (DcpProducer::closeAllStreams) we destroy the DcpProducer's
+   backfill manager.
+
+2. Rely on ~BackfillManager to cancel and delete all backfills, and
+   also cancel the backfillManager task if still running. Note that
+   previously this destructor was never called as we never destroyed
+   the owning DcpProducer.
+
+One slight sublety is the fact that the BackfillManagerTask (which
+runs on a seperate background AUXIO thread) also needs to have a
+pointer to the backfill manager object, and we need to ensure that
+this task doesn't keep the backfill manager alive after the
+DcpProducer has reset() its pointer. We solve this by making
+BackfillManagerTask have a /weak/ pointer to the backfillmanager. For
+the duration of the run() method the weak_ptr is promoted to a
+shared_ptr, giving the task temporary shared ownership, but as soon as
+that method completes the (shared) ownership is dropped and the
+backfillManager can be deleted.
+
+The patch also adds a Unit test which opens a DCP producer, opens a
+stream and when deletes the bucket (with the stream still
+connected). This leaks memory (and a couchstore FD) without the fixes
+present here.
+
+Change-Id: I23750f1d1c53a56f6773970bd35fc64224165516
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Gerrit Code Review
+Date: 2016-06-28 15:42:48.000000000
+Message: 
+Change could not be merged due to a path conflict.
+
+Please rebase the change locally and upload the rebased commit for review.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2016-06-28 15:42:56.000000000
+Message: 
+Patch Set 5:
+
+Build Started http://cv.jenkins.couchbase.com/job/ep-engine-clang_analyzer-watson/602/ (1/3)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2016-06-28 15:42:57.000000000
+Message: 
+Patch Set 5:
+
+Build Started http://cv.jenkins.couchbase.com/job/ep-engine-gerrit-watson/852/ (2/3)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2016-06-28 15:43:00.000000000
+Message: 
+Patch Set 5:
+
+Build Started http://cv.jenkins.couchbase.com/job/ep-engine-threadsanitizer-watson/759/ (3/3)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2016-06-28 15:43:01.000000000
+Message: 
+Patch Set 5:
+
+Permission granted to commit: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/17303/artifact/restricted.html : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2016-06-28 15:52:00.000000000
+Message: 
+Patch Set 5: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/ep-engine-clang_analyzer-watson/602/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/ep-engine-threadsanitizer-watson/759/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/ep-engine-gerrit-watson/852/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Gerrit Code Review
+Date: 2016-06-28 15:53:03.000000000
+Message: 
+Change has been successfully cherry-picked as e664a2cff600605100405a2a27c790a214e06a5c by Dave Rigby
+----------------------------------------------------------------------------------------------------------------------

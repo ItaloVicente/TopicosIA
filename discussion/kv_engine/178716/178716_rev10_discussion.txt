@@ -1,0 +1,172 @@
+======================================================================================================================
+DESCRIPTION:
+
+Modernize parse_config [1/2]
+
+Use a std::string view for the input string and make
+it callback based instead.
+
+Change-Id: I74f34fb4bf9959029589c199c1b1444a97df2a89
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Trond Norbye
+Date: 2022-08-11 10:53:08.000000000
+Message: 
+Uploaded patch set 10.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-08-11 11:38:59.000000000
+Message: 
+Patch Set 10: Verified-1 Code-Review-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/19386/ : FAILURE
+
+clang-tidy found the following problems:
+
+<pre>
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy-master/kv_engine/include/memcached/config_parser.h:95:12: warning: do not declare C-style arrays, use std::array<> instead [modernize-avoid-c-arrays]
+           config_item items[],
+           ^
+
+</pre> ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/19386/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/18598/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/48278/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/40553/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/9076/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/20570/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/21674/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/22396/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/9173/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/21322/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/29700/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2022-08-11 11:47:51.000000000
+Message: 
+Patch Set 10: Verified+1
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> Override clang-tidy error as I won't replace the API with the same patch. That happens in [2/2]
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2022-08-11 11:47:53.000000000
+Message: 
+Removed Verified-1 by <GERRIT_ACCOUNT_1000011>
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2022-08-11 11:47:57.000000000
+Message: 
+Removed Code-Review-1 by <GERRIT_ACCOUNT_1000011>
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-08-11 13:03:16.000000000
+Message: 
+Patch Set 10: Code-Review-1
+
+(9 comments)
+Line:95, include/memcached/config_parser.h -> How does the caller know how many elements are in here? null-terminated?
+
+(Given you're already changing the API might be nicer to change to gsl::span<items> which knows it's own size).
+
+Line:18, utilities/config_parser.cc -> API is not very C++ idiomatic here - we both modify the input param (str), and return it from the function.
+
+Prefer to either:
+
+a) leave the input unmodified (say passing as string_view) and return the resulting trimmed part, or
+
+b) modify the input but return void so it's more obvious how the data is changed.
+
+(Personally I'd go with (a)).
+
+Line:27, utilities/config_parser.cc -> trim_left() from boost string algorithms can do this - see https://www.boost.org/doc/libs/1_80_0/doc/html/boost/algorithm/trim_left.html
+
+Line:89, utilities/config_parser.cc -> Doesn't this loose support for negative numbers (we are not using std::stoll() anymore...)
+
+Line:104, utilities/config_parser.cc -> boost to_lower (or the copy variant if you prefer) https://www.boost.org/doc/libs/1_80_0/doc/html/boost/algorithm/to_lower.html 
+
+or  
+https://www.boost.org/doc/libs/1_80_0/doc/html/string_algo/reference.html#header.boost.algorithm.string.case_conv_hpp
+
+Line:153, utilities/config_parser.cc -> Don't we want to at least log this - to maintain the same behaviour as before?
+
+Line:156, utilities/config_parser.cc -> Ditto
+
+Line:164, utilities/config_parser.cc -> Style: unnecessary comparison to nullptr.
+
+Line:154, utilities/config_parser_test.cc -> Shouldn't we be calling value_as_ssize_t() here?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2022-08-11 13:37:05.000000000
+Message: 
+Patch Set 10:
+
+(9 comments)
+Line:95, include/memcached/config_parser.h -> It was added just as a wrapper (and could be static inside the config_parser.cc). I wanted to flip the internals over to use std::string_view first and not have to worry about all callers as that would make the patch too big..
+
+This method is nuked in the next patch
+
+Line:18, utilities/config_parser.cc -> So your comment is _almost_ correct.. we return a _modified_ version of the part we remove from the field.. I could split this into 3 different tasks:
+
+1. pick out the next field
+2. remove it frokm the input field
+3. trim the next field by removing escape's and leading/trailing space.
+
+I can always rewrite that into 3 different methods and then create a new method which calls all 3 which is the one I'm going to need in all cases...
+
+This isn't a "general purpose" method so I'd prefer to just stick with the current one..
+
+Line:27, utilities/config_parser.cc -> it didn't like the std::string_view.. the common case is no leading (or trailing) whitespace and we're only parsing a configuration as part of bucket create and delete so we don't really need a huge optimization here..
+
+Line:89, utilities/config_parser.cc -> ooops...
+
+Line:104, utilities/config_parser.cc -> Not sure what the win is? looks like we only introduce an external dependency?
+
+Line:153, utilities/config_parser.cc -> caller provides the callback
+
+Line:156, utilities/config_parser.cc -> ditto
+
+Line:164, utilities/config_parser.cc -> It will be killed in the next version
+
+Line:154, utilities/config_parser_test.cc -> Done
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-08-11 13:45:04.000000000
+Message: 
+Patch Set 10: Code-Review-1
+
+(3 comments)
+Line:27, utilities/config_parser.cc -> :( Looks like a known issue: https://groups.google.com/g/boost-developers-archive/c/m3UzDU9zFfg
+
+Line:104, utilities/config_parser.cc -> we already depend on boost (and algorithm is header-only IIRC) - what we gain is simply not implementing our own version of common algorithms.
+
+Line:153, utilities/config_parser.cc -> Ah yes, I misread :(
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2022-08-11 15:03:54.000000000
+MISMATCHED INLINE COMMENT
+Line:104, utilities/config_parser.cc -> std::transform _is_ part of the C++ library so its not like we're implementing something new (and we have the same logic elsewhere in our codebase already)
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-08-11 15:12:25.000000000
+MISMATCHED INLINE COMMENT
+Line:104, utilities/config_parser.cc -> True, although boost::to_lower is slightly simpler...
+----------------------------------------------------------------------------------------------------------------------

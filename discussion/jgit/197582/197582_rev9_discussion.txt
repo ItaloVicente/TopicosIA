@@ -1,0 +1,126 @@
+======================================================================================================================
+DESCRIPTION:
+
+PackWriter: clarify mutating and non-mutating usages of #sortedByName
+
+The #sortedByName field is being used as both a cache of the value,
+which should not be mutated, and a copy of the value, which is taken
+from the field and then mutated.
+
+Separate the computation of this value and store an immutable copy in
+the field and create a mutable copy when needed.
+
+Change-Id: I134e1a416891c031cb18f7fee389ccf86b9feb6c
+Signed-off-by: Anna Papitto <annapapitto@google.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Anna Papitto
+Date: 2022-12-15 19:56:19.000000000
+Message: 
+Uploaded patch set 9.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2022-12-15 19:56:33.000000000
+Message: 
+Patch Set 9:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline.java11/2637/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2022-12-15 20:11:38.000000000
+Message: 
+Patch Set 9: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline.java11/2637/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Anna Papitto
+Date: 2022-12-16 18:34:02.000000000
+Message: 
+Patch Set 9:
+
+(1 comment)
+----------------------------------------------------------------------------------------------------------------------
+Author: AD Dili
+Date: 2022-12-16 18:38:29.000000000
+Message: 
+Patch Set 9: Code-Review+1
+
+(1 comment)
+Line:2378, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/pack/PackWriter.java -> I see that `sortedByName = null;` is not needed anymore, but for `byName = null;` I don't see an alternative (was it needed to begin with?)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Anna Papitto
+Date: 2022-12-16 19:40:02.000000000
+Message: 
+Patch Set 9:
+
+(2 comments)
+File Comment: /PATCHSET_LEVEL -> Thanks for the review, AD!
+Line:2378, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/pack/PackWriter.java -> It looks like that was added in 2015 to allow the Java garbage collector to garbage collect that field before the method finishes, if it runs during that interval. The Java garbage collector has seen many improvements in the last 7 years, as well as the machines that JGit might be running on. 
+
+I ran the IntelliJ Async Profiler (as in https://www.jetbrains.com/help/idea/cpu-and-memory-live-charts.html) on a GC command on the cgit repository (same one as in my long comment above).
+
+In one profile the baseline implementation, the first call to PackWriter#sortByName (via PackWriter#computeName) allocates 0.04% of the memory allocated during GC#writePack. The call to PackWriter#sortByName then grabs the cached field, so it is so fast that it doesn't even show up in the profiler's graph.
+
+In one profile of this proposed implementation, the first call to PackWriter#getSortedByName allocates 1.02% of the memory allocated during GC#writePack (via PackWriter#computeName). The second call directly to PackWriter#makeSortedByName (via PackWriter#prepareBitmapIndex) allocates 0.60% of the memory allocated during GC#writePack (because it allocates 1.91% of the memory allocated by PackWriter#prepareBitmapIndex).
+
+These memory allocations are all much smaller than other parts of GC#writePack, such as PackWriter#findObjectsToPack (37%), PackWriter#writeObjects (19%), and BitmapWalker#findObjects (18%); so I'm personally not concerned about the chance that the Java garbage collector collects them a bit later.
+
+Let me know if it's concerning to you, though!
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Anna Papitto
+Date: 2022-12-16 19:45:20.000000000
+Message: 
+Patch Set 9:
+
+(1 comment)
+Line:2378, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/pack/PackWriter.java -> Sorry, I just realized I was looking at CPU instead of memory for the proposed implementation's profile. Let me get back to you with the corrected percentages.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Anna Papitto
+Date: 2022-12-16 19:53:27.000000000
+Message: 
+Patch Set 9:
+
+(1 comment)
+Line:2378, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/pack/PackWriter.java -> I should have written the following message -- the numbers look even a bit better!
+
+~~~
+It looks like that was added in 2015 to allow the Java garbage collector to garbage collect that field before the method finishes, if it runs during that interval. The Java garbage collector has seen many improvements in the last 7 years, as well as the machines that JGit might be running on. 
+
+I ran the IntelliJ Async Profiler (as in https://www.jetbrains.com/help/idea/cpu-and-memory-live-charts.html) on a GC command on the cgit repository (same one as in my long comment above).
+
+In one profile the baseline implementation, the first call to PackWriter#sortByName (via PackWriter#computeName) allocates 0.04% of the memory allocated during GC#writePack. The call to PackWriter#sortByName then grabs the cached field, so it is so fast that it doesn't even show up in the profiler's graph.
+
+In one profile of this proposed implementation, the first call to PackWriter#getSortedByName allocates 0.04% of the memory allocated during GC#writePack (via PackWriter#computeName). The second call directly to PackWriter#makeSortedByName (via PackWriter#prepareBitmapIndex) allocates 0.04% of the memory allocated during GC#writePack (because it allocates 0.15% of the memory allocated by PackWriter#prepareBitmapIndex).
+
+These memory allocations are all much smaller than other parts of GC#writePack, such as PackWriter#findObjectsToPack (65%), BitmapWalker#findObjects (23%), and PackWriter#writeObjects (6%); so I'm personally not concerned about the chance that the Java garbage collector collects them a bit later.
+
+Let me know if it's concerning to you, though!
+~~~
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2022-12-19 23:12:24.000000000
+MISMATCHED INLINE COMMENT
+Line:2378, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/pack/PackWriter.java -> yes, there is a reason why sortedByName and byName are set null here
+----------------------------------------------------------------------------------------------------------------------
+Author: Ivan Frade
+Date: 2022-12-19 22:50:00.000000000
+MISMATCHED INLINE COMMENT
+Line:2378, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/pack/PackWriter.java -> Bitmap calculation is a very heavy process. I suspect that GC could kick in in the middle and then having this collection marked as "unreachable" helps to get rid of it at that moment. Otherwise the memory has a valid pointer and don't know if GC is clever enough to know that you won't use it.
+
+Maybe it is not that much memory, but we won't need it and doesn't harm telling that to GC. I think we better do not remove the nulls.
+
+Check the javadoc of this method (because you are making it keep some of the internal state).
+----------------------------------------------------------------------------------------------------------------------
+Author: Anna Papitto
+Date: 2022-12-20 00:06:47.000000000
+MISMATCHED INLINE COMMENT
+Line:2378, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/pack/PackWriter.java -> I see that setting `byName` to null here may allow it to be cleaned up by GC in the chance that GC runs before the method ends.
+----------------------------------------------------------------------------------------------------------------------

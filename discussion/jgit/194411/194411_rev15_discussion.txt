@@ -1,0 +1,144 @@
+======================================================================================================================
+DESCRIPTION:
+
+[bug]Merge crashes on rare combination of file names
+
+The NameConflictTreeWalk class is used in merge for iterating over
+entries in commits. The class uses a separate iterator for each
+commit's tree. In rare cases it can incorrectly report the same entry
+twice. As a result, duplicated entries are added to the merge result
+and later jgit throws an exception when it tries to process merge
+result.
+
+The problem appears only when there is a directory-file conflict for
+the last item in trees. Example from the bug:
+Commit 1:
+* subtree - file
+* subtree-0 - file
+Commit 2:
+* subtree - directory
+* subtree-0 - file
+Here the names are ordered like this:
+"subtree" file <"subtree-0" file < "subtree" directory.
+
+The NameConflictTreeWalk handles similar cases correctly if there are
+other files after subtree... in commits - this is processed in the
+AbstractTreeIterator.min function. Existing code has a special
+optimization for the case, when all trees are pointed to the same
+entry name - it skips additional checks. However, this optimization
+incorrectly skips checks if one of trees reached the end.
+
+The fix processes a situation when some trees reached the end, while
+others are still point to an entry.
+
+bug: 535919
+Change-Id: I62fde3dd89779fac282479c093400448b4ac5c86
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dmitrii Filippov
+Date: 2022-07-18 13:53:12.000000000
+Message: 
+Patch Set 15: Patch Set 14 was rebased
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2022-07-18 13:53:20.000000000
+Message: 
+Patch Set 15: -Verified
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline.java11/1527/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2022-07-18 14:06:33.000000000
+Message: 
+Patch Set 15: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline.java11/1527/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Ivan Frade
+Date: 2022-07-20 20:44:00.000000000
+Message: 
+Patch Set 15:
+
+(5 comments)
+Line:1008, org.eclipse.jgit.test/tst/org/eclipse/jgit/merge/MergerTest.java -> Then this test should be on that change (it hasn't been submitted yet).
+
+Please move this test to that change and this comment is not necessary.
+
+Line:223, org.eclipse.jgit.test/tst/org/eclipse/jgit/treewalk/NameConflictTreeWalkTest.java -> Optional: Please delete. 
+
+If somebody later modifies that test but not this one, this comment becomes misleading.
+
+Line:226, org.eclipse.jgit.test/tst/org/eclipse/jgit/treewalk/NameConflictTreeWalkTest.java -> Once the fix is commited, this comment is irrelevant. Please remove.
+
+Line:275, org.eclipse.jgit.test/tst/org/eclipse/jgit/treewalk/NameConflictTreeWalkTest.java -> Same here
+
+Line:132, org.eclipse.jgit/src/org/eclipse/jgit/treewalk/NameConflictTreeWalk.java -> Maybe I am wrong, as this is not my usual code neighborhood, but we could make this more readable iterating twice on the trees. 
+
+Also, allTreesNamesMatchFastMinRef should have a "maybe" in the name: even when true we are not sure if they point to the same entry, right?.
+
+I think we could write this more clearly like this:
+
+// Count finished trees
+int eofTrees;
+for (int i = 0; i < trees.length; i++) {
+   if (trees[i].eof()) {
+      eofTrees++;
+   }
+}
+
+// If all trees are EOF, we can say they all point to the same entry.
+// Return the last tree
+if (eofTrees == trees.length) {
+   return trees[trees.length-1];
+}
+
+// If no tree is EOF, *maybe* they still all point to the same entry 
+// (if some are EOF, we know they cannot all be pointing to the same entry).
+maybeAllTreesNamesMatchFastMinRef = eofTrees == 0;
+
+// Point minRef to the first non-finished tree
+AbstractTreeIterator minRef;
+for (int i = 0; i < trees.length; i++) {
+   if (!trees[i].eof()) {
+       minRef = trees[i];
+       break;
+   } 
+}
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dmitrii Filippov
+Date: 2022-07-21 08:26:29.000000000
+MISMATCHED INLINE COMMENT
+Line:1008, org.eclipse.jgit.test/tst/org/eclipse/jgit/merge/MergerTest.java -> This should be a link to the bug, fixed
+----------------------------------------------------------------------------------------------------------------------
+Author: Dmitrii Filippov
+Date: 2022-07-21 08:26:29.000000000
+MISMATCHED INLINE COMMENT
+Line:223, org.eclipse.jgit.test/tst/org/eclipse/jgit/treewalk/NameConflictTreeWalkTest.java -> Without this line the whole comment doesn't make sense; the comment is removed.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dmitrii Filippov
+Date: 2022-07-21 08:26:29.000000000
+MISMATCHED INLINE COMMENT
+Line:226, org.eclipse.jgit.test/tst/org/eclipse/jgit/treewalk/NameConflictTreeWalkTest.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Dmitrii Filippov
+Date: 2022-07-21 08:26:29.000000000
+MISMATCHED INLINE COMMENT
+Line:275, org.eclipse.jgit.test/tst/org/eclipse/jgit/treewalk/NameConflictTreeWalkTest.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Dmitrii Filippov
+Date: 2022-07-21 08:26:29.000000000
+MISMATCHED INLINE COMMENT
+Line:132, org.eclipse.jgit/src/org/eclipse/jgit/treewalk/NameConflictTreeWalk.java -> > Maybe I am wrong, as this is not my usual code neighborhood, but we could make this more readable iterating twice on the trees. 
+
+Thanks for the suggestion. I adopted it a little bit and decided to extract a loop into a separate method, so we can avoid double iterations.
+I think this should make code more readable (however, I don't want spend too much on refactoring 4 lines of code - it is very debatable what is better to read)
+
+> Also, allTreesNamesMatchFastMinRef should have a "maybe" in the name: even when true we are not sure if they point to the same entry, right?.
+
+No. If the value is true after returning from the method, than all trees point to the same entry.
+----------------------------------------------------------------------------------------------------------------------

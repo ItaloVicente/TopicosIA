@@ -1,0 +1,147 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-27231: Support multiple prefix tuples...
+
+...in client cert auth.
+
+This change adds the support to handle multiple {path, prefix, delimiters}
+tuples in ns_config. The following are the changes done:
+
+[1] In order to accept multiple prefixes the clientCertAuth POST has
+    been updated to accept a JSON payload. The following is an example
+    JSON:
+    {
+      “state”: “enable”,
+      “prefixes”: [
+        {
+          “path”: “san.dnsname”,
+          “prefix”: “www.”,
+          “delimiters”: “.,;”
+        }
+      ]
+    }
+
+[2] The clientCertAuth GET has been updated to return the settings in
+    JSON format.
+
+[3] The memcached_confg_mgr has been updated to construct the client
+    cert auth field appropriately in the memcached.json file.
+
+[4] There can be a maximum of 10 entries in the "prefixes" array.
+
+[5] In mixed mode, the user can continue use the older format.
+
+Change-Id: Ia03a182f5d379f1634eae78b1284e36b26e0bb27
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Ajit Yagaty
+Date: 2017-12-22 03:39:51.000000000
+Message: 
+Uploaded patch set 6.
+----------------------------------------------------------------------------------------------------------------------
+Author: Ajit Yagaty
+Date: 2017-12-22 03:40:00.000000000
+Message: 
+Patch Set 6: Verified+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2017-12-22 03:40:01.000000000
+Message: 
+Patch Set 6: Well-Formed+1
+
+Permission granted to commit: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/71763/artifact/restricted.html : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2017-12-22 05:46:20.000000000
+Message: 
+Patch Set 6:
+
+(9 comments)
+Line:329, src/memcached_config_mgr.erl -> You can also do it this way:
+misc:rewrite_tuples(fun ({prefixes, _} = T) -> {continue, T}; ({K, V}) -> {stop, {K, list_to_binary(V)}} end, Val).
+
+Or maybe it will be more convenient to store binaries.
+
+Line:60, src/menelaus_web.erl -> this is not used anymore
+
+Line:186, src/menelaus_web_cert.erl -> why don't you return {ok, {K, V}} or {error, Error}. That will improve readability.
+
+Line:207, src/menelaus_web_cert.erl -> [K || {K, V} <- Triple] -- ["path", "prefix", "delimiter"] =:= [].
+
+Line:234, src/menelaus_web_cert.erl -> lists:map will look prettier here, imho
+
+Line:246, src/menelaus_web_cert.erl -> this is just an unnecessary complexity. I would merge this with is_valid_triple and the code will be something like this: lists:sort([K || {K, V} <- Triple]) =:= lists:sort(["path", "prefix", "delimiter"]). And then lists:sort([{list_to_atom(K, V} || {K, V} <- Triple]). It is useful to always store the Triple sorted, so there will be no false positives when you compare Triples.
+
+Line:308, src/menelaus_web_cert.erl -> This is one Triple, not multiple Triples.
+
+Line:314, src/menelaus_web_cert.erl -> case Errors of [] -> .....
+
+Line:664, src/ns_audit.erl -> The audit descriptor for this one is missing. Did you actually check that anything printed to the audit log? I'm not sure how memcached deals with descriptors.
+
+Audit descriptor must be in etc/audit_descriptor.json
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ajit Yagaty
+Date: 2017-12-22 07:38:44.000000000
+Message: 
+Patch Set 6:
+
+(8 comments)
+Line:329, src/memcached_config_mgr.erl -> The problem with rewrite_tuples is that each entry in the "prefixes" list must be tuple to be successfully converted into JSON. For instance this is what is generated with rewrite_tuples:
+
+[{state,<<"enable">>},
+ {prefixes,[[{delimiter,<<".">>},
+             {path,<<"subject.cn">>},
+             {prefix,<<"www.">>}]]
+ }]
+
+But we want to be like this:
+[{state,<<"enable">>},
+ {prefixes,[{[{delimiter,<<".">>},
+              {path,<<"subject.cn">>},
+              {prefix,<<"www.">>}]}]
+ }]
+
+So currently with rewite_tuples the ejson_encode_pretty fails.
+
+NOTE: In both the cases the overall list needs to be wrapped with { & } before sending it to the JSON API.
+
+Line:60, src/menelaus_web.erl -> will remove.
+
+Line:186, src/menelaus_web_cert.erl -> Done
+
+Line:207, src/menelaus_web_cert.erl -> Done
+
+Line:246, src/menelaus_web_cert.erl -> Will do!
+
+Line:308, src/menelaus_web_cert.erl -> Done
+
+Line:314, src/menelaus_web_cert.erl -> Done
+
+Line:664, src/ns_audit.erl -> I didn't know about audit descriptor file. Clearly, the initial commit has missed it. I am not sure what all should be part of the descriptor for client_cert_auth. I just copied the descriptor used for the entry with ID 8195.
+
+{
+          "id" : 8236,
+          "name" : "client cert auth",
+          "description" : "Client certificate authentication settings changed",
+          "sync" : false,
+          "enabled" : true,
+          "mandatory_fields" : {
+              "timestamp" : "",
+              "identity" : {"source" : "", "user" : ""}
+          },
+          "optional_fields" : {
+              "real_userid" : {"source" : "", "user" : ""},
+              "remote" : {"ip" : "", "port" : 1},
+              "sessionid" : ""
+          }
+}
+
+Is the above ok?
+
+----------------------------------------------------------------------------------------------------------------------

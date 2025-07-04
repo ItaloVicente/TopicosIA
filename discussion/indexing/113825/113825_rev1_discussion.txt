@@ -1,0 +1,90 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-35328 Handle KV failover from indexer
+
+When a node is failed over, it can take arbitrarily long time for
+ns_server on the failed over node to realise the failover and act
+on it. When it is a KV node that is failed over, in some cases
+(E.g. indexer is ahead of replica and ns_server takes more than
+20 minutes to realise the failover), this can lead to a rollback to
+"0" for indexer
+
+The rollback situation can be avoided to some extent by making indexer
+to act pro-actively on KV node failover rather than waiting for ns_server
+of the failed over node to terminate the projector process/ intimate
+memcached about failover
+
+In this fix, indexer process monitors the clusterInfoCache periodically
+(every 5 sec) and keeps a track of hostnames of the KV failed over
+nodes. When indexer observes any failed over nodes, it sends a message
+to dataport server (via mutation manager, stream reader) to close the
+connection belonging to the failed over node
+
+The mapping between a KV node hostname and remote address of the
+connection is maintained in dataport server (Projector sends the
+hostname of the KV node along with a stream-begin message. See
+http://review.couchbase.org/#/c/110765/. The mapping between hostname
+and connection address is made during this time).
+
+The connection closure happens in the following cases:
+
+a. When indexer receives a StreamBegin message from a connection that
+is different from the connection dataport server has in its book-keeping
+for the host in StreamBegin messages - In this case, the connection in
+dataport server book-keeping will be closed and book-keeping will
+be updated to contain a new connection
+
+b. When indexer sends a CLOSE_SERVER_CONNS message - Indexer sends a
+CLOSE_SERVER_CONNS message when indexer sees KV nodes in state
+inactiveFailed (or) some KV nodes have moved out of cluster since the
+last time indexer has updated it's cluster info cache. In this case,
+indexer sends a message to dataport server containing the hostnames
+of failed-over/rebalanced-out KV nodes along with the timestamp of
+when cluster info cache is updated on indexer side.
+
+The dataport server on receiving this message compares the time when a
+connection is updated in it's book-keeping to the time when the cluster
+info cache is updated on indexer side. An attempt to close the connection
+happens only when the book-keeping time for the connection is less than
+cluster info fetch time. This check is to ensure that indexer does to close
+any connections that have been established as a part of restart attempt from
+indexer
+
+Change-Id: I6eca1ca65e966e49bf7fd95eb9aaeea9cc60e081
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: VarunVelamuri
+Date: 2019-08-26 09:53:16.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Jeelan Basha Poola
+Date: 2019-08-28 10:06:34.000000000
+Message: 
+Patch Set 1:
+
+(2 comments)
+Line:156, secondary/dataport/server.go -> Q: Does this need to be protected?
+
+Line:296, secondary/dataport/server.go -> Q: Assuming we tested mixed-mode/rolling-upgrade.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: VarunVelamuri
+Date: 2019-08-28 11:13:15.000000000
+Message: 
+Patch Set 1:
+
+(2 comments)
+Line:156, secondary/dataport/server.go -> Hi Jeelan, This map is updated only inside the genServer routine. Hence, it need not be protected
+
+Line:296, secondary/dataport/server.go -> Yes. I tested this on a 2-6.0.2 KV and 1-6.5.0 indexer. I did not see any issues
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Deepkaran Salooja
+Date: 2019-08-30 00:56:20.000000000
+Message: 
+Removed reviewer CI Bot.
+----------------------------------------------------------------------------------------------------------------------

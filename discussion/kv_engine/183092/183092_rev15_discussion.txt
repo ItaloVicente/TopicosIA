@@ -1,0 +1,111 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-54640: Add support for client connection information
+
+Allow the administrator to get information of client connections:
+
+    ./mcstat --user Administrator --password asdfasdf \
+             --json=pretty client_connection_details
+
+    {
+      "127.0.0.1": {
+        "last_used": "8904 us",
+        "current": 31,
+        "disconnect": 0,
+        "total": 39
+      },
+      "172.17.0.1": {
+        "last_used": "89 ms",
+        "current": 1,
+        "disconnect": 0,
+        "total": 1
+      }
+    }
+
+By this functionality is _disabled_ by default and the operator
+needs to explicitly enable it by inserting the following entry
+with a number != 0 in memcached.json:
+
+    "max_client_connection_details": <number>
+
+The number specifies the maximum number of uniqe IP addresses
+each front end thread should keep information about.
+
+Why do you need to worry about that? memory and efficiency.
+If we don't set a limit this map could in theory contain all
+possible IPv4 AND IPv6 addresses (not very likely, but you get
+the point). If we set it to 100 it wouldn't work well for people
+who try to use it with 101 app servers etc.
+
+Under the covers each front end thread creates a map looking
+like:
+
+   [ip] - [details]
+
+When a connection gets created on the server the front
+end thread starts by checking if it has any knowledge
+of the connecting IP. If it has that it'll just update
+the entry. If this is a new entry it'll check to see
+if the number of entries is below the max number it'll
+create a new entry. If the map is full it'll try to scan
+the map to see if there is an entry with 0 current connections
+and replace that entry with the new IP. If there is no
+entry to evict it'll simply _IGNORE_ the connection.
+
+As you probably spotted this have few "problems":
+
+1) When we evict an entry what we return is no longer really
+   accurate as thread 1 may evict an entry for an IP thread 2
+   still has an entry for. The "current" count reported for
+   that IP would be correct, but the total and forced disconnect
+   is incorrect. (This could have been solved by having a
+   shared data structure, but that introduce locking and
+   other problems)
+
+2) Scanning the table to find someone to evict is costly
+   (and even worse if there is nothing to evict).
+
+Change-Id: Icef362281b80fe23ab9015c85834d53d90398d18
+Reviewed-on: https://review.couchbase.org/c/kv_engine/+/183092
+Well-Formed: Restriction Checker
+Reviewed-by: Dave Rigby <daver@couchbase.com>
+Tested-by: Trond Norbye <trond.norbye@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Trond Norbye
+Date: 2022-11-28 13:13:10.000000000
+Message: 
+Change has been successfully cherry-picked as 23562d3a8d5e03e3128036a2f79d097c29423ba9
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-11-28 13:13:19.000000000
+Message: 
+Patch Set 15:
+
+Build Started https://cv.jenkins.couchbase.com/job/kv_engine-post-commit-TSan-neo/442/ (1/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-11-28 13:29:20.000000000
+Message: 
+Patch Set 15:
+
+Build Started https://cv.jenkins.couchbase.com/job/kv_engine-post-commit-neo/785/ (2/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-11-28 13:31:31.000000000
+Message: 
+Patch Set 15:
+
+Build Failed 
+
+https://cv.jenkins.couchbase.com/job/kv_engine-post-commit-TSan-neo/442/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( https://cv.jenkins.couchbase.com/job/kv_engine-post-commit-TSan-neo/442/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine-post-commit-neo/785/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( https://cv.jenkins.couchbase.com/job/kv_engine-post-commit-neo/785/ )
+----------------------------------------------------------------------------------------------------------------------

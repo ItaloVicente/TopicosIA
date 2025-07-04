@@ -1,0 +1,160 @@
+======================================================================================================================
+DESCRIPTION:
+
+Verify packfile existence when returned from WindowCursor
+
+WindowCursor was not validating the in-memory packfiles against
+their real existence on the filesystem before returning as possible
+candidates as available cached entity for serving getCachedPacksAndUpdate.
+
+Files can be silently pruned from the underlying filesystem without
+being noticed when the repository is GCed on a separate host over NFS.
+
+Failing to check for the real existence of the underlying packfile would
+result in failing the associated Git operation.
+
+Bug: 573770
+Signed-off-by: Luca Milanesio <luca.milanesio@gmail.com>
+Change-Id: I76fb554f7bc09d61afb33f01b3b7fa3ad3d20c64
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Luca Milanesio
+Date: 2021-05-28 01:58:27.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2021-05-28 01:58:33.000000000
+Message: 
+Patch Set 1:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/4918/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2021-05-28 02:39:17.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/4918/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Nasser Grainawi
+Date: 2021-05-28 02:49:58.000000000
+Message: 
+Patch Set 1: Code-Review-1
+
+(3 comments)
+Line:11, /COMMIT_MSG -> s/as/an/ ?
+
+Line:14, /COMMIT_MSG -> The silent pruning isn't the problem. If any "not this JGit process" action (i.e. non-NFS same-host repacking) removed a packfile, it also isn't noticed. However, the OS keeps the file from actually being removed because it knows there's an open file handle. When you're on NFS that open file handle doesn't protect the file from deletion.
+
+Line:102, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/WindowCursor.java -> This is racy. The pack could cease to exist moments after this call and before you reach the next line. Unless you're actually catching the stale file handle exceptions, you're not fixing the problem. Unfortunately, it looks like a lot of places use the packs returned by this call. Putting those all into try/catch blocks is going to be a pain.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2021-05-28 09:38:28.000000000
+MISMATCHED INLINE COMMENT
+Line:11, /COMMIT_MSG -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2021-05-28 09:38:28.000000000
+MISMATCHED INLINE COMMENT
+Line:14, /COMMIT_MSG -> > The silent pruning isn't the problem. If any "not this JGit process" action (i.e. non-NFS same-host repacking) removed a packfile, it also isn't noticed. 
+
+Yes, the pruning is a consequence of the repacking.
+
+> However, the OS keeps the file from actually being removed because it knows there's an open file handle. When you're on NFS that open file handle doesn't protect the file from deletion.
+
+Yes, I will add the "stale file handle" case in the description.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2021-05-28 23:48:14.000000000
+MISMATCHED INLINE COMMENT
+Line:102, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/WindowCursor.java -> Can we fix this on master and decide what to backport when we know how the proper fix looks like ?
+
+Checking for existence is inherently racy since the file could be deleted immediately after exists() returned true. I think the only way to avoid such race is to read the file where we need the data and handle the exception if that fails since the file is gone.
+----------------------------------------------------------------------------------------------------------------------
+Author: Nasser Grainawi
+Date: 2021-05-28 15:56:41.000000000
+MISMATCHED INLINE COMMENT
+Line:102, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/WindowCursor.java -> > There are two classes of problem:
+> 
+> 1. Severe: the cached packfile keeps on being returned constantly, even if the underlying file handle is stale or the file had disappeared. Retry doesn't help, it will keep on failing until you restart the JVM (we had that failing for 3 days on one repository, until a Gerrit JVM restart fixed the issue)
+> 
+> 2. Moderate: the racy situation you described can absolutely happen and the cached packfile could exist when this method is called but moments later disappear or becoming stale when is accessed. A second retry would succeed because the getCachedPacksAndUpdate() will discard the in-memory packfile afterwards.
+> 
+> This change addresses the case 1. and does not address the case 2. I will clarify that in the commit message.
+
+Thanks for clarifying that, it helps me understand the situation better.
+
+> 
+> I agree with you that solving 2. would provide the full solution and I agree again with you that is going to be painful and require some refactoring.
+
++1
+
+> 
+> I would go for 2. on master and NOT on stable-5.9, otherwise the merge upstream would become a real pain, as you rightly envisaged.
+
+While I agree the full solution is more work, I'm really not a fan of this partial fix. JGit has had enough problems with raciness that I really think we should avoid adding more.
+
+This is "solved" already in ObjectDirectory where the methods there accessing packs know how to consider a pack invalid and remove it from the cached list. It seems like the protocol v2 stuff broke that support by trying to go through a different code path. Can we address that directly with a fix there somehow?
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2021-05-28 09:38:28.000000000
+MISMATCHED INLINE COMMENT
+Line:102, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/WindowCursor.java -> There are two classes of problem:
+
+1. Severe: the cached packfile keeps on being returned constantly, even if the underlying file handle is stale or the file had disappeared. Retry doesn't help, it will keep on failing until you restart the JVM (we had that failing for 3 days on one repository, until a Gerrit JVM restart fixed the issue)
+
+2. Moderate: the racy situation you described can absolutely happen and the cached packfile could exist when this method is called but moments later disappear or becoming stale when is accessed. A second retry would succeed because the getCachedPacksAndUpdate() will discard the in-memory packfile afterwards.
+
+This change addresses the case 1. and does not address the case 2. I will clarify that in the commit message.
+
+I agree with you that solving 2. would provide the full solution and I agree again with you that is going to be painful and require some refactoring.
+
+I would go for 2. on master and NOT on stable-5.9, otherwise the merge upstream would become a real pain, as you rightly envisaged.
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2021-05-29 00:00:58.000000000
+MISMATCHED INLINE COMMENT
+Line:102, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/WindowCursor.java -> > Can we fix this on master and decide what to backport when we know how the proper fix looks like ?
+
+Sure, makes sense.
+
+> Checking for existence is inherently racy since the file could be deleted immediately after exists() returned true.
+
+Yep.
+
+> I think the only way to avoid such race is to read the file where we need the data and handle the exception if that fails since the file is gone.
+
+Yes, we need to backtrack and restart the process transparently when the file is gone, also removing the stale reference to the non-existent file in the in-memory cache.
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2021-05-28 19:17:20.000000000
+MISMATCHED INLINE COMMENT
+Line:102, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/WindowCursor.java -> > > I agree with you that solving 2. would provide the full solution and I agree again with you that is going to be painful and require some refactoring.
+> 
+> +1
+> 
+> > 
+> > I would go for 2. on master and NOT on stable-5.9, otherwise the merge upstream would become a real pain, as you rightly envisaged.
+> 
+> While I agree the full solution is more work, I'm really not a fan of this partial fix.
+
+Neither do I, that's why I proposed the 2. for master, whilst 1. can stay in a stable branch only.
+
+> JGit has had enough problems with raciness that I really think we should avoid adding more.
+
+Couldn't agree more :-)
+
+> This is "solved" already in ObjectDirectory where the methods there accessing packs know how to consider a pack invalid and remove it from the cached list. It seems like the protocol v2 stuff broke that support by trying to go through a different code path. Can we address that directly with a fix there somehow?
+
+Yes, and that's why I was also surprised to see this problem happening. The reason why it happens here is because the pack is sent 'as-is' without being looked at in their individual objects. A fix in ObjectDirectory won't work for that reason.
+
+A refactoring would solve the issue, yes. Do we want a refactoring on stable-5.9 though?
+
+@Matthias what is your view on this?
+----------------------------------------------------------------------------------------------------------------------

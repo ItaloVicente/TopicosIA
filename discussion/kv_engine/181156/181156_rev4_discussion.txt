@@ -1,0 +1,335 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-52682: Derive initial MFU of new values from MFU histograms
+
+Historically, all new items start with a frequency counter of 4. As the
+MFU of existing items may have increased through accesses (e.g.,
+everything could be >100), new items would be more likely to be
+evicted straight away, before potential accesses are able to increase
+the frequency counter.
+
+To counter this, "young" items (age determined from the HLC cas) were
+made ineligible (config params item_eviction_age_percentage,
+item_eviction_freq_counter_age_threshold).
+
+Each vbucket currently tracks a histogram of the frequency counter of
+all stored values which are eligible for eviction.
+
+This patch uses these histograms select an appropriate starting
+frequency counter, prepping new items to be at some configured
+percentile of MFU values.
+
+This is a step towards frequency counters being comparable across
+vbuckets.
+
+This patch does _not_ address the frequency counter of items bgfetched
+from disk; currently they will have their freq counter set to whatever
+value was present when the item was _persisted_, even if it had been
+increased significantly before the item was eventually evicted.
+
+A consequence of this is that read-heavy workloads may bgfetch items
+and give them very outdated freq counters, leading to sub-optimal
+eviction. This will be addressed in a following patch, by setting them
+to the initial counter value discussed above.
+
+Change-Id: Ifa107501d9e7b7e42d40f9d552781c7e6f626252
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: James H
+Date: 2022-10-12 11:04:06.000000000
+Message: 
+Uploaded patch set 4: Patch Set 3 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-10-12 13:30:25.000000000
+Message: 
+Patch Set 4: Verified-1 Code-Review-1
+
+Build Failed 
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/21085/ : FAILURE
+
+<p>clang-tidy suggested the following changes:
+<pre>
+
+cat &lt;&lt;&quot;EOF&quot; | patch -p1
+diff --git a/engines/ep/src/hash_table.cc b/engines/ep/src/hash_table.cc
+index ea95e0106..eec0b40da 100644
+--- a/engines/ep/src/hash_table.cc
++++ b/engines/ep/src/hash_table.cc
+@@ -21,6 +21,7 @@
+ #include &lt;nlohmann/json.hpp&gt;
+ #include &lt;phosphor/phosphor.h&gt;
+ #include &lt;cstring&gt;
++#include &lt;utility&gt;
+ 
+ static std::array&lt;const ssize_t, 31&gt; prime_size_table{
+         {3,        7,         13,        23,        47,        97,
+@@ -145,7 +146,7 @@ HashTable::HashTable(EPStats&amp; st,
+       numResizes(0),
+       maxDeletedRevSeqno(0),
+       probabilisticCounter(freqCounterIncFactor),
+-      getInitialMFU(getInitialMFU) {
++      getInitialMFU(std::move(getInitialMFU)) {
+     values.resize(size);
+     activeState = true;
+ }
+EOF
+
+</pre> ( https://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/21085/ )
+
+clang-tidy found the following problems:
+
+<pre>
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy-master/kv_engine/engines/ep/src/hash_table.cc:135:22: warning: pass by value and use std::move [modernize-pass-by-value]
+                     std::function<uint8_t()> getInitialMFU,
+                     ^
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy-master/kv_engine/engines/ep/src/hash_table.cc:24:1: note: FIX-IT applied suggested code changes
+^
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy-master/kv_engine/engines/ep/src/hash_table.cc:148:21: note: FIX-IT applied suggested code changes
+      getInitialMFU(getInitialMFU) {
+                    ^
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy-master/kv_engine/engines/ep/src/hash_table.cc:148:34: note: FIX-IT applied suggested code changes
+      getInitialMFU(getInitialMFU) {
+                                 ^
+clang-tidy suggested the following changes:
+
+cat &lt;&lt;&quot;EOF&quot; | patch -p1
+diff --git a/engines/ep/src/hash_table.cc b/engines/ep/src/hash_table.cc
+index ea95e0106..eec0b40da 100644
+--- a/engines/ep/src/hash_table.cc
++++ b/engines/ep/src/hash_table.cc
+@@ -21,6 +21,7 @@
+ #include &lt;nlohmann/json.hpp&gt;
+ #include &lt;phosphor/phosphor.h&gt;
+ #include &lt;cstring&gt;
++#include &lt;utility&gt;
+ 
+ static std::array&lt;const ssize_t, 31&gt; prime_size_table{
+         {3,        7,         13,        23,        47,        97,
+@@ -145,7 +146,7 @@ HashTable::HashTable(EPStats&amp; st,
+       numResizes(0),
+       maxDeletedRevSeqno(0),
+       probabilisticCounter(freqCounterIncFactor),
+-      getInitialMFU(getInitialMFU) {
++      getInitialMFU(std::move(getInitialMFU)) {
+     values.resize(size);
+     activeState = true;
+ }
+EOF
+
+</pre> ( https://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/21085/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine-windows-master/50263/ : FAILURE
+
+Failure of GoogleTest "EphemeralVBucketTest.DoublePageOut":
+
+<pre>
+[ RUN      ] EphemeralVBucketTest.DoublePageOut
+unknown file: error: SEH exception with code 0xc0000005 thrown in the test body.
+[  FAILED  ] EphemeralVBucketTest.DoublePageOut (3 ms)
+EphemeralVBucketTest.DoublePageOut
+</pre>
+ ( https://cv.jenkins.couchbase.com/job/kv_engine-windows-master/50263/ )
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [144/160]: test_MB-19687_fixed...Unexpected stat: ep_initial_mfu_percentile from stat group 
+Unexpected stat: ep_initial_mfu_update_interval from stat group 
+Missing stat:  ep_item_eviction_strategy from stat group config
+..\kv_engine\engines\ep\tests\ep_testsuite.cc:7816 Test failed: `stats error" (missing stats)
+(30 ms) FAIL
+</pre>
+ ( https://cv.jenkins.couchbase.com/job/kv_engine-windows-master/50263/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/23103/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [144/160]: test_MB-19687_fixed...Unexpected stat: ep_initial_mfu_percentile from stat group 
+[2022-10-12T12:16:41.147Z] Unexpected stat: ep_initial_mfu_update_interval from stat group 
+[2022-10-12T12:16:41.147Z] Missing stat:  ep_item_eviction_strategy from stat group config
+[2022-10-12T12:16:41.147Z] ../kv_engine/engines/ep/tests/ep_testsuite.cc:7816 Test failed: `stats error" (missing stats)
+[2022-10-12T12:16:41.147Z] (41 ms) FAIL
+</pre>
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/23103/ )
+
+Failure of GoogleTest "EphemeralOrPersistent/BucketQuotaChangeTest.QuotaChangeDownMemoryUsageHigh/ephemeral_auto_delete":
+
+<pre>
+[ RUN      ] EphemeralOrPersistent/BucketQuotaChangeTest.QuotaChangeDownMemoryUsageHigh/ephemeral_auto_delete
+[2022-10-12T12:16:15.169Z] ../kv_engine/engines/ep/tests/module_tests/bucket_quota_change_test.cc:413: Failure
+[2022-10-12T12:16:15.169Z] Expected equality of these values:
+[2022-10-12T12:16:15.169Z]   1
+[2022-10-12T12:16:15.169Z]   store->getVBucket(vbid)->getNumInMemoryDeletes()
+[2022-10-12T12:16:15.169Z]     Which is: 2
+[2022-10-12T12:16:15.169Z] Google Test trace:
+[2022-10-12T12:16:15.169Z] ../kv_engine/engines/ep/tests/module_tests/bucket_quota_change_test.cc:367: 
+[2022-10-12T12:16:15.169Z] [  FAILED  ] EphemeralOrPersistent/BucketQuotaChangeTest.QuotaChangeDownMemoryUsageHigh/ephemeral_auto_delete, where GetParam() = "bucket_type=ephemeral:ephemeral_full_policy=auto_delete" (15 ms)
+EphemeralOrPersistent/BucketQuotaChangeTest.QuotaChangeDownMemoryUsageHigh/ephemeral_auto_delete
+</pre>
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/23103/ )
+
+One of more core files found at the end of the build. Data for post-mortem saved to archived_core_dumps.tar.bz2 under "Build Artifacts". ( https://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/23103/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/10912/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [27/91]: test dcp consumer hotness data...../kv_engine/engines/ep/tests/ep_testsuite_dcp.cc:2479 Test failed: `" (Expected `128" to be less than or equal to `5" - Failed to set the hotness data to the correct value)
+[2022-10-12T11:19:56.177Z] (21 ms) FAIL
+</pre>
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/10912/ )
+
+Failure of GoogleTest "EphemeralOrPersistent/BucketQuotaChangeTest.QuotaChangeDownMemoryUsageHigh/ephemeral_auto_delete":
+
+<pre>
+[ RUN      ] EphemeralOrPersistent/BucketQuotaChangeTest.QuotaChangeDownMemoryUsageHigh/ephemeral_auto_delete
+[2022-10-12T11:22:40.537Z] ../kv_engine/engines/ep/tests/module_tests/bucket_quota_change_test.cc:413: Failure
+[2022-10-12T11:22:40.537Z] Expected equality of these values:
+[2022-10-12T11:22:40.537Z]   1
+[2022-10-12T11:22:40.537Z]   store->getVBucket(vbid)->getNumInMemoryDeletes()
+[2022-10-12T11:22:40.537Z]     Which is: 2
+[2022-10-12T11:22:40.537Z] Google Test trace:
+[2022-10-12T11:22:40.537Z] ../kv_engine/engines/ep/tests/module_tests/bucket_quota_change_test.cc:367: 
+[2022-10-12T11:22:40.537Z] [  FAILED  ] EphemeralOrPersistent/BucketQuotaChangeTest.QuotaChangeDownMemoryUsageHigh/ephemeral_auto_delete, where GetParam() = "bucket_type=ephemeral:ephemeral_full_policy=auto_delete" (3 ms)
+EphemeralOrPersistent/BucketQuotaChangeTest.QuotaChangeDownMemoryUsageHigh/ephemeral_auto_delete
+</pre>
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/10912/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/22512/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [35/160]: test access scanner...../kv_engine/engines/ep/tests/ep_testsuite.cc:3493 Test failed: `access log file (./ep_testsuite.value_eviction.comp_passive.db/access.log.0) should exist (got errno:2" (cb::io::isFile(name))
+[2022-10-12T11:39:12.820Z] (1068 ms) FAIL
+</pre>
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/22512/ )
+
+Failure of GoogleTest "EphemeralOrPersistent/EPEngineParamTest.DynamicConfigValuesModifiable/persistent_magma":
+
+<pre>
+[ RUN      ] EphemeralOrPersistent/EPEngineParamTest.DynamicConfigValuesModifiable/persistent_magma
+[2022-10-12T11:38:38.075Z] ../kv_engine/engines/ep/tests/module_tests/evp_engine_test.cc:324: Failure
+[2022-10-12T11:38:38.075Z] Failed
+[2022-10-12T11:38:38.075Z] Dynamic config key "initial_mfu_percentile" cannot be set via any of the set...Param methods.
+[2022-10-12T11:38:38.075Z] ../kv_engine/engines/ep/tests/module_tests/evp_engine_test.cc:324: Failure
+[2022-10-12T11:38:38.075Z] Failed
+[2022-10-12T11:38:38.075Z] Dynamic config key "initial_mfu_update_interval" cannot be set via any of the set...Param methods.
+[2022-10-12T11:38:38.075Z] ../kv_engine/engines/ep/tests/module_tests/evp_engine_test.cc:324: Failure
+[2022-10-12T11:38:38.075Z] Failed
+[2022-10-12T11:38:38.075Z] Dynamic config key "item_eviction_strategy" cannot be set via any of the set...Param methods.
+[2022-10-12T11:38:38.075Z] [  FAILED  ] EphemeralOrPersistent/EPEngineParamTest.DynamicConfigValuesModifiable/persistent_magma, where GetParam() = "persistent_magma" (29 ms)
+EphemeralOrPersistent/EPEngineParamTest.DynamicConfigValuesModifiable/persistent_magma
+</pre>
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/22512/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/23496/ : FAILURE
+
+Failure of GoogleTest "EphemeralOrPersistent/BucketQuotaChangeTest.QuotaChangeDownMemoryUsageHigh/ephemeral_auto_delete":
+
+<pre>
+[ RUN      ] EphemeralOrPersistent/BucketQuotaChangeTest.QuotaChangeDownMemoryUsageHigh/ephemeral_auto_delete
+[2022-10-12T12:12:18.532Z] ../kv_engine/engines/ep/tests/module_tests/bucket_quota_change_test.cc:413: Failure
+[2022-10-12T12:12:18.532Z] Expected equality of these values:
+[2022-10-12T12:12:18.532Z]   1
+[2022-10-12T12:12:18.532Z]   store->getVBucket(vbid)->getNumInMemoryDeletes()
+[2022-10-12T12:12:18.532Z]     Which is: 2
+[2022-10-12T12:12:18.532Z] Google Test trace:
+[2022-10-12T12:12:18.532Z] ../kv_engine/engines/ep/tests/module_tests/bucket_quota_change_test.cc:367: 
+[2022-10-12T12:12:18.532Z] [  FAILED  ] EphemeralOrPersistent/BucketQuotaChangeTest.QuotaChangeDownMemoryUsageHigh/ephemeral_auto_delete, where GetParam() = "bucket_type=ephemeral:ephemeral_full_policy=auto_delete" (8 ms)
+EphemeralOrPersistent/BucketQuotaChangeTest.QuotaChangeDownMemoryUsageHigh/ephemeral_auto_delete
+</pre>
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/23496/ )
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [144/160]: test_MB-19687_fixed...Unexpected stat: ep_initial_mfu_percentile from stat group 
+[2022-10-12T12:13:18.457Z] Unexpected stat: ep_initial_mfu_update_interval from stat group 
+[2022-10-12T12:13:18.457Z] Missing stat:  ep_item_eviction_strategy from stat group config
+[2022-10-12T12:13:18.457Z] ../kv_engine/engines/ep/tests/ep_testsuite.cc:7816 Test failed: `stats error" (missing stats)
+[2022-10-12T12:13:18.457Z] (20 ms) FAIL
+</pre>
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/23496/ )
+
+One of more core files found at the end of the build. Data for post-mortem saved to archived_core_dumps.tar.bz2 under "Build Artifacts". ( https://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/23496/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/24335/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [144/160]: test_MB-19687_fixed...Unexpected stat: ep_initial_mfu_percentile from stat group 
+[2022-10-12T12:36:48.370Z] Unexpected stat: ep_initial_mfu_update_interval from stat group 
+[2022-10-12T12:36:48.370Z] Unexpected stat: ep_item_eviction_strategy from stat group 
+[2022-10-12T12:36:48.370Z] ../kv_engine/engines/ep/tests/ep_testsuite.cc:7816 Test failed: `stats error" (missing stats)
+[2022-10-12T12:36:48.370Z] (814 ms) FAIL
+</pre>
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/24335/ )
+
+Failure of GoogleTest "EphemeralOrPersistent/EPEngineParamTest.DynamicConfigValuesModifiable/persistent_magma":
+
+<pre>
+[ RUN      ] EphemeralOrPersistent/EPEngineParamTest.DynamicConfigValuesModifiable/persistent_magma
+[2022-10-12T12:49:24.264Z] ../kv_engine/engines/ep/tests/module_tests/evp_engine_test.cc:324: Failure
+[2022-10-12T12:49:24.264Z] Failed
+[2022-10-12T12:49:24.264Z] Dynamic config key "initial_mfu_percentile" cannot be set via any of the set...Param methods.
+[2022-10-12T12:49:24.264Z] ../kv_engine/engines/ep/tests/module_tests/evp_engine_test.cc:324: Failure
+[2022-10-12T12:49:24.264Z] Failed
+[2022-10-12T12:49:24.264Z] Dynamic config key "initial_mfu_update_interval" cannot be set via any of the set...Param methods.
+[2022-10-12T12:49:24.264Z] ../kv_engine/engines/ep/tests/module_tests/evp_engine_test.cc:324: Failure
+[2022-10-12T12:49:24.264Z] Failed
+[2022-10-12T12:49:24.264Z] Dynamic config key "item_eviction_strategy" cannot be set via any of the set...Param methods.
+[2022-10-12T12:49:24.264Z] [  FAILED  ] EphemeralOrPersistent/EPEngineParamTest.DynamicConfigValuesModifiable/persistent_magma, where GetParam() = "persistent_magma" (261 ms)
+EphemeralOrPersistent/EPEngineParamTest.DynamicConfigValuesModifiable/persistent_magma
+</pre>
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/24335/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/31514/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [144/160]: test_MB-19687_fixed...Unexpected stat: ep_initial_mfu_percentile from stat group 
+[2022-10-12T12:42:15.342Z] Unexpected stat: ep_initial_mfu_update_interval from stat group 
+[2022-10-12T12:42:15.342Z] Unexpected stat: ep_item_eviction_strategy from stat group 
+[2022-10-12T12:42:15.342Z] ../kv_engine/engines/ep/tests/ep_testsuite.cc:7816 Test failed: `stats error" (missing stats)
+[2022-10-12T12:42:15.342Z] (241 ms) FAIL
+</pre>
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/31514/ )
+
+Failure of GoogleTest "EphemeralOrPersistent/BucketQuotaChangeTest.QuotaChangeDownMemoryUsageHigh/ephemeral_auto_delete":
+
+<pre>
+[ RUN      ] EphemeralOrPersistent/BucketQuotaChangeTest.QuotaChangeDownMemoryUsageHigh/ephemeral_auto_delete
+[2022-10-12T12:46:22.282Z] ../kv_engine/engines/ep/tests/module_tests/bucket_quota_change_test.cc:413: Failure
+[2022-10-12T12:46:22.282Z] Expected equality of these values:
+[2022-10-12T12:46:22.282Z]   1
+[2022-10-12T12:46:22.282Z]   store->getVBucket(vbid)->getNumInMemoryDeletes()
+[2022-10-12T12:46:22.282Z]     Which is: 2
+[2022-10-12T12:46:22.282Z] Google Test trace:
+[2022-10-12T12:46:22.282Z] ../kv_engine/engines/ep/tests/module_tests/bucket_quota_change_test.cc:367: 
+[2022-10-12T12:46:22.282Z] [  FAILED  ] EphemeralOrPersistent/BucketQuotaChangeTest.QuotaChangeDownMemoryUsageHigh/ephemeral_auto_delete, where GetParam() = "bucket_type=ephemeral:ephemeral_full_policy=auto_delete" (29 ms)
+EphemeralOrPersistent/BucketQuotaChangeTest.QuotaChangeDownMemoryUsageHigh/ephemeral_auto_delete
+</pre>
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/31514/ )
+
+One of more core files found at the end of the build. Data for post-mortem saved to archived_core_dumps.tar.bz2 under "Build Artifacts". ( https://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/31514/ )
+
+Test exceeded the timeout:
+[2022-10-12T12:42:15.610Z] /usr/bin/timeout: the monitored command dumped core ( https://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/31514/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/20329/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/42175/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/10815/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

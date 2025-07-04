@@ -1,0 +1,118 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-29262: When scanning the seqno index, use the persisted manifest
+
+When a scan is performed we check if items belong to a deleted
+collection by calling isLogicallyDeleted, this previously always
+used the in-memory manifest to determine the state of the key. This
+however is dangerous, particularly when the result of a scan is used
+to feed DCP (e.g. backfill_disk).
+
+The in-memory manifest can easily lose updates if a node crashes
+allowing a situation when we can backfill a client and drop keys
+before a crash, but then after the node restarts a client can stream
+and now receive keys which would of been dropped before the crash.
+
+A simple example is a client asking for seqno ranges.
+
+First they ask for all collection keys from seqno 0-10, assume seqno
+3 and 4 are for the 'beer' collection which has been deleted from
+the memory manifest, but not yet flushed to disk.
+
+* Backfill will send 0 to 9 but drop 3 and 4 (3 is 'create-beer')
+* Scan completes and client has received all keys.
+* memcached crashes before the beer delete fact has been persisted.
+* memcached restarts
+* Client reconnects and now asks for 10-19, assume 15 and 16 are
+  'beer' mutations
+* Backfill will now send every key, none are logically deleted
+* Client gets beer keys and has never seen a create-beer or any prior
+  'beer' key, an incorrect view of the data.
+
+If the scan drops keys based on the persisted manifest, then this
+situation will not occur.
+
+Change-Id: I742e5cccf861baa895f4e72c1ed2b94f2847f4dd
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jim Walker
+Date: 2018-07-30 13:18:03.000000000
+Message: 
+Patch Set 5: Patch Set 4 was rebased
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-07-30 14:04:50.000000000
+Message: 
+Patch Set 5: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/10674/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/9508/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/2550/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/10813/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/388/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/9662/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-07-31 09:44:41.000000000
+Message: 
+Patch Set 5: Code-Review-1
+
+(4 comments)
+
+Approach looks good. Mostly some comments on code layout; to try to minimise #include spiderwebs...
+Line:21, engines/ep/src/callbacks.h -> If we inline the constructor of CacheLookup can we avoid pulling in this header (and just forward-declare CachingReadHandle)?
+
+Unless we really need CacheLookup inlined (which at first glance I don't think we do); I think it's preferred to minimise the number of headers included.
+
+Line:3, engines/ep/src/collections/scan_context.h -> Nit: 2018
+
+Line:35, engines/ep/src/collections/scan_context.h -> I believe this is no longer true in the current design - I assume the main motivation now is having a consistent manifest set?
+
+Line:23, engines/ep/src/kvstore.h -> Similary here; given it looks like we only refer to ScanContext in the header as either a reference or as a template to unique_ptr we should be able to avoid including this here.
+
+*EDIT*: Ah yes, I see it's used in ScanContext below :( Might be worth moving that class to it's own header file; to avoid having to pull in collections/scan_context.h into kvstore.h.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2018-08-08 15:33:03.000000000
+Message: 
+Patch Set 5:
+
+(2 comments)
+
+updating soon
+Line:3, engines/ep/src/collections/scan_context.h -> I think i actually wrote the first 'scan_context' in 2017 :eek: just been sitting in local branches for a while
+
+Line:35, engines/ep/src/collections/scan_context.h -> Done
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2018-08-12 19:36:02.000000000
+Message: 
+Patch Set 5:
+
+(2 comments)
+Line:21, engines/ep/src/callbacks.h -> Being an inner-class of Manifest, you can't forward declare CachingReadHandle
+
+Line:23, engines/ep/src/kvstore.h -> There's more to it than just ScanContext, compaction_ctx may have a unique_ptr, but the compiler defined ~compaction_ctx wants to destroy the Collections::VB::ScanContext and as such needs the definition. A number of objects need tweaking including an empty ~compaction_ctx defined in the .cc
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-08-13 10:03:35.000000000
+Message: 
+Patch Set 5:
+
+(1 comment)
+Line:21, engines/ep/src/callbacks.h -> Fair enough :)
+
+----------------------------------------------------------------------------------------------------------------------

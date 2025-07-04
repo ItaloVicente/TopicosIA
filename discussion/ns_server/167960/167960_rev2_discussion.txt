@@ -1,0 +1,304 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-49191 Check correct stat for bucket warmup complete
+
+This changes the stat that is queried from memcached in order to
+determine if the bucket had completed warmup and activities such as
+setting up DCP connections can occur.
+
+Stalling warmup for a node for delta recovery can be done via:
+
+ns_config:set({node, 'n_3@127.0.0.1', stall_warmup}, true).
+
+Change-Id: I2942f4595204c9b2281c282f795d31ddab6d0183
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Steve Watanabe
+Date: 2021-12-20 22:55:56.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-12-20 22:56:04.000000000
+Message: 
+Patch Set 2:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-test/28800/
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-12-20 22:57:21.000000000
+Message: 
+Patch Set 2:
+
+make simple-test
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-12-20 22:57:29.000000000
+Message: 
+Patch Set 2:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-simple-test/3235/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-12-20 23:02:32.000000000
+Message: 
+Patch Set 2: Well-Formed+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/ns-server-test/28800/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-12-21 00:07:13.000000000
+Message: 
+Patch Set 2: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/ns-server-simple-test/3235/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Artamonau
+Date: 2021-12-21 19:54:31.000000000
+Message: 
+Patch Set 2:
+
+1. How's stall_bucket related related to the patch?
+2. Why is a new janitor_agent call needed?
+3. How's backward compatibility handled?
+4. I don't see any new stats being used actually.
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-12-21 20:17:44.000000000
+Message: 
+Patch Set 2:
+
+> Patch Set 2:
+> 
+> 1. How's stall_bucket related related to the patch?
+
+It's used for testing. It can be removed before the final merge though it might be useful to leave in. I'm changing it to a list of nodes instead of per-node.
+
+> 2. Why is a new janitor_agent call needed?
+
+There's a current check for vbuckets and this new one checks for the entire bucket being warmed (from the kv perspective). I didn't yet look to see if the clients of the vbucket calls can use the entire bucket check...at some point.
+
+> 3. How's backward compatibility handled?
+
+Thanks, I hadn't given that thought yet. This new janitor_agent call is only on Neo onwards so we might have to keep the vbucket check too (even with it checking the wrong stat). Any suggestions are welcome.
+
+> 4. I don't see any new stats being used actually.
+
+It's checking an existing stat ep_warmup_thread to see if it is "complete". This is different from what the vbucket check looks at.
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Artamonau
+Date: 2021-12-21 20:29:21.000000000
+Message: 
+Patch Set 2:
+
+> It's used for testing. It can be removed before the final merge though it might be useful to leave in. I'm changing it to a list of nodes instead of per-node.
+
+There's already a way to simulate slow warmup in ns_memcached.
+
+> It's checking an existing stat ep_warmup_thread to see if it is "complete". This is different from what the vbucket check looks at.
+
+I don't see how that's the case. Both wait for ep_warmup_thread to be "complete".
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-12-21 21:07:01.000000000
+Message: 
+Patch Set 2:
+
+> 
+> > It's checking an existing stat ep_warmup_thread to see if it is "complete". This is different from what the vbucket check looks at.
+> 
+> I don't see how that's the case. Both wait for ep_warmup_thread to be "complete".
+
+I'm confused. The current code does the following and my belief was that the wait_for_bucket call was returning before kv warm up was complete and as a result the ns_janitor:cleanup_apply_config was prematurely setting up dcp connections. Would you point to where wait_for_bucket checks the ep_warmup_thread to be "complete".
+
+    ok = check_test_condition(apply_delta_recovery),
+    lists:foreach(
+      fun ({Bucket, BucketConfig}) ->
+              ok = wait_for_bucket(Bucket, DeltaNodes),
+              ok = ns_janitor:cleanup_apply_config(
+                     Bucket, DeltaNodes, BucketConfig,
+                     [{apply_config_timeout, ?REBALANCER_APPLY_CONFIG_TIMEOUT}])
+      end, TransitionalBuckets),
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Artamonau
+Date: 2021-12-21 21:17:02.000000000
+Message: 
+Patch Set 2:
+
+> Patch Set 2:
+> 
+> > 
+> > > It's checking an existing stat ep_warmup_thread to see if it is "complete". This is different from what the vbucket check looks at.
+> > 
+> > I don't see how that's the case. Both wait for ep_warmup_thread to be "complete".
+> 
+> I'm confused. The current code does the following and my belief was that the wait_for_bucket call was returning before kv warm up was complete and as a result the ns_janitor:cleanup_apply_config was prematurely setting up dcp connections. Would you point to where wait_for_bucket checks the ep_warmup_thread to be "complete".
+> 
+>     ok = check_test_condition(apply_delta_recovery),
+>     lists:foreach(
+>       fun ({Bucket, BucketConfig}) ->
+>               ok = wait_for_bucket(Bucket, DeltaNodes),
+>               ok = ns_janitor:cleanup_apply_config(
+>                      Bucket, DeltaNodes, BucketConfig,
+>                      [{apply_config_timeout, ?REBALANCER_APPLY_CONFIG_TIMEOUT}])
+>       end, TransitionalBuckets),
+
+https://github.com/couchbase/ns_server/blob/master/src/ns_memcached.erl#L1609-L1615
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-12-21 21:52:06.000000000
+Message: 
+Patch Set 2:
+
+> Patch Set 2:
+> 
+> > Patch Set 2:
+> > 
+> > > 
+> > > > It's checking an existing stat ep_warmup_thread to see if it is "complete". This is different from what the vbucket check looks at.
+> > > 
+> > > I don't see how that's the case. Both wait for ep_warmup_thread to be "complete".
+> > 
+> > I'm confused. The current code does the following and my belief was that the wait_for_bucket call was returning before kv warm up was complete and as a result the ns_janitor:cleanup_apply_config was prematurely setting up dcp connections. Would you point to where wait_for_bucket checks the ep_warmup_thread to be "complete".
+> > 
+> >     ok = check_test_condition(apply_delta_recovery),
+> >     lists:foreach(
+> >       fun ({Bucket, BucketConfig}) ->
+> >               ok = wait_for_bucket(Bucket, DeltaNodes),
+> >               ok = ns_janitor:cleanup_apply_config(
+> >                      Bucket, DeltaNodes, BucketConfig,
+> >                      [{apply_config_timeout, ?REBALANCER_APPLY_CONFIG_TIMEOUT}])
+> >       end, TransitionalBuckets),
+> 
+> https://github.com/couchbase/ns_server/blob/master/src/ns_memcached.erl#L1609-L1615
+
+I remain confused. In MB-47387 there's the following which seems to indicate the bucket wasn't really ready for dcp replications. What am I missing?
+
+[ns_server:debug,2021-10-13T03:53:05.186-07:00,ns_1@172.23.107.105:<0.21984.27>:ns_rebalancer:wait_for_bucket:1076]Waiting until bucket "default" gets ready on nodes ['ns_1@172.23.107.111',
+                                                    'ns_1@172.23.107.110']
+ 
+ns_server:debug,2021-10-13T03:53:51.306-07:00,ns_1@172.23.107.105:<0.21984.27>:ns_rebalancer:do_wait_for_bucket:1082]Bucket "default" became ready on nodes ['ns_1@172.23.107.111',
+                                        'ns_1@172.23.107.110']
+[ns_server:info,2021-10-13T03:53:51.772-07:00,ns_1@172.23.107.105:<0.32382.27>:janitor_agent:call_on_servers:309]default:Some janitor state change requests (apply_new_config_replicas_phase) have failed:
+[{'ns_1@172.23.107.111',
+     {'EXIT',
+         {{{{{case_clause,
+                 {error,
+                     {{{badmatch,
+                           {error,
+                               {{badmatch,{dcp_error,etmpfail,undefined}},
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Artamonau
+Date: 2021-12-21 21:57:45.000000000
+Message: 
+Patch Set 2:
+
+I don't know what you're missing. But your patch appears to be a noop to me.
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-12-21 22:12:30.000000000
+Message: 
+Patch Set 2:
+
+> Patch Set 2:
+> 
+> I don't know what you're missing. But your patch appears to be a noop to me.
+
+I agree my patch is a noop if this code does ensure the ep_warmup_thread to be "complete".
+
+              ok = wait_for_bucket(Bucket, DeltaNodes),
+
+But if that's the case then I don't see where we complete the check yet we get a etmpfile while setting up dcp_connections.
+
+[ns_server:debug,2021-10-13T03:53:05.186-07:00,ns_1@172.23.107.105:<0.21984.27>:ns_rebalancer:wait_for_bucket:1076]Waiting until bucket "default" gets ready on nodes ['ns_1@172.23.107.111',
+                                                    'ns_1@172.23.107.110']
+ 
+ns_server:debug,2021-10-13T03:53:51.306-07:00,ns_1@172.23.107.105:<0.21984.27>:ns_rebalancer:do_wait_for_bucket:1082]Bucket "default" became ready on nodes ['ns_1@172.23.107.111',
+                                        'ns_1@172.23.107.110']
+[ns_server:info,2021-10-13T03:53:51.772-07:00,ns_1@172.23.107.105:<0.32382.27>:janitor_agent:call_on_servers:309]default:Some janitor state change requests (apply_new_config_replicas_phase) have failed:
+[{'ns_1@172.23.107.111',
+     {'EXIT',
+         {{{{{case_clause,
+                 {error,
+                     {{{badmatch,
+                           {error,
+                               {{badmatch,{dcp_error,etmpfail,undefined}},
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-12-22 01:29:09.000000000
+Message: 
+Patch Set 2: Verified-1
+
+Looking at the collected bundle that initiated this ticket/change we see the following. The 'Bucket "default" loaded' message is printed from handle_cast(start_completed.. and that cast is only done after checking "has_started" which checks that ep_warmup_thread is "complete". 
+
+[user:info,2021-10-13T03:53:51.291-07:00,ns_1@172.23.107.111:ns_memcached-default<0.30986.16>:ns_memcached:handle_cast:689]Bucket "default" loaded on node 'ns_1@172.23.107.111' in 48 seconds.
+[ns_server:debug,2021-10-13T03:53:51.322-07:00,ns_1@172.23.107.111:dcp_replication_manager-default<0.30993.16>:dcp_sup:start_replicator:48]Starting DCP replication from 'ns_1@172.23.107.103' for bucket "default" (Features = [collections,
+                                                                                      del_times,
+                                                                                      del_user_xattr,
+                                                                                      json,
+                                                                                      set_consumer_name,
+                                                                                      snappy,
+                                                                                      xattr])
+[ns_server:debug,2021-10-13T03:53:51.325-07:00,ns_1@172.23.107.111:<0.6127.17>:dcp_commands:open_connection:72]Open consumer connection "replication:ns_1@172.23.107.103->ns_1@172.23.107.111:default" on socket #Port<0.97861>: Body <<"{\"consumer_name\":\"ns_1@172.23.107.111\"}">>
+[error_logger:error,2021-10-13T03:53:51.326-07:00,ns_1@172.23.107.111:<0.6127.17>:ale_error_logger_handler:do_log:101]
+=========================CRASH REPORT=========================
+  crasher:
+    initial call: dcp_proxy:init/1
+    pid: <0.6127.17>
+    registered_name: []
+    exception error: no match of right hand side value {dcp_error,etmpfail,
+                                                        undefined}
+      in function  dcp_proxy:connect/5 (src/dcp_proxy.erl, line 262)
+      in call from dcp_proxy:maybe_connect/2 (src/dcp_proxy.erl, line 236)
+      in call from dcp_consumer_conn:init/2 (src/dcp_consumer_conn.erl, line 51)
+      in call from dcp_proxy:init/1 (src/dcp_proxy.erl, line 52)
+      in call from gen_server:init_it/2 (gen_server.erl, line 374)
+      in call from gen_server:init_it/6 (gen_server.erl, line 342)
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-12-22 15:40:40.000000000
+Message: 
+Patch Set 2: Code-Review-2
+
+> Patch Set 2: Verified-1
+> 
+> Looking at the collected bundle that initiated this ticket/change we see the following. The 'Bucket "default" loaded' message is printed from handle_cast(start_completed.. and that cast is only done after checking "has_started" which checks that ep_warmup_thread is "complete". 
+> 
+> [user:info,2021-10-13T03:53:51.291-07:00,ns_1@172.23.107.111:ns_memcached-default<0.30986.16>:ns_memcached:handle_cast:689]Bucket "default" loaded on node 'ns_1@172.23.107.111' in 48 seconds.
+> [ns_server:debug,2021-10-13T03:53:51.322-07:00,ns_1@172.23.107.111:dcp_replication_manager-default<0.30993.16>:dcp_sup:start_replicator:48]Starting DCP replication from 'ns_1@172.23.107.103' for bucket "default" (Features = [collections,
+>                                                                                       del_times,
+>                                                                                       del_user_xattr,
+>                                                                                       json,
+>                                                                                       set_consumer_name,
+>                                                                                       snappy,
+>                                                                                       xattr])
+> [ns_server:debug,2021-10-13T03:53:51.325-07:00,ns_1@172.23.107.111:<0.6127.17>:dcp_commands:open_connection:72]Open consumer connection "replication:ns_1@172.23.107.103->ns_1@172.23.107.111:default" on socket #Port<0.97861>: Body <<"{\"consumer_name\":\"ns_1@172.23.107.111\"}">>
+> [error_logger:error,2021-10-13T03:53:51.326-07:00,ns_1@172.23.107.111:<0.6127.17>:ale_error_logger_handler:do_log:101]
+> =========================CRASH REPORT=========================
+>   crasher:
+>     initial call: dcp_proxy:init/1
+>     pid: <0.6127.17>
+>     registered_name: []
+>     exception error: no match of right hand side value {dcp_error,etmpfail,
+>                                                         undefined}
+>       in function  dcp_proxy:connect/5 (src/dcp_proxy.erl, line 262)
+>       in call from dcp_proxy:maybe_connect/2 (src/dcp_proxy.erl, line 236)
+>       in call from dcp_consumer_conn:init/2 (src/dcp_consumer_conn.erl, line 51)
+>       in call from dcp_proxy:init/1 (src/dcp_proxy.erl, line 52)
+>       in call from gen_server:init_it/2 (gen_server.erl, line 374)
+>       in call from gen_server:init_it/6 (gen_server.erl, line 342)
+
+The memcached.logs show the Engine warmup for the bucket completed twice. I've assigned the ticket to KV for triage.
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2022-01-14 00:59:22.000000000
+Message: 
+Abandoned
+----------------------------------------------------------------------------------------------------------------------

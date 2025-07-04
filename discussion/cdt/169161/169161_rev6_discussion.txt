@@ -1,0 +1,272 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 566495: Rework CMakeErrorParser
+
+Change-Id: I5c7c67597da386137581b7b240b9ca7fdcf71c29
+Signed-off-by: Martin Weber <fifteenknots505@gmail.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Martin Weber
+Date: 2020-09-20 12:11:19.000000000
+Message: 
+Patch Set 6: Patch Set 5 was rebased
+----------------------------------------------------------------------------------------------------------------------
+Author: CDT Bot
+Date: 2020-09-20 12:33:45.000000000
+Message: 
+Patch Set 6: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-ui-only-pipeline/2362/ : SUCCESS
+
+https://ci.eclipse.org/cdt/job/cdt-verify-code-cleanliness-pipeline/2021/ : SUCCESS. Formatting, whitespace, version numbers and other checks appear to be correct. See https://github.com/eclipse-cdt/cdt-infra/tree/master/jenkins/pipelines/cdt/verify#cdt-verify-code-cleanliness for documentation on what is checked.
+
+https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-other-pipeline/2510/ : SUCCESS. p2 repository available on https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-other-pipeline/2510/artifact/releng/org.eclipse.cdt.repo/target/repository/ - please mark build as "Keep this build forever" if the p2 repo is needed for testing. Otherwise it will be deleted shortly.
+----------------------------------------------------------------------------------------------------------------------
+Author: Martin Weber
+Date: 2020-09-21 17:56:19.000000000
+Message: 
+Patch Set 6:
+
+@Alexander, @Jonah: Could you pls review this?
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonah Graham
+Date: 2020-09-21 19:27:00.000000000
+Message: 
+Patch Set 6:
+
+(4 comments)
+Line:25, build/org.eclipse.cdt.cmake.core/src/org/eclipse/cdt/cmake/core/internal/CMakeErrorParser.java -> missing > on <p>
+
+Line:58, build/org.eclipse.cdt.cmake.core/src/org/eclipse/cdt/cmake/core/internal/CMakeErrorParser.java -> I like the code here - but I would extend it a little further and make the handlers for LOG and STATUS also handlers. It would make currentHandler never null and significantly simplify the processBuffer code below by changing from 4 if blocks and a ?: to a single if.
+
+I did the below because I was having a bit of trouble understanding the code. If you find my version less understandable that is ok, this exercise has still been useful as a way for me to understand your original code:
+
+If the patch below is unreadable, you can see the file here https://github.com/jonahgraham/cdt/blob/4521815e3ad2c0330eb0118bb0fb4a8c01e176f1/build/org.eclipse.cdt.cmake.core/src/org/eclipse/cdt/cmake/core/internal/CMakeErrorParser.java#L1
+
+    diff --git a/build/org.eclipse.cdt.cmake.core/src/org/eclipse/cdt/cmake/core/internal/CMakeErrorParser.java b/build/org.eclipse.cdt.cmake.core/src/org/eclipse/cdt/cmake/core/internal/CMakeErrorParser.java
+    index a32a5a6..f12c147 100644
+    --- a/build/org.eclipse.cdt.cmake.core/src/org/eclipse/cdt/cmake/core/internal/CMakeErrorParser.java
+    +++ b/build/org.eclipse.cdt.cmake.core/src/org/eclipse/cdt/cmake/core/internal/CMakeErrorParser.java
+    @@ -38,16 +38,13 @@
+    */
+    /* package */ class CMakeErrorParser implements AutoCloseable {
+    
+    -	private static final String START_LOG = "CMake Debug Log"; //$NON-NLS-1$
+    -	private static final String START_STATUS = "-- "; //$NON-NLS-1$
+    -
+        /** matches the Start of a message, also ending the previous message */
+        private static final Pattern PTN_MSG_START;
+    
+        private static Map<String, MessageHandler> handlersByMessageStart = new HashMap<>();
+    
+    -	/** the handler for the message we are currently gathering output for or <code>null</code> */
+    -	private MessageHandler currentHandler;
+    +	/** the handler for the message we are currently gathering output for */
+    +	private MessageHandler currentHandler = new MhNull();
+        private final ICMakeExecutionMarkerFactory markerFactory;
+        private final StringBuilder buffer;
+    
+    @@ -55,12 +52,9 @@
+            // setup regex to match the start of a message...
+            StringBuilder ptnbuf = new StringBuilder("^"); //$NON-NLS-1$
+    
+    -		String ignoredMessages = String.join("|", START_LOG, START_STATUS); //$NON-NLS-1$
+    -		ptnbuf.append(ignoredMessages);
+    -
+    -		List<MessageHandler> markerHandlers = Arrays.asList(new MhDeprError(), new MhDeprWarning(), new MhErrorDev(),
+    -				new MhError(), new MhInternalError(), new MhWarningDev(), new MhWarning());
+    -		ptnbuf.append('|');
+    +		List<MessageHandler> markerHandlers = Arrays.asList(new MhStartLog(), new MhStatus(), new MhDeprError(),
+    +				new MhDeprWarning(), new MhErrorDev(), new MhError(), new MhInternalError(), new MhWarningDev(),
+    +				new MhWarning());
+            for (Iterator<MessageHandler> it = markerHandlers.iterator(); it.hasNext();) {
+                MessageHandler h = it.next();
+                handlersByMessageStart.put(h.getMessageStart(), h);
+    @@ -90,7 +84,7 @@
+        */
+        public void addInput(CharSequence input) {
+            buffer.append(input);
+    -		processBuffer(false);
+    +		processBuffer();
+        }
+    
+        /** Closes this parser. Any remaining buffered input will be parsed.
+    @@ -98,51 +92,25 @@
+        @Override
+        public void close() {
+            // process remaining bytes
+    -		processBuffer(true);
+    +		processMessage(currentHandler, buffer.toString().trim());
+            buffer.delete(0, buffer.length());
+        }
+    
+    -	private void processBuffer(boolean isEOF) {
+    +	private void processBuffer() {
+            Matcher matcher = PTN_MSG_START.matcher(""); //$NON-NLS-1$
+            while (true) {
+    -			matcher.reset(currentHandler == null ? buffer
+    -					: buffer.subSequence(currentHandler.getMessageStart().length(), buffer.length()));
+    -			//			System.err.println("-###\nr" + buffer.toString() + "\n###-");
+    +			matcher.reset(buffer.subSequence(currentHandler.getMessageStart().length(), buffer.length()));
+                if (matcher.find()) {
+    -				// first or second message arrived in buffer
+                    String handlerId = matcher.group();
+                    MessageHandler newHandler = handlersByMessageStart.get(handlerId);
+    -				if (currentHandler == null) {
+    -					// first message arrived in buffer
+    -					if (newHandler != null) {
+    -						// got handler for first message:
+    -						// discard leading junk
+    -						buffer.delete(0, matcher.start());
+    -						currentHandler = newHandler;
+    -					} else {
+    -						// no handler for first message:
+    -						// message is to be ignored, remove msg start to advance
+    -						buffer.delete(0, matcher.end());
+    -					}
+    -					continue; // proceed with follow-up messages
+    -					//					return; // wait for more input
+    -				} else {
+    -					// second message arrived in buffer
+    -					// extract first message from buffer and process it...
+    -					int end = matcher.start() + currentHandler.getMessageStart().length();
+    -					String message = buffer.substring(0, end);
+    -					processMessage(currentHandler, message.trim());
+    -					currentHandler = newHandler;
+    -					buffer.delete(0, end); // delete processed message
+    -					continue; // proceed with follow-up messages
+    -				}
+    +				int end = matcher.start() + currentHandler.getMessageStart().length();
+    +				String message = buffer.substring(0, end);
+    +				processMessage(currentHandler, message.trim());
+    +				currentHandler = newHandler;
+    +				buffer.delete(0, end); // delete processed message
+    +				continue; // proceed with follow-up messages
+                } else {
+                    // NO message arrived in buffer
+    -				if (currentHandler != null && isEOF) {
+    -					// first message is in buffer:
+    -					// take buffer content as first message and process it...
+    -					processMessage(currentHandler, buffer.toString().trim());
+    -				}
+                    return; // wait for more input
+                }
+            }
+    @@ -269,6 +237,70 @@
+        } // MessageHandler
+    
+        ////////////////////////////////////////////////////////////////////
+    +	private static class MhNull extends MessageHandler {
+    +
+    +		@Override
+    +		public void processMessage(ICMakeExecutionMarkerFactory markerFactory, String fullMessage)
+    +				throws CoreException {
+    +		}
+    +
+    +		@Override
+    +		String getMessageStart() {
+    +			return ""; //$NON-NLS-1$
+    +		}
+    +
+    +		@Override
+    +		int getSeverity() {
+    +			throw new UnsupportedOperationException();
+    +		}
+    +
+    +		@Override
+    +		public String toString() {
+    +			return super.toString() + ": " + getMessageStart(); //$NON-NLS-1$
+    +		}
+    +	}
+    +
+    +	////////////////////////////////////////////////////////////////////
+    +	private static class MhStartLog extends MhNull {
+    +		private static final String START_LOG = "CMake Debug Log"; //$NON-NLS-1$
+    +
+    +		@Override
+    +		String getMessageStart() {
+    +			return START_LOG;
+    +		}
+    +
+    +		@Override
+    +		int getSeverity() {
+    +			throw new UnsupportedOperationException();
+    +		}
+    +
+    +		@Override
+    +		public String toString() {
+    +			return super.toString() + ": " + getMessageStart(); //$NON-NLS-1$
+    +		}
+    +	}
+    +
+    +	////////////////////////////////////////////////////////////////////
+    +	private static class MhStatus extends MhNull {
+    +		private static final String START_STATUS = "-- "; //$NON-NLS-1$
+    +
+    +		@Override
+    +		String getMessageStart() {
+    +			return START_STATUS;
+    +		}
+    +
+    +		@Override
+    +		int getSeverity() {
+    +			throw new UnsupportedOperationException();
+    +		}
+    +
+    +		@Override
+    +		public String toString() {
+    +			return super.toString() + ": " + getMessageStart(); //$NON-NLS-1$
+    +		}
+    +	}
+    +
+    +	////////////////////////////////////////////////////////////////////
+        private static class MhDeprError extends MessageHandler {
+            private static final String START_DERROR = "CMake Deprecation Error"; //$NON-NLS-1$
+
+Line:128, build/org.eclipse.cdt.cmake.core/src/org/eclipse/cdt/cmake/core/internal/CMakeErrorParser.java -> commented out return
+
+Line:23, cmake/org.eclipse.cdt.cmake.core.tests/src/org/eclipse/cdt/cmake/core/internal/CMakeErrorParserTest.java -> :-) For JUnit5!
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Martin Weber
+Date: 2020-09-23 18:56:24.000000000
+MISMATCHED INLINE COMMENT
+Line:25, build/org.eclipse.cdt.cmake.core/src/org/eclipse/cdt/cmake/core/internal/CMakeErrorParser.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Martin Weber
+Date: 2020-09-23 18:56:24.000000000
+MISMATCHED INLINE COMMENT
+Line:58, build/org.eclipse.cdt.cmake.core/src/org/eclipse/cdt/cmake/core/internal/CMakeErrorParser.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Martin Weber
+Date: 2020-09-22 20:19:01.000000000
+MISMATCHED INLINE COMMENT
+Line:58, build/org.eclipse.cdt.cmake.core/src/org/eclipse/cdt/cmake/core/internal/CMakeErrorParser.java -> I was playing with the idea to make the handlers for LOG and STATUS also handlers but could not see any benefit.
+Its much clearer now! Thank you.
+----------------------------------------------------------------------------------------------------------------------
+Author: Martin Weber
+Date: 2020-09-23 18:56:24.000000000
+MISMATCHED INLINE COMMENT
+Line:128, build/org.eclipse.cdt.cmake.core/src/org/eclipse/cdt/cmake/core/internal/CMakeErrorParser.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Martin Weber
+Date: 2020-09-23 18:17:42.000000000
+MISMATCHED INLINE COMMENT
+Line:23, cmake/org.eclipse.cdt.cmake.core.tests/src/org/eclipse/cdt/cmake/core/internal/CMakeErrorParserTest.java -> I don't have experience using JUnit5, either. That slipped in by accident.
+At least we now know, that our maven poms do handle JUnit5 test without any further configuration:-)
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonah Graham
+Date: 2020-09-23 01:44:42.000000000
+MISMATCHED INLINE COMMENT
+Line:23, cmake/org.eclipse.cdt.cmake.core.tests/src/org/eclipse/cdt/cmake/core/internal/CMakeErrorParserTest.java -> Sorry for lack of clarity before. I was saying smiley face, meaning I thought it was good you were moving us forward. I didn't intend to get you to back track to JUnit4 style. I don't have experience using JUnit5, so please lead the way!
+----------------------------------------------------------------------------------------------------------------------
+Author: Martin Weber
+Date: 2020-09-22 20:19:01.000000000
+MISMATCHED INLINE COMMENT
+Line:23, cmake/org.eclipse.cdt.cmake.core.tests/src/org/eclipse/cdt/cmake/core/internal/CMakeErrorParserTest.java -> Done
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,193 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-28722 basic methods for manipulating collections and scopes
+
+Change-Id: If2a7de89442f6ea0e0935de7fdab1c72d4e26321
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Artem Stemkovski
+Date: 2018-10-12 18:29:33.000000000
+Message: 
+Uploaded patch set 9.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-10-12 18:29:39.000000000
+Message: 
+Patch Set 9:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-test/7010/
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2018-10-12 18:32:17.000000000
+Message: 
+Patch Set 9: Verified+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2018-10-12 18:32:24.000000000
+Message: 
+Removed reviewer Amit Krishnan.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-10-12 18:36:57.000000000
+Message: 
+Patch Set 9: Well-Formed+1
+
+Permission granted to commit to restricted branch
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Artamonau
+Date: 2018-10-22 18:57:07.000000000
+Message: 
+Patch Set 9:
+
+Haven't looked ta the change properly yet. But two (hopefully) quick questions.
+
+1. Why is the collections process started in ns_orhcestrator_sup? Any reason why it can't live in mb_master_sup?
+
+2. Related question. I know we talked about this in person. But could you please briefly describe what are the specific requirements as to the monotonicity of colleciton ids? A link would be ok if it's already described somewhere.
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2018-10-22 19:18:57.000000000
+Message: 
+Patch Set 9:
+
+1. No particular reason. Can move it to mb_master_sup
+2. Manifest UID:
+https://docs.google.com/document/d/1X-v8GWQjplrMMaYwwWOzEuP4AUoDNIAvS39NmEjQ3_E/edit#heading=h.v4ekz7beb39p
+Collection UID:
+https://docs.google.com/document/d/1X-v8GWQjplrMMaYwwWOzEuP4AUoDNIAvS39NmEjQ3_E/edit#heading=h.no14rlvgkgrr
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2018-10-22 19:26:09.000000000
+Message: 
+Patch Set 9:
+
+(1 comment)
+Line:99, src/collections.erl -> Why do we have ?log_debug here? Looks like it should be error, no?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2018-10-22 19:53:14.000000000
+Message: 
+Patch Set 9:
+
+(1 comment)
+Line:99, src/collections.erl -> These are validation errors triggered by user mistakes. I don't want them in error.log. I guess I need this spelled better in the code.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2018-10-22 19:59:37.000000000
+Message: 
+Patch Set 9:
+
+(1 comment)
+Line:99, src/collections.erl -> exactly, it is better to handle validation errors explicitly and everything else put to error log.
+I would also remove that case above (the one with leader_activities_error) and handle all errors here, but that's up to you.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2018-10-22 21:14:55.000000000
+Message: 
+Patch Set 9:
+
+(1 comment)
+Line:123, src/collections.erl -> This code looks very overcomplicated. Update consists of 4 operations: get manifest, verify operation, update manifest, save manifest. I don't see the reasons to make it more complex than that. All id update logic should seat in that update function. Currently it's very easy to get inconsistent state if you call update_manifest without doing bump_ids first. Which seems very unnecessary and strange. It would also make it trivial to support batch operations if the code is organized that way. 
+
+do_update_as_leader(Bucket, Operation) ->
+    Manifest = get_manifest(Bucket),
+    case verify_oper(Operation, Manifest) of
+        ok ->
+            NewManifest = apply_operation(Operation, Manifest),
+            set_manifest(NewManifest);
+        Error ->
+            Error
+    end.
+
+apply_operation({create_collection, _}, Manifest) -> ... update id's here ...
+apply_operation({create_scope, _}, Manifest) ->
+
+get_manifest(Bucket) ->
+    {ok, BucketCfg} = ns_bucket:get_bucket(Bucket),
+    proplists:get_value(collections_manifest, BucketCfg, default_manifest()).
+
+set_manifest(Bucket, Manifest) ->
+    ns_bucket:update_bucket_config(
+      Bucket,
+      fun (OldConfig) ->
+              lists:keystore(collections_manifest, 1, OldConfig,
+                             {collections_manifest, Manifest})
+      end),
+      case ns_config_rep:ensure_config_seen_by_nodes(OtherNodes) of
+          ok ->
+              do_update_with_manifest(Bucket, NewManifest,
+                                                    Operation);
+          Error ->
+              {push_config, Error}
+      end.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2018-10-22 22:12:26.000000000
+Message: 
+Patch Set 9:
+
+(2 comments)
+Line:123, src/collections.erl -> The problem in your code is that updated next_uid, next_scope_uid, next_coll_uid won't be distributed to other nodes prior to the actual manifest update. And I disagree that my code is complicated.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2018-10-22 22:17:30.000000000
+Message: 
+Patch Set 9:
+
+(1 comment)
+Line:123, src/collections.erl -> I put the update algorithm description to the commit message
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2018-10-22 22:18:28.000000000
+Message: 
+Patch Set 9:
+
+(1 comment)
+Line:123, src/collections.erl -> Why do we need to distribute id's before manifest update?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2018-10-22 22:25:22.000000000
+Message: 
+Patch Set 9:
+
+(1 comment)
+Line:123, src/collections.erl -> to prevent this kind of badness:
+
+2 nodes A & B. manifest id = 1
+collections are updated on A, manifest_id becomes 2
+manifest_id applied to memcached on node A
+memcached promotes manifest with id = 2 to replicas on node B
+node A dies and failed over without replicating collections manifest to node B
+replicas on B become masters
+collections updated on node B, manifest_id becomes 2
+as a result we have 2 different collection manifests with the same id
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2018-10-22 23:45:36.000000000
+Message: 
+Patch Set 9:
+
+(1 comment)
+Line:123, src/collections.erl -> I didn't realize that memcached can promote manifests to other nodes. So looks like we need some kind of transactions for config changes :)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2018-10-23 00:15:57.000000000
+Message: 
+Patch Set 9:
+
+(1 comment)
+Line:123, src/collections.erl -> Aliaksey is working on it
+
+----------------------------------------------------------------------------------------------------------------------

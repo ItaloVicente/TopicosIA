@@ -1,0 +1,125 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-36948: Track and store maxVisibleEndSeqno in Checkpoints
+
+Add a maxVisibleEndSeqno to Checkpoint and then maintain that
+value for active/replica.
+
+Replica vbuckets set this value on receipt of a snapshot-marker.
+They will either call createSnapshot or updateCurrentSnapshot both
+methods now require the visible snap-end value. The value then
+remains in the Checkpoint object and is now visible to subsequent
+DCP producers (producing the replica) or readable from
+CheckpointManager (which will be wired into GetAllVBSeqnos).
+
+Active VBuckets track/set the maxVisibleEndSeqno in a way which
+mirrors the visible seqno (which is CheckpointManager::lastBySeqno).
+As items are queued (queueDirty) lastBySeqno is increased and
+the current Checkpoint will have it's end seqno adjusted.
+The same logic applies to a new member, maxVisibleSeqno
+which only increments for visible items.
+
+Note on tests using "createSnapshot": to avoid a default parameter
+the createSnapshot method has been updated in many unit tests and
+in some places what seems like the correct maxVisibleSeqno is
+added and sometime later tested. Many tests though are just using
+zero, as for many tests the maxVisibleSeqno isn't of interest.
+
+Change-Id: I0e2a6aafeeef3a334766e8bdc868471462510d85
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jim Walker
+Date: 2019-12-03 10:21:07.000000000
+Message: 
+Uploaded patch set 10: Patch Set 9 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-12-03 10:21:21.000000000
+Message: 
+Patch Set 10:
+
+Permission granted to commit: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/159531/artifact/restricted.html : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-12-03 11:19:43.000000000
+Message: 
+Patch Set 10: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/434/ : FAILURE
+
+Failure of a GoogleTest test:
+
+AllBucketTypes/DurabilityActiveStreamTest.BackfillDurabilityLevel/persistent_value_only, where GetParam() = ("persistent", "value_only") (72 ms) ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/434/ )
+
+Failure of a CTest test  36/187 Test  #23: ep-engine_ep_unit_tests ...................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/434/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/442/ : FAILURE
+
+Failure of a CTest test [2019-12-03T11:13:15.080Z]  27/193 Test  #26: ep-engine_ep_unit_tests ...................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/442/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/435/ : FAILURE
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/444/ : FAILURE
+
+Failure of a CTest test [2019-12-03T10:58:56.188Z]  27/193 Test  #26: ep-engine_ep_unit_tests ...................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/444/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/22888/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/402/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2019-12-03 13:39:08.000000000
+Message: 
+Patch Set 10:
+
+> (1 comment)
+
+I don't think we would ever send an MVS higher than snap end? The MVS would only be sent to sync-repl clients (i.e. KV) and they would see all abort/prepare, so snapend should always be >= MVS
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2019-12-03 14:08:26.000000000
+Message: 
+Patch Set 10:
+
+example my previous comment was based on:
+
+CM:[1:PRE][2:ABT, 3:MUT)
+
+When we call getItemsForCursor we return
+
+IFC:[1:PRE, 2:ABT, 3:MUT] with MVS of 3
+
+We send to the replica then a snapshot with snap start 0/1, snap end 1 and MVS 3 as the prepare at seqno 1 is not visible. We then send the second snap with start 2, end 3 and MVS of 3. I believe this is correct based on the code in this patch and the following one, but please correct me if I'm wrong.
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2019-12-03 14:51:20.000000000
+Message: 
+Patch Set 10:
+
+> example my previous comment was based on:
+ > 
+ > CM:[1:PRE][2:ABT, 3:MUT)
+ > 
+ > When we call getItemsForCursor we return
+ > 
+ > IFC:[1:PRE, 2:ABT, 3:MUT] with MVS of 3
+ > 
+ > We send to the replica then a snapshot with snap start 0/1, snap
+ > end 1 and MVS 3 as the prepare at seqno 1 is not visible. We then
+ > send the second snap with start 2, end 3 and MVS of 3. I believe
+ > this is correct based on the code in this patch and the following
+ > one, but please correct me if I'm wrong.
+
+For clarity, IFC should actually be the following
+
+IFC:[1:PRE, 2:CKPT-END, 2:CKPT-START, 2:ABT, 3:MUT]
+
+The CKPT-START will force snapshot to be caleld in ActiveStream with just the prepare
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,172 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-39046: Introduce units for statistics
+
+While many existing stats represent a value with units (e.g.,
+microseconds), this was not always programatically determinable.
+
+In order to correctly expose stats for Prometheus, stats need to be
+scaled to base units (microseconds->seconds, kilobytes->bytes) and
+appropriately suffixed ( https://prometheus.io/docs/practices/naming/
+).
+
+This patch introduces Unit types which can be used to normalise values
+and determine the correct suffix.
+
+Units are not yet used in this patch, but will in future be used in
+metric definitions.
+
+Change-Id: I656f13406e8b039e54c84bdb464c45012ee92c1f
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: James H
+Date: 2020-07-28 11:02:21.000000000
+Message: 
+Uploaded patch set 18: Patch Set 17 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-07-28 12:58:19.000000000
+Message: 
+Patch Set 18: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/4810/ : FAILURE
+
+The warnings threshold for this job was exceeded - <a href="warningsResult">1 warnings</a> found. ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/4810/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/12708/ : FAILURE
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/4993/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [0038/0045]: test CAS regeneration seqno del_with_meta lww...../kv_engine/engines/ep/tests/ep_testsuite_xdcr.cc:2804 Test failed: `" (Expected `1595939470983561216" to not equal `1595939470983561216" - CAS was not regenerated)
+[2020-07-28T12:31:12.302Z] (61 ms) FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/4993/ )
+
+Failure of a CTest test [2020-07-28T12:31:12.302Z]  56/391 Test #256: ep_testsuite_xdcr.full_eviction.comp_passive ................................................................ ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/4993/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/4889/ : FAILURE
+
+The warnings threshold for this job was exceeded - <a href="warningsResult">1 warnings</a> found. ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/4889/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/25367/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/3539/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/2054/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/29322/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/3919/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-07-28 13:06:11.000000000
+Message: 
+Patch Set 18: Code-Review-1
+
+(6 comments)
+Line:273, engines/ep/tests/module_tests/stats_test.cc -> Are we going to have any issues with float / double rounding here?
+
+Line:284, engines/ep/tests/module_tests/stats_test.cc -> Is "percent" a prometheus thing? I'm not really a fan of having something called "percent" which is in the range 0.0-1.0 - that's just wrong - "percent" is in the range 0-100!
+
+Can we just stick with using "ratio" in our code as that at least has a fixed meaning?
+
+Line:3, include/statistics/stat_units.h -> 2020 ?
+
+Line:33, include/statistics/stat_units.h -> Nit: You're allowed to add a trailing comma to the last enum element now (since C++14?), which means if another element is later added you don't have to modify (and break blame) of the previous ultimate element.
+
+Line:36, include/statistics/stat_units.h -> Please add a description of this class.
+
+Line:70, include/statistics/stat_units.h -> You probably want a folly::unreachable() here.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-07-28 14:30:30.000000000
+Message: 
+Patch Set 18:
+
+(6 comments)
+Line:273, engines/ep/tests/module_tests/stats_test.cc -> I'd be surprised if we _didn't_ have rounding issues really. Apparently this value happens to be correctly representable - the test passes with these values, but can easily be made not to by using smaller numbers
+
+ Expected equality of these values:
+  0.000000000456
+    Which is: 4.56e-10
+  units::nanoseconds.normalise(0.456)
+    Which is: 4.56e-10
+
+I can make it EXPECT_NEAR, if preferred.
+
+If you meant actually in Prometheus, we either:
+
+1. accept that stats will be retained as a double representing the recommended base units (seconds, bytes, ratio, celcius etc.) with any rounding and limitations that entails
+2. expose stats in non-base units to make sure the values are in a good representable range, and handle the querying hell that will cause
+
+Line:284, engines/ep/tests/module_tests/stats_test.cc -> This time I think I've got percent and ratio the right way round - the unit "percent" is to used when the value kv tracks is a 0-100 (or higher) percentage, to then be normalised into a ratio 0.0-1.0 to expose to Prometheus. That is, the unit describes what the number kv works with _is_ (and thus the unit cbstats uses... in most cases), not what prometheus will see.
+
+It doesn't normalise _to_ a percentage, it normalises _from_ a percentage, to the matching base unit Prometheus expects: a ratio. Compare to a stat which goes up in "days". This may be internally tracked in kv as say an int `3`. By associating it with the unit `units::days`, the exporter now knows how to scale `3` to get the number of seconds for Prometheus, 259200. If we in the future want to track hours, we change the code that generates that stat so it stores `72` instead, but change the unit to `units::hours`. Now, Prometheus _still_ knows how to get the correct number of seconds.
+
+To get back to percent: ep_mem_low_wat_percent is tracked internally as a real percentage 0-100 (and cbstats exposes that value as-is), but needs to be exposed as a ratio for Prometheus. So, in the process of collecting and exposing, it is normalised
+
+ units::percent.normalise(95) == 0.95
+
+so Prometheus will get it in the format meeting the best practices.
+
+In any case, it's not immediately clear so that says "needs documentation!" to me.
+
+Perhaps normalise is a bit vague anyway. maybe "toBaseUnit" or something.
+
+Ideally, I'd like it to be more like std::chrono::duration in operation
+
+ std::duration_cast<std::chrono::seconds>(<whatever value the stat returns in whatever time unit it likes>);
+
+so maybe (again, this is not what the code does now, but _could maybe_ do)
+ 
+ units::megabytes getSomeStat();
+
+Then to turn it into the desired base unit, one could do something like
+
+ units::bytes(getSomeStat()).count();
+or
+ unit_cast<units::bytes>(getSomeStat()).count();
+
+or whatever.
+
+Functionally the maths that needs to be done is the same, but that might fit better with the mental model of units. That way, the same benefits std::chrono::duration brings to time could be brought to bytes and ratios.
+
+But it's not there yet. For now, this is a bolt-on to declare in the X-macros the unit we _currently_ track stats in.
+
+Apologies for the brain-dump
+
+Line:3, include/statistics/stat_units.h -> Dang, I set the time machine to the wrong decade. Done!
+
+Line:33, include/statistics/stat_units.h -> Done, much nicer
+
+Line:36, include/statistics/stat_units.h -> Done
+
+Line:70, include/statistics/stat_units.h -> Done
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-07-28 14:35:28.000000000
+Message: 
+Patch Set 18:
+
+(2 comments)
+Line:273, engines/ep/tests/module_tests/stats_test.cc -> I was talking about the test in this instance. For the kind of things we use stats for, I think prometheus' representation should be fine.
+
+Suggest EXPECT_NEAR for these tests.
+
+Line:284, engines/ep/tests/module_tests/stats_test.cc -> I think it follow ;)
+
+I noted the std::chrono -style approach - which I think is quite nice. `toBaseUnit()` or similar seems more descriptive - "normalise" is somewhat vague.
+
+In terms of ratio vs. percentage, as long as we talk about things which are percentages (x/y *100) as "percent" and ratios (x/y) as "ratio" I'm happy :)
+
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,231 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-49071: Make engine-specific storage type-safe [1/2]
+
+Using an interface type for the engine-specific storage allows us to
+avoid reinterpret_casts from void* and to use smart pointers for
+automatic memory management of objects with lifetime bound by the
+command context.
+
+This will be a two-part patch. This first part swaps out the underlying
+void* storage with EngineStorageIface and ensures that memory
+allocations are correctly accounted for, but it does not change the
+interface of the (get|set)EngineStorage methods we use in
+EventuallyPersistentEngine to acccess the stored data.
+
+I will refactor those methods and their callers to EngineStorageIface
+in a follow-up patch.
+
+Change-Id: Idadd77ded7a7be14bf7ca290f7aa29861f294442
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Vesko Karaganev
+Date: 2022-09-12 14:14:55.000000000
+Message: 
+Uploaded patch set 25.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-09-12 14:36:22.000000000
+Message: 
+Patch Set 25: Verified-1
+
+Build Failed 
+
+https://cv.jenkins.couchbase.com/job/kv_engine-windows-master/49293/ : FAILURE
+
+Failure of GoogleTest "AllBucketTypes/SingleThreadedActiveStreamTest.ExpirationRemovesBody_UserXa/ephemeral_auto_delete":
+
+<pre>
+[ RUN      ] AllBucketTypes/SingleThreadedActiveStreamTest.ExpirationRemovesBody_UserXa/ephemeral_auto_delete
+unknown file: error: C++ exception with description "KVStoreFactory ctor: Specified dbname "ep_engine_ep_unit_tests.db/test.529403" is not a directory" thrown in SetUp().
+unknown file: error: SEH exception with code 0xc0000005 thrown in TearDown().
+[  FAILED  ] AllBucketTypes/SingleThreadedActiveStreamTest.ExpirationRemovesBody_UserXa/ephemeral_auto_delete, where GetParam() = "bucket_type=ephemeral:ephemeral_full_policy=auto_delete" (4 ms)
+AllBucketTypes/SingleThreadedActiveStreamTest.ExpirationRemovesBody_UserXa/ephemeral_auto_delete
+</pre>
+ ( https://cv.jenkins.couchbase.com/job/kv_engine-windows-master/49293/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/19532/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/20310/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/41434/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/10116/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/21638/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/10018/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/22282/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/22642/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/23405/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/30683/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-09-12 15:05:34.000000000
+Message: 
+Patch Set 25: Verified+1
+
+Build Successful 
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/19532/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/20310/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/41434/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/10116/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/21638/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/10018/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/22282/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/22642/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/23405/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/30683/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-windows-master/49299/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Vesko Karaganev
+Date: 2022-09-13 15:07:03.000000000
+Message: 
+Patch Set 25:
+
+(1 comment)
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-09-13 16:12:48.000000000
+Message: 
+Patch Set 25: Code-Review-1
+
+(5 comments)
+File Comment: /PATCHSET_LEVEL -> Generally the approach looks good. Few specific comments below. 
+Line:14, engines/ep/src/engine_storage.h -> ep_engine.h and object registry.h appear unused here.
+
+Line:817, include/memcached/engine.h -> Why is this necessary? Assuming EngineStorageIface has a virtual dtor (and any subclasses "do the right thing", the caller should just be able to delete an EngineStorageIface object directly.
+
+Line:249, include/memcached/types.h -> This feels overly complex, and likely brittle. If a cookie outlives an engine which has already been destroyed, there's probably all kinds of Bad Things which could happen (any call into the EngineIface could crash), so I believe we'll just end up having the complexity / cost of a weak_ptr being created for every Cookie instance.
+
+I don't believe you're changing the lifetime model here - Cookies _should_ already only assume a valid engine while they are executing (i.e. while a command returns EWOULDBLOCK). Once a command has returned a final status code, we can consider that command completed - and assert that the cookie's engineStorage has already been cleared by the engine.
+
+Line:32, utilities/engine_storage.cc -> We always build with debug information - CMake build type "RelWithDebInfo" with NDEBUG defined: https://github.com/couchbase/tlm/blob/master/cmake/Modules/CouchbaseGccOptions.cmake#L92
+
+Instead guard with CB_DEVELOPMENT_ASSERTS
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Vesko Karaganev
+Date: 2022-09-14 07:42:40.000000000
+Message: 
+Patch Set 25:
+
+(4 comments)
+Line:14, engines/ep/src/engine_storage.h -> Thanks!
+
+Line:817, include/memcached/engine.h -> I've added this method to allow EngineStorageIface-derived classes, which are heap allocated, to be deallocated correctly. EPEngineStorage is allocated under a BucketAllocationGuard, and releaseEngineStorage just frees it under the same. https://review.couchbase.org/c/kv_engine/+/163999/25/engines/ep/src/ep_engine.cc#1848
+
+I see a couple of ways of avoiding adding a method in EngineIface, there might be more. We could use a fatter (possibly type-erased) deleter in cb::unique_engine_storage_ptr, which can store a pointer to the engine and do the same `BucketAllocationGuard g(ptr);` without calling into EngineIface. 
+
+Or to avoid increasing the size of the deleter, we could allocate the EPEngineStorage class under a NonBucketAllocationGuard, deallocate it under the same using a function pointer deleter in cb::unique_engine_storage_ptr. Only then we also need to have the ~EPEngineStorage perform some magic to deallocate the EPEngineStorage members under a BucketAllocationGuard (as my assumption is that data stored in the engine specific is allocated under the engine's memory domain).
+
+I'm thinking the current approach is somewhat simpler, but don't have any strong opinions on the matter.
+
+Line:249, include/memcached/types.h -> >  cost of a weak_ptr being created for every Cookie instance.
+
+Actually, it is created for every EngineStorageIface, which I think makes it mildly better/more measurable. We pay the cost only when using the engine specific. 
+
+It is used such that _if_ we end up calling Cookie::reset() or ~Cookie() and there is some engine storage and the engine has been destroyed, we can "catch" it and not crash. This was my interpretation of what Trond said in a comment above (https://review.couchbase.org/c/kv_engine/+/163999/comments/5d44cf6b_987f6c38), but I might have misunderstood.
+
+Line:32, utilities/engine_storage.cc -> Ack
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Vesko Karaganev
+Date: 2022-09-14 07:56:14.000000000
+Message: 
+Patch Set 25:
+
+(1 comment)
+Line:17, include/memcached/engine_storage.h -> Apparently, this is UB.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-09-14 09:56:52.000000000
+MISMATCHED INLINE COMMENT
+Line:817, include/memcached/engine.h -> So part of my concern of adding releaseEngineStorage() method to the public API is the potential for misuse - one shouldn't go around releasing engine storage unless the object has definable finished use. This is a very C-style API (think free()) - ideally the owner of the storage should be the one responsible for releasing it, and ideally this is symmetric with where the storage is allocated - think paired operator new / delete.
+
+The rationale for having EngineStorageIface is that should encapsulate the lifetime and access to objects stored by the engine and given to the cookie. I think that is a better place to put the actual deallocation code.
+
+For example, have you considered something like a deallocate() virtual method on EngineStorageIface which would be responsible for freeing engine storage subclasses? e.g.
+
+    class EngineStorageIface {
+        ...
+        virtual void deallocate() = 0;
+    };
+
+Then EPEngineStorage::deallocate() would look like the current releaseEngineStorage():
+
+    class EPEngineStorage : public EngineStorageIface {
+        ...
+        EventuallyPersistentEngine& owner;
+
+        void deallocate() override {
+            BucketAllocationGuard guard(&owner);
+            delete this;
+        }
+    }
+
+"delete this" is a bit unusual, but it's legal and I believe safe here as long
+as we ensure that deallocate() is only called as part of the unique_ptr's Deleter (perhaps a bit of friend / private can be used to make it harder to misuse). EngineStorageDeleter then simply becomes (ignoring checks):
+
+    class EngineStorageDeleter {
+        ...
+        void operator()(const EngineStorageIface* engine_storage) const {
+            engine_storage->deallocate();
+        }
+    }
+----------------------------------------------------------------------------------------------------------------------
+Author: Vesko Karaganev
+Date: 2022-09-14 15:10:50.000000000
+MISMATCHED INLINE COMMENT
+Line:817, include/memcached/engine.h -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Vesko Karaganev
+Date: 2022-09-14 10:57:47.000000000
+MISMATCHED INLINE COMMENT
+Line:817, include/memcached/engine.h -> I think thats a great idea 😄 Going ahead with `delete this`.
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2022-09-14 10:06:52.000000000
+MISMATCHED INLINE COMMENT
+Line:817, include/memcached/engine.h -> Heh... one of Vesko's earlier versions for this patch did exactly that 😄
+----------------------------------------------------------------------------------------------------------------------
+Author: Vesko Karaganev
+Date: 2022-09-14 15:10:50.000000000
+MISMATCHED INLINE COMMENT
+Line:249, include/memcached/types.h -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Vesko Karaganev
+Date: 2022-09-14 10:57:47.000000000
+MISMATCHED INLINE COMMENT
+Line:249, include/memcached/types.h -> > I believe we are still incrementing / decrementing a weak count every time a cookie is created / destroyed.
+
+That should not be the case, as the IsValidInstanceFlag is default initialised in the EngineStorageDeleter, in the nullptr cb::unique_engine_storage_ptr that all cookies have. The default initialiser of the weak_ptr assigns nullptr and does not allocate a ref-count block.
+
+I'm happy to remove this monstrosity regardless 😊
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-09-14 09:56:52.000000000
+MISMATCHED INLINE COMMENT
+Line:249, include/memcached/types.h -> I believe we are still incrementing / decrementing a weak count every time a cookie is created / destroyed.
+
+In terms of catching lifetime ordering issues, we already have tools like Asan / TSan which I cover this (and many other object relations). I think as long as we assert the cookie's engineSpecific is empty after the command has completed we should have sufficient defence.
+----------------------------------------------------------------------------------------------------------------------

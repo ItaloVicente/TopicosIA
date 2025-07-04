@@ -1,0 +1,85 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 396081 - Duplicate target breakpoints created when setting a GDB
+console breakpoint with relative path.
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Marc Khouzam
+Date: 2013-01-04 15:26:52.000000000
+Message: 
+Patch Set 1: Verified; Looks good to me, approved; IP review completed
+
+(4 inline comments)
+
+Sorry for the delay.
+Comments are mostly cosmetics and are optional.
+Line:88, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/MIBreakpointsSynchronizer.java -> If you agree it is simpler to do so, can we remove this class, and use a final value instead?  See below.
+
+If not, please make the class private.
+
+Line:897, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/MIBreakpointsSynchronizer.java -> This is an interesting use of a sequence to perform multiple async operations.  I do like it.  The part I don't like is that we have to pre-define the number of steps when, in this case, we don't know that number.
+
+FYI, the pattern I've used for such situations, is to have an RM class which keeps instantiating itself as the async calls complete.  It would look like this in this case:
+	private void findTargetLineBreakpoint(
+			final IBreakpointsTargetDMContext bpTargetDMC,
+			final List<MIBreakpoint> candidates, 
+			final String fileName, 
+			final Integer lineNumber,
+			final String function,
+			final String address,
+			final Boolean isHardware, 
+			final Boolean isTemporary,
+			final DataRequestMonitor<MIBreakpoint> drm) {
+
+		final List<MIBreakpoint> bps = new ArrayList<MIBreakpoint>(candidates);
+		class GetSourceRM extends ImmediateDataRequestMonitor<MIBreakpoint> {
+			public GetSourceRM() {
+				super();
+			}
+
+			@Override
+			protected void handleCompleted() {
+				if (bps.isEmpty()) {
+					drm.done();
+					return;
+				}
+
+				final MIBreakpoint fMIBpt = bps.remove(0);
+				getSource(
+						bpTargetDMC, 
+						getFileName(fMIBpt), 
+						new DataRequestMonitor<String>(getExecutor(), drm) {
+							@Override
+							@ConfinedToDsfExecutor( "fExecutor" )
+							protected void handleSuccess() {
+								if (compareBreakpointAttributes(
+										fMIBpt, 
+										getData(), 
+										fileName, 
+										lineNumber, 
+										function, 
+										address, 
+										isHardware, 
+										isTemporary)) {
+									drm.setData(fMIBpt);
+									drm.done();
+								} else {
+									new GetSourceRM().done();
+								}
+							}									
+						});
+			}
+		};
+
+		new GetSourceRM().done();
+	}
+
+Line:901, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/MIBreakpointsSynchronizer.java -> don't need to override, since nothing special is being done
+
+Line:911, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/MIBreakpointsSynchronizer.java -> Can you use a plain Step() but above the step creation, add the line:
+final MIBreakpoint fMIBpt = candidates.get(i);
+(and refactor the name fMIBpt)
+
+----------------------------------------------------------------------------------------------------------------------

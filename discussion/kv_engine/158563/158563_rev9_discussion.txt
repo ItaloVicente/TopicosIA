@@ -1,0 +1,150 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-47460: Correctly handle replay of collection drop + doc size decrease
+
+During compaction and when the flusher runs concurrently (triggering a
+replay) where the changes copied during replay:
+
+(1) Includes mutations that replace a document and decrease its size
+(2) Where the documents of (1) are to a collection that is also
+    subsequently dropped in the replay.
+
+The diskSize stat of the dropped collection is then allowed to go
+negative resulting in an exception being thrown and compaction being
+aborted:
+
+    WARNING (GleamBookUsers0) CouchKVStore::replayPrecommitHook failed saveCollectionStats what:ThrowExceptionUnderflowPolicy current:0 arg:-1061
+    ERROR (GleamBookUsers0) CouchKVStore::compactDB: exception while performing compaction for vb:0 - Details: cb::couchstore::replay() - precommit hook Failed: error cancel
+
+The issue is that the local collection cardinality doc (|<CID>|) is
+not alive during this replay batch (as the collection has been
+dropped), hence when the replayPreCopyHook is passed the mutation
+which reduces the value size, we record a negative diskSize in
+StatisticsUpdate for the affected collection.
+
+Later in CouchKVStore::replayPrecommitHook when
+FlushAccounting::forEachCollection is called to calculate new local
+docs to write to disk, we attempt to construct a PersistedStats with a
+negative diskSize; which isn't permitted (given it's a
+NonNegativeCounter) and hence an exception is thrown, and compaction
+aborted.
+
+Note this issue appears relatively benign - while this compaction is
+aborted, a subsequent compaction will process the collection drop in
+the initial compaction phase and hence the negative diskSize code path
+isn't run.
+
+Solution
+
+The bug is in tryToCatchUpDbFile() - we read the dropped collections
+from the source Db too late, after we have seeked back to the original
+header. As such the vbucket metadata changes (critically the fact the
+collection is dropped) made in the pre-hook are not observed allowing
+the negative size to be computed.
+
+By hoisting the read of the collections earlier we observe all dropped
+collections - including the ones dropped during this iteration.
+
+Change-Id: I937f839f25a79d0d9241663837c41150a580cbba
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jim Walker
+Date: 2021-09-20 09:57:57.000000000
+Message: 
+Uploaded patch set 9: Patch Set 8 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-09-20 10:34:54.000000000
+Message: 
+Patch Set 9: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/40118/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [0058/0158]: ep workload stats...(44 ms) OK
+
+
+99% tests passed, 2 tests failed out of 411
+
+Total Test time (real) = 693.96 sec
+
+The following tests FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/40118/ )
+
+Failure of GoogleTest "CollectionRessurectionKVStoreTests/CollectionRessurectionKVStoreTest.resurection/couchdb_with_1cycles_1_1_1":
+
+<pre>
+[ RUN      ] CollectionRessurectionKVStoreTests/CollectionRessurectionKVStoreTest.resurection/couchdb_with_1cycles_1_1_1
+..\kv_engine\engines\ep\tests\module_tests\collections\collections_kvstore_test.cc(585): error: Value of: status
+  Actual: false
+Expected: true
+unknown file: error: C++ exception with description "cb::io::rmrf: stat of ep_engine_ep_unit_tests.db/test.178002 failed: The system cannot find the file specified." thrown in TearDown().
+[  FAILED  ] CollectionRessurectionKVStoreTests/CollectionRessurectionKVStoreTest.resurection/couchdb_with_1cycles_1_1_1, where GetParam() = ("couchdb", 1, true, true, 1) (4 ms)
+CollectionRessurectionKVStoreTests/CollectionRessurectionKVStoreTest.resurection/couchdb_with_1cycles_1_1_1
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/40118/ )
+
+Timeout of a CTest test 411/411 Test #263: ep_testsuite.ephemeral.comp_passive ...........................................................................................} ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/40118/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/34149/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/12587/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/11378/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/13345/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/14203/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/2230/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/14455/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/2259/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/14962/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/22464/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-09-20 15:03:18.000000000
+Message: 
+Patch Set 9: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/34149/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/12587/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/11378/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/13345/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/14203/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/2230/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/14455/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/2259/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/14962/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/22464/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/40139/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-09-22 08:53:14.000000000
+Message: 
+Patch Set 9: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------

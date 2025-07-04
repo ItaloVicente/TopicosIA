@@ -1,0 +1,171 @@
+======================================================================================================================
+DESCRIPTION:
+
+WIP MB-38326: Allow failed IORequests to be requeued
+
+The magma code was not allowing failed IORequests to be requeued as part
+of commitCallback.
+
+Ben... I think the original problem stems from this...
+getMutationStatus returns DocNotFound for the following cases:
+COUCHSTORE_ERROR_NO_HEADER: I believe this would be corruption of the
+file. Since magma doesn't have this situation, not quite sure what the
+equivalent is.
+COUCHSTORE_ERROR_NO_SUCH_FILE: I don't see how this error can occur. An
+insert into the vbucket implicitly creates the vbucket if it does not
+exists.
+COUCHSTORE_ERROR_DOC_NOT_FOUND: No idea how this gets returned for the
+entire set of operations but I don't think there is a magma equivalent.
+
+Since the above 3 errors don't really exist in magma, there really is no
+situation where magma would NOT requeue the item. But, as I mentioned in
+the defect comments, if magma continues to requeue the item, it ends up
+looping forever.
+
+Change-Id: I13c0b5f699d888d2479d79b2daf8c7f2119e5657
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Scott Lashley
+Date: 2020-03-31 01:28:15.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-03-31 03:03:55.000000000
+Message: 
+Patch Set 2: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/27194/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/23255/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/25557/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/1438/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/2833/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/2836/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/2885/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/10692/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/1884/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2020-03-31 09:10:50.000000000
+Message: 
+Patch Set 2: Code-Review-1
+
+> Patch Set 1:
+> 
+> (3 comments)
+> 
+> There are 2 issues that need further attention.
+> 1. How to test failed commit requests?
+> Is there any KV or couchbase testing infrastructure that allows a test to inject an error into the runtime code path? We are not talking about injecting IO errors but rather simple error injections. For instance, if I want to mark a request as failed, how would I do that? 
+> Note: magma does support error injections for io but it is quite a bit different than couchstore's io error injections and I think trying to make them compatible would be a difficult task. 
+> 2. The flush pattern for magma is significantly different in magma than in couchstore and its different between magma testing and normal magma. 
+> Normal magma will flush the WAL which guarantees that the IORequest (item) is persisted and it guarantees it readable from memory. But it does not guarantee that the item has been persisted to index once the commit returns success. Let's assume we are able to flush the WAL but there is insufficient space to flush the writeCache and create the LSM indexes. What should the storage engine do? 
+> For magma testing, we force the flush of the WAL, the flush of the indexes (key & seq) and the flush of the state tables for every commit. But they are separate writes and flushes.
+
+1) For couchstore tests we just inject IO errors with the FileOps interface. See any test that calls replaceCouchKVStore(). If you can do the same here with a simple error injection then that's fine, but it may just be simpler to use IO error injection given you already have it. Magma IO error injection does not /have/ to be compatible with couchstore error injection, it would be fine to write one test for couchstore and one for magma if required.
+
+Given that couchstore and magma don't conform to the same interface, and here we're trying to test the wrapper code, we can't just mock the interface with the backend and test everything in KV. I'd suggest just using magma's IO error injection to write these tests.
+
+2) Provided we can recover from the WAL without losing any acknowledged writes (if we crash) and magma repeats the flush of the cache/indexes at a later point (if we don't crash) then it feels like that scenario could be considered "successful", or at least a partial success, from the KV perspective. If magma failed to write the WAL though (say because it was entirely out of disk space) then that would be a failure from the KV perspective as we would have to retry our flush.
+
+It feels like we have a couple of different scenarious that require testing here. We /should/ be testing the code that is ran in production wherever reasonably possible.
+----------------------------------------------------------------------------------------------------------------------
+Author: Scott Lashley
+Date: 2020-03-31 15:35:24.000000000
+Message: 
+Patch Set 2:
+
+> 
+> 1) For couchstore tests we just inject IO errors with the FileOps interface. See any test that calls replaceCouchKVStore(). If you can do the same here with a simple error injection then that's fine, but it may just be simpler to use IO error injection given you already have it. Magma IO error injection does not /have/ to be compatible with couchstore error injection, it would be fine to write one test for couchstore and one for magma if required.
+> 
+> Given that couchstore and magma don't conform to the same interface, and here we're trying to test the wrapper code, we can't just mock the interface with the backend and test everything in KV. I'd suggest just using magma's IO error injection to write these tests.
+> 
+IMO... the io error injection method is a bad choice for implementing error injections in general. They rely on counting the # of IO's and then triggering a failure. This is susceptible to changes in IO flushing patterns and to asynchronous IO such as magma's compaction. There are better methods for pinpointing specific error injections.
+Let's take the case of testing this fix. It does not require an IO error injection, it requires marking a request as failed to make sure the error code path is followed and the item is resubmitted. Using IO error injection for this case seems a bad choice.
+My question...  does kv or couchbase have a generic error injection mechanism?... it appears there is no mechanism or infrastructure. I will propose one for the wrapper code in my next checkin and we can evaluate if it should be made generic.
+
+> 2) Provided we can recover from the WAL without losing any acknowledged writes (if we crash) and magma repeats the flush of the cache/indexes at a later point (if we don't crash) then it feels like that scenario could be considered "successful", or at least a partial success, from the KV perspective. If magma failed to write the WAL though (say because it was entirely out of disk space) then that would be a failure from the KV perspective as we would have to retry our flush.
+
+Magma retries the IO to the WAL. If it is unable to complete the IO, we return an error. If we come back down again to the WAL, we again retry the failed IO because we don't know how much was actually written so we must complete the failed IO before a new IO will be tried. If those fail, we give up.
+> 
+> It feels like we have a couple of different scenarious that require testing here. We /should/ be testing the code that is ran in production wherever reasonably possible.
+
+For QE functional testing, we use normal production mode. Couchstore expects every flush to be a potential rollback point and magma doesn't support that during production mode. For KV and magma unit testing, we have to use a testing mode which simulates couchstore otherwise the tests can't pass.
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2020-03-31 15:47:21.000000000
+Message: 
+Patch Set 2:
+
+> Patch Set 2:
+> 
+> > 
+> > 1) For couchstore tests we just inject IO errors with the FileOps interface. See any test that calls replaceCouchKVStore(). If you can do the same here with a simple error injection then that's fine, but it may just be simpler to use IO error injection given you already have it. Magma IO error injection does not /have/ to be compatible with couchstore error injection, it would be fine to write one test for couchstore and one for magma if required.
+> > 
+> > Given that couchstore and magma don't conform to the same interface, and here we're trying to test the wrapper code, we can't just mock the interface with the backend and test everything in KV. I'd suggest just using magma's IO error injection to write these tests.
+> > 
+> IMO... the io error injection method is a bad choice for implementing error injections in general. They rely on counting the # of IO's and then triggering a failure. This is susceptible to changes in IO flushing patterns and to asynchronous IO such as magma's compaction. There are better methods for pinpointing specific error injections.
+> Let's take the case of testing this fix. It does not require an IO error injection, it requires marking a request as failed to make sure the error code path is followed and the item is resubmitted. Using IO error injection for this case seems a bad choice.
+> My question...  does kv or couchbase have a generic error injection mechanism?... it appears there is no mechanism or infrastructure. I will propose one for the wrapper code in my next checkin and we can evaluate if it should be made generic.
+> 
+> > 2) Provided we can recover from the WAL without losing any acknowledged writes (if we crash) and magma repeats the flush of the cache/indexes at a later point (if we don't crash) then it feels like that scenario could be considered "successful", or at least a partial success, from the KV perspective. If magma failed to write the WAL though (say because it was entirely out of disk space) then that would be a failure from the KV perspective as we would have to retry our flush.
+> 
+> Magma retries the IO to the WAL. If it is unable to complete the IO, we return an error. If we come back down again to the WAL, we again retry the failed IO because we don't know how much was actually written so we must complete the failed IO before a new IO will be tried. If those fail, we give up.
+> > 
+> > It feels like we have a couple of different scenarious that require testing here. We /should/ be testing the code that is ran in production wherever reasonably possible.
+> 
+> For QE functional testing, we use normal production mode. Couchstore expects every flush to be a potential rollback point and magma doesn't support that during production mode. For KV and magma unit testing, we have to use a testing mode which simulates couchstore otherwise the tests can't pass.
+
+We don't have a mechanism to inject errors in the way you describe. I'm not saying we shouldn't, just that we probably didn't do it already because it's hard to make something generic. It's fine to make something magma specific though. A more direct error injection method is simpler for magma given you have background tasks. It was never really necessary for couchstore though as everything is single threaded in there so you can control IO finely. My suggestion for using the magma IO error injection here was simply because it already exists and saves writing a whole bunch more code, but if a direct error injection interface simplifies a bunch of other tests too then it is probably a worthwhile tradeoff.
+
+One thing that may be worth considering is running magma in a single threaded mode. We run ep engine in an entirely single threaded mode for our module tests and drive threads/actions specifically as required. It might be too complex/late to do the same for magma but I think it generally works well for ep engine.
+----------------------------------------------------------------------------------------------------------------------
+Author: Scott Lashley
+Date: 2020-03-31 16:02:47.000000000
+Message: 
+Patch Set 2:
+
+> Patch Set 2:
+> 
+> > Patch Set 2:
+> > 
+> > > 
+> > > 1) For couchstore tests we just inject IO errors with the FileOps interface. See any test that calls replaceCouchKVStore(). If you can do the same here with a simple error injection then that's fine, but it may just be simpler to use IO error injection given you already have it. Magma IO error injection does not /have/ to be compatible with couchstore error injection, it would be fine to write one test for couchstore and one for magma if required.
+> > > 
+> > > Given that couchstore and magma don't conform to the same interface, and here we're trying to test the wrapper code, we can't just mock the interface with the backend and test everything in KV. I'd suggest just using magma's IO error injection to write these tests.
+> > > 
+> > IMO... the io error injection method is a bad choice for implementing error injections in general. They rely on counting the # of IO's and then triggering a failure. This is susceptible to changes in IO flushing patterns and to asynchronous IO such as magma's compaction. There are better methods for pinpointing specific error injections.
+> > Let's take the case of testing this fix. It does not require an IO error injection, it requires marking a request as failed to make sure the error code path is followed and the item is resubmitted. Using IO error injection for this case seems a bad choice.
+> > My question...  does kv or couchbase have a generic error injection mechanism?... it appears there is no mechanism or infrastructure. I will propose one for the wrapper code in my next checkin and we can evaluate if it should be made generic.
+> > 
+> > > 2) Provided we can recover from the WAL without losing any acknowledged writes (if we crash) and magma repeats the flush of the cache/indexes at a later point (if we don't crash) then it feels like that scenario could be considered "successful", or at least a partial success, from the KV perspective. If magma failed to write the WAL though (say because it was entirely out of disk space) then that would be a failure from the KV perspective as we would have to retry our flush.
+> > 
+> > Magma retries the IO to the WAL. If it is unable to complete the IO, we return an error. If we come back down again to the WAL, we again retry the failed IO because we don't know how much was actually written so we must complete the failed IO before a new IO will be tried. If those fail, we give up.
+> > > 
+> > > It feels like we have a couple of different scenarious that require testing here. We /should/ be testing the code that is ran in production wherever reasonably possible.
+> > 
+> > For QE functional testing, we use normal production mode. Couchstore expects every flush to be a potential rollback point and magma doesn't support that during production mode. For KV and magma unit testing, we have to use a testing mode which simulates couchstore otherwise the tests can't pass.
+> 
+> We don't have a mechanism to inject errors in the way you describe. I'm not saying we shouldn't, just that we probably didn't do it already because it's hard to make something generic. It's fine to make something magma specific though. A more direct error injection method is simpler for magma given you have background tasks. It was never really necessary for couchstore though as everything is single threaded in there so you can control IO finely. My suggestion for using the magma IO error injection here was simply because it already exists and saves writing a whole bunch more code, but if a direct error injection interface simplifies a bunch of other tests too then it is probably a worthwhile tradeoff.
+> 
+> One thing that may be worth considering is running magma in a single threaded mode. We run ep engine in an entirely single threaded mode for our module tests and drive threads/actions specifically as required. It might be too complex/late to do the same for magma but I think it generally works well for ep engine.
+
+Dave R has already asked that we run multi threaded to catch more TSAN issue.
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2020-04-03 10:32:20.000000000
+MISMATCHED INLINE COMMENT
+Line:26, /COMMIT_MSG -> just spotted this comment, sorry if it's out of date (feel free to ignore). As per the backtrace in the MB magma returned an IO ERROR status code (5) to KV.
+----------------------------------------------------------------------------------------------------------------------

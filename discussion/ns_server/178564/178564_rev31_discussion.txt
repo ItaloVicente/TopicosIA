@@ -1,0 +1,139 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-52349: Introduce kv hibernation modules.
+
+1. Start a new async under the hibernation_manager process, which
+   executes kv specific hibernation operations via kv-service_manager.
+
+2. A new kv_hibernation_agent gen_server runs on all the nodes in the
+   cluster and executes pause/resume tasks local to the node. Tasks
+   include calling PAUSE_BUCKET memcached op-code which pausing bucket and
+   uploading/downloading data on local disk to s3 while pausing/resuming
+   a bucket.
+
+3. Interactions between kv-service_manager and kv_hibernation_agent
+   can be summarized as below:
+   - kv-service_manager adds a monitor on the kv_hibernation_agent
+     on Nodes a bucket is placed (BucketNodes) on.
+   - kv-service_manager sends a "prepare" call to
+     kv_hibernation_agent on the BucketNodes.
+   - kv_hibernation_agent on each of BucketNodes monitor the
+     kv-service_manager in reverse.
+   - kv-service_manager issues the hibernation op
+     (pause_bucket/resume_bucket).
+
+   Any failures during the hibernation operations translate into 'DOWN'
+   messages, which are processed by the kv-service_manager and propogated
+   upwards to the hibernation_manager.
+
+   Similarly if the hibernation_manager crashes - the
+   kv_hibernation_agents receive a 'DOWN' message upon which they clear their
+   local state.
+
+Change-Id: Ibee68b7df782d186556fe60682df6952dd4ce2b4
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Hareen Kancharla
+Date: 2022-11-18 18:28:36.000000000
+Message: 
+Uploaded patch set 31.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-11-18 18:28:57.000000000
+Message: 
+Patch Set 31:
+
+Build Started https://cv.jenkins.couchbase.com/job/ns-server-test/32416/ (1/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-11-18 18:29:03.000000000
+Message: 
+Patch Set 31:
+
+Build Started https://cv.jenkins.couchbase.com/job/ns-server-ns-test/490/ (2/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-11-18 18:45:58.000000000
+Message: 
+Patch Set 31: Well-Formed+1
+
+Build Successful 
+
+https://cv.jenkins.couchbase.com/job/ns-server-test/32416/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/ns-server-ns-test/490/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2022-11-19 01:26:20.000000000
+Message: 
+Patch Set 31: Verified+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2022-12-06 05:09:10.000000000
+Message: 
+Patch Set 31:
+
+(6 comments)
+Line:51, src/kv_hibernation_agent.erl -> typo?
+
+Line:123, src/kv_hibernation_agent.erl -> Shouldn't we just crash here? I cannot reason why we might need to handle this gracefully.
+
+Line:188, src/kv_hibernation_agent.erl -> What will happen if this process crashes, therefore losing the state and then hibernation manager crashes? Will the bucket stay partially paused?
+
+Line:44, src/service_manager.erl -> should not be here
+
+Line:180, src/service_manager.erl -> should be in this commit: https://review.couchbase.org/c/ns_server/+/178123
+
+Line:376, src/service_manager.erl -> 1. I think this might trigger the autofailover.
+2. Is it guaranteed that janitor will not restore the replications while pausing is in process?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2022-12-10 01:11:12.000000000
+MISMATCHED INLINE COMMENT
+Line:51, src/kv_hibernation_agent.erl -> Fixed.
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2022-12-10 01:11:12.000000000
+MISMATCHED INLINE COMMENT
+Line:123, src/kv_hibernation_agent.erl -> My rationale with this is - if crash consistently we would never be able to make progress with another pause/resume operation. Technically it should never happen but the idea is if we find service_manager set it is possible a worker from the previous pause/resume is present too and that should be terminated. Therefore I feel it's ok to not crash and do the necessary clean-up and move forward.
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2022-12-09 22:55:41.000000000
+MISMATCHED INLINE COMMENT
+Line:188, src/kv_hibernation_agent.erl -> So we have catch-all in the janitor:cleanup which will make sure the bucket is unpaused on all the nodes - it's done in this patch: https://review.couchbase.org/c/ns_server/+/182476/10
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2022-12-09 01:43:51.000000000
+MISMATCHED INLINE COMMENT
+Line:44, src/service_manager.erl -> Fixed.
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2022-12-09 01:43:51.000000000
+MISMATCHED INLINE COMMENT
+Line:180, src/service_manager.erl -> Ah no I meant it to be here - since we now funnel the kv hibernation ops too through the service manager. I added it so that we know if it was the service_agent or the kv_hibernation_agent that caused the error. The patch you mention was only parameterizing the ops we run through service_manager exclusively for the "services". 
+
+Though what's faulty is the order of Args to the log - it should have been [Service, Other]. Will fix it.
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2022-12-10 01:11:12.000000000
+MISMATCHED INLINE COMMENT
+Line:180, src/service_manager.erl -> Fixed the incorrect order in which args were being passed to the ?log_warning.
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2022-12-10 01:11:12.000000000
+MISMATCHED INLINE COMMENT
+Line:376, src/service_manager.erl -> Sorry missed answering point 2.
+
+Yes - since the janitor run and all the hibernation ops are performed via ns_orchestrator those two operations are serialized.
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2022-12-09 01:43:51.000000000
+MISMATCHED INLINE COMMENT
+Line:376, src/service_manager.erl -> Tracking this in https://issues.couchbase.com/browse/MB-54633.
+
+TLDR: We might need a small patch in kv_monitor to exclude the warmup status of buckets that are pausing/paused.
+----------------------------------------------------------------------------------------------------------------------

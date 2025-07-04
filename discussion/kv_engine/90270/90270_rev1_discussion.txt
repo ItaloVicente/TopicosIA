@@ -1,0 +1,189 @@
+======================================================================================================================
+DESCRIPTION:
+
+get_cbmonitor_data: Add read amplifcation metric
+
+Add a new 'read_amp' metric to the output - this is the ratio of disk
+read IOs to application read requests:
+
+    read_amp = disk_read_count / application_read_count
+
+Change-Id: I983f2ad79b010ddf737bff3a9757a25da7e13d6c
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2018-03-01 12:43:27.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-03-01 13:06:53.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/5916/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/7495/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master/7074/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/7297/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/7816/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/6816/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-03-01 16:20:20.000000000
+Message: 
+Removed reviewer Pavel Blagodov.
+----------------------------------------------------------------------------------------------------------------------
+Author: Pavel Paulau
+Date: 2018-03-01 19:31:59.000000000
+Message: 
+Patch Set 1:
+
+(3 comments)
+Line:12, /COMMIT_MSG -> This is a little bit misleading, isn't it?
+
+We can't ignore disk reads caused by write operations and compaction.
+
+This new metric is very useful but it's not exactly "read amplification" in the traditional definition.
+
+Line:220, scripts/get_cbmonitor_data.py -> I understand your constrains but cbmonitor as a data source is not going to make your life easy.
+
+You could have access to actual accumulated counters in kv-engine if the entire workflow was implemented in perfrunner.
+
+Line:221, scripts/get_cbmonitor_data.py -> Similar to bytes_read and bytes_written, we can track total disk reads and disk writes in perfrunner/cbmonitor using proc/diskstats.
+
+https://www.kernel.org/doc/Documentation/ABI/testing/procfs-diskstats
+
+Also what about read operations that hit the page cache? For instance, results might not be comparable if direct IO is used.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-03-01 21:01:34.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:12, /COMMIT_MSG -> So this won't be ignoring disk reads done by writing/ compaction - it includes them as we are simply measuring the total number of (OS-observed) disk reads.
+
+This is a relatively "standard" definition of read amplification - see:
+
+* https://github.com/facebook/rocksdb/wiki/RocksDB-Tuning-Guide#amplification-factors 
+* https://www.slideshare.net/profyclub_ru/mark-calla?ref=http://www.highload.ru/2013/abstracts/1226.html (slide 7 onwards) - the full talk video (https://vimeo.com/album/2920922/video/98428203) is also very good and worth watching IMHO.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Pavel Paulau
+Date: 2018-03-01 23:59:02.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:12, /COMMIT_MSG -> Sorry, I probably wasn't clear.
+
+Let's stick to the following definition from the above mentioned article:
+
+
+    Read amplification is the number of disk reads per query. If you need to read 5 pages to answer a query, read amplification is 5. Logical reads are those that get data from cache, either the RocksDB block cache or the OS filesystem cache.
+
+
+That's not exactly what read_amp will measure in mixed and write-heavy workloads. For instance, read_amp will be ∞ in write-only workloads if application_read_count == ep_bg_fetched.
+
+By saying that we can't ignore reads that occur during write operations I meant that we should exclude those background reads if we want to be precise and consistent.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-03-02 10:16:20.000000000
+Message: 
+Patch Set 1:
+
+(2 comments)
+Line:12, /COMMIT_MSG -> Yes, it's true the definition of read_amp here doesn't just cover the disk reads for "query" (lookup), and also includes reads during compaction / writes etc. 
+
+However I'd argue that's a "better" definition, for a few reasons:
+
+If we want to summarise Amplification factors in just three numbers (Read, Write, Space), then we _want_ to try to encapsulate as much of the work done by the system in each metric. In the case of Read Amp; the application itself doesn't really care how the underlying storage engine performs writes or compaction; *but* if that storage engine adds "extra" reads when doing write/compaction, we should include those reads in the costs.
+To put another way - couchstore's writes require read ops, whereas RocksDB doesn't. I'd argue couchstore therefore *should* have a higher Read Amp value for the same workload, assuming that the actual read operations required the same number of disk IOs in both cases.
+
+Secondly; it's hard to determine the number of disk reads performed just for application reads (i.e. bgfetches) in the general case. We'd need to modify each storage engine to track how many IOPS it issued on the read path - and ensure that the definition is consistent in each case. Couchstore *does* already have such stats (added for MB-25661), but RocksDB doesn't as far as I know; I don't know about plasma.
+
+Thirdly, if we want to look at physical (hitting disk) vs logical (hitting Buffer Cache) reads, userspace has no way to distinguish between them - so any measurement in the engine of "disk reads only for bg_fetches" would always be logical reads. While both metrics are interesting, I'd say that physical reads are the more interesting of the two.
+
+Again I'm just mostly other people here (and often Mark Callaghan!) but he uses the following definitions (http://smalldatum.blogspot.co.uk/2017/06/all-about-linkbench.html):
+
+* ips - average insert rate for the link table. This is less than the real insert rate during the test because it doesn't count inserts to the count and node tables. Don't forget this when looking at the results below that are divided by ips.
+* r/i, rkb/i, wkb/i - iostat r/s, iostat rKB/s and iostat wKB/s divided by ips.
+
+Line:220, scripts/get_cbmonitor_data.py -> This is true - although we'd have to reset the stats at the start of the access phase (or at least note the counters and subtract them).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-03-02 10:41:38.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:12, /COMMIT_MSG -> Edit: I pasted the wrong section from that URL - that was the Linkbench load phase (hence its = insert rate). That's less interesting to us (IMHO). What I meant to paste was the transaction phase definitions - which are similar but taik about "transactions" not inserts: 
+
+* tps - average transaction rate.
+* r/t, rkb/t, wkb/t - iostat r/s, iostat rKB/s and iotat wKB/s divided by tps.
+
+Interestingly they don't attempt to separate read requests from write requests (the access phase has a mix) - instead they just define an overall read amp per transaction (r/t). 
+
+This does have the advantage that it /implicilty/ addresses your concern about "read amp" being misleading, as it includes reads caused by writes/compactions. Instead you simply measure the overall reads needed for /all/ application requests.
+
+What do you think to changing this metric to something similar - say:
+
+ reads_per_op = iostat_read_ops 
+                ---------------------------------------------
+                ep_bg_fetched + ep_ops_{create,update,delete}
+
+?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Pavel Paulau
+Date: 2018-03-02 19:28:58.000000000
+Message: 
+Patch Set 1:
+
+(2 comments)
+Line:12, /COMMIT_MSG -> I like this new formula!
+
+Line:220, scripts/get_cbmonitor_data.py -> We already reset the stats before the access phase.)
+
+https://github.com/couchbase/perfrunner/blob/master/perfrunner/tests/kv.py#L24
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2018-03-13 10:37:44.000000000
+Message: 
+Patch Set 1: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-03-13 10:46:55.000000000
+Message: 
+Patch Set 1: Code-Review-2
+
+Will change the metric to the one discussed with pavel in commit message...
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2018-03-15 12:10:28.000000000
+Message: 
+Patch Set 1: -Code-Review
+----------------------------------------------------------------------------------------------------------------------
+Author: Pavel Paulau
+Date: 2018-04-17 23:42:48.000000000
+Message: 
+Removed reviewer Pavel Paulau.
+----------------------------------------------------------------------------------------------------------------------
+Author: Scott Lashley
+Date: 2019-11-19 00:19:44.000000000
+Message: 
+Removed reviewer Scott Lashley.
+----------------------------------------------------------------------------------------------------------------------

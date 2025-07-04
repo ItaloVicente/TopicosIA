@@ -1,0 +1,135 @@
+======================================================================================================================
+DESCRIPTION:
+
+RevWalk: integrate commit-graph with commit parsing
+
+Teach JGit to inspect a commit graph file to supply the contents of a
+RevCommit when calling RevCommit.parseHeaders(), including parents,
+the root tree, the commit date and the generation number.
+By loading commits from the graph instead of parsing commit buffers,
+we save a lot of time on long commit walks.
+
+The following is the performance results for a copy of the Linux
+repository with this change.
+
+| Command                       |   berfore  |    after   |
+|-------------------------------|------------|------------|
+| rev-list -10000               |  96ms      |    12ms    |
+| rev-list -50000               |  482ms     |    46ms    |
+| rev-list -100000              |  936ms     |    85ms    |
+| rev-list -200000              |  1844ms    |    178ms   |
+| rev-list -500000              |  3919ms    |    445ms   |
+
+If core.commitGraph is false, then do not check graph files.
+When core.commitGraph is true, it's important to know that RevCommit
+may not contain buffer after calling RevCommit.parseHeaders().
+To ensure the existing features of RevWalk are not affected, an
+additional check in RevWalk.next() is necessary.
+
+Bug: 574368
+Change-Id: I90d0f64af24f3acc3eae6da984eae302d338f5ee
+Signed-off-by: kylezhao <kylezhao@tencent.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Kyle Zhao
+Date: 2021-08-04 03:44:12.000000000
+Message: 
+Uploaded patch set 6: Patch Set 5 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2021-08-04 03:44:23.000000000
+Message: 
+Patch Set 6:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/5265/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2021-08-04 04:06:05.000000000
+Message: 
+Patch Set 6: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/5265/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Martin Fick
+Date: 2021-10-08 18:54:25.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+Line:224, org.eclipse.jgit/src/org/eclipse/jgit/revwalk/RevCommit.java -> Instead of shuffling data from a CommitData to the RevCommit, would it make more sense to make the CommitGraph able to return a RevCommit that is a CommitData?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Martin Fick
+Date: 2021-10-08 19:00:42.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+Line:20, /COMMIT_MSG -> Can you also post some numbers for much smaller counts? I am also interested in small counts on repos with massive commit counts, perhaps such as the chromium project?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Martin Fick
+Date: 2021-10-13 19:45:06.000000000
+MISMATCHED INLINE COMMENT
+Line:20, /COMMIT_MSG -> I guess by small counts, I meant like 1. :) What I am really trying to gather is whether there is a now a startup cost of reading the entire commit graph that could impact small walks, or RevCommit parsing, which would not be there without commit graphs. Could you quantify this cost somehow, and in which situations it might be possible to see a performance degradation due to this?
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2022-11-18 07:31:13.000000000
+MISMATCHED INLINE COMMENT
+Line:20, /COMMIT_MSG -> I mentioned the startup cost of reading the entire commit-graph in the commit message.
+
+> The startup cost of reading the entire commit graph is small. After
+> testing, reading a commit-graph with 1 million commits takes less than
+> 50ms. If we use RepositoryCache, it will not be initialized util the
+> commit-graph is rewritten.
+
+
+Thanks.
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2021-10-13 06:01:38.000000000
+MISMATCHED INLINE COMMENT
+Line:20, /COMMIT_MSG -> Done.
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2022-12-20 07:37:09.000000000
+MISMATCHED INLINE COMMENT
+Line:224, org.eclipse.jgit/src/org/eclipse/jgit/revwalk/RevCommit.java -> > @Martin: the owner of the RevCommit instances is the RevWalk. If we want the commit graph to instantiate them, it would need access to the walk (e.g. to create the RevCommits for the parents of commit). This way (copying), we keep the graph unaware of the walk.
+> 
+> I think that if we implement commit-data as a "pointer" to the byte[] in the graph, we could even do only Commit-graph -> RevCommit, instead of Commit-graph -> Commit-data -> RevCommit (saving one copy of the data)
+
+The constructor of RevCommit is a protect method. IIUC, in order to make better use of RevWalk's cache (Revwalk#objects, which contains the commits that have been visited), it is designed to be generated only by RevWalk. 
+
+For JGit, we usually use RevWalk#lookupCommit to find RevCommit instance first, and then parse its headers through RevWalk#parseHeaders(). Only in this way can ensure that the RevCommit we get is the same as the RevCommit we flagged before (RevCommit instance reuse).
+
+If use CommitGraph to directly generate RevCommit, it is likely to break this rule.
+
+Because tree, parents, etc. are all private variables. Unless we get the entire GraphCommitData#data[] in RevCommit, it's diffcult to avoid one copy of data.
+
+But in this case, I feel that the code of RevCommit would become very difficult to understand.
+----------------------------------------------------------------------------------------------------------------------
+Author: Demetr Starshov
+Date: 2022-10-26 23:34:31.000000000
+MISMATCHED INLINE COMMENT
+Line:224, org.eclipse.jgit/src/org/eclipse/jgit/revwalk/RevCommit.java -> I believe RevCommit should be the one. For example if we use generation numbers V2 (to be implemented) they consist from 2 parts:
+1. Commit date which might be obtained from any source
+2. Fix value that is stored in 2 commit graph chunks
+
+So we really should have both in order to use it and commit is the most convenient place to keep it.
+----------------------------------------------------------------------------------------------------------------------
+Author: Ivan Frade
+Date: 2023-01-10 18:09:34.000000000
+MISMATCHED INLINE COMMENT
+Line:224, org.eclipse.jgit/src/org/eclipse/jgit/revwalk/RevCommit.java -> I think this comment can be resolved. @Martin please unresolve and comment if needed.
+----------------------------------------------------------------------------------------------------------------------
+Author: Ivan Frade
+Date: 2022-12-09 05:32:30.000000000
+MISMATCHED INLINE COMMENT
+Line:224, org.eclipse.jgit/src/org/eclipse/jgit/revwalk/RevCommit.java -> @Martin: the owner of the RevCommit instances is the RevWalk. If we want the commit graph to instantiate them, it would need access to the walk (e.g. to create the RevCommits for the parents of commit). This way (copying), we keep the graph unaware of the walk.
+
+I think that if we implement commit-data as a "pointer" to the byte[] in the graph, we could even do only Commit-graph -> RevCommit, instead of Commit-graph -> Commit-data -> RevCommit (saving one copy of the data)
+----------------------------------------------------------------------------------------------------------------------

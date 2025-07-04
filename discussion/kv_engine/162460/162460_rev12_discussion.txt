@@ -1,0 +1,125 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-48506: Use cursor 'distance' for getting to a O(1) splice at expel
+
+Splicing out items to expel from Checkpoint::toWrite is executed under
+CM::queueLock and it's currenlty O(N) in toWrite.size(). Which can be
+very expensive when the size of the checkpoint queue grows.
+
+This patch turns toWrite from std::list to boost::container::list and
+and make use of the boost's splice(range, distance) API, which is a
+O(1) operation.
+
+Summary of benchs results:
+- On all configurations but Memory/Open, at this point we have removed
+  all the O(N) components of CM::extractItemsToExpel, so benchs show the
+  new constant asymptotic behaviour;
+- On those configurations, in absolute terms the O(1) splice allows to
+  drop the runtime to up to 80% in the 10k scenario (runtime ~ from
+  80us to 15us)
+- Unfortunately that isn't the case for Memory/Open. Updating the
+  KeyIndex is linear, so that still makes the operation linear and much
+  slower than all the other configurations.
+
+$ ./ep_engine_benchmarks --benchmark_filter="ExtractItemsToExpel" --benchmark_repetitions=10
+Run on (24 X 2252.21 MHz CPU s)
+CPU Caches:
+  L1 Data 32 KiB (x12)
+  L1 Instruction 32 KiB (x12)
+  L2 Unified 256 KiB (x12)
+  L3 Unified 15360 KiB (x2)
+
+------------------------------------------------------------------------------------------------------------
+Benchmark                                                                  Time             CPU   Iterations
+------------------------------------------------------------------------------------------------------------
+
+[BEFORE]
+
+$ ./ep_engine_benchmarks --benchmark_filter="ExtractItemsToExpel/0/0/"
+CheckpointBench/ExtractItemsToExpel/0/0/1/iterations:1_median           8501 ns         7120 ns           10 type:Disk state:Open items:1
+CheckpointBench/ExtractItemsToExpel/0/0/10/iterations:1_median          8792 ns         7240 ns           10 type:Disk state:Open items:10
+CheckpointBench/ExtractItemsToExpel/0/0/100/iterations:1_median        10069 ns         8252 ns           10 type:Disk state:Open items:100
+CheckpointBench/ExtractItemsToExpel/0/0/1000/iterations:1_median       14141 ns        11703 ns           10 type:Disk state:Open items:1000
+CheckpointBench/ExtractItemsToExpel/0/0/10000/iterations:1_median      79859 ns        75384 ns           10 type:Disk state:Open items:10000
+
+$ ./ep_engine_benchmarks --benchmark_filter="ExtractItemsToExpel/0/1/"
+CheckpointBench/ExtractItemsToExpel/0/1/1/iterations:1_median           8199 ns         6796 ns           10 type:Disk state:Closed items:1
+CheckpointBench/ExtractItemsToExpel/0/1/10/iterations:1_median          8333 ns         6841 ns           10 type:Disk state:Closed items:10
+CheckpointBench/ExtractItemsToExpel/0/1/100/iterations:1_median         9488 ns         7753 ns           10 type:Disk state:Closed items:100
+CheckpointBench/ExtractItemsToExpel/0/1/1000/iterations:1_median       14994 ns        12487 ns           10 type:Disk state:Closed items:1000
+CheckpointBench/ExtractItemsToExpel/0/1/10000/iterations:1_median      78578 ns        74081 ns           10 type:Disk state:Closed items:10000
+
+$ ./ep_engine_benchmarks --benchmark_filter="ExtractItemsToExpel/1/0/"
+CheckpointBench/ExtractItemsToExpel/1/0/1/iterations:1_median           9485 ns         8079 ns           10 type:Memory state:Open items:1
+CheckpointBench/ExtractItemsToExpel/1/0/10/iterations:1_median         10252 ns         8848 ns           10 type:Memory state:Open items:10
+CheckpointBench/ExtractItemsToExpel/1/0/100/iterations:1_median        20385 ns        18819 ns           10 type:Memory state:Open items:100
+CheckpointBench/ExtractItemsToExpel/1/0/1000/iterations:1_median      112697 ns       110735 ns           10 type:Memory state:Open items:1000
+CheckpointBench/ExtractItemsToExpel/1/0/10000/iterations:1_median    1176331 ns      1172218 ns           10 type:Memory state:Open items:10000
+
+$ ./ep_engine_benchmarks --benchmark_filter="ExtractItemsToExpel/1/1/"
+CheckpointBench/ExtractItemsToExpel/1/1/1/iterations:1_median           8378 ns         6939 ns           10 type:Memory state:Closed items:1
+CheckpointBench/ExtractItemsToExpel/1/1/10/iterations:1_median          8464 ns         6984 ns           10 type:Memory state:Closed items:10
+CheckpointBench/ExtractItemsToExpel/1/1/100/iterations:1_median         9384 ns         7731 ns           10 type:Memory state:Closed items:100
+CheckpointBench/ExtractItemsToExpel/1/1/1000/iterations:1_median       13892 ns        11447 ns           10 type:Memory state:Closed items:1000
+CheckpointBench/ExtractItemsToExpel/1/1/10000/iterations:1_median      78589 ns        73939 ns           10 type:Memory state:Closed items:10000
+
+[AFTER]
+
+$ ./ep_engine_benchmarks --benchmark_filter="ExtractItemsToExpel/0/0/"
+CheckpointBench/ExtractItemsToExpel/0/0/1/iterations:1_median           8348 ns         7102 ns           10 type:Disk state:Open items:1
+CheckpointBench/ExtractItemsToExpel/0/0/10/iterations:1_median          8523 ns         7283 ns           10 type:Disk state:Open items:10
+CheckpointBench/ExtractItemsToExpel/0/0/100/iterations:1_median         8620 ns         7248 ns           10 type:Disk state:Open items:100
+CheckpointBench/ExtractItemsToExpel/0/0/1000/iterations:1_median        9935 ns         8007 ns           10 type:Disk state:Open items:1000
+CheckpointBench/ExtractItemsToExpel/0/0/10000/iterations:1_median      15255 ns        11435 ns           10 type:Disk state:Open items:10000
+
+$ ./ep_engine_benchmarks --benchmark_filter="ExtractItemsToExpel/0/1/"
+CheckpointBench/ExtractItemsToExpel/0/1/1/iterations:1_median           8084 ns         6799 ns           10 type:Disk state:Closed items:1
+CheckpointBench/ExtractItemsToExpel/0/1/10/iterations:1_median          8550 ns         7012 ns           10 type:Disk state:Closed items:10
+CheckpointBench/ExtractItemsToExpel/0/1/100/iterations:1_median         7998 ns         6666 ns           10 type:Disk state:Closed items:100
+CheckpointBench/ExtractItemsToExpel/0/1/1000/iterations:1_median        9678 ns         7499 ns           10 type:Disk state:Closed items:1000
+CheckpointBench/ExtractItemsToExpel/0/1/10000/iterations:1_median      14685 ns        10356 ns           10 type:Disk state:Closed items:10000
+
+$ ./ep_engine_benchmarks --benchmark_filter="ExtractItemsToExpel/1/0/"
+CheckpointBench/ExtractItemsToExpel/1/0/1/iterations:1_median           9105 ns         7953 ns           10 type:Memory state:Open items:1
+CheckpointBench/ExtractItemsToExpel/1/0/10/iterations:1_median          9965 ns         8858 ns           10 type:Memory state:Open items:10
+CheckpointBench/ExtractItemsToExpel/1/0/100/iterations:1_median        19845 ns        18528 ns           10 type:Memory state:Open items:100
+CheckpointBench/ExtractItemsToExpel/1/0/1000/iterations:1_median      109609 ns       107682 ns           10 type:Memory state:Open items:1000
+CheckpointBench/ExtractItemsToExpel/1/0/10000/iterations:1_median    1130436 ns      1126949 ns           10 type:Memory state:Open items:10000
+
+$ ./ep_engine_benchmarks --benchmark_filter="ExtractItemsToExpel/1/1/"
+CheckpointBench/ExtractItemsToExpel/1/1/1/iterations:1_median           8561 ns         7065 ns           10 type:Memory state:Closed items:1
+CheckpointBench/ExtractItemsToExpel/1/1/10/iterations:1_median          8378 ns         7004 ns           10 type:Memory state:Closed items:10
+CheckpointBench/ExtractItemsToExpel/1/1/100/iterations:1_median         8591 ns         7066 ns           10 type:Memory state:Closed items:100
+CheckpointBench/ExtractItemsToExpel/1/1/1000/iterations:1_median        9675 ns         7520 ns           10 type:Memory state:Closed items:1000
+CheckpointBench/ExtractItemsToExpel/1/1/10000/iterations:1_median      14517 ns        10394 ns           10 type:Memory state:Closed items:10000
+
+Change-Id: I30a6623750ce8639112edbe0c7c155348be5d358
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2021-10-08 10:01:16.000000000
+Message: 
+Uploaded patch set 12: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2021-10-08 10:16:53.000000000
+Message: 
+Patch Set 12: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2021-10-08 12:08:24.000000000
+Message: 
+Patch Set 12: Verified+1
+
+Unrelated/known at http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/34818/.
+Plus the last patchset contains just a new assert that doesn't change the original logic that got CV+1 in previous run.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2021-10-08 12:09:20.000000000
+Message: 
+Removed Verified-1 by Build Bot <build@couchbase.com>
+
+----------------------------------------------------------------------------------------------------------------------

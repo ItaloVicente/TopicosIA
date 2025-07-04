@@ -1,0 +1,329 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-46279 Send synchronous refresh to memcached
+
+The refresh message from ns_server to memcached is now synchronous.
+memcached will not respond to the message until it has completed
+processing of the config file. This eliminates the race present when
+the message was sent asynchronously. The exception is at memcached
+bootstrap time where it accesses the file without a refresh message.
+The ns_server rename/retry logic handles that case.
+
+Change-Id: I6213e8faac9b1d7e4a7e34b7f89376be41c4cf3d
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Steve Watanabe
+Date: 2021-06-22 22:00:24.000000000
+Message: 
+Uploaded patch set 12.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-06-22 22:00:34.000000000
+Message: 
+Patch Set 12: -Well-Formed
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-test/24273/
+----------------------------------------------------------------------------------------------------------------------
+Author: Meni Hillel
+Date: 2021-06-22 22:14:04.000000000
+Message: 
+Patch Set 12:
+
+(1 comment)
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-06-22 22:21:54.000000000
+Message: 
+Patch Set 12:
+
+(1 comment)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-06-22 22:29:14.000000000
+Message: 
+Patch Set 12: Well-Formed+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/ns-server-test/24273/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-06-22 22:49:24.000000000
+Message: 
+Patch Set 12: Verified+1
+
+make simple-test
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-06-22 22:49:32.000000000
+Message: 
+Patch Set 12:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-simple-test/2470/
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2021-06-22 23:03:07.000000000
+Message: 
+Patch Set 12: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2021-06-22 23:04:31.000000000
+Message: 
+Patch Set 12: -Code-Review
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-06-22 23:31:41.000000000
+Message: 
+Patch Set 12: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/ns-server-simple-test/2470/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2021-06-22 23:52:34.000000000
+Message: 
+Patch Set 12:
+
+(1 comment)
+
+Overall I have problems understanding how this code works. We have some async refreshes and some sync ones and maintain the list of refresh requests just to support the async ones which happen only after init. I would say if you want file:rename never happen during the sync refresh you can simply execute file:rename in the same process which calls sync refresh commands. Which is memcached_refresh.
+Line:224, src/memcached_cfg.erl -> Why do we need this and how this is related to refresh being synchronous?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-06-23 00:10:37.000000000
+Message: 
+Patch Set 12:
+
+(1 comment)
+Line:224, src/memcached_cfg.erl -> the Module:refresh() is now a synchronous call with this change. The reason is that memcached will not respond back to the command until after it is done with the "shared" file. This avoids the races which are seen when the refresh is done asynchronously. During start up memcached may not yet be running or may not yet be accepting connections so the synchronous refresh will return an error and this code will retry.
+
+The rename_and_refresh involves:
+1) a rename of the file. This can fail if memcached has the file open. Since the refresh is done synchronously this will only happen during memcached bootstrap where it is accessing the file without a refresh from ns_server.
+2) The synchronous refresh from ns_server to memcached prevents ns_server from trying to write another config while memcached has the file open. This will fail if memcached is not running or isn't yet accepting connections.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-06-23 00:15:35.000000000
+Message: 
+Patch Set 12:
+
+> Patch Set 12:
+> 
+> (1 comment)
+> 
+> Overall I have problems understanding how this code works. We have some async refreshes and some sync ones and maintain the list of refresh requests just to support the async ones which happen only after init. I would say if you want file:rename never happen during the sync refresh you can simply execute file:rename in the same process which calls sync refresh commands. Which is memcached_refresh.
+
+When I made the one from init a synchronous call the system hung. I wonder if the one from init isn't needed if memcached will process the file on bootstrap anyway.
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-06-23 00:18:53.000000000
+Message: 
+Patch Set 12: -Verified
+
+> Patch Set 12:
+> 
+> > Patch Set 12:
+> > 
+> > (1 comment)
+> > 
+> > Overall I have problems understanding how this code works. We have some async refreshes and some sync ones and maintain the list of refresh requests just to support the async ones which happen only after init. I would say if you want file:rename never happen during the sync refresh you can simply execute file:rename in the same process which calls sync refresh commands. Which is memcached_refresh.
+> 
+> When I made the one from init a synchronous call the system hung. I wonder if the one from init isn't needed if memcached will process the file on bootstrap anyway.
+
+I might be mis-remembering this case.  I need to look again.
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-06-23 00:24:13.000000000
+Message: 
+Patch Set 12:
+
+> Patch Set 12: -Verified
+> 
+> > Patch Set 12:
+> > 
+> > > Patch Set 12:
+> > > 
+> > > (1 comment)
+> > > 
+> > > Overall I have problems understanding how this code works. We have some async refreshes and some sync ones and maintain the list of refresh requests just to support the async ones which happen only after init. I would say if you want file:rename never happen during the sync refresh you can simply execute file:rename in the same process which calls sync refresh commands. Which is memcached_refresh.
+> > 
+> > When I made the one from init a synchronous call the system hung. I wonder if the one from init isn't needed if memcached will process the file on bootstrap anyway.
+> 
+> I might be mis-remembering this case.  I need to look again.
+
+In this code in memcached_refresh can the sending of the refresh be removed? If memcached is running then it's already running then it's already accessing or has accessed the files. If any changes are made to isasl/ssl_certs/rbac then a new refresh will be done.
+
+init([]) ->
+    ToRestart =
+        case ns_ports_manager:find_port(ns_server:get_babysitter_node(), memcached) of
+            Pid when is_pid(Pid) ->
+                ?log_debug("Starting during memcached lifetime. Try to refresh all files."),
+                self() ! refresh,
+                [isasl, ssl_certs, rbac];
+            _ ->
+                []
+        end,
+    {ok, ToRestart}.
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2021-06-23 00:45:26.000000000
+Message: 
+Patch Set 12:
+
+> Patch Set 12:
+> 
+> > Patch Set 12: -Verified
+> > 
+> > > Patch Set 12:
+> > > 
+> > > > Patch Set 12:
+> > > > 
+> > > > (1 comment)
+> > > > 
+> > > > Overall I have problems understanding how this code works. We have some async refreshes and some sync ones and maintain the list of refresh requests just to support the async ones which happen only after init. I would say if you want file:rename never happen during the sync refresh you can simply execute file:rename in the same process which calls sync refresh commands. Which is memcached_refresh.
+> > > 
+> > > When I made the one from init a synchronous call the system hung. I wonder if the one from init isn't needed if memcached will process the file on bootstrap anyway.
+> > 
+> > I might be mis-remembering this case.  I need to look again.
+> 
+> In this code in memcached_refresh can the sending of the refresh be removed? If memcached is running then it's already running then it's already accessing or has accessed the files. If any changes are made to isasl/ssl_certs/rbac then a new refresh will be done.
+> 
+> init([]) ->
+>     ToRestart =
+>         case ns_ports_manager:find_port(ns_server:get_babysitter_node(), memcached) of
+>             Pid when is_pid(Pid) ->
+>                 ?log_debug("Starting during memcached lifetime. Try to refresh all files."),
+>                 self() ! refresh,
+>                 [isasl, ssl_certs, rbac];
+>             _ ->
+>                 []
+>         end,
+>     {ok, ToRestart}.
+
+This code is there because memcached_refresh might crash for whatever reason and lose refresh requests. So when it is started again it performs all 3 just to be on the side of caution.
+----------------------------------------------------------------------------------------------------------------------
+Author: Meni Hillel
+Date: 2021-06-23 00:55:03.000000000
+Message: 
+Patch Set 12: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-06-23 00:59:19.000000000
+Message: 
+Patch Set 12:
+
+> Patch Set 12:
+> 
+> > Patch Set 12:
+> > 
+> > > Patch Set 12: -Verified
+> > > 
+> > > > Patch Set 12:
+> > > > 
+> > > > > Patch Set 12:
+> > > > > 
+> > > > > (1 comment)
+> > > > > 
+> > > > > Overall I have problems understanding how this code works. We have some async refreshes and some sync ones and maintain the list of refresh requests just to support the async ones which happen only after init. I would say if you want file:rename never happen during the sync refresh you can simply execute file:rename in the same process which calls sync refresh commands. Which is memcached_refresh.
+> > > > 
+> > > > When I made the one from init a synchronous call the system hung. I wonder if the one from init isn't needed if memcached will process the file on bootstrap anyway.
+> > > 
+> > > I might be mis-remembering this case.  I need to look again.
+> > 
+> > In this code in memcached_refresh can the sending of the refresh be removed? If memcached is running then it's already running then it's already accessing or has accessed the files. If any changes are made to isasl/ssl_certs/rbac then a new refresh will be done.
+> > 
+> > init([]) ->
+> >     ToRestart =
+> >         case ns_ports_manager:find_port(ns_server:get_babysitter_node(), memcached) of
+> >             Pid when is_pid(Pid) ->
+> >                 ?log_debug("Starting during memcached lifetime. Try to refresh all files."),
+> >                 self() ! refresh,
+> >                 [isasl, ssl_certs, rbac];
+> >             _ ->
+> >                 []
+> >         end,
+> >     {ok, ToRestart}.
+> 
+> This code is there because memcached_refresh might crash for whatever reason and lose refresh requests. So when it is started again it performs all 3 just to be on the side of caution.
+
+> I would say if you want file:rename never happen during the sync refresh you can simply execute file:rename in the same process which calls sync refresh commands. Which is memcached_refresh.
+
+The problem is that anytime ns_server does a file:rename, memcached could be bootstrapping and have the config file open. That's the reason the rename has to be retried.
+
+The reason the synchronous refresh from ns_server to memcached is done is to prevent ns_server from trying to do a subsequent writing of new config and then another rename. As long as the synchronous refresh is outstanding we know memcached has the file open.
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2021-06-23 01:00:01.000000000
+Message: 
+Patch Set 12: Code-Review-2
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-06-23 01:20:13.000000000
+Message: 
+Patch Set 12:
+
+> Patch Set 12: Code-Review-2
+
+Please expand on you suggestion for handling this.
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-06-24 20:54:49.000000000
+Message: 
+Removed reviewer Artem Stemkovski with the following votes:
+
+* Code-Review-2 by Artem Stemkovski <artem@couchbase.com>
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-06-24 20:54:50.000000000
+Message: 
+Removed reviewer Meni Hillel with the following votes:
+
+* Code-Review+2 by Meni Hillel <meni.hillel@couchbase.com>
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-06-24 20:54:52.000000000
+Message: 
+Removed reviewer Aliaksey Artamonau.
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-06-24 20:54:53.000000000
+Message: 
+Removed reviewer Pavel Blagodov.
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-06-24 20:54:55.000000000
+Message: 
+Removed reviewer Dave Finlay.
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-06-24 20:54:57.000000000
+Message: 
+Removed reviewer Abhijeeth Nuthan.
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-06-24 20:54:57.000000000
+Message: 
+Removed reviewer Timofey Barmin.
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-06-24 20:54:58.000000000
+Message: 
+Removed reviewer Raluca Lupu.
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-06-24 20:55:00.000000000
+Message: 
+Removed reviewer null.
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-06-24 20:55:01.000000000
+Message: 
+Removed reviewer Bryan McCoid.
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,101 @@
+======================================================================================================================
+DESCRIPTION:
+
+Correctly handle initialization of shallow commits
+
+In a new RevWalk, if the first object parsed is one of the
+shallow commits, the following happens:
+1) RevCommit.parseCanonical() is called on a new "r1" RevCommit.
+2) RevCommit.parseCanonical() immediately calls
+   RevWalk.initializeShallowCommits().
+3) RevWalk.initializeShallowCommits() calls lookupCommit(id),
+   creating and adding a new "r2" version of this same object and
+   marking its parents empty.
+4) RevCommit.parseCanonical() initializes the "r1" RevCommit's
+   fields, including the parents.
+5) RevCommit.parseCanonical()'s caller uses the "r1" commit that
+   has parents, losing the fact that it is a shallow commit.
+
+This change passes the current RevCommit as an argument to
+RevWalk.initializeShallowCommits() so that method can set its
+parents empty rather than creating the duplicate "r2" commit.
+
+Change-Id: I67b79aa2927dd71ac7b0d8f8917f423dcaf08c8a
+Signed-off-by: Terry Parker <tparker@google.com>
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Terry Parker
+Date: 2018-06-27 00:24:20.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-06-27 00:24:27.000000000
+Message: 
+Patch Set 1:
+
+Build Started https://ci.eclipse.org/jgit/job/jgit.gerrit/13464/
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonathan Nieder
+Date: 2018-06-27 00:37:33.000000000
+Message: 
+Patch Set 1:
+
+(2 comments)
+Line:172, org.eclipse.jgit/src/org/eclipse/jgit/revwalk/RevCommit.java -> An alternative we discussed is to move this call to RevWalk#createCommit. That way, it's not possible to create a RevCommit without shallow commits being initialized first.
+
+I think I'd be more comfortable with that approach because of that guarantee. Is the problem that subclasses that override createCommit would lose the check? If so, would it make sense to move this call to a wrapper around createCommit or put calls at all createCommit call sites?
+
+Looking over those call sites, I see only three: lookupCommit, lookupAny, and parseNew. Looking at where the parents field gets written, I see RevCommit#parseCanonical, RewriteGenerator#next, and TreeRevFilter#include (twice). I *think* that this place captures all cases, but if any new call sites are introduced then the problem could occur again. Should the javadoc comment for createCommit discuss this issue?
+
+Line:1463, org.eclipse.jgit/src/org/eclipse/jgit/revwalk/RevWalk.java -> This is subtle, so it deserves a comment.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-06-27 00:43:52.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/jgit.gerrit/13464/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Terry Parker
+Date: 2018-06-27 01:23:40.000000000
+Message: 
+Patch Set 1:
+
+(2 comments)
+Line:172, org.eclipse.jgit/src/org/eclipse/jgit/revwalk/RevCommit.java -> Yes, RevWalk#createCommit() is a protected method that is frequently overridden in subclasses and it is public API, so it isn't a good candidate for enforcing this. Given that it is public API I don't see an easy way to enforce that all clients call a wrapper around it.
+
+The RevCommit#parents field is left null until parseCanonical or initializeShallowCommits sets it. So as long as parseCanonical and initializeShallowCommits cooperate, we are ok. I don't think that is a worse situation than having all createCommit call sites cooperate.
+
+Line:1463, org.eclipse.jgit/src/org/eclipse/jgit/revwalk/RevWalk.java -> Done
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonathan Nieder
+Date: 2018-06-27 01:31:03.000000000
+MISMATCHED INLINE COMMENT
+Line:172, org.eclipse.jgit/src/org/eclipse/jgit/revwalk/RevCommit.java -> Indeed RevWalk#createCommit is protected, so we couldn't easily change the implementer contract for it without e.g. changing its name.
+
+On the other hand, we could do something like
+
+  RevCommit newCommit(AnyObjectId id) {
+    if (!walk.shallowCommitsInitialized) {
+      walk.initializeShallowCommits();
+    }
+    return createCommit(id);
+  }
+
+Then the three createCommit call sites could switch to using newCommit instead.
+
+The createCommit call sites having to cooperate doesn't seem so bad to me; after all, ill behaved callers can also call `new RevCommit(id)` directly, but they don't.
+
+With the comment you added to initializeShallowCommits, I think the code is already clear enough. Thanks for the patient explanations.
+----------------------------------------------------------------------------------------------------------------------
+Author: Terry Parker
+Date: 2018-06-27 03:14:08.000000000
+MISMATCHED INLINE COMMENT
+Line:172, org.eclipse.jgit/src/org/eclipse/jgit/revwalk/RevCommit.java -> Ack
+----------------------------------------------------------------------------------------------------------------------

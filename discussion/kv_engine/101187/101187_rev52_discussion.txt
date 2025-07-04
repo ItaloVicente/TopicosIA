@@ -1,0 +1,97 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-31869: Provide ability for consumer to not buffer DCP messages
+
+First, let's sum up how FlowControl currently works. That is related to
+Replication Throttling and DCP buffering at Consumer.
+
+1) Producer and Consumer negotiates a max DCP buffer size when the DCP
+connection is initialized. This buffer size becomes the size of the
+BufferLog at Producer, see below.
+
+2) The Producer starts sending messages to the Consumer. The Producer
+adds the number of bytes sent to its BufferLog. The Consumer receives
+messages and acks back the bytes received to the Producer via BufferAck.
+
+3) The Producer receives BufferAcks and removes bytes from its
+BufferLog.
+
+4) The Producer pause if the BufferLog is full. That happens when (for
+any reason) the Consumer delays in ingesting the inbound DCP traffic.
+
+As (4) suggests, OOM at Consumer is only one reason why the Consumer may
+delay in processing incoming DCP messages and acking bytes back to the
+Producer.
+
+And now on Replication Throttling.
+Replication Throttling guards the Consumer for OOM. We have a
+Replication Throttling Threshold (defaulted to 99% of the bucket quota)
+which is where the Consumer stops processing the received DCP messages.
+
+The Consumer acks back to the Producer only bytes of messages processed.
+So again, if Throttling kicks is then the Consumer stops acking bytes back
+to the Producer. This time for an OOM condition.
+
+Now on the DCP buffering at Consumer, which is the core of this patch.
+How does that fit in what I have described above?
+When the Consumer hits OOM, it stops processing messages by adding them
+into each PassiveStream::buffer. Bytes for buffered messages are *not*
+acked, which means that at some point the BufferLog at Producer becomes
+full and replication pauses.
+
+This patch just provides an alternative to buffering at Consumer. Rather
+than buffering messages we just pause the Consumer when we hit OOM.
+That means not draining the inbound socket buffer at Consumer and not
+acking bytes back to the Producer. As soon as we recover from the OOM
+condition, we unpause the Consumer and everyting proceed as usual. Which
+leaves the throttling mechanism logically unchanged.
+
+First of all, that simplifies the logic considerably at Consumer in an
+area that has already caused issues (eg, MB-31547).
+Plus, doing extra buffering on a node that has already hit OOM doesn't
+really help.
+
+A configuration parameter is provided to allow easy switching between
+using the buffer or not. Once we have gained confidence in not using
+the buffer the switch and associated buffering code will be removed.
+
+Change-Id: I1e87caeddd3f520c7eb1ee7ccf77043461df9d0b
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2020-09-22 10:16:33.000000000
+Message: 
+Uploaded patch set 52.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-09-22 10:22:50.000000000
+Message: 
+Patch Set 52: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/30590/ : ABORTED
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/30590/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/5013/ : ABORTED
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/5920/ : ABORTED
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/5920/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/6036/ : ABORTED
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/6036/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/6161/ : ABORTED
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/6161/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/13832/ : ABORTED
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/13832/ )
+----------------------------------------------------------------------------------------------------------------------

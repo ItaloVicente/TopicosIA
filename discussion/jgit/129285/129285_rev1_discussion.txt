@@ -1,0 +1,157 @@
+======================================================================================================================
+DESCRIPTION:
+
+UploadPack: support deepen-since in protocol v2
+
+Support the deepen-since parameter when requested by a client using
+protocol v2. This is done by:
+ - adding a DepthWalk.RevWalk#setShallowSince method
+ - updating DepthGenerator to recognize when shallow-since is set
+ - recording in DepthWalk.Commit whether a commit is a boundary commit
+
+Existing users of DepthWalk such as UploadPack previously recognized
+boundary commits by comparing their depths against the threshold, not
+tracking whether any parents were truly excluded. This behavior is
+preserved - UploadPack considers a commit as boundary if its depth is
+equal to the threshold *or* a parent was excluded (whether by depth or
+by shallow-since).
+
+Change-Id: I852bba6b1279f9cc8aee38282e9339d62b8dcddc
+Signed-off-by: Jonathan Tan <jonathantanmy@google.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jonathan Tan
+Date: 2018-09-12 20:02:18.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-09-12 20:02:29.000000000
+Message: 
+Patch Set 1:
+
+Build Started https://ci.eclipse.org/jgit/job/jgit.gerrit/14038/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-09-12 20:32:48.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/jgit.gerrit/14038/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonathan Tan
+Date: 2018-09-20 17:07:25.000000000
+Message: 
+Patch Set 1:
+
+For what it's worth, I have checked interoperability with the C implementation of Git using the following script:
+
+#!/bin/bash
+
+rm -rf shallowsince &&
+mkdir shallowsince &&
+(
+	cd shallowsince &&
+	git init client &&
+	(
+		cd client &&
+		GIT_COMMITTER_DATE=2018-01-01T12:00:00 git commit --allow-empty -m x &&
+		GIT_COMMITTER_DATE=2018-01-01T13:00:00 git commit --allow-empty -m y
+	) &&
+	git clone --depth=1 "file://$(pwd)/client" shallowclient &&
+
+	cp -r client server &&
+	(
+		cd server &&
+		git checkout --orphan another &&
+		GIT_COMMITTER_DATE=2018-01-01T11:00:00 git commit --allow-empty -m w &&
+		git tag w &&
+		GIT_COMMITTER_DATE=2018-01-01T14:00:00 git merge \
+			--allow-unrelated-histories --no-edit --no-ff master
+	) &&
+	
+	touch server/.git/git-daemon-export-ok
+	~/egit-master/git/jgit/bazel-bin/org.eclipse.jgit.pgm/jgit daemon . &
+	PID=$!
+	sleep 2
+
+	echo
+	printf "another is "
+	git -C server rev-parse another
+	printf "w is "
+	git -C server rev-parse w
+	printf "master is "
+	git -C server rev-parse master
+	printf "master^ is "
+	git -C server rev-parse master^
+	echo
+
+	GIT_TRACE_PACKET="$(pwd)/trace" git -C shallowclient fetch \
+		--shallow-since=2018-01-01T12:00:00 git://localhost:9418/server another
+
+	# Ensure that the expected commits exist and don't exist
+	git -C shallowclient cat-file -e $(git -C server rev-parse another)
+	echo "Exit code is" $?
+	! git -C shallowclient cat-file -e $(git -C server rev-parse w)
+	echo "Exit code is" $?
+	git -C shallowclient cat-file -e $(git -C server rev-parse master)
+	echo "Exit code is" $?
+	git -C shallowclient cat-file -e $(git -C server rev-parse master^)
+	echo "Exit code is" $?
+
+	# Ensure that the shallow file is correct
+	test "$(cat shallowclient/.git/shallow)" == "$(git -C server rev-parse another)"
+	echo "Exit code is" $?
+
+	# Ensure that the trace is as expected
+	grep "fetch< version 2" trace &&
+	grep "fetch< shallow $(git -C server rev-parse another)" trace &&
+	grep "fetch< unshallow $(git -C server rev-parse master)" trace
+	echo "Exit code is" $?
+	kill $PID
+)
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonathan Nieder
+Date: 2018-09-20 17:08:31.000000000
+Message: 
+Patch Set 1:
+
+Sorry I missed this. *excited*
+----------------------------------------------------------------------------------------------------------------------
+Author: Ivan Frade
+Date: 2018-09-26 17:52:52.000000000
+Message: 
+Patch Set 1: Code-Review-1
+
+(2 comments)
+
+As part of the refactoring into a request object, "shallowSince" will be renamed to "deepenSince" (to match with the protocol argument name).
+
+I think it would be a good idea to use "deepenSince" already in this patch. Although it would look inconsistent in UploadPack, it is only
+ until 
+https://git.eclipse.org/r/#/c/129752/
+gets merged and it saves us to rename a public interface later.
+Line:62, org.eclipse.jgit/src/org/eclipse/jgit/revwalk/DepthGenerator.java -> deepenSince instead?
+
+Line:71, org.eclipse.jgit/src/org/eclipse/jgit/revwalk/DepthWalk.java -> As this is a public interface and would be hard to change later, should we use directly "deepenSince"?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonathan Tan
+Date: 2018-09-27 17:28:27.000000000
+Message: 
+Patch Set 1:
+
+(2 comments)
+
+Thanks for your review. Also updated the commit message and some variable/field names.
+
+I've left the name of UploadPack#shallowSince alone since I think you were planning to refactor that anyway.
+Line:62, org.eclipse.jgit/src/org/eclipse/jgit/revwalk/DepthGenerator.java -> Done
+
+Line:71, org.eclipse.jgit/src/org/eclipse/jgit/revwalk/DepthWalk.java -> Done
+
+----------------------------------------------------------------------------------------------------------------------

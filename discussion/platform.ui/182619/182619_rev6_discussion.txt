@@ -1,0 +1,398 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 574556 - proper concurrency control instead of dubious sleeping
+
+Avoids a Thread.sleep(5) during each Eclipse start.
+
+Change-Id: I92760bd655b64c70e0fa629b613ecd72ecb2febf
+Signed-off-by: Joerg Kubitz <jkubitz-eclipse@gmx.de>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Lars Vogel
+Date: 2021-09-16 11:24:03.000000000
+Message: 
+Patch Set 6: Patch Set 5 was rebased
+----------------------------------------------------------------------------------------------------------------------
+Author: Lars Vogel
+Date: 2021-09-16 11:24:58.000000000
+Message: 
+Patch Set 6:
+
+Jörg, not sure what the status here is but if you still plan to merge this, please do it early in the 4.22 release cycle so that this startup change will get good testing.
+----------------------------------------------------------------------------------------------------------------------
+Author: Platform Bot
+Date: 2021-09-16 11:30:54.000000000
+Message: 
+Patch Set 6:
+
+Build started https://ci.eclipse.org/platform/job/eclipse.platform.ui/job/19%252F182619%252F6/1/
+----------------------------------------------------------------------------------------------------------------------
+Author: Andrey Loskutov
+Date: 2021-09-16 11:32:36.000000000
+Message: 
+Patch Set 6: Code-Review-1
+
+(1 comment)
+Line:9, /COMMIT_MSG -> That is the side effect, but where is the technical reasoning for the new change? Why don't we need the old code and why the new code is better?
+
+I see discussion on the bug but that seem not to have a conclusion.
+
+So for such changes I expect that the commit provides a technical summary needed to review the patch. Right now it doesn't.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jörg Kubitz
+Date: 2021-09-16 11:37:59.000000000
+Message: 
+Patch Set 6:
+
+I do not plan to submit this, since i can not test it on systems other then windows on my own. If you could verify it on linux i may further explain why it works if you want.
+----------------------------------------------------------------------------------------------------------------------
+Author: Lars Vogel
+Date: 2021-09-16 12:03:55.000000000
+Message: 
+Patch Set 6:
+
+> Patch Set 6:
+> 
+> I do not plan to submit this, since i can not test it on systems other then windows on my own. If you could verify it on linux i may further explain why it works if you want.
+
+I verified that the Eclipse IDE starts under Linux with this change.
+----------------------------------------------------------------------------------------------------------------------
+Author: Platform Bot
+Date: 2021-09-16 12:04:16.000000000
+Message: 
+Patch Set 6: Verified+1
+
+Build Succcess https://ci.eclipse.org/platform/job/eclipse.platform.ui/job/19%252F182619%252F6/1/
+----------------------------------------------------------------------------------------------------------------------
+Author: Jörg Kubitz
+Date: 2021-09-16 12:09:51.000000000
+Message: 
+Patch Set 6:
+
+> Patch Set 6:
+> 
+> > Patch Set 6:
+> > 
+> > I do not plan to submit this, since i can not test it on systems other then windows on my own. If you could verify it on linux i may further explain why it works if you want.
+> 
+> I verified that the Eclipse IDE starts under Linux with this change.
+
+yea sure. its more the question if it ALWAYS (unconditional) will - but not only randomly fail (as reported by the 5ms bug. I'll try to get up a test for that next days.
+----------------------------------------------------------------------------------------------------------------------
+Author: Jörg Kubitz
+Date: 2021-09-17 15:51:52.000000000
+Message: 
+Patch Set 6:
+
+@Lars:
+here is a stress test:
+the users claimed runOld() would not terminate always.
+while i claim runNew() will terminate always;
+on windows its the same (so i cant test it). but on GTK and COCOA the difference is in 
+org.eclipse.swt.widgets.Synchronizer.asyncExec(Runnable) line 137 "//TEMPORARY CODE"
+
+package org.eclipse.ui.application;
+
+import java.util.function.Consumer;
+import org.eclipse.swt.widgets.Display;
+
+public class Test {
+	private volatile boolean initDone;
+
+	void run(Consumer<Display> stop) {
+		final Display display = new Display();
+		Thread initThread = new Thread() {
+			@Override
+			public void run() {
+				try {
+					// anything
+				} finally {
+					initDone = true;
+					stop.accept(display);
+				}
+			}
+		};
+		initDone = false;
+		initThread.start();
+
+		while (!initDone) {
+			if (!display.readAndDispatch()) {
+				display.sleep();
+			}
+		}
+		display.dispose();
+	}
+
+	void runNew() {
+		for (int i = 0; i < 10000; i++) {
+			run(display -> display.asyncExec(null));
+			if (i % 100 == 0)
+				System.out.println(i);
+		}
+	}
+
+	void runOld() {
+		for (int i = 0; i < 10000; i++) {
+			run(display -> display.wake());
+			if (i % 100 == 0)
+				System.out.println(i);
+		}
+	}
+
+	public static void main(String[] args) {
+		// new Test().runNew();
+		new Test().runOld();
+	}
+}
+----------------------------------------------------------------------------------------------------------------------
+Author: Lars Vogel
+Date: 2021-09-17 16:10:32.000000000
+Message: 
+Patch Set 6:
+
+> Patch Set 6:
+> 
+> @Lars:
+> here is a stress test:
+> the users claimed runOld() would not terminate always.
+> while i claim runNew() will terminate always;
+> on windows its the same (so i cant test it). but on GTK and COCOA the difference is in 
+> org.eclipse.swt.widgets.Synchronizer.asyncExec(Runnable) line 137 "//TEMPORARY CODE"
+> 
+> package org.eclipse.ui.application;
+> 
+> import java.util.function.Consumer;
+> import org.eclipse.swt.widgets.Display;
+> 
+> public class Test {
+> 	private volatile boolean initDone;
+> 
+> 	void run(Consumer<Display> stop) {
+> 		final Display display = new Display();
+> 		Thread initThread = new Thread() {
+> 			@Override
+> 			public void run() {
+> 				try {
+> 					// anything
+> 				} finally {
+> 					initDone = true;
+> 					stop.accept(display);
+> 				}
+> 			}
+> 		};
+> 		initDone = false;
+> 		initThread.start();
+> 
+> 		while (!initDone) {
+> 			if (!display.readAndDispatch()) {
+> 				display.sleep();
+> 			}
+> 		}
+> 		display.dispose();
+> 	}
+> 
+> 	void runNew() {
+> 		for (int i = 0; i < 10000; i++) {
+> 			run(display -> display.asyncExec(null));
+> 			if (i % 100 == 0)
+> 				System.out.println(i);
+> 		}
+> 	}
+> 
+> 	void runOld() {
+> 		for (int i = 0; i < 10000; i++) {
+> 			run(display -> display.wake());
+> 			if (i % 100 == 0)
+> 				System.out.println(i);
+> 		}
+> 	}
+> 
+> 	public static void main(String[] args) {
+> 		// new Test().runNew();
+> 		new Test().runOld();
+> 	}
+> }
+
+Both tests (runNew and runOld) result in the following exception from time to time.
+
+
+Exception in thread "Thread-1010" org.eclipse.swt.SWTException: Device is disposed
+	at org.eclipse.swt.SWT.error(SWT.java:4893)
+	at org.eclipse.swt.SWT.error(SWT.java:4808)
+	at org.eclipse.swt.SWT.error(SWT.java:4779)
+	at org.eclipse.swt.widgets.Display.error(Display.java:1518)
+	at org.eclipse.swt.widgets.Display.wake(Display.java:6052)
+	at org.eclipse.ui.application.Test.lambda$1(Test.java:43)
+	at org.eclipse.ui.application.Test$$Lambda$1/0x00000000010f2c80.accept(Unknown Source)
+	at org.eclipse.ui.application.Test$1.run(Test.java:18)
+----------------------------------------------------------------------------------------------------------------------
+Author: Jörg Kubitz
+Date: 2021-09-17 16:37:00.000000000
+Message: 
+Patch Set 6:
+
+we can fix that disposed - please try this:
+
+package org.eclipse.ui.application;
+
+import java.util.function.Consumer;
+import org.eclipse.swt.widgets.Display;
+
+public class Test {
+	private volatile boolean initDone;
+	private volatile boolean initDone2;
+
+	void run(Consumer<Display> stop) {
+		final Display display = new Display();
+		Thread initThread = new Thread() {
+			@Override
+			public void run() {
+				try {
+					// anything
+				} finally {
+					initDone = true;
+					stop.accept(display);
+					initDone2 = true;
+				}
+			}
+		};
+		initDone = false;
+		initDone2 = false;
+		initThread.start();
+
+		while (!initDone) {
+			if (!display.readAndDispatch()) {
+				display.sleep();
+			}
+		}
+		while (!initDone2) {
+			Thread.onSpinWait();
+		}
+		display.dispose();
+	}
+
+	void runNew() {
+		for (int i = 0; i < 10000; i++) {
+			run(display -> display.asyncExec(null));
+			if (i % 100 == 0)
+				System.out.println(i);
+		}
+	}
+
+	void runOld() {
+		for (int i = 0; i < 10000; i++) {
+			run(display -> display.wake());
+			if (i % 100 == 0)
+				System.out.println(i);
+		}
+	}
+
+	public static void main(String[] args) {
+		// new Test().runNew();
+		new Test().runOld();
+	}
+}
+----------------------------------------------------------------------------------------------------------------------
+Author: Jörg Kubitz
+Date: 2021-09-22 07:01:43.000000000
+Message: 
+Patch Set 6:
+
+@Lars: Ping, can you please run the tests given in my last comment?
+----------------------------------------------------------------------------------------------------------------------
+Author: Lars Vogel
+Date: 2021-09-22 07:50:47.000000000
+Message: 
+Patch Set 6:
+
+> Patch Set 6:
+> 
+> @Lars: Ping, can you please run the tests given in my last comment?
+
+Yes, will do. Most likely next week as I'm working for a client this week.
+----------------------------------------------------------------------------------------------------------------------
+Author: Lars Vogel
+Date: 2021-09-27 10:11:34.000000000
+Message: 
+Patch Set 6:
+
+> Patch Set 6:
+> 
+> @Lars: Ping, can you please run the tests given in my last comment?
+
+Neither the new Test().runNew(); nor the new Test().runOld(); give me an dispose error.
+----------------------------------------------------------------------------------------------------------------------
+Author: Jörg Kubitz
+Date: 2021-09-27 10:12:33.000000000
+Message: 
+Patch Set 6:
+
+> Patch Set 6:
+> 
+> > Patch Set 6:
+> > 
+> > @Lars: Ping, can you please run the tests given in my last comment?
+> 
+> Neither the new Test().runNew(); nor the new Test().runOld(); give me an dispose error.
+
+And both did terminate?
+----------------------------------------------------------------------------------------------------------------------
+Author: Lars Vogel
+Date: 2021-09-27 10:51:34.000000000
+Message: 
+Patch Set 6:
+
+> Patch Set 6:
+> 
+> > Patch Set 6:
+> > 
+> > > Patch Set 6:
+> > > 
+> > > @Lars: Ping, can you please run the tests given in my last comment?
+> > 
+> > Neither the new Test().runNew(); nor the new Test().runOld(); give me an dispose error.
+> 
+> And both did terminate?
+
+Both terminate.
+I reduced the number of iterations to 4000 and got the following timing:
+
+Old:
+
+	long epochMilli = ZonedDateTime.now().toInstant().toEpochMilli();
+		new Test().runOld();
+		 long epochMilli2 = ZonedDateTime.now().toInstant().toEpochMilli();
+		 System.out.println(epochMilli2-epochMilli);
+
+Output 241535
+#
+
+New:
+	long epochMilli = ZonedDateTime.now().toInstant().toEpochMilli();
+//		new Test().runOld();
+		new Test().runNew();
+		 long epochMilli2 = ZonedDateTime.now().toInstant().toEpochMilli();
+		 System.out.println(epochMilli2-epochMilli);
+Output: 247077
+----------------------------------------------------------------------------------------------------------------------
+Author: Jörg Kubitz
+Date: 2021-09-27 11:14:23.000000000
+Message: 
+Patch Set 6:
+
+> Patch Set 6:
+> Both terminate.
+
+On the one hand thats good on the other hand it doesnt proof that the bugfix helps. We would need a system where the old did not terminate. As long as we cannot proof that it's better to keep the current implementation.
+----------------------------------------------------------------------------------------------------------------------
+Author: Jörg Kubitz
+Date: 2021-10-08 07:29:18.000000000
+Message: 
+Abandoned
+
+As long as we do not find some Computer on which the difference is proved we better stick with the old implementation.
+----------------------------------------------------------------------------------------------------------------------

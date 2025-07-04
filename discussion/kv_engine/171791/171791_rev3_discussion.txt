@@ -1,0 +1,145 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-35297: Distinguish KVStore::scan failure vs abort
+
+KVStore::scan currently returns 3 status codes.
+
+* scan_success
+* scan_again
+* scan_failed
+
+With these 3 status codes there's no way for a scan to signal it cannot
+continue for some state change (non fatal), e.g. vbucket or stream
+closing. This limitation leads to an inefficiency that means a scan
+keeps on scanning the index, even though it is doing so pointlessly.
+For example when the vbucket goes away the callback sets status to
+engine_errc::success and returns from the callback, yet KVStore::scan
+will just keep invoking the callback for the next item in the index.
+Ideally a better solution is to return an appropriate status and allow
+that to get KVStore::scan to stop without triggering critical log or
+increment failover stats.
+
+This commit makes use of a linked couchstore change and refactors scan
+so so that the following 4 codes can now be returned.
+
+* ScanStatus::Success
+    - The scan successfully scanned all items
+
+* ScanStatus::Yield
+    - The scan has been requested to yield due to a temporary issue,
+      currently this means DCP is out of buffer space
+
+* ScanStatus::Aborted
+    - The scan cannot continue, e.g. the vbucket or stream has gone away
+
+* ScanStatus::Failed
+    - The scan failed, this is used for when couchstore hits an error,
+      e.g. some system call error or data integrity issue.
+
+With these changes, the scan can brought to a halt as soon as one of
+the scan callbacks detects the vbucket state change, setting an appropriate
+code triggering the use of Aborted.
+
+Change-Id: I40bcde6c70a11fea4a1ec9fe2b5d2d828cc55c90
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jim Walker
+Date: 2022-03-04 14:54:05.000000000
+Message: 
+Uploaded patch set 3.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-03-04 15:00:43.000000000
+Message: 
+Patch Set 3: Verified-1 Code-Review-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/15911/ : FAILURE
+
+clang-tidy found the following problems:
+
+<pre>
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy-master/kv_engine/engines/ep/src/kvstore/kvstore.cc:680:13: error: use of undeclared identifier "status"; did you mean "stat"? [clang-diagnostic-error]
+    switch (status) {
+            ^~~~~~
+            stat
+/usr/include/x86_64-linux-gnu/sys/stat.h:449:8: note: "stat" declared here
+__NTH (stat (const char *__path, struct stat *__statbuf))
+       ^
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy-master/kv_engine/engines/ep/src/kvstore/kvstore.cc:681:10: error: value of type "ScanStatus" is not implicitly convertible to "int (const char *, struct stat *) throw()" [clang-diagnostic-error]
+    case ScanStatus::Success:
+         ^
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy-master/kv_engine/engines/ep/src/kvstore/kvstore.cc:683:10: error: value of type "ScanStatus" is not implicitly convertible to "int (const char *, struct stat *) throw()" [clang-diagnostic-error]
+    case ScanStatus::Yield:
+         ^
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy-master/kv_engine/engines/ep/src/kvstore/kvstore.cc:685:10: error: value of type "ScanStatus" is not implicitly convertible to "int (const char *, struct stat *) throw()" [clang-diagnostic-error]
+    case ScanStatus::Aborted:
+         ^
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy-master/kv_engine/engines/ep/src/kvstore/kvstore.cc:687:10: error: value of type "ScanStatus" is not implicitly convertible to "int (const char *, struct stat *) throw()" [clang-diagnostic-error]
+    case ScanStatus::Failed:
+         ^
+
+</pre> ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/15911/ )
+
+Compile error at /home/couchbase/jenkins/workspace/kv_engine-clang_tidy-master/kv_engine/engines/ep/src/kvstore/kvstore.cc:680:13:
+error: use of undeclared identifier "status"; did you mean "stat"? [clang-diagnostic-error]
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/15911/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/44333/ : FAILURE
+
+Compile error at C:/Jenkins/workspace/kv_engine-windows-master/kv_engine/engines/ep/src/kvstore/kvstore.cc(680): error C2065: "status": undeclared identifier ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/44333/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/37328/ : FAILURE
+
+Compile error at /home/couchbase/jenkins/workspace/kv_engine-clang_analyzer-master/kv_engine/engines/ep/src/kvstore/kvstore.cc:680:13:
+error: use of undeclared identifier "status"; did you mean "stat"?
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/37328/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/5565/ : FAILURE
+
+Compile error at [2022-03-04T14:55:40.257Z] /home/couchbase/jenkins/workspace/kv_engine.libFuzzer_master/kv_engine/engines/ep/src/kvstore/kvstore.cc:680:13:
+error: use of undeclared identifier "status"; did you mean "stat"?
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/5565/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/17675/ : FAILURE
+
+Compile error at [2022-03-04T14:56:25.269Z] /home/couchbase/jenkins/workspace/kv_engine.linux-CE_master/kv_engine/engines/ep/src/kvstore/kvstore.cc:680:13:
+error: ?status? was not declared in this scope; did you mean ?stat64??
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/17675/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/5624/ : FAILURE
+
+Compile error at [2022-03-04T14:56:51.681Z] /home/couchbase/jenkins/workspace/kv_engine.aarch64-linux_master/kv_engine/engines/ep/src/kvstore/kvstore.cc:680:13:
+error: ?status? was not declared in this scope; did you mean ?stat64??
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/5624/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/16741/ : FAILURE
+
+Compile error at [2022-03-04T14:56:58.210Z] /Users/couchbase/workspace/workspace/kv_engine.macos_master_2/kv_engine/engines/ep/src/kvstore/kvstore.cc:680:13:
+error: use of undeclared identifier "status"
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/16741/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/18001/ : FAILURE
+
+Compile error at [2022-03-04T14:57:35.940Z] /home/couchbase/jenkins/workspace/kv_engine.linux_master/kv_engine/engines/ep/src/kvstore/kvstore.cc:680:13:
+error: ?status? was not declared in this scope; did you mean ?stat64??
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/18001/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/18708/ : FAILURE
+
+Compile error at [2022-03-04T14:57:05.057Z] /home/couchbase/jenkins/workspace/kv_engine.threadsanitizer_master/kv_engine/engines/ep/src/kvstore/kvstore.cc:680:13:
+error: use of undeclared identifier "status"
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/18708/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/26080/ : FAILURE
+
+Compile error at [2022-03-04T14:58:35.793Z] /home/couchbase/jenkins/workspace/kv_engine.ASan-UBSan_master/kv_engine/engines/ep/src/kvstore/kvstore.cc:680:13:
+error: use of undeclared identifier "status"
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/26080/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/14782/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

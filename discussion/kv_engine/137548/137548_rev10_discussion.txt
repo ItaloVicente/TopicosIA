@@ -1,0 +1,252 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-41510: Fix TSAN failure due to lock order inversion
+
+Fix a TSAN failure due to a lock order inversion observed on the
+mad-hatter TSAN cv machine. This was due to a potential deadlock while
+acquiring locks on this and other histogram in
+HdrHistogram::operator+=(). To fix this use folly::acquireLocked() to
+safely take write lock and read lock on this->histogram and
+other.histogram respectively. We also remove the nullptr for
+this->histogram as we don't guard any other access to the histograms
+pointer, in case cb_calloc() fails.
+
+TSAN failure:
+    WARNING: ThreadSanitizer: lock-order-inversion (potential deadlock) (pid=11208)
+    Cycle in lock order graph: M296533874179548048 (0x000000000000) => M174936684240544688 (0x000000000000) => M296533874179548048
+
+    Mutex M174936684240544688 acquired here while holding mutex M296533874179548048 in main thread:
+    #0 AnnotateRWLockAcquired <null> (libtsan.so.0+0x00000005b63d)
+    #1 folly::detail::annotate_rwlock_acquired_impl(void const volatile*, folly::annotate_rwlock_level, char const*, int) /home/couchbase/jenkins/workspace/cbdeps-platform-build-old/deps/packages/build/folly/follytsan-prefix/src/follytsan/folly/synchronization/SanitizeThread.cpp:99 (ep-engine_ep_unit_tests+0x00000139555e)
+    #2 annotate_rwlock_acquired tlm/deps/folly.exploded/include/folly/synchronization/SanitizeThread.h:111 (ep-engine_ep_unit_tests+0x000001362a06)
+    #3 folly::SharedMutexImpl<false, void, std::atomic, false, true>::annotateAcquired(folly::annotate_rwlock_level) tlm/deps/folly.exploded/include/folly/SharedMutex.h:726 (ep-engine_ep_unit_tests+0x000001362a06)
+    #4 folly::SharedMutexImpl<false, void, std::atomic, false, true>::lock_shared() tlm/deps/folly.exploded/include/folly/SharedMutex.h:400 (ep-engine_ep_unit_tests+0x000001362a06)
+    #5 folly::detail::LockTraitsImpl<folly::SharedMutexImpl<false, void, std::atomic, false, true>, (folly::detail::MutexLevel)1, false>::lock_shared(folly::SharedMutexImpl<false, void, std::atomic, false, true>&) tlm/deps/folly.exploded/include/folly/LockTraits.h:157 (ep-engine_ep_unit_tests+0x000001362a06)
+    #6 std::integral_constant<bool, true> folly::LockPolicyShared::lock<folly::SharedMutexImpl<false, void, std::atomic, false, true> >(folly::SharedMutexImpl<false, void, std::atomic, false, true>&) tlm/deps/folly.exploded/include/folly/LockTraits.h:499 (ep-engine_ep_unit_tests+0x000001362a06)
+    #7 folly::LockedPtrBase<folly::Synchronized<std::unique_ptr<hdr_histogram, HdrHistogram::HdrDeleter>, folly::SharedMutexImpl<false, void, std::atomic, false, true> > const, folly::SharedMutexImpl<false, void, std::atomic, false, true>, folly::LockPolicyShared>::LockedPtrBase(folly::Synchronized<std::unique_ptr<hdr_histogram, HdrHistogram::HdrDeleter>, folly::SharedMutexImpl<false, void, std::atomic, false, true> > const*) tlm/deps/folly.exploded/include/folly/Synchronized.h:1089 (ep-engine_ep_unit_tests+0x000001362a06)
+    #8 folly::LockedPtr<folly::Synchronized<std::unique_ptr<hdr_histogram, HdrHistogram::HdrDeleter>, folly::SharedMutexImpl<false, void, std::atomic, false, true> > const, folly::LockPolicyShared>::LockedPtr(folly::Synchronized<std::unique_ptr<hdr_histogram, HdrHistogram::HdrDeleter>, folly::SharedMutexImpl<false, void, std::atomic, false, true> > const*) tlm/deps/folly.exploded/include/folly/Synchronized.h:1394 (ep-engine_ep_unit_tests+0x000001360063)
+    #9 folly::SynchronizedBase<folly::Synchronized<std::unique_ptr<hdr_histogram, HdrHistogram::HdrDeleter>, folly::SharedMutexImpl<false, void, std::atomic, false, true> >, (folly::detail::MutexLevel)1>::rlock() tlm/deps/folly.exploded/include/folly/Synchronized.h:140 (ep-engine_ep_unit_tests+0x000001360063)
+    #10 HdrHistogram::operator+=(HdrHistogram const&) ../kv_engine/utilities/hdrhistogram.cc:83 (ep-engine_ep_unit_tests+0x000001360063)
+    #11 HdrHistogramTest_aggregationTest_Test::TestBody() ../kv_engine/engines/ep/tests/module_tests/hdrhistogram_test.cc:317 (ep-engine_ep_unit_tests+0x00000106945c)
+    #12 void testing::internal::HandleSehExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) ../googletest/googletest/src/gtest.cc:2402 (ep-engine_ep_unit_tests+0x0000013276cb)
+    #13 void testing::internal::HandleExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) ../googletest/googletest/src/gtest.cc:2438 (ep-engine_ep_unit_tests+0x00000132e814)
+    #14 testing::Test::Run() ../googletest/googletest/src/gtest.cc:2474 (ep-engine_ep_unit_tests+0x00000131d649)
+    #15 testing::TestInfo::Run() ../googletest/googletest/src/gtest.cc:2656 (ep-engine_ep_unit_tests+0x00000131d91d)
+    #16 testing::TestCase::Run() ../googletest/googletest/src/gtest.cc:2774 (ep-engine_ep_unit_tests+0x00000131dac5)
+    #17 testing::internal::UnitTestImpl::RunAllTests() ../googletest/googletest/src/gtest.cc:4649 (ep-engine_ep_unit_tests+0x00000131fe3e)
+    #18 bool testing::internal::HandleSehExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) ../googletest/googletest/src/gtest.cc:2402 (ep-engine_ep_unit_tests+0x000001327972)
+    #19 bool testing::internal::HandleExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) ../googletest/googletest/src/gtest.cc:2438 (ep-engine_ep_unit_tests+0x00000132edc8)
+    #20 testing::UnitTest::Run() ../googletest/googletest/src/gtest.cc:4257 (ep-engine_ep_unit_tests+0x00000131d741)
+    #21 RUN_ALL_TESTS() ../googletest/googletest/include/gtest/gtest.h:2237 (ep-engine_ep_unit_tests+0x000000d30e6a)
+    #22 main ../kv_engine/engines/ep/tests/module_tests/ep_unit_tests_main.cc:144 (ep-engine_ep_unit_tests+0x000000d30e6a)
+
+Change-Id: I7f7448627d20c753add8c92eaf1186fb350aaab0
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Richard de Mellow
+Date: 2020-10-07 10:24:47.000000000
+Message: 
+Uploaded patch set 10.
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2020-10-07 10:24:56.000000000
+Message: 
+Patch Set 10:
+
+(1 comment)
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-10-07 10:25:49.000000000
+Message: 
+Patch Set 10: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-10-07 11:41:08.000000000
+Message: 
+Patch Set 10: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/30945/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/30945/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/3465/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/4937/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/26735/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/6357/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/6470/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/5314/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/14134/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/6240/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-10-07 11:43:57.000000000
+Message: 
+Patch Set 10:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/30953/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/30953/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/3465/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/4937/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/26735/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/6357/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/6470/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/5314/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/14134/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/6240/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-10-07 11:44:30.000000000
+Message: 
+Patch Set 10:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/30954/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/30954/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/3465/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/4937/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/26735/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/6357/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/6470/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/5314/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/14134/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/6240/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-10-07 11:55:40.000000000
+Message: 
+Patch Set 10:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/30957/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/30957/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/3465/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/4937/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/26735/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/6357/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/6470/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/5314/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/14134/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/6240/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-10-07 11:59:34.000000000
+Message: 
+Patch Set 10:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/30958/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/30958/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/3465/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/4937/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/26735/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/6357/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/6470/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/5314/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/14134/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/6240/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-10-07 13:11:03.000000000
+Message: 
+Patch Set 10:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/30959/ : ABORTED
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/30959/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/3465/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/4937/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/26735/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/6357/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/6470/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/5314/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/14134/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/6240/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-10-07 13:26:57.000000000
+Message: 
+Patch Set 10: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/3465/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/4937/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/26735/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/6357/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/6470/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/5314/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/14134/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/6240/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/30971/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

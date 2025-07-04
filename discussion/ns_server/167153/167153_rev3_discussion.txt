@@ -1,0 +1,158 @@
+======================================================================================================================
+DESCRIPTION:
+
+Add checks to make sure only JSON-ifiable terms are added as event logs
+
+Call ejson:encode/1 to make sure an event log is encodable else we could accept
+an event log which cann't be encoded and it will nuke /events endpoint.
+
+There is no specific bug that prompted this change - but it's a good fix
+to make sure, we don't loose the other event logs due to a single
+bad event log.
+
+Change-Id: I92820830d2a6bd241a7cee6015140e59b452cfa9
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Hareen Kancharla
+Date: 2021-12-08 22:12:26.000000000
+Message: 
+Uploaded patch set 3.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-12-08 22:12:34.000000000
+Message: 
+Patch Set 3:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-test/28639/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-12-08 22:15:59.000000000
+Message: 
+Patch Set 3: Well-Formed+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/ns-server-test/28639/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2021-12-08 22:21:58.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2021-12-08 22:22:32.000000000
+Message: 
+Patch Set 3:
+
+make simple-test
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-12-08 22:22:39.000000000
+Message: 
+Patch Set 3:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-simple-test/3198/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-12-08 23:10:36.000000000
+Message: 
+Patch Set 3: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/ns-server-simple-test/3198/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2021-12-08 23:31:17.000000000
+Message: 
+Patch Set 3: Verified+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2021-12-09 00:37:36.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:224, src/event_log.erl -> Since we control the input I think we can let the process crash instead of catching it, no?
+Making it like an assert.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2021-12-09 03:01:31.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:217, src/event_log.erl -> JFYI: You can use "try of" for things like this. For example:
+
+try ejson:encode({Log}) of
+    _ -> event_log_server:log(Timestamp, Id, Log)
+catch
+    T:E:S ->
+        ?log_error(),
+end,
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2021-12-09 18:28:56.000000000
+Message: 
+Patch Set 3:
+
+(2 comments)
+Line:217, src/event_log.erl -> Thanks Timofey. That's definitely more cleaner. Changed it to that.
+
+Line:224, src/event_log.erl -> Really? I wouldn't want a important code path like probably adding a bucket to fail if for some reason we can't add a log. The rationale is I want to avoid hitting issues like MB-49231 (If there are more of those) in the field. It's ok to loose a log but not the ability to add a bucket or such.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2021-12-09 19:17:49.000000000
+MISMATCHED INLINE COMMENT
+Line:224, src/event_log.erl -> Oh my stance is not to sweep the error under the carpet by avoiding the crash. 
+
+In MB-49231 you create a bucket with some special config settings (which is a relatively less often used path) and when we add an event log for it we fail to massage the term in a way that ejson expects it. My worry and motivation for this patch is to rather have the log not be added (for such other cases if they exist) and have the main operation go through. 
+
+I understanding crashing rings all the bells to get it fixed right away - but I wouldn't want that to happen in the field. Also crashing this will not help us recover - but only permanently dissable that operation from being performed. 
+
+master events suffers exactly from the same problem - you end up with not being able to retrieve any master events if there is one rogue non-json-able term in master_events_keeper - MB-49314. master_events_keepers is a little immune to it since we add an event as a cast and only encode them to a JSON when /diag/masterEvents?o=1 is called.
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2021-12-11 00:04:45.000000000
+MISMATCHED INLINE COMMENT
+Line:224, src/event_log.erl -> >> this just reads we don't do proper testing. 
+
+I don't think it is about not testing. It's about the state explosion in terms of the data you'll accept and the number of places you have to check.
+
+Take MB-49314 for example where /diag/masterEvents?o=1 fails: You could create a bucket by selecting any of the 'x' config options we present in the UI. One of those specific selection cause a bug and we have had that since Mad-hatter. If testing were the only way to catch it we should have seen it by now. The point is there are less often seen code paths you could never cover via testing. 
+
+In my opinion, the primary trouble is we create terms in a free form manner and a simple "~p" that works for logging doesn't work straight off the bat, if you expect to print data in structured format. We ought to have some data-model around the way we accept data in our REST API'es and map those onto internal records when we unmarshal data off the wire - by no means am I saying it is the most urgent work; but until we have that we'll see such issues.
+
+I know you said you were fine with the patch; just adding my view - I would rather not crash the orchestrator because a JSON log can't be added vs missing  the log.
+----------------------------------------------------------------------------------------------------------------------
+Author: Meni Hillel
+Date: 2021-12-09 22:44:37.000000000
+MISMATCHED INLINE COMMENT
+Line:224, src/event_log.erl -> You bring up a good point Abhi. But I think we can address it - we should re-raise the exception after we log it. So still let it crash. I don't know what it does to what needs to follow, but I don't think we should "penalize" rest of the logic just because we did not get to test properly. If this happens in a customer setup, I think we'll be happy we've actually collected the info and also we'll have the indication of bug we did not find during testing. I leave it to Hareen to decide if re-raising the exception may cause that bigger penalty.
+----------------------------------------------------------------------------------------------------------------------
+Author: Meni Hillel
+Date: 2021-12-09 19:25:04.000000000
+MISMATCHED INLINE COMMENT
+Line:224, src/event_log.erl -> I second Hareen's opinion. If we fail for whatever reason due to json encoding, I think it is still important to capture the important information needed to resolve customer issues. Even if it is in the Erlang Term format.
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2021-12-09 22:17:18.000000000
+MISMATCHED INLINE COMMENT
+Line:224, src/event_log.erl -> > but I wouldn't want that to happen in the field.
+
+:) this just reads we don't do proper testing. 
+The chances of us catching a problem goes down without a crash.
+FYI, I do not mind integrating this patch as is. Just making an observation above.
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-12-09 18:45:23.000000000
+MISMATCHED INLINE COMMENT
+Line:224, src/event_log.erl -> Issues which are, in a sense, coding errors should crash (which is the case with MB-49231). Is the content of "Log" variable enough to cause intermittent issues? If not, then it should probably crash...that way a future change which introduces a json error will get caught.
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,190 @@
+======================================================================================================================
+DESCRIPTION:
+
+FS: write to JGit config in a background thread
+
+Otherwise locking problems may ensue if the JGit config itself is
+on a different file system. Since the internal is already updated,
+it is not really important when exactly the value gets persisted.
+By queueing up separate Runnables executed by a single thread we
+avoid concurrent write access to the JGit config, and nested calls
+to getFileStoreAttributes(Path) result in serialized attempts to
+write.
+
+The thread for writing the config must not be a daemon thread. If
+it were, JVM shutdown might kill it anytime, which may lead to
+the config not being written, or worse, a config.lock file being
+left behind.
+
+Bug: 566170
+Change-Id: I07e3d4c5e029d3cec9ab5895002fc4e0c7948c40
+Signed-off-by: Thomas Wolf <thomas.wolf@paranor.ch>
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Thomas Wolf
+Date: 2020-08-21 07:03:12.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2020-08-21 07:03:23.000000000
+Message: 
+Patch Set 1:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/3561/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2020-08-21 07:40:36.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/3561/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2020-08-21 08:01:06.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:277, org.eclipse.jgit/src/org/eclipse/jgit/util/FS.java -> Please don't tell me this was an unrelated change. Seems to come from auto-format on save.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2020-08-22 16:23:59.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+
+if it run jgit status using org.eclipse.jgit.pgm with that it seems to measure the filestore attributes but they are not written to ~/.config/jgit/config, interestingly the directory ~/.config/jgit is created if it was missing but the config file is not created
+Line:261, org.eclipse.jgit/src/org/eclipse/jgit/util/FS.java -> did you try 0 ?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2020-08-22 16:29:02.000000000
+Message: 
+Patch Set 1:
+
+> Patch Set 1:
+> 
+> (1 comment)
+> 
+> if it run jgit status using org.eclipse.jgit.pgm with that it seems to measure the filestore attributes but they are not written to ~/.config/jgit/config, interestingly the directory ~/.config/jgit is created if it was missing but the config file is not created
+
+Yes, I saw that, too, but without this change. I'll have to re-test with a newly build pgm; I don't think I saw that behavior _with_ this change.
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2020-08-22 17:22:34.000000000
+Message: 
+Patch Set 1:
+
+I think the problem with pgm is that it calls System.exit(). That terminates the process hard.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2020-08-22 18:06:11.000000000
+Message: 
+Patch Set 1:
+
+> Patch Set 1:
+> 
+> I think the problem with pgm is that it calls System.exit(). That terminates the process hard.
+
+AFAICS pgm only calls System.exit() when it handles an exception to return an exit code > 0
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2020-08-22 18:11:59.000000000
+Message: 
+Patch Set 1:
+
+> Patch Set 1:
+> 
+> > Patch Set 1:
+> > 
+> > I think the problem with pgm is that it calls System.exit(). That terminates the process hard.
+> 
+> AFAICS pgm only calls System.exit() when it handles an exception to return an exit code > 0
+
+Yes, saw that, too. So shutdown comes before the SAVE_RUNNER started saving. The directory gets created in readFromConfig(), in SystemReader's getXDGConfigHome(). Which is way too early; should be created only if we try to write there. The daemon thread determining the resolution gets killed by JVM shutdown before it even gets to saving the value.
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2020-08-22 18:32:17.000000000
+Message: 
+Patch Set 1:
+
+Why does SystemReader even create the XDG_CONFIG_HOME directory if it doesn't exist? As I see it, when we'd try to write, LockFile.lock() would create it anyway. See also https://git.eclipse.org/r/c/jgit/jgit/+/167001 , which would be obsoleted if we could remove these calls in SystemReader altogether.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2020-08-22 19:22:20.000000000
+Message: 
+Patch Set 1: Code-Review+2
+
+> Patch Set 1:
+> 
+> > Patch Set 1:
+> > 
+> > > Patch Set 1:
+> > > 
+> > > I think the problem with pgm is that it calls System.exit(). That terminates the process hard.
+> > 
+> > AFAICS pgm only calls System.exit() when it handles an exception to return an exit code > 0
+> 
+> Yes, saw that, too. So shutdown comes before the SAVE_RUNNER started saving. The directory gets created in readFromConfig(), in SystemReader's getXDGConfigHome(). Which is way too early; should be created only if we try to write there. The daemon thread determining the resolution gets killed by JVM shutdown before it even gets to saving the value.
+
+ok, fair enough. If the pgm command is fast we won't persist the attributes which isn't a big deal and as soon as some other usage of jgit is up long enough the attributes will be persisted and after that also quick pgm commands will use them
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2020-08-22 19:22:53.000000000
+Message: 
+Patch Set 1:
+
+> Patch Set 1:
+> 
+> Why does SystemReader even create the XDG_CONFIG_HOME directory if it doesn't exist? As I see it, when we'd try to write, LockFile.lock() would create it anyway. See also https://git.eclipse.org/r/c/jgit/jgit/+/167001 , which would be obsoleted if we could remove these calls in SystemReader altogether.
+
+you are right, here is the fix https://git.eclipse.org/r/c/jgit/jgit/+/168096
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2020-08-22 20:35:44.000000000
+Message: 
+Patch Set 1:
+
+> ok, fair enough. If the pgm command is fast we won't persist the attributes which isn't a big deal and as soon as some other usage of jgit is up long enough the attributes will be persisted and after that also quick pgm commands will use them
+
+Maybe... though I just realized that pgm doesn't set FileStoreAttributes.setRunInBackground(true). So it should wait for the future.get(), and that will always have scheduled the job on the SAVE_RUNNER.
+
+The reason is different: readFromConfig() reads from the *user* config, which has as parent the system config, which has as parent the JGit config. I had, from a very early version of all the FS resolution determination, still an entry for the file system my git repo was on in my user config! So of course pgm never even tried to determine the resolution, much less write it to JGit config -- it just used the value it found in my user config.
+
+Once I had removed that old entry from my user config, behavior was as expected: pgm would write the JGit config file just fine.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2020-08-22 23:54:36.000000000
+Message: 
+Patch Set 1:
+
+> Patch Set 1:
+> 
+> > ok, fair enough. If the pgm command is fast we won't persist the attributes which isn't a big deal and as soon as some other usage of jgit is up long enough the attributes will be persisted and after that also quick pgm commands will use them
+> 
+> Maybe... though I just realized that pgm doesn't set FileStoreAttributes.setRunInBackground(true). So it should wait for the future.get(), and that will always have scheduled the job on the SAVE_RUNNER.
+> 
+> The reason is different: readFromConfig() reads from the *user* config, which has as parent the system config, which has as parent the JGit config. I had, from a very early version of all the FS resolution determination, still an entry for the file system my git repo was on in my user config! So of course pgm never even tried to determine the resolution, much less write it to JGit config -- it just used the value it found in my user config.
+> 
+> Once I had removed that old entry from my user config, behavior was as expected: pgm would write the JGit config file just fine.
+
+yep, I also had an entry in ~/.gitconfig, after removing that the ~/.config/jgit/config is written as expected
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2020-08-23 09:12:49.000000000
+Message: 
+Change has been successfully merged by Thomas Wolf
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2020-09-08 17:50:13.000000000
+Message: 
+Patch Set 1:
+
+No Builds Executed
+----------------------------------------------------------------------------------------------------------------------

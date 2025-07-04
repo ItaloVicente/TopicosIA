@@ -1,0 +1,275 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-40531: Prefer paging from replicas if possible
+
+Prior to this change, the pager would try to page out X% of items in
+replica vbuckets, but if this did not bring memory usage below the low
+water mark, it would flip phase to ACTIVE_AND_PENDING_ONLY - meaning
+the next run of the pager would page immediately try to page from
+active and pending vbuckets.
+
+Now, replica vbuckets will always be considered first. In the event
+that paging _every_ possible item from replicas would not free enough
+memory to drop below the low water mark, it will then also evict from
+active vbuckets.
+
+Change-Id: I46e578bf163fa2e12834173595c8aa3f52f1593d
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: James H
+Date: 2020-07-29 14:14:36.000000000
+Message: 
+Uploaded patch set 8.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-07-29 14:14:52.000000000
+Message: 
+Patch Set 8:
+
+Branch restricted. PLEASE READ this URL: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/194218/artifact/restricted.html : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-07-29 15:01:02.000000000
+Message: 
+Patch Set 8: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/1489/ : FAILURE
+
+Failure of a CTest test [2020-07-29T14:40:20.443Z]  91/187 Test  #93: memcached_testapp.default.TransportProtocols/BucketTest ......................Child aborted ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/1489/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/25952/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/1365/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/1526/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/mad-hatter/841/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/1275/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/1477/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/1497/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-07-30 08:52:24.000000000
+Message: 
+Patch Set 8: Code-Review-1
+
+(12 comments)
+
+In addition to your own TODOs still in the patch.
+Line:70, engines/ep/src/item_pager.cc -> Note you could just make this case a no-op, then you don't have to explicitly check and handle dead vBuckets when you call this.
+
+Line:149, engines/ep/src/item_pager.cc -> Style: if you declare replicaEvictableMem as a double, then you avoid the need for the cast here.
+
+Line:166, engines/ep/src/item_pager.cc -> Nit: "active/pending" could be confusing here - is that some kind of ratio?
+
+I think "active & pending" is clearer.
+
+Line:167, engines/ep/src/item_pager.cc -> I think you want some percentage signs in here to make it clear to the reader what the units are.
+
+Line:174, engines/ep/src/item_pager.cc -> Careful with floating point comparisons. Prefer `> 0.0` as that's more explicit and safer.
+
+Line:222, engines/ep/src/item_pager.cc -> Please document this class.
+
+Line:30, engines/ep/src/item_pager.h -> Please document this class.
+
+Line:31, engines/ep/src/item_pager.h -> If you're adding getters / setters to control access to these two member variables, then they should be private.
+
+Line:34, engines/ep/src/item_pager.h -> Please document these methods.
+
+Line:98, engines/ep/src/paging_visitor.cc -> Style: prefer comparison to 0.0 for non-integer types.
+
+Line:622, engines/ep/tests/module_tests/item_pager_test.cc -> Prefer "1.0" here - makes it more obvious to the reader this is a fractional value.
+
+Line:898, engines/ep/tests/module_tests/item_pager_test.cc -> If activeRR is less than 100%, shouldn't replicaRR be zero?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-07-30 14:15:04.000000000
+Message: 
+Patch Set 8:
+
+(12 comments)
+Line:70, engines/ep/src/item_pager.cc -> Done
+
+Line:149, engines/ep/src/item_pager.cc -> Done
+
+Line:166, engines/ep/src/item_pager.cc -> Done
+
+Line:167, engines/ep/src/item_pager.cc -> Done
+
+Line:174, engines/ep/src/item_pager.cc -> Done
+
+Line:222, engines/ep/src/item_pager.cc -> Done
+
+Line:30, engines/ep/src/item_pager.h -> Done
+
+Line:31, engines/ep/src/item_pager.h -> Done
+
+Line:34, engines/ep/src/item_pager.h -> Done
+
+Line:98, engines/ep/src/paging_visitor.cc -> Done
+
+Line:622, engines/ep/tests/module_tests/item_pager_test.cc -> Done
+
+Line:898, engines/ep/tests/module_tests/item_pager_test.cc -> Hmmmmmm if absolutely everything in the vb can be evicted, _and_ if adjustPercent biasing were removed again (caps replicas at 0.9), and the learning histograms were instantly accurate yes.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-07-30 14:26:54.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:898, engines/ep/tests/module_tests/item_pager_test.cc -> Fine, but I think we should at least check the replicaRR is say below 10% or some similar low-is value (maybe with a TODO that ideally this should be zero...)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-07-31 13:01:20.000000000
+MISMATCHED INLINE COMMENT
+Line:898, engines/ep/tests/module_tests/item_pager_test.cc -> re 3), maybe we should change the way age is utilised. Instead of tracking two histograms (age and freq), then utilising both as currently, we could have a combined age+fre histogram.
+
+Essentially value would have a single "score" - say the sum of it's age and it's inverse frequency. This score would be used in a single histogram.
+
+That would still consider both properties, but if we wanted to evict 50% of the data in avBucket we could find the p50 of the score histogram, and evict everything with a score greater than that.
+
+I believe that would address the current issue with accuratly mapping the desired fraction to evict with what actually gets evicted.
+
+@CC Dan Owen.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-07-31 09:09:59.000000000
+MISMATCHED INLINE COMMENT
+Line:898, engines/ep/tests/module_tests/item_pager_test.cc -> I;m a bit concerned that "all of replica" still leaves 25% remaining - that's a pretty big error bar - and absent any other evidence have no proof that the algorithm as proposed actually works correctly.
+
+Do we understand the reason for only getting to 25%?
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-08-07 08:26:44.000000000
+MISMATCHED INLINE COMMENT
+Line:898, engines/ep/tests/module_tests/item_pager_test.cc -> So the current implementation has a simple fixed threshold (freqCounterAgeThreshold) for controlling when age is factored into the decision.
+
+For an initial version you could do something similar - essentially apply age as a square function - if the age is below a certain value then add a fixed value to the score (assuming higher score == less likely to be evicted).
+
+Either way, I agree you probably want to choose _some_ initial value, and iterate once we have data.
+
+Note we won't be able to achieve a "perfect" solution here, we just want something which is reasonably similar to the current two-histogram implementation, but has the advantage of having a predictable fraction of items which will be evicted.
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-07-31 11:12:42.000000000
+MISMATCHED INLINE COMMENT
+Line:898, engines/ep/tests/module_tests/item_pager_test.cc -> 1. Dang - I was sure I had a numItems check. It's higher than the learning population, but only just over 2x.
+2. I agree, in tests 100 is a big fraction of the VB total items, but it'd be unlikely to be such a large fraction of it in a env in the wild (though I guess it could still be 100 x 20MB, so not tiny in memory usage)
+3. Correct
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-07-31 13:05:05.000000000
+MISMATCHED INLINE COMMENT
+Line:898, engines/ep/tests/module_tests/item_pager_test.cc -> That sounds reasonable to me
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-07-30 15:33:48.000000000
+MISMATCHED INLINE COMMENT
+Line:898, engines/ep/tests/module_tests/item_pager_test.cc -> To reliably reach that low of a value in a small test, I think we'd have to have
+
+1) a special case in the paging visitor - if ratio == 1.0, override the threshold and evict everything.
+or
+2) adjustPercent needs to be removed again - it still "shifts the goal posts" over time (the target percent is adjusted based on mem used)
+
+I added adjustPercent back in for the minimal comparison of visiting replicas first, but having it still there kneecaps wanting to have a 1.0 replica eviction ratio.
+
+With that in mind, if we'd still like adjustPercent removed in a follow up, I'd prefer to put the tighter bound in this test in that patch.
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-08-07 08:05:33.000000000
+MISMATCHED INLINE COMMENT
+Line:898, engines/ep/tests/module_tests/item_pager_test.cc -> I've still not reached the point of being confident that any particular scaling of age vs MFU won't lead to issues (e.g., could the age start to dominate or be virtually ignored in certain situations)
+
+I've been fiddling with having very young items having a reasonable score contribution, but having that tail off very quickly, so after a certain age the age contribution to the score becomes negligible. But that's then just becomes a question of "how young" and "how big of a bonus for being young". A data-driven answer is probably a good idea - but whatever values are used it seems likely a counter example could be crafted (but that's true of most things).
+
+The other way would be to have the scaling stuff be dynamic; but if the scores are going into a histogram, changing how the scores are defined over the course of a run seems like a path to strange behaviour - it might be better to just have a 2d histogram at that point (but that would have wildly excessive memory usage and so on, so maybe not).
+
+We already bias the MFU hist to compensate for picking an item to evict that isn't eligible (e.g., is dirty). Perhaps there may be merit to biasing when an item is rejected for being too young.
+
+Flip-flopping won't lead to progress though, will go ahead with the current iteration for now.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-07-30 20:03:34.000000000
+MISMATCHED INLINE COMMENT
+Line:898, engines/ep/tests/module_tests/item_pager_test.cc -> I think we probably need to ditch adjustPercent then, given it essentially means we cannot verify the correct behaviour of the algorithm.
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-07-30 15:54:20.000000000
+MISMATCHED INLINE COMMENT
+Line:898, engines/ep/tests/module_tests/item_pager_test.cc -> Not significantly, adjustPercent still shafts it by essentially undoing the replica = 1.0 immediately. I'm not entirely sure keeping adjustPercent in is feasible with this impl - it could be hand waved when it was done in two phases to get a comparison with a minimal change, but now it relies on the ratio not being fiddled with part way through.
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-07-31 09:05:38.000000000
+MISMATCHED INLINE COMMENT
+Line:898, engines/ep/tests/module_tests/item_pager_test.cc -> :roger: current patch does that, and gets to <25% replica residence, special-casing 1.0 to evict everything rather than follow the histogram threshold gets it to 0%. Can add that to the patch too, or leave as-is (with test checking <25%) to avoid changing to many variables in one go, for a comparison to the old behaviour
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-07-31 09:45:01.000000000
+MISMATCHED INLINE COMMENT
+Line:898, engines/ep/tests/module_tests/item_pager_test.cc -> When we start visiting a vbucket, we set the threshold
+
+ freqCounterThreshold = 0;
+
+We update it after a certain number of items have been visited
+
+ uint64_t noOfItems =
+                    std::ceil(vb->getNumItems() * (percentOfItems * 0.01));
+            uint64_t interval = (noOfItems > ItemEviction::learningPopulation)
+                                        ? noOfItems
+                                        : ItemEviction::learningPopulation;
+            itemEviction.setUpdateInterval(interval);
+
+where
+
+ static const uint64_t learningPopulation = 100;
+
+But, there's a second component to the mfu check
+
+     if ((storedValueFreqCounter <= freqCounterThreshold) &&
+        ((storedValueFreqCounter < freqCounterAgeThreshold) ||
+         (age >= ageThreshold))) {
+
+
+Age threshold come from config
+
+ cfg.getItemEvictionFreqCounterAgeThreshold()
+
+config defaults to
+
+ "item_eviction_freq_counter_age_threshold": {
+            "default": "1",
+
+fiddling the learningPopulation down, and the age threshold up (so the age is not considered), we reach 0% resident replicas.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-07-30 15:41:32.000000000
+MISMATCHED INLINE COMMENT
+Line:898, engines/ep/tests/module_tests/item_pager_test.cc -> Do things look any better with say 1000 items minimum?
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-07-31 09:57:58.000000000
+MISMATCHED INLINE COMMENT
+Line:898, engines/ep/tests/module_tests/item_pager_test.cc -> Thanks, makes sense.
+
+So a couple of things come to mind:
+
+1. The number of items per vBucket here (which I note you don't have a sanity-check in this test) is too low, maybe less than learningPopulation?
+
+2. learningPopulation is too naive - in very small vBuckets it doesn't make sense to wait for 100 items before evicting.
+
+3. The approach of deciding what percentage of items to evict, but *then* checking both the age and frequency is problematic - for example if we decide to evict 50% based on say frequency, but then everything is very "young" then we can end up evicting much less than 50%, correct?
+----------------------------------------------------------------------------------------------------------------------

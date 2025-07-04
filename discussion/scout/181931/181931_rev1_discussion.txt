@@ -1,0 +1,209 @@
+======================================================================================================================
+DESCRIPTION:
+
+Data objects: add support for DoSet and DoBag
+
+Currently a data object supports DoValue and DoList nodes. To represent
+a set or an ordered collection semantically, DoSet and DoBag are
+introduced. The serialized form of a DoSet and DoBag is identically to
+the one of a DoList (JSON array). If a JSON is deserialized without any
+type information, a DoList is used within Java.
+
+Via DataObjectHelper#normalize all DoSet and DoBag nodes can be sorted
+deterministically in order to have the same serialized output.
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Stephan Merkli
+Date: 2021-06-14 16:14:40.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Scout Bot
+Date: 2021-06-14 16:14:48.000000000
+Message: 
+Patch Set 1:
+
+Build Started https://ci.eclipse.org/scout/job/org.eclipse.scout.rt_gerrit_jdk11_pipeline/654/
+----------------------------------------------------------------------------------------------------------------------
+Author: Scout Bot
+Date: 2021-06-14 16:41:01.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/scout/job/org.eclipse.scout.rt_gerrit_jdk11_pipeline/654/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Bazzi
+Date: 2021-06-21 11:46:01.000000000
+Message: 
+Patch Set 1: Code-Review+1
+
+(14 comments)
+
+Looks good to me, see comments for some minor details
+Line:29, org.eclipse.scout.rt.dataobject/src/main/java/org/eclipse/scout/rt/dataobject/AbstractDoCollection.java -> this constructor is not necessary
+
+Line:200, org.eclipse.scout.rt.dataobject/src/main/java/org/eclipse/scout/rt/dataobject/DataObjectHelper.java -> mark as protected static, no need to access other members of helper
+
+Line:224, org.eclipse.scout.rt.dataobject/src/main/java/org/eclipse/scout/rt/dataobject/DataObjectHelper.java -> add testcase for list of objects which are all comparable but not of same interface (e.g. integer & strings) -> check for (expected) exception when trying to compare the elements
+
+Line:185, org.eclipse.scout.rt.dataobject/src/main/java/org/eclipse/scout/rt/dataobject/DoEntity.java -> Code could be consolidated to 
+
+  protected <NODE> NODE doNode(String attributeName, Class<NODE> clazz, Supplier<NODE> nodeSupplier) {
+    Assertions.assertNotNull(attributeName, "attribute name cannot be null");
+    DoNode<?> node = getNode(attributeName);
+    if (node != null) {
+      Assertions.assertInstance(node, clazz, "Existing node {} is not of type {}, cannot change the node type!", node, clazz);
+      return (NODE) node;
+    }
+    return nodeSupplier.get();
+  }
+
+and calls like this
+
+  protected <V> DoValue<V> doValue(String attributeName) {
+    return doNode(attributeName, DoValue.class, () -> new DoValue<V>(attributeName, attribute -> putNode(attributeName, attribute)));
+  }
+
+
+[untested....]
+
+Line:24, org.eclipse.scout.rt.dataobject/src/main/java/org/eclipse/scout/rt/dataobject/DoNode.java -> attributeName / lazyCreate -> do not change to protected, never needed in sub classes
+
+Line:26, org.eclipse.scout.rt.dataobject/src/main/java/org/eclipse/scout/rt/dataobject/DoNode.java -> do not change to protected, use .get() in DoBag where access is needed
+
+Line:105, org.eclipse.scout.rt.dataobject/src/main/java/org/eclipse/scout/rt/dataobject/DoNode.java -> +javadoc for purpose
+
+Line:136, org.eclipse.scout.rt.dataobject/src/main/java/org/eclipse/scout/rt/dataobject/DoNode.java -> +javadoc
+
+Line:79, org.eclipse.scout.rt.dataobject/src/main/java/org/eclipse/scout/rt/dataobject/DoPredicates.java -> rename LIST_NODE (also in following methods)
+
+Line:26, org.eclipse.scout.rt.jackson/src/main/java/org/eclipse/scout/rt/jackson/dataobject/AbstractDoCollectionSerializer.java -> abstract class without abstract method
+-> change to DoCollectionSerializer and remove the three subclasses
+
+Line:32, org.eclipse.scout.rt.jackson/src/main/java/org/eclipse/scout/rt/jackson/dataobject/AbstractDoCollectionStdDeserializer.java -> rename to DoCollectionDeserializer  (without 'std')
+
+using appropriate generics this class should also be able to be consolidated for dolist/doset/dobag
+
+both new DoList<>(); alls in DoListDeserializer should be convertible into a Supplier<COLLECTION_NODE> nodeSupplier constructor param  (and maybe a few casts)
+
+draft:
+
+public class AbstractDoCollectionStdDeserializer<COLLECTION_NODE extends IDoCollection<?, ? extends Collection<Object>>> extends StdDeserializer<COLLECTION_NODE> {
+
+  private static final long serialVersionUID = 1L;
+
+  private final JavaType m_collectionType;
+  private final Supplier<IDoCollection<Object, ? extends Collection<Object>>> m_nodeSupplier;
+
+  public AbstractDoCollectionStdDeserializer(JavaType type, Supplier<IDoCollection<Object, ? extends Collection<Object>>> nodeSupplier) {
+    super(type);
+    m_collectionType = type;
+    m_nodeSupplier = nodeSupplier;
+  }
+
+  @Override
+  public COLLECTION_NODE deserialize(JsonParser p, DeserializationContext ctxt) throws IOException {
+    return deserializeInternal(p, ctxt, m_nodeSupplier.get());
+  }
+
+  protected COLLECTION_NODE deserializeInternal(JsonParser p, DeserializationContext ctxt, IDoCollection<Object, ? extends Collection<Object>> collection) throws IOException {
+    p.setCurrentValue(collection);
+    for (JsonToken t = p.nextToken(); t != JsonToken.END_ARRAY; t = p.nextToken()) {
+      ResolvedType elementType = resolveListElementType(p);
+      Object element = p.getCodec().readValue(p, elementType);
+      //noinspection unchecked
+      collection.add(element);
+    }
+    //noinspection unchecked
+    return (COLLECTION_NODE) collection;
+  }
+
+  protected ResolvedType resolveListElementType(JsonParser p) {
+    if (p.getCurrentToken() == JsonToken.START_OBJECT) {
+      // deserialize object-like JSON structure using specified type binding (DoList<T>/DoSet<T>/DoBag<T> generic parameter), fallback to generic DoEntity if no type information available
+      JavaType collectionItemType = m_collectionType.getBindings().getBoundType(0);
+      if (collectionItemType == null || collectionItemType.getRawClass() == Object.class) {
+        // use DoEntity as default value for missing or unspecified object types
+        return TypeFactory.defaultInstance().constructType(DoEntity.class);
+      }
+      return collectionItemType;
+    }
+    else {
+      // all JSON scalar values are deserialized as bound type (if available) and as fallback as raw object using default jackson typing
+      return ObjectUtility.nvl(m_collectionType.getBindings().getBoundType(0), TypeFactory.unknownType());
+    }
+  }
+
+  @Override
+  public Object deserializeWithType(JsonParser p, DeserializationContext ctxt, TypeDeserializer typeDeserializer) throws IOException {
+    return deserialize(p, ctxt);
+  }
+
+  @Override
+  public COLLECTION_NODE getNullValue(DeserializationContext ctxt) {
+    //noinspection unchecked
+    return (COLLECTION_NODE)  m_nodeSupplier.get(); // create empty DO collection for null value
+  }
+}
+
+Line:80, org.eclipse.scout.rt.jackson/src/main/java/org/eclipse/scout/rt/jackson/dataobject/DataObjectDeserializers.java -> if (DoList.class.isAssignableFrom(rawClass)) {
+      return new DoCollectionDeserializer<>(type, DoList::new);
+    }
+
+Line:75, org.eclipse.scout.rt.jackson/src/main/java/org/eclipse/scout/rt/jackson/dataobject/DataObjectSerializers.java -> if (oneOf(list,bag,set)) {
+  return DoCollectionSerializer(type)
+
+Line:147, org.eclipse.scout.rt.jackson/src/main/java/org/eclipse/scout/rt/jackson/dataobject/DoEntityDeserializer.java -> shorten to:
+
+      if (attributeType.hasRawClass(DoList.class) || attributeType.hasRawClass(DoSet.class) || attributeType.hasRawClass(DoBag.class)) {
+        DoNode<?> nodeValue = p.getCodec().readValue(p, attributeType);
+        entity.putNode(attributeName, nodeValue);
+      }
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Stephan Merkli
+Date: 2021-06-24 09:53:47.000000000
+Message: 
+Patch Set 1:
+
+(13 comments)
+Line:29, org.eclipse.scout.rt.dataobject/src/main/java/org/eclipse/scout/rt/dataobject/AbstractDoCollection.java -> Done
+
+Line:200, org.eclipse.scout.rt.dataobject/src/main/java/org/eclipse/scout/rt/dataobject/DataObjectHelper.java -> Done
+
+Line:224, org.eclipse.scout.rt.dataobject/src/main/java/org/eclipse/scout/rt/dataobject/DataObjectHelper.java -> Done
+
+Line:185, org.eclipse.scout.rt.dataobject/src/main/java/org/eclipse/scout/rt/dataobject/DoEntity.java -> Done
+
+Line:24, org.eclipse.scout.rt.dataobject/src/main/java/org/eclipse/scout/rt/dataobject/DoNode.java -> Done
+
+Line:26, org.eclipse.scout.rt.dataobject/src/main/java/org/eclipse/scout/rt/dataobject/DoNode.java -> Done
+
+Line:105, org.eclipse.scout.rt.dataobject/src/main/java/org/eclipse/scout/rt/dataobject/DoNode.java -> Done
+
+Line:136, org.eclipse.scout.rt.dataobject/src/main/java/org/eclipse/scout/rt/dataobject/DoNode.java -> Done
+
+Line:26, org.eclipse.scout.rt.jackson/src/main/java/org/eclipse/scout/rt/jackson/dataobject/AbstractDoCollectionSerializer.java -> Done
+
+Line:32, org.eclipse.scout.rt.jackson/src/main/java/org/eclipse/scout/rt/jackson/dataobject/AbstractDoCollectionStdDeserializer.java -> Done
+
+Line:80, org.eclipse.scout.rt.jackson/src/main/java/org/eclipse/scout/rt/jackson/dataobject/DataObjectDeserializers.java -> Done
+
+Line:75, org.eclipse.scout.rt.jackson/src/main/java/org/eclipse/scout/rt/jackson/dataobject/DataObjectSerializers.java -> Done
+
+Line:147, org.eclipse.scout.rt.jackson/src/main/java/org/eclipse/scout/rt/jackson/dataobject/DoEntityDeserializer.java -> Done
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Stephan Merkli
+Date: 2021-06-24 09:54:55.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:79, org.eclipse.scout.rt.dataobject/src/main/java/org/eclipse/scout/rt/dataobject/DoPredicates.java -> Done
+
+----------------------------------------------------------------------------------------------------------------------

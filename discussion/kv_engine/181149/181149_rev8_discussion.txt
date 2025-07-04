@@ -1,0 +1,161 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-53920: CheckpointQuota accounts detached checkpoints
+
+Since when introduced, the CheckpointQuota accounts the memory usage of
+checkpoints owned by CM. Ie, detached-to-be-destroyed checkpoints
+(owned by CheckpointDestroyer) aren't accounted.
+
+The problem with that approach is that in the case of slow checkpoint
+deallocation (for whatever reason), the checkpoint allocation in
+Destroyers can take up to the entire BucketQuota.
+
+With this patch we change CheckpointQuota to accounting mem-alloc in
+Destroyers too. The consequence is that the system will enter a TempOOM
+phase when checkpoint allocation is high (usual CheckpointQuota
+rules apply), regardless of what's owning those checkpoints.
+
+Note that this change has implications in the way we perform memory
+recovery from CM. By that:
+
+  a. If the memory releasable by detached-to-be-destroyed checkpoints
+     allows to push the overall checkpoint alloc down to the lower_mark
+     (which is our usual target), then the CheckpointMemRecoveryTask
+     isn't woken up at all
+  b. Otherwise, the CheckpointMemRecoveryTask is scheduled to run as
+     usual, but now it attempts mem-releasing from CM only to the extent
+     of what needs to be freed on top of detached-to-be-destroyed
+     checkpoints
+
+That is mainly for avoiding excessive ItemExpel/CursorDrop on CM, when
+CM isn't the problematic component.
+
+Note: This change might possibly make visible any suboptimal behaviour
+on checkpoint mem-releasing in Destroyers. In case, that is expected to
+show up as the system entering TempOOM phases in a state where the
+Destroyer-alloc component is prevalent compared to CM-alloc.
+Regardless of that, optimizations in the Destroyer deallocation area
+are already in-progress in MB-53531.
+
+Change-Id: I8540b7781b0929ea6006e1522ee3fe35f19d93ef
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2022-11-03 13:33:51.000000000
+Message: 
+Uploaded patch set 8.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-11-03 14:08:17.000000000
+Message: 
+Patch Set 8: Verified-1
+
+Build Failed 
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/24125/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [159/160]: test bucket quota reduction...../kv_engine/engines/ep/tests/ep_testsuite.cc:8508 Test failed: `" (Expected `success", got `no memory" - We should be able to store an item as the BucketQuotaChangeTask should not enforce memory limits until memory usage is low enough.)
+[2022-11-03T14:05:55.161Z] (703 ms) FAIL
+</pre>
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/24125/ )
+
+Timeout of a CTest test [2022-11-03T14:03:00.327Z]  11/464 Test #220: ep-engine_ep_unit_tests.NexusBackends/DurabilityEPBucketTest ............................................} ( https://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/24125/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/20949/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/42738/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/21679/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-windows-master/50924/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux-debug/job/master/422/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/11405/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/24954/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/23717/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/23154/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/32141/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/11496/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-11-03 16:24:26.000000000
+Message: 
+Patch Set 8: Verified+1
+
+Build Successful 
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/20949/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/42738/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/21679/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-windows-master/50924/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux-debug/job/master/422/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/11405/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/24954/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/23717/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/23154/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/32141/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/11496/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/24128/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-11-04 13:03:52.000000000
+Message: 
+Patch Set 8: Code-Review+1
+
+(2 comments)
+Line:2976, engines/ep/src/kv_bucket.cc -> Nit: slightly clearer if you use the helper method `isCMMemoryReductionRequired` here.
+
+Line:937, engines/ep/src/kv_bucket.h -> Style: At the moment this diagram might be confusing to people not familiar with it, as we have both limits (quotas) and current usage rendered identically.
+
+Maybe consider using different notation (e.g. unicode "┆" or "╷") for the lines which denote current usage (i.e. variable quantities), compared to the watermarks which are limits and nominally fixed (unless someone reconfigures the bucket) 
+
+
+Random experiment from me, feel free to do somthing else:
+
+     * 0 <---            Entire Bucket Quota                             ---> B
+     * ├──────────────────────────────────────────────────────────────────────┤
+     * │                                                                      │
+     * └──────────────────────────────────────────────────────────────────────┘
+     * │          │              │             │
+     * │          │              │             │
+     * └───────────────────────────────────────┘
+     *            L              U             Q
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2022-11-04 15:45:29.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:2976, engines/ep/src/kv_bucket.cc -> Done
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2022-11-04 15:48:49.000000000
+MISMATCHED INLINE COMMENT
+Line:937, engines/ep/src/kv_bucket.h -> I've tweaked a bit from your version, definitely a step up from the original
+----------------------------------------------------------------------------------------------------------------------

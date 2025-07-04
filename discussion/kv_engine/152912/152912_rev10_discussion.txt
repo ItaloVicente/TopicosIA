@@ -1,0 +1,82 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-45756: Persist stats at end of EventuallyPersistentEngine::destroy()
+
+Currently during the destruction of an ep-engine bucket we persist a key
+"ep_force_shutdown" to stats.json, this value is set to false when we've
+had a clean shutdown and true if the shutdown was forced.
+
+This value affects when we decide to generate a new failover table entry
+during warmup in Warmup::createVBuckets(), when we've had a forced
+shutdown or if the key isn't present in the document. Which is used to
+help us identify differing seqno histories between kv nodes.
+
+MB-45756 showed that this wasn't always working in the way it should
+have. This would occur if memcached is killed using SIGKILL while its
+while its in EventuallyPersistentEngine::~EventuallyPersistentEngine().
+As ~EventuallyPersistentEngine() is responsible for shutting the flusher
+it takes a non insignificant amount of time to complete and if killed
+when flushing could leave the node in an inconsistent with its replica.
+As in the case of MB-45756, where the active was at seqno:Y when it was
+killed but only persisted to X. So when it came back up the at seqno:X
+it was behind replica at seqno:Y. But due to expiry we generated enough
+seqnos to have a high seqno > Y. Causing us to having differing
+histories but not causing us to roll back the replica.
+
+To fix this we should gather the stats that we want to persist to disk
+during EventuallyPersistentEngine::destroy(), before we call
+EventuallyPersistentEngine::~EventuallyPersistentEngine(). Then after
+the dtor of EventuallyPersistentEngine has run we then finally persist
+the stats to disk. That way if we crash at any point before we'll have
+never inserted a "ep_force_shutdown" key in the document (as
+ep_force_shutdown is only ever written during shutdown).
+
+We also need to ensure that we remove the key "ep_force_shutdown" from
+stats.json if we find it and its false. As if we get killed/crash during
+warmup then we should be aware of this. During warmup however, this
+should only be done once we get to a stage where we're going to start
+modifying a vbuckets history.
+
+Change-Id: Ia05cafcbcc0c225fe373d0ccfebf135a5c012c6e
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Richard de Mellow
+Date: 2021-05-07 15:31:07.000000000
+Message: 
+Uploaded patch set 10.
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2021-05-07 15:36:38.000000000
+Message: 
+Patch Set 10: Code-Review-1
+
+need to rebase onto http://review.couchbase.org/c/kv_engine/+/153149 but opening up to reviewers
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-05-07 15:42:27.000000000
+Message: 
+Patch Set 10: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/18374/ : ABORTED
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/18374/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/10566/ : ABORTED
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/10566/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/9493/ : ABORTED
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/10815/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/10815/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/10424/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/10424/ )
+----------------------------------------------------------------------------------------------------------------------

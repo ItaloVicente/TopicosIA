@@ -1,0 +1,210 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-52490: [wip]
+
+It's possible that a single Producer consumes all backfills.maxRunning
+slots. That might happen in the case where a Producer is busy with many
+backfills. Eg, the current backfill fixture implementation allows the
+follwing:
+
+1. backfills.maxRunning = 4096
+2. Two DcpProducer connections with some active/pending backfills
+   -> Prod1(active:4096, pending:100), Prod2(active:0, pending:1)
+3. Prod1 completes a backfill -> Prod1(active:4095, pending:100)
+4. Prod1 is rescheduled to run immediately
+5. Prod2 keeps being snoozed and rescheduled to run only after its
+   sleep-time (1 sec by default for the BackfillManagerTask)
+
+The consequence is that Prod1 has much more chance to drain its pending
+queue than Prod2.
+
+This patch prevents that by increasing the likelihood that a Producer
+like Prod2 gets it's backfill slot before Prod1 manages to take its next
+one.
+
+The logic change in this patch is that at step (5) Prod2 realizes that
+it's being snoozed because some other Producer is consuming all the
+available backfill slots. At that point Prod2 reschedules itself to run
+immediately (rathar than snoozing).
+
+Change-Id: I17130e6b1e5bf66555e7fba9ea7d5682bd2be865
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2022-06-28 13:54:09.000000000
+Message: 
+Uploaded patch set 3: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: Restriction Checker
+Date: 2022-06-28 13:54:21.000000000
+Message: 
+Patch Set 3: Well-Formed+1
+
+Permission granted to commit: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/304504/artifact/restricted.html : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2022-06-28 14:01:32.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> Opening for early review for shared discussion
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2022-06-28 14:17:17.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:277, engines/ep/src/dcp/backfill-manager.cc -> Returning backfill_success here means that this BackfillTask will be rescheduled to run immediately.
+
+In offline chat, Ben has raised the concern of a task that might be keeping rescheduling itself multiple times until it manages to get its backfill slot.
+
+What's your thoughts on that?
+
+Here the behaviour would be:
+
+1. Assume AuxIO threads = 2
+2. ProdA (CBAS) has all of the backfill slots and some extra pending backfills (i.e. it will attempt to consumer more if/when a backfill finishes). 
+3. ProdB (replication) with this change is going to try to move a backfill from pending to init.
+4. At (3) ProdB fails (all slots taken by ProdA)
+5. ProdB reschedules itself to run immediately
+6. ProdB runs again -> If slot found then done. Else, back to step (5).
+
+Note: The above happens only in cases where we hit backfills.maxRunning, and only for a Producer that doesn't have any backfill in the active/initializing/snoozing queues.
+
+The concern is on the BackfillTask "spinning" until it finds its way to backfill.
+In practice the "spinning" is a rescheduling via our ExecutorPool, so the task doesn't monopolize any AuxIO thread (ie, other AuxIO tasks will get their change to run between one reschedule and another.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2022-06-28 14:53:15.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:277, engines/ep/src/dcp/backfill-manager.cc -> This is only a concern when the number of backfilling producers is less than or equal to the number of AuxIO threads, in addition to the above mentioned conditions. 
+
+A couple points I think worth considering are:
+1) Prod2 isn't guaranteed the next available backfill, the task for Prod1 could run after completing a backfill before the task for Prod2.
+2) The task for Prod2 is likely to run thousands of times in the time it takes for Prod1 to even complete a backfill iteration (i.e. fill the scan buffer, not necessarily even complete a backfill) as Prod1 is going to disk while Prod2 is not.
+
+I think in such a scenario it's likely that Prod2 gets a backfill within some number of backfill completions for Prod1, so provided an individual backfill doesn't run for too long it's likely to be a relatively small time period (seconds/minutes perhaps?).
+
+I think it would be worth a test to verify that it:
+a) fixes the issue
+b) see if we can spot the impact of it (provided the tests that we have can hit this scenario)
+
+I think it might be fine for neo, but it feels like something we could improve.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2022-06-28 15:33:26.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:277, engines/ep/src/dcp/backfill-manager.cc -> > This is only a concern when the number of backfilling producers is less than or equal to the number of AuxIO threads, in addition to the above mentioned conditions. 
+
+Could you expand on that please?
+I consider all this less of a concern when there's less Tasks than Threads, as it would be less likely that running tasks delay scheduling of other AuxIO tasks in the queue.
+
+> A couple points I think worth considering are:
+> 1) ProdA isn't guaranteed the next available backfill, the task for ProdB could run after completing a backfill before the task for ProdB.
+
+Correct on no guarantees, but not seeking that guarantee here, purpose is just making ProdA and ProdB on the same level of fair scheduling.
+I would actually expect very unlikely that ProdB runs again before ProdA as ProdB is still processing some backfill when ProdA reschedules itself, and ProdB has also to go through the same reschedule path.
+
+> 2) The task for ProdB is likely to run thousands of times in the time it takes for ProdA to even complete a backfill iteration (i.e. fill the scan buffer, not necessarily even complete a backfill) as Prod1 is going to disk while Prod2 is not.
+
+Not sure about the order of magnitude of how many times ProdA would re-run before getting its backfill slot, but yes that's expected to be some number.
+Surely not ideal, and I wouldn't even consider this change on the master branch.
+That sounds more acceptable on Neo, considering that we are expected to hit the new code path only when the system is already overloaded by some backfill-busy DCP Client (4096+ backfills created).
+
+> I think in such a scenario it's likely that Prod2 gets a backfill within some number of backfill completions for Prod1, so provided an individual backfill doesn't run for too long it's likely to be a relatively small time period (seconds/minutes perhaps?).
+
+Yeah I would expect much less than a minute surely. Probably less than 1 second? Our scan buffer default is 4096-items/4-MB (whatever we hit first).
+
+> I think it would be worth a test to verify that it:
+> a) fixes the issue
+> b) see if we can spot the impact of it (provided the tests that we have can hit this scenario)
+
+Toy on the go to QE.
+
+> I think it might be fine for neo, but it feels like something we could improve.
+
+This is proposed as possible improvement for Neo, there's a lot to improve on master ;)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2022-06-28 16:03:57.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:277, engines/ep/src/dcp/backfill-manager.cc -> > Could you expand on that please?
+I consider all this less of a concern when there's less Tasks than Threads, as it would be less likely that running tasks delay scheduling of other AuxIO tasks in the queue.
+
+___Backfilling Producers > AuxIO___
+
+In the simplest case in which we have 2 Producers and 1 AuxIO thread, we can run only 1 task concurrently. With this change we will find that tasks interleave themselves as they will only reschedule when they are run (i.e. we will run Prod1, Prod2, Prod1, Prod2 and eventually Prod2 will get a backfill when Prod1 completes a backfill).
+
+In a slightly less simple case we may have 3 Producers and 2 AuxIO threads. In this case, Prod1 and Prod2 are backfilling, and Prod3 is waiting to start a backfill. Prod1 and Prod2 run on average for say 1ms and Prod3 runs on average for 1us. The majority of the time we will be running Prod1 and Prod2 concurrently until Prod3 starts its own backfill. As the runtime of Prod3 is so much shorter than Prod1 or Prod2 we will be likely be able to run the tasks for Prod1 and Prod3 or Prod2 and Prod3 in a shorter time period than the task for Prod2 or Prod1 respectively. We could then see task interleaving as such:
+
+Thread 1) Prod1, Prod3, Prod1, Prod3
+Thread 2) Prod2, Prod3, Prod2, Prod3
+
+This would continue until Prod3 gets a backfill. I believe this flips the fairness around and makes Prod3 the priority, but I don't have a problem with that, as it corrects itself once Prod3 starts a backfill (its runtimes will be of the same order of magnitude as Prod1 and Prod2).
+
+___Backfilling Producers <= AuxIO___
+
+The scenario that I think is a concern is one in which we have 2 AuxIO threads and 2 Producers (Prod1 - CBAS, Prod2 - replication). In this case while Prod2 cannot start a backfill we will run tasks as such:
+
+Thread 1) Prod1
+Thread 2) Prod2
+
+As the task runtime is going to be very short for Prod2 until it can start a backfill what we're likely to see though is:
+
+Thread 1) Prod1-------------------------------------------------Prod1
+Thread 2) Prod2 Prod2 Prod2 Prod2 Prod2 Prod2 Prod2 Prod2 Prod2 Prod2
+
+One AuxIO thread is effectively consumed (while it admittedly has nothing else to do) polling the backfill counter for an available resource. If CPU usage is generally high for other reasons (say front end load) then we may see that impact front end performance.
+
+
+Maybe we can have a quick zoom on that tomorrow if you like.
+
+> Yeah I would expect much less than a minute surely. Probably less than 1 second? Our scan buffer default is 4096-items/4-MB (whatever we hit first).
+
+This isn't related to the scan buffer, rather when an entire backfill completes, as we can only start a new backfill when one completes entirely, and we won't stop spinning the task until we do start a new backfill.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2022-06-29 08:33:26.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:277, engines/ep/src/dcp/backfill-manager.cc -> > ___Backfilling Producers > AuxIO___
+> ..
+
+Sure - missed your point as my focus was more on ensuring that a BackfillTask doesn't prevent other AuxIO tasks from running.
+
+> One AuxIO thread is effectively consumed (while it admittedly has nothing else to do) polling the backfill counter for an available resource. If CPU usage is generally high for other reasons (say front end load) then we may see that impact front end performance.
+
+Legit concern - In the evaluation we need to consider that the behaviour described here would kick-in only on a system that is already overloaded by DCP backfills and where replication might be stuck for hours. I would expect that the effect on the frontend here would be comparable to the effect of some CPU-intensive NonIO task run.
+
+> This isn't related to the scan buffer ..
+
+True, I was thinking on that as if snoozed backfills weren't included in the "alive backfill" count. While they are. Count decremented only when a backfill is completed:
+
+        case backfill_finished:
+            lh.unlock();
+            backfillTracker.decrNumRunningBackfills();
+            break;
+
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,429 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-36746 Reimplement KeyspaceStats (formerly BucketStats)
+
+(Additional changes are coming in another commit before this change set is complete.)
+
+Architectural change to make KeyspaceStats entirely independent of IndexStats and
+tie the KeyspaceStats lifecycle to residence of the keyspaceId in a given stream
+(INIT_STREAM or MAINT_STREAM).
+
+Also fixed several latent and actual bugs in existing GSI code in related areas. See
+the MB entry for details.
+
+Amended per Jeelan's review to remove func-end tags, MB refs, and reduce commenting.
+
+Change-Id: I3792a0a0cb41bbfe21ece3cf74b91f8a58ce5d71
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Kevin Cherkauer
+Date: 2020-11-30 19:53:23.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2020-12-03 00:59:39.000000000
+Message: 
+Patch Set 1:
+
+First of two commits for MB-36746.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2020-12-03 07:35:45.000000000
+Message: 
+Patch Set 1: Code-Review+1
+
+PASS sanity,unit,functional,integration with storage memdb. See http://ci2i-unstable.northscale.in/gsi-03.12.2020-09.41.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2020-12-03 11:16:28.000000000
+Message: 
+Patch Set 1:
+
+PASS sanity,unit,functional,integration with storage fdb. See http://ci2i-unstable.northscale.in/gsi-03.12.2020-13.17.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2020-12-03 15:33:23.000000000
+Message: 
+Patch Set 1:
+
+PASS sanity,unit,functional,integration with storage plasma. See http://ci2i-unstable.northscale.in/gsi-03.12.2020-16.57.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2020-12-03 19:08:26.000000000
+Message: 
+Patch Set 1:
+
+PASS sanity,unit,functional,integration with storage memdb. See http://ci2i-unstable.northscale.in/gsi-03.12.2020-21.14.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2020-12-03 22:47:18.000000000
+Message: 
+Patch Set 1:
+
+PASS sanity,unit,functional,integration with storage fdb. See http://ci2i-unstable.northscale.in/gsi-04.12.2020-00.49.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2020-12-04 10:51:20.000000000
+Message: 
+Patch Set 1:
+
+PASS sanity,unit,functional,integration with storage fdb. See http://ci2i-unstable.northscale.in/gsi-04.12.2020-12.53.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2020-12-04 15:07:20.000000000
+Message: 
+Patch Set 1:
+
+PASS sanity,unit,functional,integration with storage plasma. See http://ci2i-unstable.northscale.in/gsi-04.12.2020-16.32.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: VarunVelamuri
+Date: 2020-12-04 18:18:53.000000000
+Message: 
+Patch Set 1:
+
+(4 comments)
+
+We need to come up with a common agreement on the coding standards here i.e. whether to use
+
+for streamId, _ := range m.streamReaderMap { 
+(or)
+for streamId := range m.streamReaderMap {
+
+Similarly, partnInst.Sc.GetSliceByIndexKey(common.IndexKey(mut.key)) (or) slice := partnInst.Sc.GetSliceByIndexKey(mut.key)
+Line:159, secondary/indexer/message.go -> Very minor: "Mutations" is the term used internally for DCP records
+
+Line:737, secondary/indexer/stats_manager.go -> Minor: Why not accept KeyspaceId in Init() method?
+
+Line:811, secondary/indexer/stats_manager.go -> If this is the last index in the keyspace and it is getting dropped, we should also drop the keyspace stats - Not sure if this is covered else where
+
+Line:2293, secondary/indexer/stats_manager.go -> I think it is a good idea to use the same format i.e. %s:%s or %v_%v. E.g., see the prefix generation at line 2277
+
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2020-12-04 18:43:03.000000000
+Message: 
+Patch Set 1:
+
+PASS sanity,unit,functional,integration with storage memdb. See http://ci2i-unstable.northscale.in/gsi-04.12.2020-20.48.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2020-12-04 22:31:31.000000000
+Message: 
+Patch Set 1:
+
+PASS sanity,unit,functional,integration with storage fdb. See http://ci2i-unstable.northscale.in/gsi-05.12.2020-00.24.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2020-12-05 00:45:58.000000000
+Message: 
+Patch Set 1:
+
+(4 comments)
+Line:159, secondary/indexer/message.go -> Done
+
+Line:737, secondary/indexer/stats_manager.go -> Done.
+
+Line:811, secondary/indexer/stats_manager.go -> This is handled by the architectural changes introduced by this MB that make KeyspaceStats lifespans completely independent of IndexStats (and index) lifespans. Now:
+
+1. Unchanged: IndexStats lifespan is exactly the same as the lifespan of an index.
+2. New: KeyspaceStats lifespan is exactly the same as the lifespan of a keyspace in a stream.
+
+A KeyspaceStats map entry is created when a keyspace is added to a stream (only happens via OPEN_STREAM command) and removed when a keyspace is removed from a stream (CLOSE_STREAM, REMOVE_KEYSPACE_FROM_STREAM), so their lives are tied 1:1 to the lives of keyspaces in streams. There is handling to do this in all the occurrences of those commands in indexer.go now (except the one where a comment notes that it is doing bootstrap stream cleanup and the keyspace stats are still empty and not all the workers that receive them are started yet, so we don't try to remove and distribute updated keyspace map in that case because it hangs waiting forever for a reply from a worker that is not booted yet -- I found that out through trial and error).
+
+The code you marked here is removing an IndexStats entry, not a KeyspaceStats entry. It used to also have to check if index count = 0 and remove the old bucket stats, but that was back when the lifespan of bucket stats was tied to that of IndexStats. Now they are unrelated.
+
+Line:2293, secondary/indexer/stats_manager.go -> I'm not 100% sure what you are asking for here as the code you reference uses "%v:" but ST_TYPE_INDEX that it also uses has separator suffix "_".
+
+Are you just asking me to use %v instead of %s to match the earlier code? Done! (If that's not what you were asking for, please let me know.)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2020-12-05 04:12:47.000000000
+Message: 
+Patch Set 1:
+
+PASS sanity,unit,functional,integration with storage plasma. See http://ci2i-unstable.northscale.in/gsi-05.12.2020-05.30.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2020-12-05 07:48:38.000000000
+Message: 
+Patch Set 1:
+
+PASS sanity,unit,functional,integration with storage memdb. See http://ci2i-unstable.northscale.in/gsi-05.12.2020-09.54.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2020-12-05 11:29:18.000000000
+Message: 
+Patch Set 1: -Code-Review
+
+MAYBE FAIL sanity,unit,functional,integration with storage fdb. See http://ci2i-unstable.northscale.in/gsi-05.12.2020-13.30.fail.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2020-12-05 15:42:40.000000000
+Message: 
+Patch Set 1:
+
+MAYBE FAIL sanity,unit,functional,integration with storage plasma. See http://ci2i-unstable.northscale.in/gsi-05.12.2020-17.11.fail.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2020-12-05 19:19:18.000000000
+Message: 
+Patch Set 1: Code-Review+1
+
+PASS sanity,unit,functional,integration with storage memdb. See http://ci2i-unstable.northscale.in/gsi-05.12.2020-21.24.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2020-12-05 23:01:33.000000000
+Message: 
+Patch Set 1:
+
+PASS sanity,unit,functional,integration with storage fdb. See http://ci2i-unstable.northscale.in/gsi-06.12.2020-01.01.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2020-12-06 04:04:37.000000000
+Message: 
+Patch Set 1:
+
+PASS sanity,unit,functional,integration with storage plasma. See http://ci2i-unstable.northscale.in/gsi-06.12.2020-05.30.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2020-12-06 07:39:43.000000000
+Message: 
+Patch Set 1:
+
+PASS sanity,unit,functional,integration with storage memdb. See http://ci2i-unstable.northscale.in/gsi-06.12.2020-09.46.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2020-12-06 11:18:58.000000000
+Message: 
+Patch Set 1:
+
+PASS sanity,unit,functional,integration with storage fdb. See http://ci2i-unstable.northscale.in/gsi-06.12.2020-13.21.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2020-12-06 15:34:17.000000000
+Message: 
+Patch Set 1:
+
+PASS sanity,unit,functional,integration with storage plasma. See http://ci2i-unstable.northscale.in/gsi-06.12.2020-17.00.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2020-12-06 19:10:28.000000000
+Message: 
+Patch Set 1:
+
+PASS sanity,unit,functional,integration with storage memdb. See http://ci2i-unstable.northscale.in/gsi-06.12.2020-21.15.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2020-12-06 22:50:47.000000000
+Message: 
+Patch Set 1:
+
+PASS sanity,unit,functional,integration with storage fdb. See http://ci2i-unstable.northscale.in/gsi-07.12.2020-00.52.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2020-12-07 04:11:56.000000000
+Message: 
+Patch Set 1:
+
+PASS sanity,unit,functional,integration with storage plasma. See http://ci2i-unstable.northscale.in/gsi-07.12.2020-05.30.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2020-12-07 07:49:32.000000000
+Message: 
+Patch Set 1:
+
+PASS sanity,unit,functional,integration with storage memdb. See http://ci2i-unstable.northscale.in/gsi-07.12.2020-09.53.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2020-12-07 11:38:48.000000000
+Message: 
+Patch Set 1:
+
+PASS sanity,unit,functional,integration with storage fdb. See http://ci2i-unstable.northscale.in/gsi-07.12.2020-13.31.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2020-12-07 15:55:02.000000000
+Message: 
+Patch Set 1:
+
+PASS sanity,unit,functional,integration with storage plasma. See http://ci2i-unstable.northscale.in/gsi-07.12.2020-17.20.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2020-12-07 17:14:32.000000000
+Message: 
+Removed reviewer CI Bot with the following votes:
+
+* Code-Review+1 by CI Bot (1004336)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2020-12-07 19:15:40.000000000
+Message: 
+Removed reviewer John Liang.
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2020-12-07 19:15:52.000000000
+Message: 
+Removed reviewer Deepkaran Salooja.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2020-12-08 20:20:32.000000000
+Message: 
+Patch Set 1:
+
+PASS sanity,unit,functional,integration with storage memdb. See http://ci2i-unstable.northscale.in/gsi-08.12.2020-22.26.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2020-12-08 23:49:30.000000000
+Message: 
+Patch Set 1: -Code-Review
+
+MAYBE FAIL sanity,unit,functional,integration with storage fdb. See http://ci2i-unstable.northscale.in/gsi-09.12.2020-02.02.fail.html
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2020-12-09 02:55:55.000000000
+Message: 
+Removed reviewer CI Bot.
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2020-12-14 23:21:12.000000000
+Message: 
+Removed reviewer null.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2020-12-15 03:31:35.000000000
+Message: 
+Patch Set 1: Code-Review+1
+
+PASS sanity,unit,functional,integration with storage fdb. See http://ci2i-unstable.northscale.in/gsi-15.12.2020-05.30.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2020-12-15 07:50:16.000000000
+Message: 
+Patch Set 1:
+
+PASS sanity,unit,functional,integration with storage plasma. See http://ci2i-unstable.northscale.in/gsi-15.12.2020-09.13.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2020-12-15 11:27:59.000000000
+Message: 
+Patch Set 1:
+
+PASS sanity,unit,functional,integration with storage memdb. See http://ci2i-unstable.northscale.in/gsi-15.12.2020-13.32.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2020-12-15 15:56:35.000000000
+Message: 
+Patch Set 1:
+
+PASS sanity,unit,functional,integration with storage memdb. See http://ci2i-unstable.northscale.in/gsi-15.12.2020-18.03.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2020-12-15 19:37:39.000000000
+Message: 
+Patch Set 1:
+
+PASS sanity,unit,functional,integration with storage fdb. See http://ci2i-unstable.northscale.in/gsi-15.12.2020-21.38.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2020-12-15 23:54:44.000000000
+Message: 
+Patch Set 1:
+
+PASS sanity,unit,functional,integration with storage plasma. See http://ci2i-unstable.northscale.in/gsi-16.12.2020-01.19.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2020-12-16 03:26:07.000000000
+Message: 
+Patch Set 1:
+
+PASS sanity,unit,functional,integration with storage memdb. See http://ci2i-unstable.northscale.in/gsi-16.12.2020-05.30.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: Deepkaran Salooja
+Date: 2020-12-16 06:34:09.000000000
+Message: 
+Patch Set 1:
+
+(2 comments)
+Line:85, secondary/indexer/stats_manager.go -> BucketSeqsTimings are only available at bucket level.
+
+Line:714, secondary/indexer/storage_manager.go -> Use keyspaceId instead of bucket.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2020-12-16 07:08:54.000000000
+Message: 
+Patch Set 1:
+
+PASS sanity,unit,functional,integration with storage fdb. See http://ci2i-unstable.northscale.in/gsi-16.12.2020-09.07.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2020-12-16 11:25:11.000000000
+Message: 
+Patch Set 1:
+
+PASS sanity,unit,functional,integration with storage plasma. See http://ci2i-unstable.northscale.in/gsi-16.12.2020-12.50.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2020-12-16 15:03:37.000000000
+Message: 
+Patch Set 1:
+
+PASS sanity,unit,functional,integration with storage memdb. See http://ci2i-unstable.northscale.in/gsi-16.12.2020-17.06.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2020-12-16 18:43:28.000000000
+Message: 
+Patch Set 1:
+
+PASS sanity,unit,functional,integration with storage fdb. See http://ci2i-unstable.northscale.in/gsi-16.12.2020-20.45.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2020-12-16 21:43:59.000000000
+Message: 
+Patch Set 1:
+
+(2 comments)
+Line:85, secondary/indexer/stats_manager.go -> Done. (Confirmed with you that the correct approach here is to extract the bucket name from the keyspaceId and add BucketSeqsTiming(bucket) to statMap regardless of whether keyspaceId was originally a b:s:c key or just a bucket key.)
+
+Line:714, secondary/indexer/storage_manager.go -> Done
+
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2020-12-16 22:59:52.000000000
+Message: 
+Patch Set 1:
+
+PASS sanity,unit,functional,integration with storage plasma. See http://ci2i-unstable.northscale.in/gsi-17.12.2020-00.25.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2020-12-17 05:29:30.000000000
+Message: 
+Patch Set 1:
+
+PASS sanity,unit,functional,integration with storage memdb. See http://ci2i-unstable.northscale.in/gsi-17.12.2020-05.30.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2020-12-17 13:58:02.000000000
+Message: 
+Patch Set 1:
+
+PASS sanity,unit,functional,integration with storage memdb. See http://ci2i-unstable.northscale.in/gsi-17.12.2020-15.56.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2020-12-17 17:39:41.000000000
+Message: 
+Patch Set 1:
+
+PASS sanity,unit,functional,integration with storage fdb. See http://ci2i-unstable.northscale.in/gsi-17.12.2020-19.39.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: Deepkaran Salooja
+Date: 2020-12-17 17:39:56.000000000
+Message: 
+Patch Set 1: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------

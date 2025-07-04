@@ -1,0 +1,200 @@
+======================================================================================================================
+DESCRIPTION:
+
+FS: use binary search to determine filesystem timestamp resolution
+
+Previous code used a minimum granularity of 1 microsecond and would
+iterate 233 times on a system where the resolution is 1 second (for
+instance, Java 8 on Mac APFS).
+
+New code uses a binary search between the maximum we care about (2
+seconds) and zero, with a minimum granularity of also 1 microsecond.
+This takes at most 19 iterations (guaranteed). For a file system with 1
+second resolution, it takes 4 iterations (1s, 0.5s, 0.8s, 0.9s). With
+an up-front check at 1 microsecond and at 1 millisecond this performs
+equally well as the old code on file systems with a fine resolution.
+(For instance, Java 11 on Mac APFS.)
+
+Also handle obscure cases where the file timestamp implementation may
+yield bogus values (as observed on HP NonStop). If such an error case
+occurs, log a warning and abort the measurement at the last good value.
+
+Bug: 565707
+Change-Id: I82a96729b50c284be7c23fbdf3d0df1bddf60e41
+Signed-off-by: Thomas Wolf <thomas.wolf@paranor.ch>
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Thomas Wolf
+Date: 2020-08-14 14:37:11.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2020-08-14 14:37:22.000000000
+Message: 
+Patch Set 2:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/3534/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2020-08-14 15:14:20.000000000
+Message: 
+Patch Set 2: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/3534/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2020-08-16 12:38:51.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:542, org.eclipse.jgit/src/org/eclipse/jgit/util/FS.java -> Can we extract this logic working around bug 565707 which seems to be caused by bugs in z/OS and NonStop JVM ports to a helper method which is only used on these platforms ?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2020-08-16 15:52:46.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:542, org.eclipse.jgit/src/org/eclipse/jgit/util/FS.java -> 1. I don't know how to detect these platforms.
+2. The code here is correct in general on all platforms. I don't see a problem with using it on all platforms.
+3. The other critical place would be LockFile.waitForStatChange(). That uses Files.setLastModifiedTime(Instant.now()), which _may_ have sub-milli resolution, but probably doesn't on these platforms.
+4. FileUtils.setLastModifiedTime() is specified to modify the time of the link if the path is a symlink. I don't know for sure, but I suspect File.setLastModified() might change the timestamp of the link target?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2020-08-16 22:05:53.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:542, org.eclipse.jgit/src/org/eclipse/jgit/util/FS.java -> 1. yep, also don't know, I have no access to these platforms
+2. ok
+3. I think that's used in RefDirectory.commitPackedRefs to ensure a newly written packed-refs file doesn't look racily clean compared to its former state
+4. FileUtils doesn't have a method setLastModifiedTime(), it has setLastModified(Instant) which delegates to Files.setLastModifiedTime(). I tried and found that both Files.setLastModifiedTime() and File.setLastModified() when called on a symlink set the timestamp of the link target:
+
+package test;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.attribute.FileTime;
+import java.time.Instant;
+
+public class FileTimestamps {
+
+	public static void main(String[] args) throws IOException {
+		Path testdir = Files.createTempDirectory("test");
+
+		Path f1 = Files.createTempFile(testdir, "file1_", "test");
+		Path linkPath1 = testdir.resolve("link1");
+		Path l1 = Files.createSymbolicLink(linkPath1, f1);
+		l1.toFile().setLastModified(0);
+
+		Path f2 = Files.createTempFile(testdir, "file2_", "test");
+		Path linkPath2 = testdir.resolve("link2");
+		Path l2 = Files.createSymbolicLink(linkPath2, f2);
+		Files.setLastModifiedTime(l2, FileTime.from(Instant.EPOCH));
+		System.out.println("done");
+	}
+
+}
+
+I debugged this on Mac, stopped on a breakpoint in the last line and checked in the file system:
+
+test779924900212705200]$ ls -al
+total 0
+drwx------   6 user staff  192 Aug 16 23:57 .
+drwx------ 142 user staff 4544 Aug 16 23:57 ..
+-rw-------   1 user staff    0 Jan  1  1970 file1_97777409364211114test
+-rw-------   1 user staff    0 Jan  1  1970 file2_2274823892018540160test
+lrwxr-xr-x   1 user staff   99 Aug 16 23:57 link1 -> /var/folders/16/nqvdxf5s45309nxkv4k4r20r0000gq/T/test779924900212705200/file1_97777409364211114test
+lrwxr-xr-x   1 user staff  101 Aug 16 23:57 link2 -> /var/folders/16/nqvdxf5s45309nxkv4k4r20r0000gq/T/test779924900212705200/file2_2274823892018540160test
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2020-08-16 22:22:40.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:542, org.eclipse.jgit/src/org/eclipse/jgit/util/FS.java -> > 4. FileUtils doesn't have a method setLastModifiedTime(), it has setLastModified(Instant) which delegates to Files.setLastModifiedTime(). I tried and found that both Files.setLastModifiedTime() and File.setLastModified() when called on a symlink set the timestamp of the link target:
+
+Right; typo of mine. But that means that FS.setLastModified() doesn't do what its javadoc says: "If the OS/JRE support symbolic links, the link is modified, not the target,".
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2020-08-17 07:51:45.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:542, org.eclipse.jgit/src/org/eclipse/jgit/util/FS.java -> I tried this
+
+ Path f3 = Files.createTempFile(testdir, "file3_", "test");
+ Path linkPath3 = testdir.resolve("link3");
+ Path l3 = Files.createSymbolicLink(linkPath3, f3);
+ BasicFileAttributeView basicView = 
+				  Files.getFileAttributeView(l3, BasicFileAttributeView.class, LinkOption.NOFOLLOW_LINKS);
+ basicView.setTimes(FileTime.from(Instant.EPOCH), null, null);
+
+but this fails with an exception:
+
+Exception in thread "main" java.nio.file.FileSystemException: /var/folders/16/nqvdxf5s45309nxkv4k4r20r0000gq/T/test2509394913659798827/link3: Too many levels of symbolic links or unable to access attributes of symbolic link
+	at sun.nio.fs.UnixPath.openForAttributeAccess(UnixPath.java:785)
+	at sun.nio.fs.UnixFileAttributeViews$Basic.setTimes(UnixFileAttributeViews.java:74)
+	at test.FileTimestamps.main(FileTimestamps.java:31)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2020-08-17 08:51:36.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:542, org.eclipse.jgit/src/org/eclipse/jgit/util/FS.java -> Simply remove the javadoc claiming it modified the symlink? Seems like a copy-paste error?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2020-08-17 12:00:04.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:542, org.eclipse.jgit/src/org/eclipse/jgit/util/FS.java -> looks like that's the only thing we can do
+
+I don't understand why the read attributes methods allow to distinguish between attributes of the link and the link target using LinkOption.NOFOLLOW_LINKS but the write methods don't allow to change the attributes of the link itself. This asymmetry seems strange. Will ask our JVM experts if they can explain that.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2020-08-17 12:07:02.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:542, org.eclipse.jgit/src/org/eclipse/jgit/util/FS.java -> https://bugs.openjdk.java.net/browse/JDK-8220793
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2020-08-17 12:10:14.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:542, org.eclipse.jgit/src/org/eclipse/jgit/util/FS.java -> thanks, fixed in Java 13
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2020-08-17 12:11:17.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:542, org.eclipse.jgit/src/org/eclipse/jgit/util/FS.java -> I don't think JGit is ever interested in setting modification times of symlinks, is it? So probably that javadoc comment never was needed, nor should we change that method, even if we had a BREE of Java 13.
+
+----------------------------------------------------------------------------------------------------------------------

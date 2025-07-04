@@ -1,0 +1,97 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-36887: Perf: Split keyIndex into separate indexes for prepared & committed
+
+MB-34685 (commit 257fbd353) added the ability to have prepares and
+commits (to the same key) in the same checkpoint; to be consistent
+with Disk snapshots.
+
+To implement this the keyIndex (an unordred_map from StoredDocKey to
+index_entry) was modified so the 'key' was a pair of (StoredDocKey,
+CheckpointIndexKeyNamespace):
+
+    enum class CheckpointIndexKeyNamespace : uint8_t {
+        Committed = 0,
+        Prepared,
+    };
+
+    using CheckpointIndexKey = std::pair<StoredDocKey,
+                                         CheckpointIndexKeyNamespace>
+
+Functionally this is fine, however it introduces a number of temporary
+heap allocations due to the need to create temporary
+CheckpointIndexKey objects when calling checkpoint_index::find().
+
+Recall that an Item contains a StoredDocKey, so before
+CheckpointIndexKey was added, it was possible to search
+checkpoint_index via find(const StoredDocKey&) without creating a
+temporary.
+
+However, when the key was changed to CheckpointIndexKey it is
+necessary to create a temporary CheckpointIndexKey object to pass to
+find(). This typically requires a heap allocation as StoredDocKey is
+internally a std::string and most keys exceed the internal buffer of
+std::string (16 bytes on libstdc++). This heap allocation is freed
+immediately after find() returns and hence we also pay for a heap
+free.
+
+Avoid this extra heap cost by splitting keyIndex into separare indexes
+for prepared and commit keys, checking the appropriate index for the
+given queued_item.
+
+Not only does this avoid the extra heap alloc/free; but it also
+reduces the memory footprint of checkpoint_index - the key type is now
+just sizeof(StoredDocKey) and not sizeof(CheckpointIndexKeyNamespace)
+- which due to alignment is generally a rection from 32B to 24B.
+
+Change-Id: Ic8602346689d1cd64854c087386f15732944472a
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2019-12-16 11:39:42.000000000
+Message: 
+Patch Set 5: Patch Set 4 was rebased
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-12-16 11:40:14.000000000
+Message: 
+Patch Set 5:
+
+check approval
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-12-16 11:40:22.000000000
+Message: 
+Patch Set 5: Well-Formed+1
+
+Permission granted to commit: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/161113/artifact/restricted.html : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-12-16 12:19:45.000000000
+Message: 
+Patch Set 5: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/23258/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/616/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/569/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/638/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/627/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/635/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Daniel Owen
+Date: 2019-12-16 13:08:15.000000000
+Message: 
+Patch Set 5: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------

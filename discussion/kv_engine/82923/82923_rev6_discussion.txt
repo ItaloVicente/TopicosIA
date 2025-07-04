@@ -1,0 +1,122 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-20698: Add new feature Clustermap change notification
+
+This patch introduce the new feature to be passed in HELO
+and make sure that enabling it works as expected.
+
+Note that the feature is currently not implemented on the
+server, so you won't get any of the notifications.
+
+Change-Id: Ib7e54da37d64bfb1f02d3531cedadc5c874b3d0f
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Trond Norbye
+Date: 2017-09-05 17:17:45.000000000
+Message: 
+Uploaded patch set 6.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2017-09-05 17:40:31.000000000
+Message: 
+Patch Set 6: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master/2371/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/2448/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/2459/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/2220/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/978/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/2491/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Oliver Downard
+Date: 2017-09-06 15:57:21.000000000
+Message: 
+Patch Set 6: Code-Review+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2017-09-07 13:36:23.000000000
+Message: 
+Patch Set 6:
+
+ping
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2017-09-07 13:40:15.000000000
+Message: 
+Patch Set 6: Code-Review-1
+
+(1 comment)
+Line:534, daemon/connection.h -> For correctness this needs to be at least acquire/release (given you want ordering semantics on any changes).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Will Gardner
+Date: 2017-09-07 14:40:44.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+Line:534, daemon/connection.h -> You wouldn't get a useful ordering guarantee without holding a thread-level/connection-level lock anyway (which would give appropriate memory barriers) since a connection could set/unset this after it's been read but before it's been processed regardless of the ordering.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2017-09-07 14:46:12.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+Line:534, daemon/connection.h -> The primary reason for using the atomic thing here is to stop thread sanitizer from complaining. It isn't strictly needed, as we have enough full memory barriers around in the code to make sure that it is eventually propagated to all threads.
+
+The client would typically perform the hello initially and set this flag to true, and yes it could then race with an incomming clustermap and miss it from being sent to the client.. If that's the situation we can always debate if the clustermap was set _right before_ we started executing the command or not... BUT if the client does try to perform an operation to an invalid bucket it will receive the updated clustermap.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2017-09-07 14:49:40.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+Line:534, daemon/connection.h -> @Will: Maybe, but semantically this shouldn't be relaxed - that implies to the reader this variable is purely statistical). The code should express intent to both the compiler and the human reading it :)
+
+@Trond: I think it's still fine (and correct) to flip to acquire/release - there's no additional cost on x86 anyways compared to a non-atomic variable, and we arn't introducing a data race.
+
+(The fact that TSan /does/  complain about it implies either (a) there's a bug in TSan or (b) you haven't got sufficient memory barriers in place.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Will Gardner
+Date: 2017-09-07 15:43:32.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+Line:534, daemon/connection.h -> > that implies to the reader this variable is purely statistical
+
+I think that would reflect a serious misunderstanding of what a relaxed atomic *is* and what this flag variable does.
+
+It is entirely appropriate for something like this to be a relaxed atomic because it does not protect any data other than itself. It would not be invalid behaviour for a compiler (or the CPU for that matter) to reorder a subsequent read/write before a read of this flag (since it could not affect the value of this flag or the behaviour of taking that branch) nor would it be invalid behaviour to move a read/write to after a write of this flag since it could not affect the consistency of any associated data (that would have to be protected by some kind of lock).
+
+As Trond alluded to above we don't actually need an ordering guarantee and I would emphasise that a sequentially consistent atomic doesn't get you the ordering you want.
+
+The only two guarantees that are actually needed of this variable are:
+
+1) The variable is read/written indivisible (ie. atomically)
+2) Any writes are written back to memory before another CPU reads it (ie. the variable is volatile).
+
+aka the guarantees that are provided by relaxed. If anything relaxed is a better description as it doesn't imply an ordering/synchronisation that isn't there.
+
+Ultimately I don't personally mind it being sequentially consistent since it's definitely not broken but your argument that sequentially consistent is *better* is false.
+
+> The fact that TSan /does/  complain about it implies [..] you haven't got sufficient memory barriers in place.
+
+This is misleading. TSan was complaining due to overlapping non-atomic reads/writes. seqcst doesn't add any memory barriers that would help in this instance.
+
+----------------------------------------------------------------------------------------------------------------------

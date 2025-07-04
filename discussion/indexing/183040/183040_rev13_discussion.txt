@@ -1,0 +1,90 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-53297: Fix systemHandler() crashed: send on closed channel
+
+- When security context changes, projector closes the request channel on which adminport server writes requests (Reader is closing the channel)
+- This code change closes the channel from writer's side
+
+Change-Id: I46580a70299a7c1a329903394c5db36ce13545e2
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dhananjay Kshirsagar
+Date: 2022-12-02 18:57:09.000000000
+Message: 
+Patch Set 13: Patch Set 12 was rebased
+----------------------------------------------------------------------------------------------------------------------
+Author: Dhananjay Kshirsagar
+Date: 2022-12-02 18:57:41.000000000
+Message: 
+Removed cc <GERRIT_ACCOUNT_1004358>.
+----------------------------------------------------------------------------------------------------------------------
+Author: VarunVelamuri
+Date: 2022-12-04 06:38:04.000000000
+Message: 
+Patch Set 13:
+
+(2 comments)
+Line:346, secondary/adminport/server/admin_httpd.go -> Why is this lock required here? What happens if we do not acquire this lock?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dhananjay Kshirsagar
+Date: 2022-12-04 09:55:08.000000000
+Message: 
+Patch Set 13:
+
+(2 comments)
+Line:346, secondary/adminport/server/admin_httpd.go -> If one request is about to write on channel and another comes after CloseReqch() call, latter one will wait for former’s completion before closing channel.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: VarunVelamuri
+Date: 2022-12-04 21:40:37.000000000
+Message: 
+Patch Set 13:
+
+(1 comment)
+Line:346, secondary/adminport/server/admin_httpd.go -> Ok. Got that. Thanks! 
+
+Can the race still happen. E.g., Consider the following sequence of events:
+
+a. go-routine-1 reached till line: 344
+b. go-routine-2 called ClosedReqCh() and closed the reqCh
+c. go-routine-1 wakes up, acquires the lock and tries to write to reqCh which is already closed by go-routine-2
+
+----------------------------------------------------------------------------------------------------------------------
+Author: VarunVelamuri
+Date: 2022-12-12 06:04:07.000000000
+MISMATCHED INLINE COMMENT
+Line:346, secondary/adminport/server/admin_httpd.go -> Here, Instead of acquiring the mutex for entire block, can we just acquire mutex to read the closeReqCh state. Once we read the value into a local variable, I do not see a need for lock (Except when updating state to REQCH_DISABLE_CLOSE - For which we can acquire lock one more time and update the state).
+
+This makes sure that we need not acquire lock while sending request and waiting for response. This prevents lock contention for other functions and also keeps the semantics close to earlier implementation.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dhananjay Kshirsagar
+Date: 2022-12-12 09:16:45.000000000
+MISMATCHED INLINE COMMENT
+Line:346, secondary/adminport/server/admin_httpd.go -> Updated patch with mutex for state read/update only.
+----------------------------------------------------------------------------------------------------------------------
+Author: VarunVelamuri
+Date: 2022-12-05 06:46:22.000000000
+MISMATCHED INLINE COMMENT
+Line:346, secondary/adminport/server/admin_httpd.go -> Will this serialize request processing of multiple go-routines i.e. now, can one request wait for another?
+----------------------------------------------------------------------------------------------------------------------
+Author: VarunVelamuri
+Date: 2022-12-06 01:35:58.000000000
+MISMATCHED INLINE COMMENT
+Line:346, secondary/adminport/server/admin_httpd.go -> Since we are using one reqCh, they will anyways be serialized. Therefore, ignore my earlier comment.
+
+Since we are using mutex for the entire select block, is closeReqCh still required. Can we not track this with just a boolen. I mean the following:
+
+a. shutdown sets a boolean - closeReqCh to true while holding lock
+b. systemHandler will acquire lock and if this boolean is true, it will close reqCh and return
+
+Since the synchronization happens with mutex, I think we should be able to solve with just a boolean
+----------------------------------------------------------------------------------------------------------------------
+Author: Dhananjay Kshirsagar
+Date: 2022-12-05 06:39:02.000000000
+MISMATCHED INLINE COMMENT
+Line:346, secondary/adminport/server/admin_httpd.go -> Using lock for entire select block.
+----------------------------------------------------------------------------------------------------------------------

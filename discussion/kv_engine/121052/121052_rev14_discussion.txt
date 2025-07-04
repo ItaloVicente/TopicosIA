@@ -1,0 +1,148 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-37546: Early-return if no items for persistence cursor
+
+Before this change, the logic in EPBucket::flushVBucket() is:
+
+  if (some-items-for-persistence-cursor) {
+    <many lines of code for flushing to disk>
+  }
+  <epilogue>
+
+The epilogue, which is executed regardless of whether we have flushed
+or not, performs:
+  - KVStore::pendingTasks()
+  - Notify satisfied SeqnoPersistence requests
+  - Checkpoint related operations:
+    - Wakeup CheckpointRemover if CM has checkpoints that can be removed
+    - Notify satisfied CheckpointPersistence requests
+
+With this change we remove the extra indentation of many lines of code:
+
+  if (no-items-for-persistence-cursor) {
+    return;
+  }
+  <many lines of code for flushing to disk>
+  <epilogue>
+
+The side effect of this is that we do /not/ execute the <epilogue> if we
+early-return. But:
+  - KVStore::pendingTasks() does not need to be executed as by
+    definition "is called after persisting a batch of data to perform
+    any pending tasks on the underlying store"
+  - There is definitely no SeqnoPersistence requests to notify as we
+    have not persisted anything
+So that is fine.
+
+Now about the Checkpoint related operations:
+  - Wakeup CheckpointRemover
+      I am keeping this by executing it unconditionally just after the
+      call to VB::getItemsForPersistence(), as the persistence cursor
+      may have just moved to the beginning of a new checkpoint, which
+      may make the previous checkpoint eligible for removal.
+      Also, it is safe to execute this step regardless of whether (1)
+      no-items-for-pcursor or (2) flush-success or (3) flush-failure.
+      Note that before this change we missed to execute this step before
+      some nested return statement. Which is fixed here.
+  - Notify satisfied CheckpointPersistence request
+      This step must still be executed if we early-return because
+      (again) the persistence cursor may have moved.
+      But, we cannot execute this step unconditionally because we cannot
+      notify if the flush fails.
+      So, this step is executed if (1) no-items-for-pcursor or (2)
+      flush-success, but not executed if (3) flush-failure.
+
+For reference, the CheckpointPersistence command seems to be just legacy
+from TAP, so we can probably remove it in a follow-up.
+
+Change-Id: I12fb3f0afffcfca2db768d3179592f0eda2a2f18
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2020-01-28 10:23:19.000000000
+Message: 
+Uploaded patch set 14.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-01-28 10:23:29.000000000
+Message: 
+Patch Set 14: Well-Formed+1
+
+Permission granted to commit: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/165775/artifact/restricted.html : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-01-28 11:06:06.000000000
+Message: 
+Patch Set 14: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/701/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/701/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/23934/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/23934/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/768/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/764/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/772/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/mad-hatter/117/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/777/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/547/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-01-28 11:48:19.000000000
+Message: 
+Patch Set 14: Code-Review+1
+
+(1 comment)
+Line:354, engines/ep/src/ep_bucket.cc -> Just out of interest, what state does the cursor need to be in to move the cursor without finding items?
+
+The only situation I can think of is the cursor is sat at the end of a checkpoint, and we move it into the start of a new (empty) one - but CheckpointManager::addNewCheckpoint_UNLOCKED and CheckpointManager::getItemsForCursor both move the cursor to the next checkpoint (when adding the new checkpoint, or just finished collecting items for the cursor), so I'm not sure the described state would be possible.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-01-28 12:25:51.000000000
+Message: 
+Patch Set 14:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/702/ : ABORTED
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/702/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/23934/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/23934/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/768/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/764/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/772/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/mad-hatter/117/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/777/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/547/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-02-11 09:45:53.000000000
+MISMATCHED INLINE COMMENT
+Line:354, engines/ep/src/ep_bucket.cc -> Here I'm just being conservative, keeping the logic as it is (ie, we do this check unconditionally before my change).
+I assume that the reason for doing that unconditionally was that we don't want rely on all the possible cases where the check is or isn't necessary. If that s the reason, that's probably a good one given that minor changes to the cursor-move-logic appear to be quite frequent :)
+----------------------------------------------------------------------------------------------------------------------

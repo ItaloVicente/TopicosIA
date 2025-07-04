@@ -1,0 +1,93 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-47619: Free tier GSI support Planner
+
+Enforcing limit in planner
+
+Change-Id: I236a2900451b99d128ba31b1f5f2b2f9e11fc574
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: singlaabhinandan
+Date: 2021-10-03 18:47:47.000000000
+Message: 
+Uploaded patch set 10: Patch Set 9 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: VarunVelamuri
+Date: 2021-10-04 05:34:08.000000000
+Message: 
+Patch Set 10:
+
+(4 comments)
+Line:683, secondary/dcp/pools.go -> getCollectionManifest?
+
+Line:543, secondary/planner/executor.go -> I think this can become a perf hit for create index as you have to traverse entire cluster map every time you create an index. Instead of computing this every-time, you can probably maintain map[bucket][scope]<num_indexes> in plan and build it along with plan. We can re-use the data here.
+
+We can attempt this in a separate patch if any regressions are observed in DDL tests. Otherwise, we can leave it as it is.
+
+Line:546, secondary/planner/executor.go -> We usually follow camel casing. So, "bucket" would be a better name here. Same for scope
+
+Line:552, secondary/planner/executor.go -> Do you want to iterate this indexSpecs again as you are already iterating it on line 489. Why not directly use the "uint32(indexSpec.NumPartition*indexSpec.Replica)" formula directly at line 499
+
+----------------------------------------------------------------------------------------------------------------------
+Author: singlaabhinandan
+Date: 2021-10-04 07:52:38.000000000
+Message: 
+Patch Set 10:
+
+(4 comments)
+Line:683, secondary/dcp/pools.go -> Ack
+
+Line:543, secondary/planner/executor.go -> Yes, it was a perf concern, but this func will only be called when the scopeLimit is set(i.e when we need to enforce the limit). otherwise the create index will skip this part.
+
+For Enterprise Customer, keeping that map would be unnecessary as this will only be applicable for Free Tier customer.
+
+Line:546, secondary/planner/executor.go -> Ack
+
+Line:552, secondary/planner/executor.go -> In line no. 492 : we iterate over indexSpecs and if the current "bucket:scope" combination has not been encountered earlier in the loop, we go for enforcing the limit.
+
+We will find out the limit, if it is not nil proceed to enforce it. 
+
+Now in order to enforce the limit, all new indexes to be created under that "bucket:scope" should be considered.
+For example there are multiple requests(size of indexSpecs > 1) to create new indexes under the same scope and bucket, then I will iterate over indexSpecs and find total number of new indexes under the bucket and scope to be created and see if that number is within the scope limit. As this process will be same for all requests to create new indexes under the current "bucket:scope" combination, so this will happen only once whenever a new "bucket:scope" combination is encountered.
+
+eg: indexSpexcs has 4 create req, req1, req2, req3 and req4. 
+req1 --> bucket1,scope1, 3 indexes
+req2 --> bucket1,scope2, 2 indexes
+req3 --> bucket2,scope1, 3 indexes
+req4 --> bucket1,scope1, 4 indexes
+
+
+now at line 489, we enter the loop for req1, and at line 499 call the GetNewIndexesPerScope func, provided limit is not NIL. This func will return the value as 7(3+4) and if it is within the limit, then we allow index creation. 
+Same process for req2 and req3.
+For req 4 at at line no. 490, there will be a check if bucket1,scope1 has been visited or not, and if yes, we will not enter the loop.
+
+
+
+Alternate Approach: Hold the limit value in a map[bucket+scope]limitValue, and also hold all the new indexes created in a map[bucket+scope]newIndexes and use these in case of multiple requests under the same bucket,scope.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: VarunVelamuri
+Date: 2021-10-04 09:29:12.000000000
+Message: 
+Patch Set 10:
+
+(2 comments)
+Line:546, secondary/planner/executor.go -> Got it. Thanks
+
+Line:552, secondary/planner/executor.go -> Ok. Got it.  Consider this case:
+
+Scope limit 5, numIndexes is "0" when you start and you have two requests
+req1 -> bucket1, scope1, 3 indexes
+req2 -> bucket1, scope1, 4 indexes
+
+In the current logic, you reject both the requests while you can admit one request and reject the other. Is this expected behaviour?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: singlaabhinandan
+Date: 2021-10-04 13:48:41.000000000
+MISMATCHED INLINE COMMENT
+Line:552, secondary/planner/executor.go -> Yes, this is the expected behaviour either all requests are admitted or none.
+----------------------------------------------------------------------------------------------------------------------

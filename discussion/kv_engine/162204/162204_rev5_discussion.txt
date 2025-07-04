@@ -1,0 +1,87 @@
+======================================================================================================================
+DESCRIPTION:
+
+Restructure mock_server notify_io_complete to match real server
+
+When adding a new ep_testsuite-level test to verify SyncWrite timeout
+behaviour, TSan reported a lock-order inversion between the Cookie
+mutex and the Collection Manifest mutex.
+
+For front-end operations the Cookie mutex is always acquired before
+the Manifest mutex. However during the test the
+DurabilityCompletionTask calls notify_io_complete on the CookieIface
+with the Manifest mutex held. The implementation of notify_io_complete
+for MockCookie acquires the Cookie mutex and hence there is a
+lock-order inversion.
+
+This _is_ a test-only issue - the "real" memcached Cookie/Connection
+doesn't acqire the Cookie mutex as part of notify_io_complete and
+hence there is no lock-order issue in production, however it causes
+the test to fail under TSan. It also highlights the fact that the test
+harness is not representative of the real system.
+
+To address both these issues, modify mock_server / mock_cookie to
+handle locking in the same way as the real server:
+
+1. Instead of notify_io_complete acquiring the Cookie's mutex and
+   updating the async status immediately, add the status to be
+   notified to a per-cookie queue - not modifying the Cookie (and
+   hence no Cookie mutex acquired).
+
+2. When waiting for a notification, instead of checking the per-cookie
+   notification count, instead wait on the new cookie notification
+   queue to be non-empty; when it is pop off the head of the queue and
+   return that status.
+
+This matches the locking behaviour of the real server - only the
+front-end thread which "owns" a given Cookie/Connection acquires the
+Cookie mutex during async notification handling.
+
+Note this does require restructuring of some tests - the main change
+being that the status is no longer "part" of the cookie (and cannot be
+set / read from it); instead it is accessed via mock_waitfor_cookie()
+and mock_cookie_notified().
+
+Change-Id: Ic9a4c98c2a04d77f4b9690282fe1277a8626d14e
+Reviewed-on: http://review.couchbase.org/c/kv_engine/+/162204
+Tested-by: Build Bot <build@couchbase.com>
+Reviewed-by: Paolo Cocchi <paolo.cocchi@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2021-10-08 08:54:25.000000000
+Message: 
+Change has been successfully cherry-picked as 086f2b6b7efdc18e6ec4770a58dfd381976afb3d by Dave Rigby
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-10-08 08:58:15.000000000
+Message: 
+Patch Set 5:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-master/9187/ (1/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-10-08 09:06:15.000000000
+Message: 
+Patch Set 5:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-TSan-master/6074/ (2/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-10-08 10:14:18.000000000
+Message: 
+Patch Set 5:
+
+Build Unstable 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-TSan-master/6074/ : UNSTABLE
+
+Failure of a testrunner test ( http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-TSan-master/6074/ )
+
+ERROR: do_warmup_100k (memcapable.WarmUpMemcachedTest)
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-TSan-master/6074/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-master/9187/ : SUCCESS'
+----------------------------------------------------------------------------------------------------------------------

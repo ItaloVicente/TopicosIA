@@ -1,0 +1,126 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-41283: Fix crash due to keyIndexes pointing to freed queued_items
+
+Fix crashes and GSL preconditions being hit during checkpoint
+processing. Due to the committedKeyIndex and metaKeyIndex point to
+queued_items that have been freed. Due to the DCP consumer receiving a
+disk snapshot without MARKER_FLAT_DISK set.
+
+This can occur when the following sequence of events occur.
+1. A Memory checkpoint is created this contains X mutations
+   seqno:1 -> X with key:TEST at seqno:A being one of them.
+   1. While parsing these mutations we insert key:Test into
+      committedKeyIndex
+2. The consumer receives a new disk snapshot seqno:X+1->Y with the
+   MARKER_FLAG_CHK not set and containing a mutation for key:TEST at
+   seqno:B
+   1. We then update the original memory checkpoint to be a disk
+      checkpoint
+   2. Then we call Checkpoint::queueDirty() for key:TEST which then
+      finds the original mutation at seqno:A we then remove the
+      mutation at seqno:A from the toWrite queue of the checkpoint
+      (which committedKeyIndex points to)
+   3. We then FAIL to update the key:TEST in committedKeyIndex to point
+      to seqno:B
+3. Then another disk snapshot comes along without a MARKER_FLAG_CHK
+   with a mutation for key:TEST at seqno:C
+   1. We then go into Checkpoint::queueDirty() and find a key for TEST
+   in committedKeyIndex but its now pointing to memory thats no longer
+   valid as we've erased the qeued_item of seqno:A
+
+To fix this ensure we still add items to the keyIndexes if the open
+checkpoint was a memory checkpoint but has been updated to a disk
+checkpoint. Otherwise still ensure we don't use the keyIndexes when we
+have a disk checkpoint.
+
+This patch also adds unit tests to ensure the steps above reproduce the
+crashes seen and that this patch fixes the issue.
+
+Change-Id: I7926d99c151dfb728d6d54c9966e614f106e6e6e
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Richard de Mellow
+Date: 2020-09-14 13:47:59.000000000
+Message: 
+Uploaded patch set 8.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-09-14 13:48:11.000000000
+Message: 
+Patch Set 8: Well-Formed+1
+
+Permission granted to commit: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/200533/artifact/restricted.html : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-09-14 14:23:17.000000000
+Message: 
+Patch Set 8: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/1575/ : FAILURE
+
+Failure of GoogleTest "TransportProtocols/ArithmeticXattrOnTest.TestDocWithXattr/Mcbp_XattrYes_JsonYes_SnappyYes":
+
+<pre>
+[ RUN      ] TransportProtocols/ArithmeticXattrOnTest.TestDocWithXattr/Mcbp_XattrYes_JsonYes_SnappyYes
+unknown file: error: C++ exception with description "create_connect_plain_socket: Can"t connect to port == -1" thrown in SetUp().
+[  FAILED  ] TransportProtocols/ArithmeticXattrOnTest.TestDocWithXattr/Mcbp_XattrYes_JsonYes_SnappyYes, where GetParam() = (Mcbp, XattrYes, 4-byte object <00-00 00-00>, 4-byte object <00-00 00-00>) (0 ms)
+TransportProtocols/ArithmeticXattrOnTest.TestDocWithXattr/Mcbp_XattrYes_JsonYes_SnappyYes
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/1575/ )
+
+Failure of a CTest test 131/181 Test #136: memcached_testapp.ep.TransportProtocols/ArithmeticXattrOnTest ................ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/1575/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/25992/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/1403/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/mad-hatter/883/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/1320/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/1531/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/1519/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/1540/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-09-14 14:48:50.000000000
+Message: 
+Patch Set 8: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/25992/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/1403/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/mad-hatter/883/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/1320/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/1531/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/1519/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/1540/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/1576/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-09-14 15:59:03.000000000
+Message: 
+Patch Set 8: Code-Review-1
+
+(1 comment)
+Line:759, engines/ep/src/checkpoint.h -> I don't think this should be optional. By definition we always have _some_ initial type - although we allow it to change if we re-use a Checkpoint before any items are added.
+
+----------------------------------------------------------------------------------------------------------------------

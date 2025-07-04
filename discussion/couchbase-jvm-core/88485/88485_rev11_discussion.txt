@@ -1,0 +1,132 @@
+======================================================================================================================
+DESCRIPTION:
+
+JVMCBC-490: Add Snappy Compression Feature
+
+Motivation
+----------
+As part of Couchbase Server Vulcan (5.5) it is possible to
+negotiate compression between client and server which allows
+the system to perform "end-to-end compression", reducing
+network traffic and disk space.
+
+Modifications
+-------------
+To make this supported inside the SDK, a couple of tasks
+have to be accomplished:
+
+ - Since the snappy class is not public in netty 4.0, the
+   code has been copied over but apache 2 attribution is
+   still in the header. Once we upgrade to 4.1 this can
+   be removed.
+ - The "snappy" feature is negotiated with the server, and
+   if the server supports it the KeyValueHandler will use
+   it.
+ - During request encoding, the content will be compressed
+   and the snappy bit is set in the datatype. Note that
+   the uncompressed content is still kept around in the
+   original message since it is possible that the request
+   needs to be resent on a different channel.
+ - On the decoding side we look for the snappy bit in
+   the response and if set perform the decoding and free
+   the original compressed buffer.
+
+Result
+------
+If the server supports it, the client can now handle
+end-to-end compression based on snappy and the
+datatype bit in the kv protocol.
+
+Change-Id: Ibf1aebf1e62214ed7d07b232c884081a4a1d97a6
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Michael Nitschinger
+Date: 2018-02-02 12:04:34.000000000
+Message: 
+Uploaded patch set 11.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-02-02 12:04:44.000000000
+Message: 
+Patch Set 11:
+
+Build Started http://sdkbuilds.sc.couchbase.com/job/couchbase-jvm-core-test/225/
+----------------------------------------------------------------------------------------------------------------------
+Author: Sergey Avseyev
+Date: 2018-02-02 12:06:10.000000000
+Message: 
+Patch Set 11: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-02-02 12:06:55.000000000
+Message: 
+Patch Set 11: Verified+1
+
+Build Successful 
+
+http://sdkbuilds.sc.couchbase.com/job/couchbase-jvm-core-test/225/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: David Nault
+Date: 2018-02-02 20:18:23.000000000
+Message: 
+Patch Set 11:
+
+(5 comments)
+
+Cool stuff :-)
+Line:310, src/main/java/com/couchbase/client/core/endpoint/kv/KeyValueHandler.java -> Suggestion:
+
+int toRead = Math.min(uncompressedContent.readableBytes(), Short.MAX_VALUE);
+
+Q1: Why limit to Short.MAX_VALUE? 
+
+Q2: Why do this is a loop? Will the output buffer end up containing multiple snappy documents? Might be good for the unit tests to check compression + decompression with a document that's longer than Short.MAX_VALUE.
+
+Line:352, src/main/java/com/couchbase/client/core/endpoint/kv/KeyValueHandler.java -> NIT: Looks like duplicated logic. Worth extracting a method that updates sets the content and updates the total body length?
+
+Line:861, src/main/java/com/couchbase/client/core/endpoint/kv/KeyValueHandler.java -> NIT: I'd recommend using "== DATATYPE_SNAPPY" or "!= 0" instead of "> 0" just to stay well clear of the edge case where the bitmask is a byte whose sign bit is set (for example, 0x80). When both operands are bytes, there's no widening conversion, and the result is -128, which is *not* greater than zero.
+
+Doesn't make any difference in this case because DATATYPE_SNAPPY is not (byte) 0x80, but it's might still be good to get into the habit of avoiding "> 0" so as not to  get bitten when it *does* matter.
+
+Line:881, src/main/java/com/couchbase/client/core/endpoint/kv/KeyValueHandler.java -> NIT: Snappy DataType *bit* set ?
+
+Line:30, src/main/java/com/couchbase/client/core/endpoint/util/Snappy.java -> If you want to avoid copying the Netty code, it looks like it's possible to create a public subclass of Netty's package-protected Snappy class. It would have to live in the same package, of course.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Sergey Avseyev
+Date: 2018-02-02 20:23:50.000000000
+Message: 
+Patch Set 11:
+
+(1 comment)
+Line:861, src/main/java/com/couchbase/client/core/endpoint/kv/KeyValueHandler.java -> or even
+
+   return (datatype & DATATYPE_SNAPPY) == DATATYPE_SNAPPY;
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Michael Nitschinger
+Date: 2018-02-05 06:25:07.000000000
+Message: 
+Patch Set 11:
+
+(4 comments)
+Line:310, src/main/java/com/couchbase/client/core/endpoint/kv/KeyValueHandler.java -> on the q's: this needs to be done because the snappy encoder works that way. i  first did it without it and it did blow up - then checked the snappy handler and saw its done this way.. now it works.
+
+good point on the min and test, will add that to make sure.
+
+Line:861, src/main/java/com/couchbase/client/core/endpoint/kv/KeyValueHandler.java -> Done
+
+Line:881, src/main/java/com/couchbase/client/core/endpoint/kv/KeyValueHandler.java -> Done
+
+Line:30, src/main/java/com/couchbase/client/core/endpoint/util/Snappy.java -> I thought about that, but I'd rather not mess around with our repackaging for that.. once we bump to netty 4.1 we can just straight get rid of it
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Michael Nitschinger
+Date: 2018-02-05 06:25:20.000000000
+Message: 
+Patch Set 11:
+
+will look into the refactoring method as well as adding the test
+----------------------------------------------------------------------------------------------------------------------

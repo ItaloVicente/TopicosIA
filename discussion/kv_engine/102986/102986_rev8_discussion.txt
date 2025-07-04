@@ -1,0 +1,148 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-32117: Remove verified SyncWrites at commit
+
+With this patch we remove a SyncWrite from the tracked container as soon
+as it is committed.
+
+Note that in general a SyncWrite could be referenced by some (only 1 for
+now) replica iterator. That is why some enhancement to our tracking
+model is necessary, so that it is resilient to the removal of referenced
+SyncWrites.
+
+Note that with the new tracking we always keep for a replica:
+- the seqno of the last SyncWrite ack'ed
+- the last ack'ed seqno
+Those are useful for both validating the internal DurabilityMonitor
+state and exposing for stats. I will add the latter in a follow-up
+patch.
+
+Change-Id: I9495960033420ebd444bf3f4b2046a8299209288
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2018-12-19 12:05:43.000000000
+Message: 
+Patch Set 8: Published edit on patch set 7.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-12-19 12:22:11.000000000
+Message: 
+Patch Set 8: Code-Review-1
+
+(6 comments)
+Line:47, engines/ep/src/durability_monitor.cc -> Maybe rename to lastSyncWriteSeqno or similar - something to make the difference more explicit between the two variables.
+
+Line:282, engines/ep/src/durability_monitor.cc -> What if pos_.it is begin()? Won't `prev` be invalid?
+
+Line:286, engines/ep/src/durability_monitor.cc -> Nit: Should use Ensures() for post-conditions (Expects is for preconditions).
+
+Line:124, engines/ep/src/durability_monitor.h -> Returning references to internal state can get a little tricky once we have multiple threads working - we cannot drop the lock before we finish with Position as the reference could be invalidated. Given the size of Position is small, I think the cost of copying it isn't a problem so you could just return by copy. 
+
+See also: http://isocpp.github.io/CppCoreGuidelines/CppCoreGuidelines#Rf-return-ref
+
+Line:139, engines/ep/src/durability_monitor.h -> What's the next position - just the next element, or something related to seqnos.
+
+Line:179, engines/ep/src/durability_monitor.h -> This and `getReplicaMemorySeqno` have similar names, but subtly-different purposes. Could you see if you can rename one / both so their names are more different / obvious?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2018-12-19 13:09:17.000000000
+Message: 
+Patch Set 8:
+
+(6 comments)
+Line:47, engines/ep/src/durability_monitor.cc -> Done
+
+Line:282, engines/ep/src/durability_monitor.cc -> std::prev returns Container::end() if pos is at Container::begin. 
+Setting Position::it = Container::end() is fine
+
+Line:286, engines/ep/src/durability_monitor.cc -> Done
+
+Line:124, engines/ep/src/durability_monitor.h -> I agree.
+If you look at the implementation you'll see that the purpose of this function is only validation:
+
+const Position& getReplicaMemoryPosition(replica) {
+    if (replica-not-valid) { throw; }
+    return replica-pos;
+}
+
+Also, returning a reference is strictly necessary only from the callers that want to modify the DurabilityMonitor internal state.
+
+So my plan is:
+- move the validation in a dedicated helper-function and call it whenever the validation is useful
+- return a copy here, so this function will be used only by callers that don't modify the internal DM state
+- do all the internal state modification where needed by accessing directly chain->memoryPosition.at(replica), so there's no need to return any reference
+
+I planned to resolved that in a follow-up patch to avoid too much noise here, are you happy with that?
+But we can do the change here if you prefer
+
+Line:139, engines/ep/src/durability_monitor.h -> Done
+
+Line:179, engines/ep/src/durability_monitor.h -> Done
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-12-19 13:09:39.000000000
+Message: 
+Patch Set 8: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/15396/ : ABORTED
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/15396/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/6839/ : ABORTED
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/6839/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/14902/ : ABORTED
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/14902/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/13345/ : ABORTED
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/13345/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/4459/ : FAILURE
+
+The warnings threshold for this job was exceeded - <a href="warningsResult">1 warnings</a> found. ( http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/4459/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/13685/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-12-19 13:12:36.000000000
+Message: 
+Patch Set 8:
+
+(2 comments)
+Line:282, engines/ep/src/durability_monitor.cc -> I didn't think that was true in the general case for STL containers - is std::list a special case?
+
+Might be cleaner if you explicitly check for already being at begin().
+
+Line:124, engines/ep/src/durability_monitor.h -> Thanks for the explanation. A follow-up patch is fine.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2018-12-19 13:37:47.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:282, engines/ep/src/durability_monitor.cc -> I assumed that and it is for what I see on local env, but (strangely enough) I couldn't find any exact info on std::prev docs.
+That doesn't even ensure that this is not portable, so I'll check if pos is at begin().
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-01-07 12:46:39.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:282, engines/ep/src/durability_monitor.cc -> Done
+
+----------------------------------------------------------------------------------------------------------------------

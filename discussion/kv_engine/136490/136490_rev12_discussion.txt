@@ -1,0 +1,172 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-41510: Fix infinite loop due to HdrHistogram being reset
+
+Currently if a HdrHistogram has its reset() method called by one thread
+(T1) and is being read by another (T2) using an HdrHistoram::Iterator.
+There is the race that could cause the HdrHistoram::Iterator() to enter
+an infinite loop.
+
+This occurs as HdrHistogram's getNextValue() methods use HdrHistogam_c's
+hdr_iter_next() which intern uses the following function:
+static bool has_next(struct hdr_iter* iter)
+{
+        return iter->cumulative_count < iter->total_count;
+}
+Which logically checks that the total count the Iterator was
+initialize with is > than the sum of all the counts its read from the
+buckets in the histogram. The trouble is, that the reset() method
+changes the bucket counts back to 0. Thus, meaning the condition
+cumulative_count >= total_count may never be met.
+
+To fix this make the std::unique_ptr<struct hdr_histogram> as
+std::shared_ptr. When we call HdrHistogram::reset(), we should create
+a new std::shared<> and store under the histogram member. This will
+mean that new calls to the HdrHistogram obj will see that the data has
+been reset. But we can keep around the old struct hdr_histogram for use
+with the Iterator as long as we keep a std::shared_ptr<> to it within
+the HdrHistogram::Iterator. Once we've finished using the
+HdrHistogram::Iterator the shared_ptr will destroy the struct for us
+along with all its data.
+
+We also need to a cb::RWLock to guard when modifying the
+std::shared_ptr<> as its pointer value is not thread safe.
+
+Change-Id: I5d7e579d8dba638fd0d2ef1c0d1896cc3676496f
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Richard de Mellow
+Date: 2020-09-23 14:11:25.000000000
+Message: 
+Uploaded patch set 12.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-09-23 14:11:37.000000000
+Message: 
+Patch Set 12: Well-Formed+1
+
+Permission granted to commit: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/201951/artifact/restricted.html : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-09-23 15:06:30.000000000
+Message: 
+Patch Set 12: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/1571/ : FAILURE
+
+Failure of GoogleTest "TransportProtocols/SaslTest.CollectionsBucketAssociation/Mcbp":
+
+<pre>
+[ RUN      ] TransportProtocols/SaslTest.CollectionsBucketAssociation/Mcbp
+[2020-09-23T14:40:19.910Z] [       OK ] TransportProtocols/SaslTest.CollectionsBucketAssociation/Mcbp (21 ms)
+[2020-09-23T14:40:19.911Z] [ RUN      ] TransportProtocols/SaslTest.CollectionsBucketAssociation/McbpSsl
+[2020-09-23T14:40:19.911Z] ../kv_engine/tests/testapp/testapp_sasl.cc:54: Failure
+[2020-09-23T14:40:19.911Z] Expected: connection.createBucket(bucket3, "", BucketType::Couchbase) doesn"t throw an exception.
+[2020-09-23T14:40:19.911Z]   Actual: it throws.
+[2020-09-23T14:40:19.911Z] Failed building socket: connect() failed (127.0.0.1 37889): Connection refused
+[2020-09-23T14:40:19.911Z] unknown file: Failure
+[2020-09-23T14:40:19.911Z] C++ exception with description "Failed to connect to: localhost:37889: Connection refused" thrown in TearDown().
+[2020-09-23T14:40:19.911Z] [  FAILED  ] TransportProtocols/SaslTest.CollectionsBucketAssociation/McbpSsl, where GetParam() = McbpSsl (51 ms)
+TransportProtocols/SaslTest.CollectionsBucketAssociation/Mcbp
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/1571/ )
+
+Failure of a CTest test [2020-09-23T14:40:19.910Z] 165/187 Test #167: memcached_testapp.ep.TransportProtocols/SaslTest ............................. ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/1571/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/1618/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/26030/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/1441/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/1361/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/mad-hatter/923/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/1583/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/1560/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-09-23 15:27:24.000000000
+Message: 
+Patch Set 12: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/1618/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/26030/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/1441/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/1361/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/mad-hatter/923/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/1583/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/1560/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/1572/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2020-09-23 15:37:31.000000000
+Message: 
+Removed Code-Review-2 by Richard de Mellow <richard.demellow@couchbase.com>
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2020-09-24 11:53:57.000000000
+Message: 
+Removed reviewer Trond Norbye.
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2020-09-24 11:53:58.000000000
+Message: 
+Removed reviewer Dave Rigby.
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2020-09-24 11:54:00.000000000
+Message: 
+Removed reviewer Jim Walker.
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2020-09-24 11:54:00.000000000
+Message: 
+Removed reviewer Daniel Owen.
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2020-09-24 11:54:01.000000000
+Message: 
+Removed reviewer Dave Finlay.
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2020-09-24 11:54:03.000000000
+Message: 
+Removed reviewer James Harrison.
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2020-09-24 11:54:06.000000000
+Message: 
+Removed reviewer Ben Huddleston.
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2020-09-24 11:54:08.000000000
+Message: 
+Removed reviewer Paolo Cocchi.
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2020-10-07 14:29:34.000000000
+Message: 
+Abandoned
+
+No longer needed
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,169 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-48506: Introduce the expel-cursor
+
+At ItemExpel we need to change multiple times the state of the
+checkpoint touched by the operation. The CM::queueLock is
+acquired/released at every state-change, so we need to ensure that the
+checkpoint is not removed between calls.
+
+For ensuring that, the prologue of the ItemExpel code path registers a
+temporary cursor (named expel-cursor for convenience) into the
+checkpoint. That makes the checkpoint not eligible for removal.
+The cursor is also not droppable, so nothing can remove it other than
+an explicit user call to the proper API.
+
+When expel has done with all the checkpoint state-changes, then the
+expel-cursor is removed.
+
+Expel-cursor logic fully introduced and tested in this patch but not
+effectively used yet. In a follow-up we'll exploit the presence of the
+expel-cursor for implementing the acquire/release/re-acquire
+CM::queueLock pattern described above.
+
+Change-Id: I1747387204ccaeab84e025f292a76a619171b990
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2021-10-04 11:09:52.000000000
+Message: 
+Uploaded patch set 7.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-10-04 11:47:47.000000000
+Message: 
+Patch Set 7: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/40671/ : FAILURE
+
+Failure of GoogleTest "DurabilityRespondAmbiguousTest.RespondAmbiguousNotificationDeadLock":
+
+<pre>
+[ RUN      ] DurabilityRespondAmbiguousTest.RespondAmbiguousNotificationDeadLock
+unknown file: error: C++ exception with description "cb::io::rmrf: remove of directory \\?\C:\Jenkins\workspace\kv_engine-windows-master\build\kv_engine\ep_engine_ep_unit_tests.db\test.534401 failed: unknown error" thrown in the test body.
+[  FAILED  ] DurabilityRespondAmbiguousTest.RespondAmbiguousNotificationDeadLock (1143 ms)
+DurabilityRespondAmbiguousTest.RespondAmbiguousNotificationDeadLock
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/40671/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/34600/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/13070/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/11858/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/14668/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/15510/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/13815/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/22953/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/2688/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/2723/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/14937/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-10-04 12:36:57.000000000
+Message: 
+Patch Set 7: Code-Review-1
+
+(1 comment)
+Line:226, engines/ep/src/checkpoint_manager.h -> Here and elsewhere - why do we need special methods for manipulating the expel cursor? Can't it just be a normal cursor registered with the CkptMgr? 
+
+I feel like the temporary state (expel cursor, etc) should be constrained to the scope of the method doing the actual expel work - i.e. expelUnreferencedCheckpointItems().
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2021-10-04 13:33:50.000000000
+Message: 
+Patch Set 7:
+
+(1 comment)
+Line:226, engines/ep/src/checkpoint_manager.h -> > I feel like the temporary state (expel cursor, etc) should be constrained to the scope of the method doing the actual expel work
+
+Good point. I like the idea of inlining the code as it is (and must be) used only once in the expel logic.
+The is straightforward for register() part.
+While the remove() part is triggered by at ExtractItemResults::dtor():
+
+CheckpointManager::ExtractItemsResult::~ExtractItemsResult() {
+    if (manager) {
+        manager->removeExpelCursor();
+    }
+}
+
+Maybe using the RAII technique seems unnecessarily complex here?
+Ie, we can keep the ExtractItemResults for returning all the necessary resources to the caller, then at caller I can just inline the remove-cursor part.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-10-04 13:41:21.000000000
+Message: 
+Patch Set 7:
+
+(1 comment)
+Line:226, engines/ep/src/checkpoint_manager.h -> Once expelUnreferencedCheckpointItems() has finished, can't you remove the cursor there? i.e. why does the temp cursor have to outlive the lifetime of the expelUnreferenced....() function - I thought it only really exists to ensure that the checkpoint isn't removed before the items being expelled have been correctly extracted?
+
+I guess I don't understand why the cursor still has to be registered while ExtractItems result object is live?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2021-10-04 13:55:04.000000000
+Message: 
+Patch Set 7:
+
+(1 comment)
+Line:226, engines/ep/src/checkpoint_manager.h -> > Once expelUnreferencedCheckpointItems() has finished, can't you remove the cursor there?
+
+Yes, I can and I m happy to do that.
+
+> i.e. why does the temp cursor have to outlive the lifetime of the expelUnreferenced....()
+
+It does't have to.
+
+> I guess I don't understand why the cursor still has to be registered while ExtractItems result object is live?
+
+So this will be the logic at full code is:
+
+    expelUnreferencedCheckpointItems() {
+        ..
+        ExtractItemsResult res;
+        {
+            lock
+            res = extract(lock&);    <-- CRITICAL SECTION
+        }
+        ..
+        <lock-free -> scan expelled items and compute stats>
+        ..
+        <lock -> apply stats to checkpoint>    <-- Expel-cursor must still be register here, the checkpoint might be removed before this call otherwise
+        ..
+        <res going out-of-scope>     <-- I can just remove the cursor here manually rather
+    }
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-10-04 14:01:02.000000000
+Message: 
+Patch Set 7: -Code-Review
+
+(1 comment)
+Line:226, engines/ep/src/checkpoint_manager.h -> Great - thanks for explaining.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2021-10-04 15:00:42.000000000
+Message: 
+Patch Set 7:
+
+(1 comment)
+Line:226, engines/ep/src/checkpoint_manager.h -> Done
+
+----------------------------------------------------------------------------------------------------------------------

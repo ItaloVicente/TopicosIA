@@ -1,0 +1,197 @@
+======================================================================================================================
+DESCRIPTION:
+
+Suppress "Stale file handle" exception when reading loose objects
+
+When reading loose objects over NFS it is possible that the OS syscall
+would fail with ESTALE errors: This happens when the open file
+descriptor no longer refer to a valid file.
+
+Notoriously it is possible to hit this scenario when git data is shared
+among multiple clients, for example by multiple gerrit instances in HA.
+
+If one of the two clients performs a GC operation that would cause the
+packing and then the pruning of loose objects, the other client might
+still hold a reference to those objects, which would cause an exception
+to bubble up the stack.
+
+Explicitly suppress 'Stale file handle' exception, similarly to what is
+done with a FileNotFoundException and return null instead so that the
+object search can continue to PackFiles and alternates.
+
+Bug: 573791
+Change-Id: I9950002f772bbd8afeb9c6108391923be9d0ef51
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Antonio Barone
+Date: 2021-06-03 15:52:26.000000000
+Message: 
+Uploaded patch set 5.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2021-06-03 15:52:37.000000000
+Message: 
+Patch Set 5:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/4945/
+----------------------------------------------------------------------------------------------------------------------
+Author: Antonio Barone
+Date: 2021-06-03 15:53:17.000000000
+Message: 
+Patch Set 5:
+
+(1 comment)
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2021-06-03 16:14:47.000000000
+Message: 
+Patch Set 5: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/4945/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2021-06-04 08:35:01.000000000
+Message: 
+Patch Set 5: Code-Review-1
+
+(3 comments)
+
+Did you verify that this fixes you observe when running Gerrit on NFS ?
+Line:487, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/ObjectDirectory.java -> append //$NON-NLS-1$ to this line in order to suppress the non-externalized string warning
+
+Line:501, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/ObjectDirectory.java -> I think this should be package private
+
+Line:515, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/ObjectDirectory.java -> I think this should be package private
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Antonio Barone
+Date: 2021-06-04 13:55:39.000000000
+Message: 
+Patch Set 5:
+
+(3 comments)
+
+> Patch Set 5: Code-Review-1
+> 
+> (3 comments)
+> 
+> Did you verify that this fixes you observe when running Gerrit on NFS ?
+
+Yes, after various and different attempts I managed to replicate this (and test the fix) with an dual-primary AWS installation (over EFS), as such:
+
+- Deploy two gerrit instances sharing git over EFS
+- Add debug breakpoint to gerrit-1 at line[1]
+- Trigger git-upload-pack for gerrit-1 (read stops at the breakpoint)
+- From gerrit-2 trigger: git gc --prune=now (this removes all loose objects)
+- Let the stack execution continue on gerrit-1 and observe 'stale file handle' exception being thrown
+- The exception is captured at [2] and treaded as a FileNotFound Exception.
+
+
+[1]https://git.eclipse.org/r/plugins/gitiles/jgit/jgit/+/refs/changes/95/181295/5/org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/ObjectDirectory.java#503
+
+[2]https://git.eclipse.org/r/plugins/gitiles/jgit/jgit/+/refs/changes/95/181295/5/org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/ObjectDirectory.java#483
+Line:487, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/ObjectDirectory.java -> Done
+
+Line:501, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/ObjectDirectory.java -> we can't make this private.
+This method needs to be package accessible so that it can be overridden in the tests (to simulate a stale file handle).
+
+See[1]
+
+[1]https://git.eclipse.org/r/plugins/gitiles/jgit/jgit/+/refs/changes/95/181295/5/org.eclipse.jgit.test/tst/org/eclipse/jgit/internal/storage/file/ObjectDirectoryTest.java#209
+
+Line:515, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/ObjectDirectory.java -> as above, we can't make this private.
+This method needs to be package accessible so that it can be overridden in the tests (to simulate a stale file handle).
+
+See[1]
+
+[1]https://git.eclipse.org/r/plugins/gitiles/jgit/jgit/+/refs/changes/95/181295/5/org.eclipse.jgit.test/tst/org/eclipse/jgit/internal/storage/file/ObjectDirectoryTest.java#211
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2021-06-04 14:50:29.000000000
+Message: 
+Patch Set 5:
+
+(2 comments)
+
+> Patch Set 5:
+> 
+> (3 comments)
+> 
+> > Patch Set 5: Code-Review-1
+> > 
+> > (3 comments)
+> > 
+> > Did you verify that this fixes you observe when running Gerrit on NFS ?
+> 
+> Yes, after various and different attempts I managed to replicate this (and test the fix) with an dual-primary AWS installation (over EFS), as such:
+> 
+> - Deploy two gerrit instances sharing git over EFS
+> - Add debug breakpoint to gerrit-1 at line[1]
+> - Trigger git-upload-pack for gerrit-1 (read stops at the breakpoint)
+> - From gerrit-2 trigger: git gc --prune=now (this removes all loose objects)
+> - Let the stack execution continue on gerrit-1 and observe 'stale file handle' exception being thrown
+> - The exception is captured at [2] and treaded as a FileNotFound Exception.
+> 
+> 
+> [1]https://git.eclipse.org/r/plugins/gitiles/jgit/jgit/+/refs/changes/95/181295/5/org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/ObjectDirectory.java#503
+> 
+> [2]https://git.eclipse.org/r/plugins/gitiles/jgit/jgit/+/refs/changes/95/181295/5/org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/ObjectDirectory.java#483
+
+could you also verify in this setup that the exceptions you saw without this fix when e.g. running gc in separate process are gone ?
+Line:501, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/ObjectDirectory.java -> I didn't say private but package private so remove "protected" so that only classes in the same package can access it like your new test
+
+Line:515, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/ObjectDirectory.java -> I didn't say private but package private so remove "protected" so that only classes in the same package can access it like your new test
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Antonio Barone
+Date: 2021-06-04 15:14:38.000000000
+Message: 
+Patch Set 5:
+
+> Patch Set 5:
+> 
+> (2 comments)
+> 
+> > Patch Set 5:
+> > 
+> > (3 comments)
+> > 
+> > > Patch Set 5: Code-Review-1
+> > > 
+> > > (3 comments)
+> > > 
+> > > Did you verify that this fixes you observe when running Gerrit on NFS ?
+> > 
+> > Yes, after various and different attempts I managed to replicate this (and test the fix) with an dual-primary AWS installation (over EFS), as such:
+> > 
+> > - Deploy two gerrit instances sharing git over EFS
+> > - Add debug breakpoint to gerrit-1 at line[1]
+> > - Trigger git-upload-pack for gerrit-1 (read stops at the breakpoint)
+> > - From gerrit-2 trigger: git gc --prune=now (this removes all loose objects)
+> > - Let the stack execution continue on gerrit-1 and observe 'stale file handle' exception being thrown
+> > - The exception is captured at [2] and treaded as a FileNotFound Exception.
+> > 
+> > 
+> > [1]https://git.eclipse.org/r/plugins/gitiles/jgit/jgit/+/refs/changes/95/181295/5/org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/ObjectDirectory.java#503
+> > 
+> > [2]https://git.eclipse.org/r/plugins/gitiles/jgit/jgit/+/refs/changes/95/181295/5/org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/ObjectDirectory.java#483
+> 
+> could you also verify in this setup that the exceptions you saw without this fix when e.g. running gc in separate process are gone ?
+
+Yep, this is precisely what I have verified: that the exceptions I saw without this fix are gone.
+----------------------------------------------------------------------------------------------------------------------
+Author: Antonio Barone
+Date: 2021-06-04 15:15:51.000000000
+MISMATCHED INLINE COMMENT
+Line:501, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/ObjectDirectory.java -> Ack
+----------------------------------------------------------------------------------------------------------------------
+Author: Antonio Barone
+Date: 2021-06-04 15:15:51.000000000
+MISMATCHED INLINE COMMENT
+Line:515, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/ObjectDirectory.java -> Ack
+----------------------------------------------------------------------------------------------------------------------

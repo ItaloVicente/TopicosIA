@@ -1,0 +1,109 @@
+======================================================================================================================
+DESCRIPTION:
+
+Refactor: CacheCallback to not directly access HashTable object
+
+The hash table object should ideally be a protected member of the
+VBucket class, as opposed to being public.
+
+The patch moves towards this goal by introducing a getItem function to
+the VBucket class, which ensures that the backfill function
+CacheCallback::callback no longer requires direct access to the hash
+table object.
+
+Tests to ensure the refactor does not change functionality were added
+in the following patch http://review.couchbase.org/#/c/78650/
+
+Change-Id: I2c71dd30f6b8c66de668137cac1bf358bbdf6588
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Daniel Owen
+Date: 2017-06-15 18:11:20.000000000
+Message: 
+Uploaded patch set 3: Patch Set 2 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2017-06-15 18:46:26.000000000
+Message: 
+Patch Set 3: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/615/ : FAILURE
+
+Timeout of a CTest test 84/84 Test #34: ep_perfsuite.value_eviction ....................} ( http://cv.jenkins.couchbase.com//job/kv_engine-threadsanitizer-master/615/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master/605/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/549/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/618/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/590/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2017-06-15 20:54:48.000000000
+Message: 
+Patch Set 3: Code-Review-1
+
+(1 comment)
+Line:963, engines/ep/src/vbucket.h -> It feels like this is overlapping with QUEUE_BG_FETCH in get_options_t - it that's the case I don't think we want two ways to achieve the same thing.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2017-06-15 21:35:05.000000000
+Message: 
+Patch Set 3: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master/605/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/549/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/618/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/590/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/624/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Daniel Owen
+Date: 2017-06-16 09:37:54.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:963, engines/ep/src/vbucket.h -> I don't believe they have identical meaning.  The QUEUE_BG_FETCH is used to determine whether should issue BG fetch.  So with get_if on first pass its not set, but does get set on second pass.  This means on first pass if not resident and don't want only meta data then will call getInternalNonResident, but that function will not call bgFetch instead it will return GetValue(nullptr, ENGINE_EWOULDBLOCK.... (see EPVBucket::getInternalNonResident).
+
+However for the callback case we always want to ensure we never call getInternalNonResident.
+
+This could be achieved by ensuring the QUEUE_BG_FETCH is not set.  However I would then need to add an additional condition before calling  
+getInternalNonResident i.e. (options & QUEUE_BG_FETCH).  But then that would change the execution path for the get_if caller.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Daniel Owen
+Date: 2017-06-16 09:43:28.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:963, engines/ep/src/vbucket.h -> I have just noticed on the first path I noticed options are ORed with ALLOW_META_ONLY. So I think the getInternalNonResident function can only be called if either ALLOW_META_ONLY is set or QUEUE_BG_FETCH is set.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2017-06-16 09:43:43.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:963, engines/ep/src/vbucket.h -> I'm not convinced - either way we are adding complexity and ambiguity to the API. 
+
+Note as long as you don't set QUEUE_BG_FETCH, if you end up in getInternalNonResident() it basically is a no-op (just returns the metadata - see also ALLOW_META_ONLY.
+
+(Basically the get APIs are *already* too complicated - for example here we already have get_options_t which has 8 possible fields, plus diskFlushAll - that's a potential set of 9 orthogonal booleans, or 512 possible variants of the function!. If we add your GetIfNonResident & GetKeyOnly we are up to 2048!!.
+
+Can you look at a way to implement this cleanup which doesn't increase the complexity, and ideally reduces it?
+
+----------------------------------------------------------------------------------------------------------------------

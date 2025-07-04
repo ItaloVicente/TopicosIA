@@ -1,0 +1,99 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-34873: Ack prepares from disk snapshots after persisting snapEnd
+
+Any prepare received by a replica from a disk snapshot may have deduped
+an earlier prepare of a higher level.
+
+For example, the following ops (for the same key)
+
+PRE(l=PersistToMajority) CMT PRE(l=Majority) CMT
+
+May be deduped to
+
+PRE(l=Majority) CMT
+
+If we acked this prepare immediately, were we to (say) be promoted to
+active and immediately crash, we may be left with no value on disk for
+the key BUT the PersistToMajority op may have returned SUCCESS to the
+client (it was committed) - we have broken the durability agreement for
+that op.
+
+Solution: we cannot ack any prepare until the full snapshot is
+persisted *just in case* a PersistToMajority prepare was deduped.
+
+Change-Id: I9822ea608da79e4ac55f8f4f42cabe545e26adb6
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: James H
+Date: 2019-07-09 08:30:20.000000000
+Message: 
+Uploaded patch set 9: Patch Set 8 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-07-09 09:56:00.000000000
+Message: 
+Patch Set 9: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/19578/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/11956/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/18639/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/12723/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/21757/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/20927/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/2595/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/5510/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-07-09 13:43:11.000000000
+Message: 
+Patch Set 9: Code-Review-1
+
+(4 comments)
+Line:18, /COMMIT_MSG -> Might also be worth mentioning the degenerate case:
+
+ PRE(l=PersistToMajority) CMT PRE(l=Majority) SET
+
+is de-duped to:
+
+ SET
+
+And as such, even if there's not any prepares explicitly listed we must defer updating HPS until complete disk snapshot is persisted.
+
+Line:394, engines/ep/src/durability/passive_durability_monitor.cc -> I think this is unnecessary here - we shouldn't have ever added any SyncWrites to trackedWrites with an invalid (None) level. 
+
+If there isn't already a precondition along these lines in addSyncWrite, that would be the place to check this.
+
+Line:1957, engines/ep/tests/module_tests/durability_monitor_test.cc -> Prefer non-wildcard captures (esp for such a simple function) - just capture the variables you need.
+
+Line:1959, engines/ep/tests/module_tests/durability_monitor_test.cc -> Can you add similar calls to this at the various stages below to ensure we advance HPS / HCS correctly.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2019-07-09 17:04:04.000000000
+Message: 
+Patch Set 9:
+
+(4 comments)
+Line:18, /COMMIT_MSG -> Definitely - will catch up with you and ben re: if *every* dur op in a disk snapshot is reduced to a set tomorrow
+Will keep as a TODO
+
+Line:394, engines/ep/src/durability/passive_durability_monitor.cc -> Done
+
+Line:1957, engines/ep/tests/module_tests/durability_monitor_test.cc -> Done
+
+Line:1959, engines/ep/tests/module_tests/durability_monitor_test.cc -> HPS/HCS are checked in addSyncWrite, notify{Persistence,snapEnd} too - will add asserts for trackedWrites
+
+----------------------------------------------------------------------------------------------------------------------

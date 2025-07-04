@@ -1,0 +1,173 @@
+======================================================================================================================
+DESCRIPTION:
+
+toybuild: coroutine in bgfetcher
+
+Change-Id: Iccff66f5601456a46f04e4e34aafc1f2c2c60659
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Rohan Suri
+Date: 2021-09-06 15:18:01.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-09-06 15:21:19.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:181, engines/ep/src/bgfetcher.cc -> Could you give some more details on Magma's use of coroutines here? We already use Folly's ExecutorPool model and I don't really want to add another scheduling / execution abstraction - certainly not one dictated by an external library.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Rohan Suri
+Date: 2021-09-07 08:26:08.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:181, engines/ep/src/bgfetcher.cc -> Primary purpose of coroutines here is to increase concurrency on the same thread.
+
+Without coroutines, even though Magma::GetDocs takes a batch of items, it has no concurrency. It does the Get one by one. Hence there's no benefit of batching. If a Get requires going to disk, it blocks the thread until the read system call returns.
+
+However using coroutines with async file IO APIs (io_uring or libaio), a Get can now submit its request to disk and cooperatively yield to another coroutine. The other coroutine starts processing the next item in the batch keeping the thread active.
+
+Here's some results on magma_bench (which tests magma in isolation):
+https://hub.internal.couchbase.com/confluence/display/~rohan.suri/libaio+perf+tests#libaioperftests-magma_bench
+
+When qd=1 (i.e. no coroutines) and t=64, when varying batch size from 1 to 1024, maximum tput is same: 2.7G/s.
+However when qd > 1 (i.e. with coroutines), we take the benefit of batching.
+
+For example, with batch size 10:
+
+  qd=1, t=64, tput=2.7G/s
+  qd=10, t=64, tput=5.7G/s
+
+2.1x improvement.
+Note to achieve the same tput=5.7 G/s while keeping qd=1, we require atleast 200 threads.
+
+
+Magma already had coroutines inside GetDocs (kept disabled though)
+https://github.com/couchbase/magma/blob/8305579169042fa08d9601ea00faf9d318187ad4/magma/db.cc#L457
+
+however in tests we see BgFetcher mostly prepares batches of size 1 per vbucket, which doesn't leverage coroutines.
+
+Hence this experimental patch to span the coroutine scope across vbuckets. So that Gets across vbuckets can be cooperatively scheduled i.e. across a larger batch. To further force larger batches, we might also have to reduce max_num_bgfetchers. Overall this can help us reduce the number of reader threads required while achieving more tput.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-09-07 09:30:32.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:181, engines/ep/src/bgfetcher.cc -> Thanks for the background.
+
+I don't have any problems with us increasing the concurrency of tasks which normally block, but KV-Engine already has a task-based concurrency model (with appropriate statistics, logging, queueing etc) and I don't want us to inrdrpduce another one, particulary one which we don't have experience debugging (how do the Boost coroutines manifest under GDB for example?)
+
+I would recommend looking at the existing Folly-backed ExecutorPool we have in KV-Engine, and how we can expose that to Magma if it wants to schedule background work.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Rohan Suri
+Date: 2021-09-07 10:34:56.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:181, engines/ep/src/bgfetcher.cc -> I had a quick look and understand that folly ExecutorPool is based on libevent. io_uring, libaio both support notifying completions to an event_fd. So libevent and hence folly's EventBase should be usable in time as io_uring's support is on the way: https://github.com/libevent/libevent/issues/1019
+
+So we will be able to scale disk tput with folly's EventBase too. 
+
+However the code might not scale/require significant restructuring. It could get unwieldy since libevent is based on callbacks that leads into callback hell? That's my theoretical understanding with callbacks. I will try out an example to experience this and share it. I think this is why coroutines are becoming favourable. Any thoughts on this?
+This talk from 4:41 to 6:00 shows an example of going from callback hell to coroutines:
+https://youtu.be/ZTqHjjm86Bw?t=281
+
+
+
+> how do the Boost coroutines manifest under GDB for example
+
+That's a good point. I'll keep such debugging aspects in mind when exploring coroutines.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-09-07 11:00:52.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:181, engines/ep/src/bgfetcher.cc -> re: callbacks; it's all the same one way or another - something waits on something (typically an FD) and wakes up and runs some code. 
+
+Folly does have some support for asyncIO (io_uring IIRC) but I haven't used it myself so you'll have to dig around and see how it would integrate. It might also currently be experimental. 
+
+Personally I think we should be moving to an async / await type approach medium-term (which is the Latest Hip thinking for C++), and indeed some of the low-level folly building blocks we already have will help there, but we in KV-Engine haven't made any progress on that yet.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Rohan Suri
+Date: 2021-09-07 11:19:51.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:181, engines/ep/src/bgfetcher.cc -> > Folly does have some support for asyncIO (io_uring IIRC)
+
+Yup! Found it: https://github.com/facebook/folly/blob/master/folly/experimental/io/IoUringBackend.h
+Will try it out.
+
+> async / await type approach
+
+Does this mean using c++20 coroutines? Making APIs returning awaitable types, etc?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-09-07 12:19:27.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:181, engines/ep/src/bgfetcher.cc -> > Does this mean using c++20 coroutines? Making APIs returning awaitable types, etc?
+That's the general direction I'd like to go in, but more medium term (i.e not Neo).
+
+Is this boost::coroutine-based backfilling proposed for Neo or later? If Neo I'm quite nervous bringing in a new execution model (and new library) at this stage in development.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Rohan Suri
+Date: 2021-09-07 12:35:54.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:181, engines/ep/src/bgfetcher.cc -> It is not for Neo. This patch is just for exploration.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-09-07 12:46:12.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:181, engines/ep/src/bgfetcher.cc -> Cool. 
+
+This seems like a pretty good use-case for evaluating the possible coroutine options we have. Note that C++20's and Boost's coroutines are quite low-level; you really want to use a higher level abstraction on top of them. 
+
+I believe folly does this to a degree (in their experimental/ dir) - but there might be other implementations I'm not aware of. However given we already use folly in various forms (including it's libevent abstraction) I'd prefer to use that if it meets our requirements.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Rohan Suri
+Date: 2021-09-07 12:58:12.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:181, engines/ep/src/bgfetcher.cc -> > Note that C++20's and Boost's coroutines are quite low-level
+
+Yup I agree. Coroutines themselves lack the scheduler. So we might have to use something like Boost Fibers/folly Fibers. Right now I'm using one written by Sarath i.e. the CoroutineRuntime.
+
+The aim right now is just to see the scaling happen. If we can reproduce those magma_bench results on full-stack tests. Next step would be to evaluate our options.
+
+> However given we already use folly in various forms (including it's libevent abstraction) I'd prefer to use that if it meets our requirements.
+
+Sure. I'll keep this in mind and bring it up within the team. Thanks for all the inputs Dave!
+
+----------------------------------------------------------------------------------------------------------------------

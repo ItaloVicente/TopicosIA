@@ -1,0 +1,102 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 434558 - Disconnect actually terminates the session if launch
+element is selected
+
+Change-Id: I7a0064b9d9ed316079f0da80834fef278701f568
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Anonymous Coward
+Date: 2014-11-04 17:16:36.000000000
+Message: 
+Uploaded patch set 7.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2014-11-04 17:16:42.000000000
+Message: 
+Patch Set 7:
+
+Build Started https://hudson.eclipse.org/cdt/job/cdt-verify/1447/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2014-11-04 18:01:54.000000000
+Message: 
+Patch Set 7: Code-Review-1
+
+Build Unstable 
+
+https://hudson.eclipse.org/cdt/job/cdt-verify/1447/ : UNSTABLE
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc Khouzam
+Date: 2014-11-04 21:39:13.000000000
+Message: 
+Patch Set 7: Code-Review-1
+
+(4 comments)
+
+I found a couple of issues while testing (actually, only one that I think we should fix).
+
+I also noticed that when doing a detach from a local session, the process still gets killed eventually.  This is a problem even on master.  I believe it is because we have a console for the process in that case, and that means we've included the process in the platform's launch, so the platform probably does a destroy() on it.  I wanted your opinion on that and see if it is a problem for what you are trying to achieve.  After your input I can open a bug and we can deal with it separately.
+Line:209, dsf-gdb/org.eclipse.cdt.dsf.gdb.ui/src/org/eclipse/cdt/dsf/gdb/internal/ui/actions/DsfTerminateCommand.java -> This causes a problem.  We support not killing GDB when the last process is terminated or detached.  In that case, there are no processes left, so this method returns no process, which means that when the launch is selected, we can no longer terminate.
+
+You can reproduce this two ways:
+1- unselect our preference to "terminate GDB when last process exits"
+2- use a remote-attach as it starts without any process being debugged
+
+This also means that the big red button of the new launch bar is not able to kill a session that has no processes.
+
+Line:263, dsf-gdb/org.eclipse.cdt.dsf.gdb.ui/src/org/eclipse/cdt/dsf/gdb/internal/ui/actions/DsfTerminateCommand.java -> So my suggestion to only allow terminate for a single selection when there is no MultiTerminate service causes a problem with multi-process.  In that case, when selecting the launch, the code converts it to multiple processes and then does not allow to terminate with the launch selected because it looks like there are multiple selections.
+
+This is a pretty rare bug:
+1- someone replacing our IMultiTerminate service with one that does not support multi-terminate (maybe they don't want to support it)
+2- running multi-process
+
+I wanted to let you know, but I am ok with leaving this in.  If someone wants to replace our service, they would have to replace this class as well.
+
+Line:209, dsf-gdb/org.eclipse.cdt.dsf.gdb.ui/src/org/eclipse/cdt/dsf/gdb/internal/ui/actions/GdbDisconnectCommand.java -> Similar to terminate case, this breaks when there are no processes.
+However, if we can fix this, it is a bit different for disconnect, when there are no processes.  Should we kill GDB in that case (that is what we do on master), should we have GDB call 'disconnect' for remote sessions (only), should we keep this button disabled if there are no processes?
+
+Although I like the idea of supporting the GDB 'disconnect' command, we could open a new bug for that.  I'd be fine in this patch, to simply have the disconnect button disabled when the launch is selected and there are no processes.
+
+Line:67, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBProcesses_7_2.java -> Repeating this comment from patchset 2:
+
+I noticed that the new code 'magically' supports multi-terminate/disconnect for older GDBs even though only this clas supports the IMulti* calsses :) The reason is that the new DsfTerminateCommand and GdbDisconnectCommand first convert the selection into a list of processes, and for GDB < 7.2, there is only one process, so only one to terminate, so the buttons are now enabled when selecting multiple threads. Cool!
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Anonymous Coward
+Date: 2014-11-25 14:28:09.000000000
+Message: 
+Patch Set 7:
+
+(2 comments)
+Line:209, dsf-gdb/org.eclipse.cdt.dsf.gdb.ui/src/org/eclipse/cdt/dsf/gdb/internal/ui/actions/DsfTerminateCommand.java -> I changed the code to call IGDBControl.terminate() when there is no IProcessDMContexts and it works for the case you described but not sure if this is enough in general. If an extension of GdbLaunch has "ITerminate" elements that are not controlled by GDB they need to be terminated separately by calling ITerminate.terminate(). Extra processes, for instance. Unfortunately, we can't differentiate between the processes that are controlled by the IProcesses service or GDB and others. At the moment I have no idea how to handle this. What do you think?
+
+Line:209, dsf-gdb/org.eclipse.cdt.dsf.gdb.ui/src/org/eclipse/cdt/dsf/gdb/internal/ui/actions/GdbDisconnectCommand.java -> I agree, keeping the "Disconnect" button disabled for this patch is the better option.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc Khouzam
+Date: 2014-11-25 18:56:46.000000000
+Message: 
+Patch Set 7:
+
+(1 comment)
+Line:209, dsf-gdb/org.eclipse.cdt.dsf.gdb.ui/src/org/eclipse/cdt/dsf/gdb/internal/ui/actions/DsfTerminateCommand.java -> This is a new problem right? This version of your patch does not handle that either, I believe.  And the implementation on master does not handle that either, right?
+
+So, if we're not making things worse, I say don't bother, unless you actually care to fix that scenario.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Anonymous Coward
+Date: 2014-11-27 14:56:05.000000000
+Message: 
+Patch Set 7:
+
+(1 comment)
+Line:209, dsf-gdb/org.eclipse.cdt.dsf.gdb.ui/src/org/eclipse/cdt/dsf/gdb/internal/ui/actions/DsfTerminateCommand.java -> This is a problem since Teodor changed the "Terminate"' behavior for GdbLaunch. We have cases when we use debugger to start a session and then detach debugger from the program. In this case we don't have DSF services available and terminating the session when it's launch element is selected doesn't work. I want to make sure that this patch works in this scenario. It's doable but I need access to the GdbLaunch.super.terminate() method. The other option is to copy it's code into DsfTerminateCommand but I would prefer not to do it.
+What do you think about adding a new method to GdbLaunch that would simply call super.terminate()? I know it's not pretty but I can't come up with a better idea.
+The third option is to register our own ITerminateHandler but it's very tricky with the current CDT code and would probably require patching CDT or copying large amount of code.
+At the same it's not the CDT problem, so I am not sure what to do.
+
+----------------------------------------------------------------------------------------------------------------------

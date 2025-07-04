@@ -1,0 +1,224 @@
+======================================================================================================================
+DESCRIPTION:
+
+Type version annotation: String -> Class<? extends ITypeVersion>
+
+The type version of a data object is used to identify a certain version of the stored data object.
+A data object may be stored in a database or be available as a container to export certain data for import in a different compatible system.
+Such a data object may evolve over time and undergo structural changes.
+Some structural changes make it necessary to apply migrations to existing data objects to comply with the new structure.
+
+In order to prepare for migration support, the type version annotation now containing a String value changes to a value of Class<? extends ITypeVersion>.
+A ITypeVersion represents a namespace/version and it's dependencies.
+
+Change-Id: Ib802c05f7b1c4ce6a72741ff679ea4f845997d7a
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Stephan Merkli
+Date: 2021-03-08 15:58:37.000000000
+Message: 
+Uploaded patch set 3: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: Scout Bot
+Date: 2021-03-08 15:58:47.000000000
+Message: 
+Patch Set 3:
+
+Build Started https://ci.eclipse.org/scout/job/org.eclipse.scout.rt_gerrit_jdk11_pipeline/485/
+----------------------------------------------------------------------------------------------------------------------
+Author: Scout Bot
+Date: 2021-03-08 16:21:46.000000000
+Message: 
+Patch Set 3: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/scout/job/org.eclipse.scout.rt_gerrit_jdk11_pipeline/485/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Bazzi
+Date: 2021-03-09 16:17:50.000000000
+Message: 
+Patch Set 3: Code-Review+1
+
+(18 comments)
+
+Looks good to me, see comments in code for minor adjustments.
+Line:37, org.eclipse.scout.rt.dataobject/src/main/java/org/eclipse/scout/rt/dataobject/AbstractTypeVersion.java -> This class mainly wraps the dependency-resolver code.
+Why not move the dependency resolver to a helper and implement type version straightforward as final classes implementing the ITypeVersion interface:
+
+Example:
+
+  public static final class JacksonFixture_1_0_1 implements ITypeVersion {
+
+    protected static final NamespaceVersion VERSION = NamespaceVersion.of(JacksonFixtureNamespace.ID, "1.0.0");
+    protected static final Collection<NamespaceVersion> DEPENDENCIES = Namespaces.collectDependencies(FooNamespace.class);  
+    
+    @Override
+    public NamespaceVersion getVersion() {
+      return VERSION;
+    }
+
+    @Override
+    public Collection<NamespaceVersion> getDependencies() {
+      return DEPENDENCIES;
+    }
+  }
+
+Line:91, org.eclipse.scout.rt.dataobject/src/main/java/org/eclipse/scout/rt/dataobject/DataObjectInventory.java -> move method down to protected helper method section
+
+Line:96, org.eclipse.scout.rt.dataobject/src/main/java/org/eclipse/scout/rt/dataobject/DataObjectInventory.java -> could directly collect to String by .collect(Collectors.joining(",")) and afterwards check for empty string
+
+Line:212, org.eclipse.scout.rt.dataobject/src/main/java/org/eclipse/scout/rt/dataobject/DataObjectInventory.java -> maybe shorten to two lines:
+
+ITypeVersion typeVersion = assertNotNull(BEANS.opt(typeVersionClass), "No instance found of '{}' for data object '{}'.", typeVersionClass, clazz);
+NamespaceVersion version = typeVersion.getVersion();  // never null, validated in #validateTypeVersionImplementors
+
+Line:15, org.eclipse.scout.rt.dataobject/src/main/java/org/eclipse/scout/rt/dataobject/ITypeVersion.java -> To discuss: is a separate hierarchy for type versions necessary? Why not use INamespaceVersionItem classes as type version annotation values?
+
+Line:16, org.eclipse.scout.rt.dataobject/src/main/java/org/eclipse/scout/rt/dataobject/ITypeVersion.java -> Naming to be discussed: Seems very similar to TypeVersion annotation.
+May be add "value" or "item" or "instance" suffix?
+
+Line:17, org.eclipse.scout.rt.dataobject/src/main/java/org/eclipse/scout/rt/dataobject/ITypeVersion.java -> Consider adding default-implemented getDependencies() if most of the concrete type versions will not have dependencies
+
+Line:24, org.eclipse.scout.rt.platform/src/main/java/org/eclipse/scout/rt/platform/namespace/AbstractNamespace.java -> what's the benefit of using @Order annotation and afterwards "parse" the order out of the annotation instead of omitting this class and implement namespaces like this:
+
+public final class ScoutNamespace extends AbstractNamespace {
+
+  public static final String ID = "scout";
+  public static final double ORDER = 5100;
+
+  @Override
+  public String getId() {
+    return ID;
+  }
+
+  @Override
+  public double getOrder() { return ORDER;  }
+}
+
+Line:26, org.eclipse.scout.rt.platform/src/main/java/org/eclipse/scout/rt/platform/namespace/AbstractNamespace.java -> this validation could/should be moved to Namespaces helper class, since not every namespace implementation will use AbstractNamespace
+
+Line:20, org.eclipse.scout.rt.platform/src/main/java/org/eclipse/scout/rt/platform/namespace/INamespace.java -> is it really mandatory for a namespace to be "application scoped"?
+As long as the namespaces will only be compared/sorted by order/id, a namespace could also be just a bean?
+
+Line:18, org.eclipse.scout.rt.platform/src/main/java/org/eclipse/scout/rt/platform/namespace/INamespaceVersionItem.java -> Naming (to discuss):  IVersionedItem ? 
+-> namespace is implicit part of version (since even getter is just called getVersion())
+
+Line:39, org.eclipse.scout.rt.platform/src/main/java/org/eclipse/scout/rt/platform/namespace/NamespaceVersion.java -> typo: "not"
+
+Line:45, org.eclipse.scout.rt.platform/src/main/java/org/eclipse/scout/rt/platform/namespace/NamespaceVersionItemModel.java -> add javadoc describing purpose of this class
+
+Line:23, org.eclipse.scout.rt.platform/src/main/java/org/eclipse/scout/rt/platform/namespace/Namespaces.java -> Consider changing Class to @applicationscoped and use static method to delegate to implementation:
+
+public static List<INamespace> all() {
+  return BEANS.get(Namespaces.class).getAll();
+}
+
+And change NAMESPACES to a protected member initialized by @PostConstruct
+
+Line:29, org.eclipse.scout.rt.platform/src/main/java/org/eclipse/scout/rt/platform/namespace/Namespaces.java -> @PostConstruct
+
+Line:31, org.eclipse.scout.rt.platform/src/main/java/org/eclipse/scout/rt/platform/namespace/Namespaces.java -> alternative:
+
+List<INamespace> namespaces = BEANS.all(INamespace.class).stream()
+    .sorted(Comparator.comparing(INamespace::getOrder).thenComparing(namespace -> namespace.getClass().getName()))
+     .collect(Collectors.toList());
+
+Line:41, org.eclipse.scout.rt.platform/src/main/java/org/eclipse/scout/rt/platform/namespace/Namespaces.java -> suggestion: 
+
+namespaces.stream()
+   .collect(Collectors.groupingBy(INamespace::getId))
+   .entrySet()
+   .stream()
+   .filter(entry -> entry.getValue().size() > 1) // only those IDs with more than one namespace class
+   .forEach(entry -> LOG.error("Non-unique namespace detected id={}, values={}", entry.getKey(), entry.getValue()));
+
+Line:54, org.eclipse.scout.rt.platform/src/main/java/org/eclipse/scout/rt/platform/namespace/Namespaces.java -> consider add (see comment in AbstractTypeVersion):
+
+  public Collection<NamespaceVersion> collectDependencies(Class<? extends INamespaceVersionItem>... dependencyClasses) {
+    return dependencyClasses == null ? Collections.emptyList() : Stream.of(dependencyClasses).map(ancestorClass -> BEANS.get(ancestorClass).getVersion()).collect(Collectors.toList());
+  }
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Stephan Merkli
+Date: 2021-03-09 17:26:52.000000000
+Message: 
+Patch Set 3:
+
+(8 comments)
+Line:91, org.eclipse.scout.rt.dataobject/src/main/java/org/eclipse/scout/rt/dataobject/DataObjectInventory.java -> Ack
+
+Line:96, org.eclipse.scout.rt.dataobject/src/main/java/org/eclipse/scout/rt/dataobject/DataObjectInventory.java -> Ack
+
+Line:212, org.eclipse.scout.rt.dataobject/src/main/java/org/eclipse/scout/rt/dataobject/DataObjectInventory.java -> Ack
+
+Line:26, org.eclipse.scout.rt.platform/src/main/java/org/eclipse/scout/rt/platform/namespace/AbstractNamespace.java -> INamespace#getOrder uses double (not Double), thus value cannot be null anyway.
+Validation is only required when using AbstractNamespace because Order annotation is read.
+Depending on the discussion in the above comment this class will be removed anyway.
+
+Line:39, org.eclipse.scout.rt.platform/src/main/java/org/eclipse/scout/rt/platform/namespace/NamespaceVersion.java -> Ack
+
+Line:45, org.eclipse.scout.rt.platform/src/main/java/org/eclipse/scout/rt/platform/namespace/NamespaceVersionItemModel.java -> Ack
+
+Line:31, org.eclipse.scout.rt.platform/src/main/java/org/eclipse/scout/rt/platform/namespace/Namespaces.java -> Ack
+
+Line:41, org.eclipse.scout.rt.platform/src/main/java/org/eclipse/scout/rt/platform/namespace/Namespaces.java -> Applied slightly changed suggestion. toString of entry.getValue() doesn't return a nice representation, thus manually extracting names of classes.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Stephan Merkli
+Date: 2021-03-11 10:28:27.000000000
+MISMATCHED INLINE COMMENT
+Line:37, org.eclipse.scout.rt.dataobject/src/main/java/org/eclipse/scout/rt/dataobject/AbstractTypeVersion.java -> [as discussed directly] The current approach with AbstractTypeVersion allows to write the implementors of ITypeVersion in a very compact way.
+----------------------------------------------------------------------------------------------------------------------
+Author: Stephan Merkli
+Date: 2021-03-11 10:28:27.000000000
+MISMATCHED INLINE COMMENT
+Line:15, org.eclipse.scout.rt.dataobject/src/main/java/org/eclipse/scout/rt/dataobject/ITypeVersion.java -> [as discussed directly] INamespaceVersionItem and its model serves as helper/utility and can be used independently of type versions
+----------------------------------------------------------------------------------------------------------------------
+Author: Stephan Merkli
+Date: 2021-03-11 10:28:27.000000000
+MISMATCHED INLINE COMMENT
+Line:16, org.eclipse.scout.rt.dataobject/src/main/java/org/eclipse/scout/rt/dataobject/ITypeVersion.java -> [as discussed directly] Designed for type version annotation, thus name is okay.
+----------------------------------------------------------------------------------------------------------------------
+Author: Stephan Merkli
+Date: 2021-03-11 10:28:27.000000000
+MISMATCHED INLINE COMMENT
+Line:17, org.eclipse.scout.rt.dataobject/src/main/java/org/eclipse/scout/rt/dataobject/ITypeVersion.java -> Not relevant due to AbstractTypeVersion
+----------------------------------------------------------------------------------------------------------------------
+Author: Stephan Merkli
+Date: 2021-03-11 10:28:27.000000000
+MISMATCHED INLINE COMMENT
+Line:24, org.eclipse.scout.rt.platform/src/main/java/org/eclipse/scout/rt/platform/namespace/AbstractNamespace.java -> AbstractNamespace will be removed and namespace directly implements INamespace
+----------------------------------------------------------------------------------------------------------------------
+Author: Stephan Merkli
+Date: 2021-03-11 10:28:27.000000000
+MISMATCHED INLINE COMMENT
+Line:26, org.eclipse.scout.rt.platform/src/main/java/org/eclipse/scout/rt/platform/namespace/AbstractNamespace.java -> Ack
+----------------------------------------------------------------------------------------------------------------------
+Author: Stephan Merkli
+Date: 2021-03-11 10:28:27.000000000
+MISMATCHED INLINE COMMENT
+Line:20, org.eclipse.scout.rt.platform/src/main/java/org/eclipse/scout/rt/platform/namespace/INamespace.java -> [as discussed directly] Using ClassInventory to index namespaces, no @Bean or @ApplicationScoped annotation.
+----------------------------------------------------------------------------------------------------------------------
+Author: Stephan Merkli
+Date: 2021-03-11 10:28:27.000000000
+MISMATCHED INLINE COMMENT
+Line:18, org.eclipse.scout.rt.platform/src/main/java/org/eclipse/scout/rt/platform/namespace/INamespaceVersionItem.java -> New name as discussed: INamespaceVersioned, NamespaceVersionedModel
+----------------------------------------------------------------------------------------------------------------------
+Author: Stephan Merkli
+Date: 2021-03-11 10:28:27.000000000
+MISMATCHED INLINE COMMENT
+Line:23, org.eclipse.scout.rt.platform/src/main/java/org/eclipse/scout/rt/platform/namespace/Namespaces.java -> [as discussed directly] only a few accesses expected, omitting static getter but creating an @ApplicationScoped bean instead with a single getter to retrieve single instance of Namespaces class.
+----------------------------------------------------------------------------------------------------------------------
+Author: Stephan Merkli
+Date: 2021-03-11 10:28:27.000000000
+MISMATCHED INLINE COMMENT
+Line:29, org.eclipse.scout.rt.platform/src/main/java/org/eclipse/scout/rt/platform/namespace/Namespaces.java -> Ack
+----------------------------------------------------------------------------------------------------------------------
+Author: Stephan Merkli
+Date: 2021-03-11 10:28:27.000000000
+MISMATCHED INLINE COMMENT
+Line:54, org.eclipse.scout.rt.platform/src/main/java/org/eclipse/scout/rt/platform/namespace/Namespaces.java -> [as discussed directly] Not relevant anymore
+----------------------------------------------------------------------------------------------------------------------

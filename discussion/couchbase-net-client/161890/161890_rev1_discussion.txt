@@ -1,0 +1,101 @@
+======================================================================================================================
+DESCRIPTION:
+
+NCBC-2967: Rewrite OrphanReporter to avoid blocking calls
+
+Motivation
+----------
+The current OrphanReporter is using Task.Factory.StartNew with
+TaskCreationOptions.LongRunning to start the polling loop. This will
+spin up a dedicated thread for the polling loop, as was clearly desired
+since it's a long running process.
+
+However, the method it is calling, DoWork, is also an async method. Once
+the first "await Task.Delay" is reached, the created thread is done.
+After the first delay is done, the remaining work will be scheduled back
+on the ThreadPool. It will then block that thread when it reaches
+_queue.TryTake (a BlockingCollection call).
+
+Modifications
+-------------
+Rewrite OrphanReporter to use Channel<T> instead of
+BlockingCollection<T> to avoid blocking altogether, and simply run on
+the ThreadPool.
+
+Results
+-------
+A ThreadPool thread won't become blocked during bootstrap, which may
+reduce problems with warm up of a freshly started service.
+
+Change-Id: I210ebf1e63e36d927c1439c27e35f398874d6c24
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Brant Burnett
+Date: 2021-09-20 19:47:49.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-09-20 19:47:57.000000000
+Message: 
+Patch Set 1:
+
+Build Started http://sdk.jenkins.couchbase.com/job/dotnet/job/sdk/job/couchbase-net-client-cv-trigger/2756/
+----------------------------------------------------------------------------------------------------------------------
+Author: Brant Burnett
+Date: 2021-09-20 19:49:12.000000000
+Message: 
+Patch Set 1:
+
+I'm not 100% certain how to test that I didn't regress this, so you may want to verify things yourselves. But all unit tests previously written are passing.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-09-20 19:51:54.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+http://sdk.jenkins.couchbase.com/job/dotnet/job/sdk/job/couchbase-net-client-cv-trigger/2756/ : success
+----------------------------------------------------------------------------------------------------------------------
+Author: Jeffry Morris
+Date: 2021-09-20 22:24:42.000000000
+Message: 
+Patch Set 1: Code-Review+2
+
+(1 comment)
+Line:28, src/Couchbase/Core/Diagnostics/Tracing/OrphanResponseReporting/OrphanReporter.cs -> Will this work with .NET Framework 4.6.2+?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jeffry Morris
+Date: 2021-09-20 22:24:52.000000000
+Message: 
+Patch Set 1: Code-Review-1
+----------------------------------------------------------------------------------------------------------------------
+Author: Brant Burnett
+Date: 2021-09-21 02:46:07.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+
+> Patch Set 1: Code-Review+2
+> 
+> (1 comment)
+Line:28, src/Couchbase/Core/Diagnostics/Tracing/OrphanResponseReporting/OrphanReporter.cs -> Yes, the version of the NuGet package we're using is actually compatible back to 4.6.1. https://www.nuget.org/packages/System.Threading.Channels/5.0.0
+
+That said, my understanding is that it does suffer some very minor performance penalties on full framework because it doesn't have access to some internal members in the underpinnings. I think you can see it in the subtle differences in these two classes:
+
+https://github.com/dotnet/runtime/blob/main/src/libraries/System.Threading.Channels/src/System/Threading/Channels/AsyncOperation.netcoreapp.cs
+https://github.com/dotnet/runtime/blob/main/src/libraries/System.Threading.Channels/src/System/Threading/Channels/AsyncOperation.netstandard.cs
+
+But that's a minor impact, and should be completely insignificant on this low throughput code, unless I'm misunderstanding how hot this path is.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jeffry Morris
+Date: 2021-09-24 01:47:30.000000000
+Message: 
+Patch Set 1: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------

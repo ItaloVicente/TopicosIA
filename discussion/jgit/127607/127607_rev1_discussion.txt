@@ -1,0 +1,108 @@
+======================================================================================================================
+DESCRIPTION:
+
+Fix handling of option core.supportsAtomicCreateNewFile
+
+When core.supportsAtomicCreateNewFile was set to false and the repo was
+located on a filesystem which doesn't support the file attribute
+"unix:nlink" then FS_POSIX#createNewFile may report an error even if
+everything was ok. Modify FS_POSIX#createNewFile to silently ignore this
+situation. An example of such a filesystem is sshfs where reading
+"unix:nlink" always returns 1 (instead of throwing a exception).
+
+Also-by: Thomas Wolf <thomas.wolf@paranor.ch>
+Bug: 537969
+Change-Id: I6deda7672fa7945efa8706ea1cd652272604ff19
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Christian Halstrick
+Date: 2018-08-17 15:47:56.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-08-17 15:48:06.000000000
+Message: 
+Patch Set 1:
+
+Build Started https://ci.eclipse.org/jgit/job/jgit.gerrit/13660/
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2018-08-17 16:07:48.000000000
+Message: 
+Patch Set 1:
+
+(2 comments)
+
+The code changes are OK except for missing curly braces. But looking closer at the whole algorithm, I don't understand why this works. Am I missing something?
+Line:389, org.eclipse.jgit/src/org/eclipse/jgit/util/FS_POSIX.java -> Honestly said, I don't quite get the logic here. You want to catch the case where two processes/threads get true from createNewFile("foo"). To do so you create a hard link and then check whether nlink == 2. So both create ("foo.lnk"). Is that atomic? Or can both succeed? If both succeed, they will also both get nlink == 2, won't they?
+
+The recommendation for this technique was that each client should create a link with a unique file name, including hostname & pid or some such. Then I can understand it... kind of. Presumably a sequence like
+
+  A : createNewFile("foo") -> true
+  B : createNewFile("foo") -> true
+  A : createLink("foo.lnk_a_unique_id") -> OK
+  A : getAttribute("foo", "unix:nlink") -> 2
+  A : delete("foo.lnk_a_unique_id")
+  B : createLink("foo.lnk_b_unique_id") -> OK
+  B : getAttribute("foo", "unix:nlink") -> 2
+  B : delete("foo.lnk_b_unique_id")
+
+cannot occur? But I don't see why not... Methinks the algorithm can work only if
+
+1. link names have indeed a unique id,
+2. and are kept for as long as the file is kept
+
+Line:405, org.eclipse.jgit/src/org/eclipse/jgit/util/FS_POSIX.java -> Missing {}
+
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-08-17 16:08:49.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/jgit.gerrit/13660/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Halstrick
+Date: 2018-08-24 16:10:51.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:389, org.eclipse.jgit/src/org/eclipse/jgit/util/FS_POSIX.java -> Hmmm, I think you are right. I read open(2) man page and agree we have to use a unique name for the hard link. That could be achieved by just adding UUID.randomUUID() to the link name.
+
+But keeping the link as long as the lock file maybe more tricky. Maybe we need to add something to LockFile like deleteOnUnlock(File x) to tell which additional files to delete on unlock. Any comments?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2018-08-24 17:20:24.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:389, org.eclipse.jgit/src/org/eclipse/jgit/util/FS_POSIX.java -> FS.createNewFile() is used _only_ in LockFile.lock(). So I would just deprecate this and add a new version that returns the hard-link "File" when successful, or null if not. Then use that.
+
+Then we can store that hard-link File in LockFile.lock(), and delete it when we unlock the lock.
+
+For the static Lock::unlock, we could use a naming convention such that we can delete stale hard links, too.
+
+When we don't do this hard-link mechanism, just return the lock file itself. LockFile.unlock (either version) may then try to delete that file twice, so it must not fail if that second file doesn't exist.
+
+Whatever "unique ID" we add it shouldn't be overly long, lest we hit fancy filename length limits. (OK, we do this only on POSIX, so probably not an issue.) The "unique ID" format in the file name for the hard link must be such that it cannot conflict with other non-hard-link files.
+
+Anyway I think the branch name validations currently only forbid a trailing ".lock". If you have two branches "foo" and "foo.lock.lnk",  the current mechanism may already get into trouble. Don't know yet how to deal with that...
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2018-08-24 17:23:35.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:389, org.eclipse.jgit/src/org/eclipse/jgit/util/FS_POSIX.java -> That said, I would do this on master. Here on stable-5.0, just add the missing {} and then we can merge this. Apparently the current algorithm is good enough for your use case; properly fixing it can be done later on master.
+
+----------------------------------------------------------------------------------------------------------------------

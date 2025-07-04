@@ -1,0 +1,62 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-33081: Don't re-schedule VBCBAdapter once per vBucket
+
+VBCBAdapter is a Task which invokes a visitor object on each vBucket
+in a Bucket. Recently the DurabilityMonitorTimeout task was added
+which uses the VBCBAdapter to visit each vBucket and check for timed
+out SyncWrites. The DurabilityMonitorTimeout task is scheduled to run
+every 25ms on each Bucket.
+
+However, this has exposed an ineffiency in the VBCBAdapter -
+specifically that it only processes one vBucket on each call to
+run(). This means that a single-node cluster will need to schedule the
+VBCBAdapter task 1024 times for each Bucket - every 24us in the case
+of the timeout task. Our current ExecutorPool / TaskQueue doesn't
+handle this frequency of schedling very well - a single-node cluster
+with 2 (empty) buckets results in idle CPU usage of 150% - essentially
+all that time is being spent re-scheduling the VBCBAdapter 1024 times,
+once for each vBucket.
+
+Address this by changeing VBCBAdapter::run to process (up to) all
+vBuckets in each call - only if the visitor returns true from
+pauseVisitor() does VBCBAdapter::run() pause itself and allow other
+tasks to run.
+
+This change potentially introduces a regression in the opposite
+direction - if VBCBAdapter::run() no longer yields between vBuckets
+then slow-running visitors could cause delays in other background
+tasks running. To attempt to avoid this, modify VBucketVisitor to
+provide a default implementation for pauseVisitor() - it will pause
+when the visitor has run for more than maxChunkDuration. This defaults
+to defaults to 25ms, but visitors can override this (or provide a more
+elaborate pauseVisitor() implementation) if required.
+
+After this change the same test results in ~5% idle CPU usage.
+
+Change-Id: Icf8273626b411feb1786b30794a685d7d4032a3b
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2019-02-18 16:30:27.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-02-18 17:06:07.000000000
+Message: 
+Patch Set 1: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/15349/ : ABORTED
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/15349/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/1233/ : ABORTED
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/1233/ )
+----------------------------------------------------------------------------------------------------------------------

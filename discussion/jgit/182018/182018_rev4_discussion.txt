@@ -1,0 +1,273 @@
+======================================================================================================================
+DESCRIPTION:
+
+JGIT garbage collection fails to delete pack file
+
+JGit library opens a deleted pack file to extract loosen file out of it.
+However, the pack file does not get closed afterwards. This prevents
+pack file from deleted. The fix is to close the pack file before the
+delete operation.
+
+Bug: 574178
+Signed-off-by: andrew.xian2000@gmail.com
+Change-Id: Icd59931a218d84c9c97b450eea87b21ed01248ff
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: andy xian
+Date: 2021-06-18 05:28:07.000000000
+Message: 
+Patch Set 4: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2021-06-18 05:28:19.000000000
+Message: 
+Patch Set 4:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/5029/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2021-06-18 05:42:02.000000000
+Message: 
+Patch Set 4: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/5029/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Halstrick
+Date: 2021-06-18 08:55:59.000000000
+Message: 
+Patch Set 4:
+
+I am not saying that your analysis that jgit keeps a packfile open for too long is wrong and we don't need a fix here. But your solution to forcefully throw away the packfile unconditionally may be problematic for other use cases which you don't have in mind.
+What do you think about the use case I told before. Where process A is JGit running GC and process B is maybe native git concurrently creating a new ref. Don't you agree that forcefully deleting the packfile would leave us in a inconsistent state where a ref is created but the corresponding object is deleted? I know, that's not the problem you see - but we have to take care about that.
+
+When I look at your analysis it seems JGit during GC is opening packfiles during the loosen() method call but don't close them. We do call pack.close() before calling loosen() (GC#347). But it seems we not close the pack file afterwards and before calling prunePack() (GC#351). Maybe we should close the packfile after and not before calling loosen(). Like in:
+
+@@ -344,10 +344,10 @@ private void deleteOldPacks(Collection<Pack> oldPacks,
+                                        && repo.getFS()
+                                                        .lastModifiedInstant(oldPack.getPackFile())
+                                                        .toEpochMilli() < packExpireDate) {
+-                               oldPack.close();
+                                if (shouldLoosen) {
+                                        loosen(inserter, reader, oldPack, ids);
+                                }
++                               oldPack.close();
+                                prunePack(oldPack.getPackFile());
+                        }
+                }
+----------------------------------------------------------------------------------------------------------------------
+Author: andy xian
+Date: 2021-06-18 10:06:36.000000000
+Message: 
+Patch Set 4:
+
+> Patch Set 4:
+> 
+> I am not saying that your analysis that jgit keeps a packfile open for too long is wrong and we don't need a fix here. But your solution to forcefully throw away the packfile unconditionally may be problematic for other use cases which you don't have in mind.
+> What do you think about the use case I told before. Where process A is JGit running GC and process B is maybe native git concurrently creating a new ref. Don't you agree that forcefully deleting the packfile would leave us in a inconsistent state where a ref is created but the corresponding object is deleted? I know, that's not the problem you see - but we have to take care about that.
+> 
+> When I look at your analysis it seems JGit during GC is opening packfiles during the loosen() method call but don't close them. We do call pack.close() before calling loosen() (GC#347). But it seems we not close the pack file afterwards and before calling prunePack() (GC#351). Maybe we should close the packfile after and not before calling loosen(). Like in:
+> 
+> @@ -344,10 +344,10 @@ private void deleteOldPacks(Collection<Pack> oldPacks,
+>                                         && repo.getFS()
+>                                                         .lastModifiedInstant(oldPack.getPackFile())
+>                                                         .toEpochMilli() < packExpireDate) {
+> -                               oldPack.close();
+>                                 if (shouldLoosen) {
+>                                         loosen(inserter, reader, oldPack, ids);
+>                                 }
+> +                               oldPack.close();
+>                                 prunePack(oldPack.getPackFile());
+>                         }
+>                 }
+
+This issue is introduced in commit https://github.com/eclipse/jgit/commit/8bec98cec089fa488f3903e97ee6493b727d7d21 and that is version v4.7.0.201704051617-r
+ 
+I have double check that this issue does not occur in jgit library 4.6.1.201703071140-r.
+
+I think the better description for this issue should be: loosen() method does not close pack file which prevents jgit library pruning old pack file. 
+
+
+Move oldPack.close() to line 351 does not solve this issue because close() method does not close the file. It seems to me that close() method just clear the cache. See source code https://github.com/eclipse/jgit/blob/master/org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/Pack.java#L285
+
+	/**
+	 * Close the resources utilized by this repository
+	 */
+	public void close() {
+		WindowCache.purge(this);
+		synchronized (this) {
+			loadedIdx = null;
+			reverseIdx = null;
+		}
+	}
+
+While doClose() method actually close the file. 
+
+	private void doClose() {
+		synchronized (readLock) {
+			if (fd != null) {
+				try {
+					fd.close();
+				} catch (IOException err) {
+					// Ignore a close event. We had it open only for reading.
+					// There should not be errors related to network buffers
+					// not flushed, etc.
+				}
+				fd = null;
+			}
+		}
+	}
+
+
+But as you can see doClose is a private method, so I add a new method called forceClose to close the file:
+
+	synchronized void forceClose() throws IOException {
+		activeWindows = 0;
+		activeCopyRawData= 0;
+		doClose();
+	}
+
+
+Maybe the name forceClose sounds scary but its implementation is very similiary with openFail method: https://github.com/eclipse/jgit/blob/master/org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/Pack.java#L678
+----------------------------------------------------------------------------------------------------------------------
+Author: andy xian
+Date: 2021-06-18 10:22:08.000000000
+Message: 
+Patch Set 4:
+
+> Patch Set 4:
+> 
+> I am not saying that your analysis that jgit keeps a packfile open for too long is wrong and we don't need a fix here. But your solution to forcefully throw away the packfile unconditionally may be problematic for other use cases which you don't have in mind.
+> What do you think about the use case I told before. Where process A is JGit running GC and process B is maybe native git concurrently creating a new ref. Don't you agree that forcefully deleting the packfile would leave us in a inconsistent state where a ref is created but the corresponding object is deleted? I know, that's not the problem you see - but we have to take care about that.
+> 
+> When I look at your analysis it seems JGit during GC is opening packfiles during the loosen() method call but don't close them. We do call pack.close() before calling loosen() (GC#347). But it seems we not close the pack file afterwards and before calling prunePack() (GC#351). Maybe we should close the packfile after and not before calling loosen(). Like in:
+> 
+> @@ -344,10 +344,10 @@ private void deleteOldPacks(Collection<Pack> oldPacks,
+>                                         && repo.getFS()
+>                                                         .lastModifiedInstant(oldPack.getPackFile())
+>                                                         .toEpochMilli() < packExpireDate) {
+> -                               oldPack.close();
+>                                 if (shouldLoosen) {
+>                                         loosen(inserter, reader, oldPack, ids);
+>                                 }
+> +                               oldPack.close();
+>                                 prunePack(oldPack.getPackFile());
+>                         }
+>                 }
+
+In my opinon, it would be very safe to delete the pack file here because that file is already marked as delete, which says that pack file is not used any more. So deleting the doomed pack file would not leave us in a inconsistent state.
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Halstrick
+Date: 2021-06-21 11:55:19.000000000
+Message: 
+Patch Set 4:
+
+> This issue is introduced in commit https://github.com/eclipse/jgit/commit/8bec98cec089fa488f3903e97ee6493b727d7d21 and that is version v4.7.0.201704051617-r
+>  
+> I have double check that this issue does not occur in jgit library 4.6.1.201703071140-r.
+
+I agree. 
+That commit introduced loosening unreferenced objects previously stored in packfiles. Only if you save newly unreferenced objects first into loose objects you have a chance to support "git prune --expire ...". Without saving unreferenced objects into loose objects you don't know how long a currently unreferenced object has been unreferenced and when it is safe to finally delete the object.
+
+> 
+> I think the better description for this issue should be: loosen() method does not close pack file which prevents jgit library pruning old pack file. 
+
+fully agree.
+
+
+> Move oldPack.close() to line 351 does not solve this issue because close() method does not close the file. It seems to me that close() method just clear the cache. See source code https://github.com/eclipse/jgit/blob/master/org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/Pack.java#L285
+
+True. My fault. pack.close() is not enough in this situation.
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Halstrick
+Date: 2021-06-21 12:03:55.000000000
+Message: 
+Patch Set 4:
+
+> In my opinon, it would be very safe to delete the pack file here because that file is already marked as delete, which says that pack file is not used any more. So deleting the doomed pack file would not leave us in a inconsistent state.
+
+How do we "mark" a file that we want to delete it? How would native git in another process know that a certain packfile will be deleted soon.
+
+I think it may be safe to forcefully delete a pack file when we know that the objects which are in that packfile are either repacked in another packfile or persisted as loose objects. But if deleting the packfile would cause that objects get deleted we have to take extra care not to delete objects which are just revived by other processes.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2021-06-21 15:01:17.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+
+please add a test or add an assertion in an existing test which fails without this patch
+Line:351, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/GC.java -> - if loosen() opens the pack it should care for closing it before it returns to the caller
+- why isn't close() sufficient ?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: andy xian
+Date: 2021-06-22 01:47:10.000000000
+Message: 
+Patch Set 4:
+
+> Patch Set 4:
+> 
+> > In my opinon, it would be very safe to delete the pack file here because that file is already marked as delete, which says that pack file is not used any more. So deleting the doomed pack file would not leave us in a inconsistent state.
+> 
+> How do we "mark" a file that we want to delete it? How would native git in another process know that a certain packfile will be deleted soon.
+> 
+> I think it may be safe to forcefully delete a pack file when we know that the objects which are in that packfile are either repacked in another packfile or persisted as loose objects. But if deleting the packfile would cause that objects get deleted we have to take extra care not to delete objects which are just revived by other processes.
+
+The problem is that loosen method opens a pack file and not close it afterwards. The fix is to close the open file before the delete operation. 
+
+Now the question is that is there any concern that we close a file before deleting it? I think the answer is that there is nothing we need to worry about "close before delete" operation as the original implementation also try to do the same thing.
+
+The fix does not force delete anything. The fix is to close file at a appripriate place effectively.
+----------------------------------------------------------------------------------------------------------------------
+Author: andy xian
+Date: 2021-06-22 06:04:20.000000000
+Message: 
+Patch Set 4:
+
+> Patch Set 4:
+> 
+> (1 comment)
+> 
+> please add a test or add an assertion in an existing test which fails without this patch
+
+Here is the analysis why close method is not sufficient:
+
+loosen method has opened pack file several times and that prevents close method closing used file.
+
+The line increased the open counter activeWindows: https://github.com/eclipse/jgit/blob/master/org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/Pack.java#L626.
+
+Associated stacktrace is: 
+
+beginWindowCache:626, Pack (org.eclipse.jgit.internal.storage.file)
+load:510, WindowCache (org.eclipse.jgit.internal.storage.file)
+getOrLoad:602, WindowCache (org.eclipse.jgit.internal.storage.file)
+get:385, WindowCache (org.eclipse.jgit.internal.storage.file)
+pin:327, WindowCursor (org.eclipse.jgit.internal.storage.file)
+copy:226, WindowCursor (org.eclipse.jgit.internal.storage.file)
+readFully:604, Pack (org.eclipse.jgit.internal.storage.file)
+load:793, Pack (org.eclipse.jgit.internal.storage.file)
+get:274, Pack (org.eclipse.jgit.internal.storage.file)
+open:211, PackDirectory (org.eclipse.jgit.internal.storage.file)
+openPackedObject:390, ObjectDirectory (org.eclipse.jgit.internal.storage.file)
+openPackedFromSelfOrAlternate:354, ObjectDirectory (org.eclipse.jgit.internal.storage.file)
+openObjectWithoutRestoring:345, ObjectDirectory (org.eclipse.jgit.internal.storage.file)
+openObject:330, ObjectDirectory (org.eclipse.jgit.internal.storage.file)
+open:132, WindowCursor (org.eclipse.jgit.internal.storage.file)
+open:212, ObjectReader (org.eclipse.jgit.lib)
+loosen:294, GC (org.eclipse.jgit.internal.storage.file)
+deleteOldPacks:349, GC (org.eclipse.jgit.internal.storage.file)
+repack:863, GC (org.eclipse.jgit.internal.storage.file)
+doGc:270, GC (org.eclipse.jgit.internal.storage.file)
+gc:221, GC (org.eclipse.jgit.internal.storage.file)
+call:179, GarbageCollectCommand (org.eclipse.jgit.api)
+main:44, Test
+
+There is a loop on the code path which keeps opening the files: copy:226, WindowCursor (org.eclipse.jgit.internal.storage.file). Source Code: https://github.com/eclipse/jgit/blob/master/org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/WindowCursor.java#L226
+
+Ideally, somewhere alone the code path should call Pack.endWindowCache which would decrease the counter and allow the colse method acutlly close underlying file when the counter becomes zero. See source code: https://github.com/eclipse/jgit/blob/master/org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/Pack.java#L635
+----------------------------------------------------------------------------------------------------------------------

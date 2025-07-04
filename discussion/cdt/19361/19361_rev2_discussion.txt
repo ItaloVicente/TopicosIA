@@ -1,0 +1,145 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 422797 - Fix for synchronization and update in QMakeProjectInfo
+
+handleEvent method updates for related project only
+and does not fire listeners under 'sync' lock.
+
+Change-Id: Id9726925ff9c044a3c13238406bdf3228ccf2933
+Signed-off-by: David Kaspar <dkaspar@blackberry.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: David Kaspar
+Date: 2013-12-05 10:25:30.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2013-12-05 11:37:48.000000000
+Message: 
+Patch Set 2:
+
+Build Started https://hudson.eclipse.org/cdt/job/cdt-verify/96/
+----------------------------------------------------------------------------------------------------------------------
+Author: Andrew Eidsness
+Date: 2013-12-05 11:45:37.000000000
+Message: 
+Patch Set 2: Code-Review+1
+
+Is there any code checked in that implements IQMakeProjectInfoListener?  The part that I wanted to check wa to be sure the listener will not have problems if it is notified after it has been removed from the list.
+
+I think that this could happen even before this patch, but it is something that I noticed now.  It could happen because there is no synchronization (and I don't think there should be) between the notify method and add/removeListener.  It just means that the implementers of IQMakeProjectInfoListener#qmakeInfoChanged need to handle being notified after they have removed themselves.
+
+Secondly, I'm starting to rethink the wisdom of not passing event data to the notification method.  By not passing the IQMakeInfo all listeners will need to deal with duplicate notification where nothing has changed.  E.g., this sequence:
+
+    Change-1
+    Change-2
+    Notify-for-change-1
+    Notify-for-change-2
+
+By the time listeners check the IQMakeInfo at notify-1, it will already been updated as the result of change-2.  They will then check it again (for notify-2) and get the same content.
+
+Some listeners might care if change-2 undoes whatever change-1 did, but in this API there isn't a way for them to learn about that change.
+
+I'm not certain that this matters, I'm just asking you if it does matter.
+
+Finally, if you do change the notify method to pass an IQMakeInfo, then I think it should also be called as part of addListener:
+
+public void addListener(IQMakeProjectInfoListener listener) {
+    listeners.add(listener);
+    listener.qmakeInfoChanged( copy_of_curr_info );
+}
+
+I don't see any problems with this particular change (which is why I +1 here).  I'm just asking questions that could be addressed in a followup change.
+----------------------------------------------------------------------------------------------------------------------
+Author: David Kaspar
+Date: 2013-12-05 12:20:42.000000000
+Message: 
+Patch Set 2:
+
+Hi Andrew,
+
+Re: check for IQMakeProjectInfoListener:
+Actually there is no check on QMakeProjectInfo side. The reason is that I wanted to notify listeners without 'synchronized' section to prevent possible deadlocks. The check can be placed there only if we would notify listeners within 'synchronized' section. One of the solutions might be to describe this behavior in JavaDoc.
+
+Re: not passing data to listener:
+Reason for this way that we wanted to have it done lazily. If we would be passing data to listener event then we would need to calculate a new QMakeInfo information and that would need to be calculated in a thread request a change of QMakeInfo on QMakeProjectInfo e.g. ResourceChangeListener.resourceChanged(). We do not want to block this thread. In fact, e.g. QML indexer is just reacting on the qmakeChanged() via scheduling a background task that asks for recalculation of QMakeInfo data... So for QML-editor, this behavior is works well.
+
+Re: change Notify-1 vs. Notify-2:
+Actually we expect that the user of IQMakeProjectInfoListener is having old QMakeInfo value stored in its structure and a new QMakeInfo value is retrieved from IQMakeProjectInfo.getActualInfo() - QML editor does not care about mid-states since it would need to recalculate it again anyway.
+
+Still we are using this feature for QML editor only. Certainly there might be other use-cases too. If you have any, please, let me know and we will extend the API to cover those as well.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2013-12-05 12:53:02.000000000
+Message: 
+Patch Set 2: Verified-1
+
+Build Failed 
+
+https://hudson.eclipse.org/cdt/job/cdt-verify/96/ : ABORTED
+----------------------------------------------------------------------------------------------------------------------
+Author: Andrew Eidsness
+Date: 2013-12-05 19:01:37.000000000
+Message: 
+Patch Set 2:
+
+I still think this change is OK to commit now.
+
+However, I'm not sure that completely described my thought regarding the check.  It is sort of irrelevant now that I've looked at the existing implementation to see that it behaves properly.  However, it might still be worth adding a comment so that future implementers of IQMakeProjectInfoListener#qmakeInfoChanged do not create hard to debug bugs.
+
+This is the specific scenario that I think needs to be avoided:
+
+public class L implements IQMakeProjectInfoListener {
+    private IQMakeProjectInfo qmakeProjectInfo;
+    private Object obj;
+
+    public void register() {
+        obj = new Object();
+        qmakeProjectInfo.addListener(this);
+    }
+
+    public void destroy() {
+        qmakeProjectInfo.removeListener(this);
+        obj = null;
+    }
+
+    @Override
+    public void qmakeInfoChanged() {
+        // *** This will be null in the rare case where the listener is being
+        //     notified near the same time that #destroy is called.
+        obj.toString();
+    }
+}
+
+The NPE would depend on timing and would therefore be difficult to debug.  Implementers of IQMakeProjectInfoListener#qmakeInfoChanged should be aware that calling remove does not mean that they will never be notified.
+----------------------------------------------------------------------------------------------------------------------
+Author: Doug Schaefer
+Date: 2013-12-05 20:03:31.000000000
+Message: 
+Patch Set 2: Code-Review+2 IP-Clean+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Doug Schaefer
+Date: 2013-12-05 20:03:48.000000000
+Message: 
+Patch Set 2: Verified+1
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2013-12-05 20:26:39.000000000
+Message: 
+Patch Set 2: -Verified
+
+Build Started https://hudson.eclipse.org/cdt/job/cdt-verify/100/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2013-12-05 21:04:38.000000000
+Message: 
+Patch Set 2: Code-Review-1
+
+Build Unstable 
+
+https://hudson.eclipse.org/cdt/job/cdt-verify/100/ : UNSTABLE
+----------------------------------------------------------------------------------------------------------------------

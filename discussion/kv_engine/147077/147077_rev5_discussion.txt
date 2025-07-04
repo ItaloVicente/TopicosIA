@@ -1,0 +1,123 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-44079: Eph - Don't send backfilled committed prepares to replicas
+
+A node may send a committed prepare to another if it's either backfilling
+or streaming from memory. Streaming from memory guarantees that the
+replica will see the committed item for the prepare. Streaming from the
+seqlist does not if the committed item is purged before the committed
+prepare. The issue with this is that the replica does not know that the
+prepare has been committed already and it tries to recommit it.
+
+The question that needs to be addressed here is does a replica need to
+receive committed prepares in a backfill? There's a few cases to consider.
+
+1) [Prepare + Commit]. In this case not having the prepare is fine as the
+commit will exist already. If it were not received by the replica this
+would be a partial snapshot for which we make no guarantees.
+
+2) Prepare + Commit + [Prepare + Commit]. Replica received a snapshot of
+some sort before the backfill snapshot. Not having the (second)  prepare
+here is fine as in case 1.
+
+3) Prepare + [Prepare + Commit]. Replica would not replace the first prepare
+with the second if it was not sent. The commit would set the prepare to
+be completed in the HashTable and remove it from the DurabilityMonitor.
+
+One interesting part of this to note is the HCS check in the backfill scan.
+We can't just skip all completed prepares as we need to send all of the
+prepares that are incomplete at the time of the seqlist iterator creation.
+This is required because we'll stream anything newer from memory and apply
+stricter sanity checks. Currently when we complete a prepare we set the
+state of the prepare to be PrepareCommitted without replacing it. This means
+that we are modifying items in the middle of the seqlist. This is done
+without regard for range reads but this doesn't matter as the only other
+task that needs to check this is the HTTombstoneCleaner (just iterates over
+the HashTable). This leads though to a window in backfill where we may
+complete a prepare and update it to be PrepareCommitted. In this case we
+must actually send it.
+
+Change-Id: Ic3f569425d8e00782cfd89c13b16fac62cc03c59
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Ben Huddleston
+Date: 2021-02-26 07:52:34.000000000
+Message: 
+Uploaded patch set 5.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-02-26 07:52:47.000000000
+Message: 
+Patch Set 5:
+
+Branch restricted. PLEASE READ this URL: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/225589/artifact/restricted.html : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-02-26 08:32:59.000000000
+Message: 
+Patch Set 5: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/1759/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/26375/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/1981/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/mad-hatter/1213/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/1653/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/1873/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/1843/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/1870/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-02-26 11:50:00.000000000
+Message: 
+Patch Set 5: Code-Review-1
+
+(1 comment)
+Line:231, engines/ep/src/dcp/backfill_memory.cc -> From the conversations yesterday, didn't we conclude we cannot trust the CommittedState as it might get changed while the in-memory backfill is running?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2021-02-26 12:00:31.000000000
+Message: 
+Patch Set 5:
+
+(1 comment)
+Line:231, engines/ep/src/dcp/backfill_memory.cc -> Ahh yeah. I suppose it's possible for a prepare to be committed updating the HCS and then for a backfill to run before the state gets changed to PrepareCommitted. Think we need to do them both under the seqlist write lock
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2021-02-26 12:07:16.000000000
+Message: 
+Patch Set 5:
+
+(1 comment)
+Line:231, engines/ep/src/dcp/backfill_memory.cc -> actually scratch that, I think we can just skip any prepare lower than hcs
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-02-26 12:09:28.000000000
+Message: 
+Patch Set 5:
+
+(1 comment)
+Line:231, engines/ep/src/dcp/backfill_memory.cc -> Yeah that's what I was thinking, we don't care about the specific Prepare subtype, just it's a prepare lower than HCS.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2021-02-26 12:13:30.000000000
+MISMATCHED INLINE COMMENT
+Line:231, engines/ep/src/dcp/backfill_memory.cc -> Done. Note, still sending aborts (kind of a prepare subtype)
+----------------------------------------------------------------------------------------------------------------------

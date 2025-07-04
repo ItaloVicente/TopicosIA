@@ -1,0 +1,123 @@
+======================================================================================================================
+DESCRIPTION:
+
+Config: Rewrite subsection and value escaping and parsing
+
+Previously, Config was using the same method for both escaping and
+parsing subsection names and config values. The goal was presumably code
+savings, but unfortunately, these two pieces of the git config format
+are simply different.
+
+In git v2.15.1, Documentation/config.txt says the following about
+subsection names:
+
+  "Subsection names are case sensitive and can contain any characters
+  except newline (doublequote `"` and backslash can be included by
+  escaping them as `\"` and `\\`, respectively).  Section headers cannot
+  span multiple lines.  Variables may belong directly to a section or to
+  a given subsection."
+
+And, later in the same documentation section, about values:
+
+  "A line that defines a value can be continued to the next line by
+  ending it with a `\`; the backquote and the end-of-line are stripped.
+  Leading whitespaces after 'name =', the remainder of the line after
+  the first comment character '#' or ';', and trailing whitespaces of
+  the line are discarded unless they are enclosed in double quotes.
+  Internal whitespaces within the value are retained verbatim.
+
+  Inside double quotes, double quote `"` and backslash `\` characters
+  must be escaped: use `\"` for `"` and `\\` for `\`.
+
+  The following escape sequences (beside `\"` and `\\`) are recognized:
+  `\n` for newline character (NL), `\t` for horizontal tabulation (HT,
+  TAB) and `\b` for backspace (BS).  Other char escape sequences
+  (including octal escape sequences) are invalid."
+
+The main important differences are that subsection names have a limited
+set of supported escape sequences, and do not support newlines at all,
+either escaped or unescaped. Arguably, it would be easy to support
+escaped newlines, but C git simply does not:
+
+  $ git config -f foo.config $'foo.bar\nbaz.quux' value
+  error: invalid key (newline): foo.bar
+  baz.quux
+
+I468106ac was an attempt to fix one bug in escapeValue, around leading
+whitespace, without having to rewrite the whole escaping/parsing code.
+Unfortunately, because escapeValue was used for escaping subsection
+names as well, this made it possible to write invalid config files, any
+time Config#toText is called with a subsection name with trailing
+whitespace, like {foo }.
+
+Rather than pile hacks on top of hacks, fix it for real by largely
+rewriting the escaping and parsing code.
+
+In addition to fixing escape sequences, fix (and write tests for) a few
+more issues in the old implementation:
+
+* Now that we can properly parse it, always emit newlines as "\n" from
+  escapeValue, rather than the weird (but still supported) syntax with a
+  non-quoted trailing literal "\n\" before the newline. In addition to
+  producing more readable output and matching the behavior of C git,
+  this makes the escaping code much simpler.
+* Disallow '\0' entirely within both subsection names and values, since
+  due to Unix command line argument conventions it is impossible to pass
+  such values to "git config".
+* Properly preserve intra-value whitespace when parsing, rather than
+  collapsing it all to a single space.
+
+Change-Id: I304f626b9d0ad1592c4e4e449a11b136c0f8b3e3
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Borowitz
+Date: 2017-12-18 22:48:54.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2017-12-18 22:49:00.000000000
+Message: 
+Patch Set 2:
+
+Build Started https://ci.eclipse.org/jgit/job/jgit.gerrit/11962/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2017-12-18 23:10:39.000000000
+Message: 
+Patch Set 2: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/jgit.gerrit/11962/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonathan Nieder
+Date: 2017-12-18 23:16:14.000000000
+Message: 
+Patch Set 2: Code-Review+2
+
+(1 comment)
+Line:172, org.eclipse.jgit/src/org/eclipse/jgit/lib/Config.java -> optional: these \ escapes don't require quoting. E.g.
+
+ $ git config -f f.config x.y.z "        "
+ $ cat f.config 
+ [x "y"]
+        z = \t
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonathan Nieder
+Date: 2017-12-18 23:16:44.000000000
+Message: 
+Change has been successfully merged by Jonathan Nieder
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Borowitz
+Date: 2017-12-19 15:29:02.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:172, org.eclipse.jgit/src/org/eclipse/jgit/lib/Config.java -> Huh, I guess I missed that. So is it the case that the only things you _need_ quotes for are leading/trailing whitespace and quoting comment characters?
+
+----------------------------------------------------------------------------------------------------------------------

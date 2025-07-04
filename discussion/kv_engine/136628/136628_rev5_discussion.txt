@@ -1,0 +1,164 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-40531: Change order of vbuckets paging visitor visits
+
+Testing after http://review.couchbase.org/c/kv_engine/+/133197
+uncovered unexpected increases in cache miss ratio for a working set
+which fits within the quota comfortably. This occurred after some time,
+despite the workload reading the same keys in a loop.
+
+Investigation discovered a large disparity in per-vbucket residency
+(see MB for info).
+
+Vbuckets with a lower vbid could be <20% resident while other vbuckets
+remained fully resident. The fully resident vbs logically contain
+resident cold data which has never been evicted despite never being
+accessed.
+
+This patch changes the order the paging visitor visits vbuckets. They
+are now visited:
+
+ * replicas before other vbucket states
+ * from highest pageable memory to lowest (within a given vb state)
+
+Testing demonstrates a lower standard deviation of the distribution of
+per-vbucket residency ratios.
+
+Change-Id: Ia8a0fa368821518a25659da03852076b70ac478a
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: James H
+Date: 2020-09-24 15:53:55.000000000
+Message: 
+Uploaded patch set 5.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-09-24 15:54:12.000000000
+Message: 
+Patch Set 5: Well-Formed+1
+
+Permission granted to commit: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/202172/artifact/restricted.html : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-09-24 16:40:35.000000000
+Message: 
+Patch Set 5: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/1373/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [0052/0157]: seqno stats (couchstore)...../kv_engine/engines/ep/tests/ep_testsuite.cc:1967 Test failed: `" (Expected `100", got `13" - Unexpected last_persisted_seqno)
+[2020-09-24T16:01:40.017Z] (791 ms) FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/1373/ )
+
+Failure of a CTest test [2020-09-24T16:01:27.718Z]   7/184 Test #169: memcached_testapp.ep.Transport/McdTestappTest ................................ ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/1373/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/1630/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/26042/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/1453/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/mad-hatter/935/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/1595/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/1572/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/1584/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-09-25 09:23:36.000000000
+Message: 
+Patch Set 5: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/1630/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/26042/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/1453/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/mad-hatter/935/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/1595/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/1572/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/1584/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/1375/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2020-09-28 14:40:02.000000000
+MISMATCHED INLINE COMMENT
+Line:348, engines/ep/src/paging_visitor.cc -> pageable = std::move(pageableMemUsed) ? otherwise you will get a deep copy?
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-09-28 14:57:46.000000000
+MISMATCHED INLINE COMMENT
+Line:348, engines/ep/src/paging_visitor.cc -> .. which means that with move you avoid the copy, so why you're not doing the move here?
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-09-28 14:58:48.000000000
+MISMATCHED INLINE COMMENT
+Line:348, engines/ep/src/paging_visitor.cc -> Ignore my comment, still looking at the old patchset :)
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-09-28 14:45:56.000000000
+MISMATCHED INLINE COMMENT
+Line:348, engines/ep/src/paging_visitor.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2020-09-28 14:45:22.000000000
+MISMATCHED INLINE COMMENT
+Line:348, engines/ep/src/paging_visitor.cc -> for this example I see .data() with a new address when called from the foo function, but with move at the capture point same address
+
+// Example program
+#include <iostream>
+#include <string>
+#include <vector>
+#include <functional>
+
+std::function<int()> getFoo() {
+   std::vector<int> vec;
+   vec.push_back(1);
+   std::cout << "Address:" << (void*)vec.data() << std::endl;
+   return [vec]() {std::cout << "in func Address:" << (void*)vec.data() << std::endl;
+   return vec.size();};    
+}
+
+
+int main()
+{
+   auto foo = getFoo();
+   std::cout << foo() << std::endl;
+   return 0;
+}
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-09-28 14:59:10.000000000
+MISMATCHED INLINE COMMENT
+Line:348, engines/ep/src/paging_visitor.cc -> :P
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-09-28 15:07:44.000000000
+MISMATCHED INLINE COMMENT
+Line:1075, engines/ep/tests/module_tests/item_pager_test.cc -> Here and below, are these equivalent to EXPECT_CALL(<args>).Times(1); ?
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-09-28 15:38:02.000000000
+MISMATCHED INLINE COMMENT
+Line:1075, engines/ep/tests/module_tests/item_pager_test.cc -> Indeed 😊
+----------------------------------------------------------------------------------------------------------------------

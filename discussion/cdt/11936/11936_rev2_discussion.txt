@@ -1,0 +1,69 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 405643 - [performance] HoldsOptions performance improvements
+
+Change-Id: I10bc345821ad5d44a035a7dd46ac5837a0e5bbdb
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Andrew Gvozdev
+Date: 2013-05-11 10:47:26.000000000
+Message: 
+Patch Set 2: (1 inline comment)
+
+
+Line:278, build/org.eclipse.cdt.managedbuilder.core/src/org/eclipse/cdt/managedbuilder/internal/core/HoldsOptions.java -> This seems to replace the option with super option for option reference. Does it still happen in your version? Could you clarify why the logic of condition on wasOptRef() was dropped?
+
+Also, could you use your full name as git author rather than id bbelyavsky?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Baltasar Belyavsky
+Date: 2013-05-13 23:09:08.000000000
+Message: 
+Patch Set 2: (1 inline comment)
+
+
+Line:278, build/org.eclipse.cdt.managedbuilder.core/src/org/eclipse/cdt/managedbuilder/internal/core/HoldsOptions.java -> I don't know how to produce a legacy project that uses OptionReferences, but I don't think the wasOptRef() check is necessary (even in the old implementation). The way I think about it - the optRef's ID would either be the same as its referenced option's, or it would be different. In the case when it's the same - the map entry will just be overridden with ourOpt (in block #2 on the RHS), which is what we want in this case. And in the case when the ID is different, the map.containsKey() check in the inner "for" loop in block #2 would return 'false', and we'd just continue to the superOpt, which is also what we'd want in that case. 
+
+The only case, i can think of, where not checking for wasOptRef() could create a problem, is if the optRef's ID is different from the referenced option's, but actually happens to match another completely unrelated option. I don't think this is possible though.
+
+Let me know what you think. To feel safer, i could add that check. It won't affect performance at all.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Baltasar Belyavsky
+Date: 2013-05-16 14:59:12.000000000
+Message: 
+Patch Set 2: (1 inline comment)
+
+
+Line:278, build/org.eclipse.cdt.managedbuilder.core/src/org/eclipse/cdt/managedbuilder/internal/core/HoldsOptions.java -> Andrew, let me look into this some more. I found CDT v2.0.1 on some abandoned FTP site, and will try to reproduce the OptionReference scenario. 
+
+I thought that all I would have to do is create a project using CDT 2.x, but that's not enough - the wasOptRef() flag is set for "extension" OptionReferences when converting a legacy tool-chain definition. So I would have to define a complete legacy tool-chain to see how the new method implementations behave in that case.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Baltasar Belyavsky
+Date: 2013-05-17 14:52:33.000000000
+Message: 
+Patch Set 2: (1 inline comment)
+
+
+Line:278, build/org.eclipse.cdt.managedbuilder.core/src/org/eclipse/cdt/managedbuilder/internal/core/HoldsOptions.java -> Hi Andrew, I've created a sample tool-chain using CDT 2.0.1, and a sample user project using that tool-chain. The plugin project defining the tool-chain, and the user project, are attached to the bugzilla, in case you wish to look into those. The sample user project overrides the optimization-level option to exercise the option-reference case - so the optLevel option is defined on one extension tool, then it's overridden for the "Debug" configuration on another extension tool (using an OptionReference), and then that option-reference is further overridden in the user project's "non-extension" tool. To test out the scenario, I placed the plugin project into my KeplerM7-based dev-environment, then launched the KeplerM7-based runtime, and imported the sample user project. The user-project gets converted to new model, and all the option settings are preserved.
+
+I've confirmed that the new implementations properly handle option-references. I first did a quick brute force comparison - i added the old implementation (called it getOptions_1()), and the new implementation (called it getOptions_2()), and invoked them both from getOptions(), dumping their return values into two ArrayLists, and comparing the lists for equivalence for every invocation of getOptions(). The two lists always came back equal, confirming that the returned objects are the same and the order of the objects is also the same. I did a similar brute comparison for the getOptionBySuperClassId() method.
+
+So, for getOptions(), the reason why option-references are handled without needing to call wasOptRef(), is because when I override the super-tool's options (see block under comment numbered 2. on RHS), i always reuse the same key to store the overriding option back into the option-map (see the inner 'for' loop). So that key, always happens to be the ID of the original super-option in the chain of overrides - that original super-option is never an option-reference (because option-references can never be "original" options...they always have a super-class which they override). So, when an option-reference overrides an option, it gets inserted into the map using the overridden option's ID as the key - not the option-reference's ID (which is a concatenation of the configuration ID and the overridden option's ID). And then when that option-reference is overridden again (by the user project's optLevel setting), again I use the original super-option's ID to find and override the option-reference in the option-map. So the option-reference IDs are never even relevant in the construction of the temporary option-map of doGetOptions().
+
+So, in other words, when an option-holder gets the option-map from its super-class (block under comment 1 on RHS), and when that map does contain "option-references", these option-references are never stored in the map under their own ID...they're always stored under one of their super-option's IDs. So there is no need to be checking for wasOptRef() and going up one level to the super-option...because the option-reference is already stored under that super-option's ID, and if it needs to be further overridden, it is found and overridden using that super-option's ID.
+
+Actually, the reason why i had to reuse the root super-option's ID during the construction of the map of overrides, is unrelated to option-references - i had to do that in order to preserve the ordering of options in the LinkedHashMap - as options get overridden, i reinsert the overriding options into the LinkedHashMap under the same original key, and that ensures that the optLevel option, for example, always remains in the same place in the map, and the same place in the UI as well. And as a nice side-effect, this "key reuse" also happens to handle option-references.
+
+I hope the explanation makes sense. Let me know if I should try to further clarify anything... Thanks!
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Andrew Gvozdev
+Date: 2013-05-17 16:28:53.000000000
+Message: 
+Patch Set 2: Rebased
+----------------------------------------------------------------------------------------------------------------------

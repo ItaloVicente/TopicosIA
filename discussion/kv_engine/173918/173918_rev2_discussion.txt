@@ -1,0 +1,125 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-51805, MB-51806: Inherit HPS from previous Checkpoint
+
+MB-51805:
+
+In each Checkpoint we store a highPreparedSeqno value. This value is
+later persisted to disk when we persist the last value in the
+snapshot as the highPreparedSeqno. Currently each Checkpoint's
+highPreparedSeqno value is independent to the Checkpoint. It will
+only be set if we see a prepare in the Checkpoint. As we have a
+default value of 0 we would see this value bounce between 0 and
+an appropriate value if we dump the contents of the CheckpointManager.
+
+This logically doesn't make loads of sense, as the highPreparedSeqno
+should not only be Monotonic in a Checkpoint, it should also be
+Monotonic across Checkpoints. In this change we are going to pre-load
+each new Checkpoint with the value from the previous Checkpoint. This
+fixes an issue where a replica node received a partial snapshot which
+contained a prepare and restarted, before receiving the rest of the
+snapshot which did not contain a prepare. Whilst we have already
+corrected the in-memory HPS value in this case, the on disk HPS value
+would remain at 0 for lack of a value to persist. This was due to a
+particular behaviour in PassiveStream; the first snapshot in any
+PassiveStream creates a new Checkpoint. Whilst we were loading the
+HPS into the CheckpointManager, the creation of the new Checkpoint on
+new snapshot in the PassiveStream meant that this value was "lost"
+until this change.
+
+MB-51806:
+
+Currently we only update the highPreparedSeqno on disk if we are
+persisting the item at the end of a snapshot. This is correct, but
+fails to take into account that a Checkpoint only sets it's HPS
+value when it sees a prepare. We could have a flush batch such that
+we persist no item at a snapshot end for Checkpoints containing
+prepares and the HPS is not moved when it should be. E.g.
+
+[1:Pre(key1), 2:Mutation(key2)][3:Mutation(key2)]
+             ^
+         HPS = 1
+
+When visited by the flusher the HPS of 1 is not persisted. This allows
+for a scenario where a replica node restarts and the HPS goes backwards
+as this node would still ack 1 back to the Producer. If the cluster
+has two replicas and the other replica is behind, it's possible for it
+to be picked for promotion over this node. See MB for full scenario.
+
+This change fixes this issue as the second Checkpoint inherits the
+highPreparedSeqno value from the previous one, and rather than finding
+no value to flush, it finds the correct value of 1.
+
+Change-Id: I06f43c18975049187705efcb967f2d9c1fa5c782
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Ben Huddleston
+Date: 2022-05-04 09:20:27.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: Restriction Checker
+Date: 2022-05-04 09:20:58.000000000
+Message: 
+Patch Set 2: Well-Formed-1
+
+Branch restricted. PLEASE READ this URL: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/297494/artifact/restricted.html : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-05-04 10:33:36.000000000
+Message: 
+Patch Set 2: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-neo/164/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [89/159]: vbucket add (pending)...(181 ms) OK
+
+
+99% tests passed, 1 tests failed out of 422
+
+Total Test time (real) = 696.61 sec
+
+The following tests FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-neo/164/ )
+
+Timeout of a CTest test 422/422 Test #275: ep_testsuite.ephemeral.comp_passive ...........................................................................................} ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-neo/164/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/neo/134/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [42/159]: file stats post warmup...../kv_engine/engines/ep/tests/ep_testsuite.cc:2327 Test failed: `" (Expected `398131" to be less than or equal to `385024" - Unexpected fileSize for vbucket)
+[2022-05-04T10:08:34.324Z] (235 ms) FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/neo/134/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-neo/132/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/16217/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-neo/130/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/neo/131/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/neo/133/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/neo/133/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/neo/134/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/neo/132/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/neo/125/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

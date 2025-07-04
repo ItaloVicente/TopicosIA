@@ -1,0 +1,178 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-33332 [SR] Implement commit for EphemeralVBucket
+
+Implement EphemeralVBucket::commitStoredValue(). This is logically
+equivalent to the sibling method EPVBucket::commitStoredValue(),
+however it goes about the process in a slightly different way.
+
++Problem Scenario+
+
+At a high level, commit requires:
+
+1. Convert Prepared OSV -> Committed OSV
+2. Remove any previously Committed OSV.
+
+However, for Epheremal there are a few challenges in implementing this
+(compared to Persistent):
+
+a) Handling of the seqList, especially if a range read is
+   in-flight. If so, then we cannot just modify existing items (both
+   previous Commit, and current Prepare). Must instead create new
+   items and add to the seqList.
+
+b) Removal of old prepare (so writes can now be accepted against that
+   key).
+   For Persistent VBuckets we simply modify the Prepare to be a
+   Commit. For Ephemeral this isn’t possible - if the prepare is in a
+   RangeRead then we cannot modify it.
+
+Also recall Ephemeral "replacement" values
+(http://review.couchbase.org/81932) - if an OSV is marked stale then
+it can point to a replacement value which should be used instead
+during a subsequent range read.
+
+*If* we chose to convert the existing Prepare to a Committed OSV, then
+ if prepare is in a range read and if we marked the prepare as stale,
+ what should the replacement point to?
+
+- nullptr? Well, that’s not correct given there could be a subsequent
+  (new) Prepare added later, and we’d have duplicate ones in the
+  single snapshot.
+- The Commit? Again, that’s incorrect as the Commit doesn’t (at the
+  moment) replace the Prepare - we expect both.
+
++Chosen Approach*
+
+As such, a different approach is used for Ephemeral:
+
+* Prepare - Just treat as add (if first prepate for this key) / update
+  of Prepared OSV.
+
+* Commit - Remove preapre from the HashTable (so ESYNC_WRITE_IN_PROGRESS
+  is stopped and clients can modify the key again), then treat as add /
+  update of Committed OSV using data from prepare. We also mark the
+  prepare as stale so that it can be cleaned up by the StaleItemPurger.
+
+* Abort - Delete the Prepare.
+
+Note this approach is _slightly_ less efficient than the Persistent
+vBucket impl in the case where this is the first Prepare+Commit for a
+key:
+
+EPVBucket::commitStoredValue() only ever creates 1 StoredValue (same
+one used for Prepare and then converted to a Commit), whereas this
+approach will always create a second OSV for the Commit. However given
+we need both a Prepare & Commit in the seqList for Ephemeral then this
+approach seems a reasonable choice for Ephemeral.
+
+Change-Id: I33c1e879c117b36596dfee917fd3bdc961b711c0
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Ben Huddleston
+Date: 2019-05-23 09:28:10.000000000
+Message: 
+Uploaded patch set 14.
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2019-05-23 09:28:28.000000000
+Message: 
+Patch Set 14:
+
+(5 comments)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-05-23 10:15:36.000000000
+Message: 
+Patch Set 14: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/1258/ : FAILURE
+
+Failure of a CTest test 175/199 Test #177: memcached_testapp.ep.CleanOrUnclean/PersistToTest ............................ ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/1258/ )
+
+Failure of a GoogleTest test:
+
+CleanOrUnclean/PersistToTest.ConsistentStateAfterShutdown/Unclean, where GetParam() = Unclean (202 ms) ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/1258/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/19616/ : FAILURE
+
+Failure of a CTest test 175/199 Test #177: memcached_testapp.ep.CleanOrUnclean/PersistToTest ............................ ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/19616/ )
+
+Failure of a GoogleTest test:
+
+CleanOrUnclean/PersistToTest.ConsistentStateAfterShutdown/Unclean, where GetParam() = Unclean (404 ms) ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/19616/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/18207/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/10741/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/17418/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/11379/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/20334/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/4176/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-05-23 11:23:25.000000000
+Message: 
+Patch Set 14:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/19622/ : FAILURE
+
+Failure of a CTest test 179/199 Test #177: memcached_testapp.ep.CleanOrUnclean/PersistToTest ............................ ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/19622/ )
+
+Failure of a GoogleTest test:
+
+CleanOrUnclean/PersistToTest.ConsistentStateAfterShutdown/Clean, where GetParam() = Clean (193 ms) ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/19622/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/18207/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/10741/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/17418/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/11379/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/1264/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/20334/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/4176/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-05-23 12:19:52.000000000
+Message: 
+Patch Set 14: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/18207/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/10741/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/17418/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/11379/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/1264/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/20334/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/4176/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/19625/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-05-28 11:04:30.000000000
+Message: 
+Patch Set 14: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------

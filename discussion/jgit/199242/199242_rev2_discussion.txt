@@ -1,0 +1,102 @@
+======================================================================================================================
+DESCRIPTION:
+
+Reload only bitmap if bitmap file is changed
+
+Without this change `PackDirectory.scanPackImpl` method reloads
+pack when bitmap is modified. On large repositories reloading
+pack file can be an expensive operation. To avoid extra computation
+reload only bitmap index when bitmap file was modified.
+
+Bug: 581252
+Change-Id: I8de58485dc21f1f92f9dc6ecc9fecb2684ebab8c
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Marcin Czech
+Date: 2023-01-04 23:07:07.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2023-01-04 23:07:17.000000000
+Message: 
+Patch Set 2:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/5913/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2023-01-04 23:53:51.000000000
+Message: 
+Patch Set 2: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/5913/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2023-01-05 00:28:23.000000000
+Message: 
+Patch Set 2:
+
+(11 comments)
+Line:10, /COMMIT_MSG -> Reloading a large packfile ...
+
+Line:10, /COMMIT_MSG -> the bitmap
+
+Line:10, /COMMIT_MSG -> the pack
+
+Line:11, /COMMIT_MSG -> I would also add:
+_The Pack object is not necessarily loaded on creation, however it starts fresh without any of its parts loaded in the WindowCache, while preserving the existing one would also keep the pre-cached values_
+
+Line:102, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/Pack.java -> + `volatile`
+
+Line:109, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/Pack.java -> + `volatile`
+
+Line:119, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/Pack.java -> + `volatile`
+
+Line:144, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/Pack.java -> This is repeated as-is in `setBitmapIndxFile`, consider DRY-ing out
+
+Line:946, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/Pack.java -> This needs to be explained IMHO: you are managing here the situation where there was initially a bitmap file already loaded and you have detected that the one on-disk had changed and therefore you need to invalidate the one just read.
+
+The effective loading happens in a lazy way in getBitmapIndex().
+
+Line:949, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/Pack.java -> Duplication of what happens in the constructor: can you DRY that out?
+
+Also, that would be best for managing the updates in a safe way: multiple threads could store the value concurrently, we may need an atomic reference here.
+
+Line:441, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/PackDirectory.java -> It can be racy during read: if the filesystem resolution is high (e.g. 1s) you may end-up re-reading the bitmap file multiple times.
+
+However, that is much less expensive than invalidating a Pack with its associated WindowCache.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2023-01-05 00:54:49.000000000
+Message: 
+Patch Set 2: Code-Review-1
+
+(5 comments)
+File Comment: /PATCHSET_LEVEL -> Giving -1 for the lack of consistency during concurrent set of the bitmap in the Pack.
+Line:102, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/Pack.java -> It would be best to be AtomicReference() and managing the raciness when read and updated in the same method.
+
+Line:109, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/Pack.java -> It would be best to be AtomicReference() and managing the raciness when read and updated in the same method.
+
+Line:119, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/Pack.java -> It would be best to be AtomicReference() and managing the raciness when read and updated in the same method.
+
+Line:949, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/Pack.java -> During the racy-read period, if you have massive incoming traffic (e.g. thousands of people cloning the repo on a machine with hundreds of CPUs), you may have multiple parallel calls trying all to set the bitmap index file at the same time.
+
+The file-snapshot would not be able to decide if the file has been modified or not, because you are within the racy-read window, and therefore JGit would try to read the same file over and over again.
+
+We need to make sure that the setting the bitmap would not result in inconsistent reads.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Nasser Grainawi
+Date: 2023-01-05 19:13:10.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:441, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/PackDirectory.java -> I thought FileSnapshot.isModified() already accounts for filesystem resolution?
+
+----------------------------------------------------------------------------------------------------------------------

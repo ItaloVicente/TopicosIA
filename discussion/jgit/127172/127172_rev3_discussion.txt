@@ -1,0 +1,146 @@
+======================================================================================================================
+DESCRIPTION:
+
+Fix API breakage introduced by da254106
+
+Use org.eclipse.jgit.errors.CancelledException which is a subclass of
+IOException instead of org.eclipse.jgit.api.errors.CanceledException in
+order to avoid breaking API. We can reconsider this with the next major
+version 6.0.
+
+Bug: 536324
+Change-Id: Ia6f84f59aa6b7d78b8fccaba24ade320a54f7458
+Signed-off-by: Matthias Sohn <matthias.sohn@sap.com>
+Signed-off-by: Thomas Wolf <thomas.wolf@paranor.ch>
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Thomas Wolf
+Date: 2018-08-08 05:52:46.000000000
+Message: 
+Uploaded patch set 3.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-08-08 05:52:52.000000000
+Message: 
+Patch Set 3:
+
+Build Started https://ci.eclipse.org/jgit/job/jgit.gerrit/13604/
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonathan Nieder
+Date: 2018-08-08 05:54:28.000000000
+Message: 
+Patch Set 3: Code-Review+2
+
+(1 comment)
+Line:630, org.eclipse.jgit/src/org/eclipse/jgit/blame/BlameGenerator.java -> Thanks! Propagating the exception like this makes sense to me.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2018-08-08 05:55:05.000000000
+Message: 
+Patch Set 3:
+
+> BlameGenerator also needs that change.
+
+Reverted BlameGenerator to the parent of da254106. It calls RenameDetector.compute() only, i.e., the version without ProgressMonitor. That one won't throw any cancellation exception (but isn't cancellable either).
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonathan Nieder
+Date: 2018-08-08 05:56:23.000000000
+Message: 
+Patch Set 3: Code-Review+1
+
+(2 comments)
+Line:582, org.eclipse.jgit/src/org/eclipse/jgit/diff/DiffFormatter.java -> Could/should this propagate the exception as well?
+
+Line:325, org.eclipse.jgit/src/org/eclipse/jgit/diff/RenameDetector.java -> Likewise
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2018-08-08 06:04:04.000000000
+Message: 
+Patch Set 3:
+
+(3 comments)
+Line:630, org.eclipse.jgit/src/org/eclipse/jgit/blame/BlameGenerator.java -> It won't. RenameDetector.compute() has no ProgressMonitor, isn't cancellable, and won't throw CancelledException (nor CanceledException).
+
+Line:582, org.eclipse.jgit/src/org/eclipse/jgit/diff/DiffFormatter.java -> Later. There's bug 536323 about making DiffEntry.scan() cancelable, and maybe we'd need another bug about handling cancellation in DiffFormatter, too. For now, we're just trying to make the rename detector cancelable. I guess next would be diffs.
+
+Line:325, org.eclipse.jgit/src/org/eclipse/jgit/diff/RenameDetector.java -> Likewise what? Propagate CancelledException? I wouldn't. First, with a NullProgressMonitor, it should never be raised, and second, the idea is still to replace these uses of o.e.j.errors.CancelledException by o.e.j.api.errors.CanceledException once we do the next major version number increase.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-08-08 06:05:22.000000000
+Message: 
+Patch Set 3: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/jgit.gerrit/13604/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonathan Nieder
+Date: 2018-08-08 06:14:19.000000000
+Message: 
+Patch Set 3:
+
+(2 comments)
+Line:582, org.eclipse.jgit/src/org/eclipse/jgit/diff/DiffFormatter.java -> Ah, sorry for the lack of clarity. I meant letting it propagate out as IOException (and later, once we're ready to break API, as CanceledException).
+
+Line:325, org.eclipse.jgit/src/org/eclipse/jgit/diff/RenameDetector.java -> Why do we need the try block? CancelledException is a subclass of IOException, and as you mentioned, the exception will never be triggered because we're passing in a NullProgressMonitor..
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2018-08-08 06:35:39.000000000
+Message: 
+Patch Set 3:
+
+(2 comments)
+Line:582, org.eclipse.jgit/src/org/eclipse/jgit/diff/DiffFormatter.java -> Right now this progressMonitor is used only for the rename detector. I suppose once we'd make DiffEntry.scan() cancellable, we'll also make DiffFormatter.scan() and possibly also DiffFormatter.format() cancellable, and use that progressMonitor there, too. At that point it may make sense to just propagate here. Right now I'm unsure about propagating; we'd have to examine all callers. For instance, o.e.egit.core.op.CreatePatchOperation shouldn't log an error if diff formatting was canceled.
+
+So if we want to go in small steps I think catching it here is fine. Later, when that whole diff machinery is made cancelable, propagating would be the right thing to do.
+
+Perhaps a TODO comment would be in order here.
+
+Line:325, org.eclipse.jgit/src/org/eclipse/jgit/diff/RenameDetector.java -> You're right, with o.e.j.errors.CancelledException we wouldn't need to catch it. However, with o.e.j.api.errors.CanceledException, we would need this catch clause. Since this is a kind of "backwards refactoring" to avoid API breakage now and we still have the intention of using o.e.j.api.errors.CanceledException eventually, leaving the catch clause is fine by me. It'll avoid extra work once we do the switch.
+
+Personally, I would have added a comment like "// cannot happen with a NullProgressMonitor" inside the catch clause, regardless of the cancellation exception used. But that's IMO a minor detail.
+
+But if you prefer we could remove the try-block here now, and re-add it later once we do actually switch the exceptions.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonathan Nieder
+Date: 2018-08-08 06:51:28.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:325, org.eclipse.jgit/src/org/eclipse/jgit/diff/RenameDetector.java -> > But if you prefer we could remove the try-block here now, and re-add it later once we do actually switch the exceptions.
+
+Yes, please. It makes the code easier to reason about, to not have to worry about special-case non-exception return values for exceptional conditions.
+
+I think when we do change the exception type, we can plumb it through (or at worst, wrap it in another exception type).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2018-08-08 07:36:22.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:325, org.eclipse.jgit/src/org/eclipse/jgit/diff/RenameDetector.java -> Done.
+
+> (or at worst, wrap it in another exception type)
+
+Ugh. Please, no. We're only accumulating technical debt if we do that. There's already DirCacheCheckout.java:486 (checkout()) where this is done. Callers end up with a JGitInternalException with cause IOException with cause CanceledException and have to jump through hoops to figure out that a cancellation has occurred.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2018-08-08 09:45:40.000000000
+MISMATCHED INLINE COMMENT
+Line:582, org.eclipse.jgit/src/org/eclipse/jgit/diff/DiffFormatter.java -> TODO added in PS 5.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2018-08-08 07:58:31.000000000
+MISMATCHED INLINE COMMENT
+Line:582, org.eclipse.jgit/src/org/eclipse/jgit/diff/DiffFormatter.java -> I tried propagating this exception here but this requires quite a number of changes, so I thought we should better do this in steps. We should add a TODO here.
+----------------------------------------------------------------------------------------------------------------------

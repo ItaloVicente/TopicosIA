@@ -1,0 +1,199 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-55672: Convert RangeScan to perform network IO on frontend
+
+Before this commit the "send" of the data read by a RangeScan was
+occurring on the IO task. With this commit now all data read by
+a RangeScan is "sent" by the frontend executor.
+
+RangeScan's are converted to follow the established notify IO complete
+pattern.
+
+Front-end thread receives a client's range-scan-continue request
+and execution enters ep-engine continueRangeScan passing "success" as
+the currentStatus.
+
+ep-engine now schedules an IO task to move the scan forwards and
+returns would_block. Front-end thread is now free to do other work.
+
+IO thread will run the scan until some event triggers the task to
+yield. E.g. a limit was reached or the responseBuffer which stores
+the scanned data is at or over the configured limit. What ever the
+event was, this is returned to the front-end thread via
+notifyIOComplete.
+
+Front-end thread re-processes the range-scan-continue and execution
+enters ep-engine passing the IO complete status as currentStatus.
+
+ep-engine detects the IO complete phase by reading back an object
+which was stashed in the engine-specific then if currentStatus is:
+
+success: A continue is still running but the responseBuffer needs
+sending. The responseBuffer is "drained" to the client via
+Cookie::sendResponse and an IO task rescheduled - ep-engine
+returns would_block. The RangeScan remains in the Continue state.
+
+range_scan_more: A continue reached a requested limit or was throttled.
+The responseBuffer is "drained" to the client via
+Cookie::sendResponse and the request is complete. The RangeScan is
+changed to be Idle.
+
+range_scan_complete: A continue reached the scan end. The
+responseBuffer is "drained" to the client via Cookie::sendResponse and
+the request is complete. The RangeScan is changed to be Complete and
+removed from the map of available RangeScan objects.
+
+other status: A continue encountered an error. The responseBuffer is
+cleared (not sent). The RangeScan is changed to be Cancelled and
+removed from the map of available RangeScan objects.
+
+With this change some of the RangeScan state management is simplified
+in that the RangeScanOwner does all of the state changes in response
+to the status of a continue - no longer does the IO task drive the
+state to be Cancelled/Complete.
+
+With this change the performance of a RangeScan (as measured by the
+kv_engine/rangescan tool) is reduced. Primarily as between each 8K
+of keys/values there is a "cycle" of io-complete and task scheduling.
+Prior to this change, the IO task would keep on running with no
+reschedule required.
+
+Data from the rangescan tool suggest that with this commit there is a
+~7% reduction in rangescan throughput.
+
+Test used a single node with 16 vbuckets, 420MB of keys will be
+returned by the scan (total of all vbuckets). The scan used no limits,
+i.e. a single continue request progresses the scan from start to end.
+
+Time to perform the scan (no limits), average of 5 runs.
+
+pre   | post
+------|------
+37.8s | 40.6s
+
+This difference can be removed by increasing the RangeScan buffer size
+and will be done in a later commit.
+
+Change-Id: I17566daa37700a4caaf1f85152a4185929b29cf0
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jim Walker
+Date: 2023-03-22 10:07:52.000000000
+Message: 
+Uploaded patch set 17.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2023-03-22 10:55:10.000000000
+Message: 
+Patch Set 17: Verified-1
+
+Build Failed 
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/25096/ : FAILURE
+
+Failure of GoogleTest "AllBucketTypes/DurabilityActiveStreamTest.BackfillEmptySnapshotAfterCursorDroppingNoSyncWriteSupport_Delete_Majority/ephemeral_auto_delete":
+
+<pre>
+[ RUN      ] AllBucketTypes/DurabilityActiveStreamTest.BackfillEmptySnapshotAfterCursorDroppingNoSyncWriteSupport_Delete_Majority/ephemeral_auto_delete
+[2023-03-22T10:32:27.283Z] unknown file: Failure
+[2023-03-22T10:32:27.283Z] C++ exception with description "GSL: Precondition failure: "runtimeSecs != 0.0" at /home/couchbase/jenkins/workspace/kv_engine.linux-CE_master/kv_engine/engines/ep/src/dcp/active_stream.cc:1969" thrown in the test body.
+[2023-03-22T10:32:27.283Z] [  FAILED  ] AllBucketTypes/DurabilityActiveStreamTest.BackfillEmptySnapshotAfterCursorDroppingNoSyncWriteSupport_Delete_Majority/ephemeral_auto_delete, where GetParam() = "bucket_type=ephemeral:ephemeral_full_policy=auto_delete" (69 ms)
+AllBucketTypes/DurabilityActiveStreamTest.BackfillEmptySnapshotAfterCursorDroppingNoSyncWriteSupport_Delete_Majority/ephemeral_auto_delete
+</pre>
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/25096/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/23310/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-windows-master/52495/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/44040/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/23028/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/12841/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux-debug/job/master/1835/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/12760/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/25557/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/26409/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/33510/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/24680/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2023-03-22 12:37:55.000000000
+Message: 
+Patch Set 17: Verified+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2023-03-22 12:37:57.000000000
+Message: 
+Removed Verified-1 by <GERRIT_ACCOUNT_1000011>
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2023-03-22 12:57:41.000000000
+Message: 
+Patch Set 17: Code-Review-1
+
+(6 comments)
+File Comment: /PATCHSET_LEVEL -> Nothing major, few suggestions for cleanup / simplification...
+Line:171, engines/ep/src/range_scans/range_scan.h -> and ... ?
+
+Line:465, engines/ep/src/range_scans/range_scan.h -> Is this change related to the front-end change?
+
+Line:243, engines/ep/src/range_scans/range_scan_owner.cc -> Style: a switch statement here would reduce some of the duplication of `status == ...`
+
+Line:33, engines/ep/src/range_scans/range_scan_types.h -> I see this is symmetric with RangeScanCreateToken, but for essentially a pod struct you don't need an explicit ctor; it can be constructed via an initialiser list.
+
+Line:1012, engines/ep/tests/module_tests/range_scan_test.cc -> I see we call this for most (all?) RangeScanTests - worth moving into the TearDown method?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2023-03-22 14:06:53.000000000
+Message: 
+Patch Set 17:
+
+(3 comments)
+File Comment: /PATCHSET_LEVEL -> thanks, i'll take a look soon
+Line:465, engines/ep/src/range_scans/range_scan.h -> I'll check this. 
+
+Overall yes this is related, but in one iteration of the code I had removed access to the cookie from this path - so I needed to "cache" the snappy status of the client so the IO task could decompress or not.
+
+The cookie is though still accessible (for io complete) so maybe this is now redundant.
+
+Line:1012, engines/ep/tests/module_tests/range_scan_test.cc -> I'll test it from TearDown
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2023-03-23 11:50:33.000000000
+MISMATCHED INLINE COMMENT
+Line:171, engines/ep/src/range_scans/range_scan.h -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2023-03-23 11:50:33.000000000
+MISMATCHED INLINE COMMENT
+Line:465, engines/ep/src/range_scans/range_scan.h -> now redundant
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2023-03-23 11:50:33.000000000
+MISMATCHED INLINE COMMENT
+Line:243, engines/ep/src/range_scans/range_scan_owner.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2023-03-23 11:50:33.000000000
+MISMATCHED INLINE COMMENT
+Line:33, engines/ep/src/range_scans/range_scan_types.h -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2023-03-23 11:50:33.000000000
+MISMATCHED INLINE COMMENT
+Line:1012, engines/ep/tests/module_tests/range_scan_test.cc -> The patch now in front of this one changes the test fixtures so that we can remove many of the duplicated calls
+----------------------------------------------------------------------------------------------------------------------

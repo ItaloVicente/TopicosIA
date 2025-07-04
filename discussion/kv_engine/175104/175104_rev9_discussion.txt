@@ -1,0 +1,175 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-35297: RangeScan continue using mcbp
+
+Add mcbp validator/executor so that an existing RangeScan can be
+continued.
+
+A RangeScan continue is a bit different to other mcbp commands.
+
+1) A single continue request may trigger many response packets, with
+each response carrying a payload containing many keys/values.
+See range_scan_continue.md for a description of the payload format.
+
+2) The RangeScan I/O task (AUXIO) is writing 'directly' to the
+connection. This is different to the usual ewould_block pattern
+as we don't bring data into memory and then trigger a worker thread
+to copy that memory out. Note that the continue request does not
+use out-of-order and the connection cannot process any more commands,
+even whilst waiting for the AUXIO task to pickup the continue task.
+
+Change-Id: I3dcd0c8445190bb1f313d2b2746779bff7ff3cbf
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jim Walker
+Date: 2022-06-06 13:31:18.000000000
+Message: 
+Uploaded patch set 9: Patch Set 8 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-06-06 15:13:20.000000000
+Message: 
+Patch Set 9: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/16975/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/46606/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/17922/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/39169/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/28153/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/7581/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/18952/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/19760/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/20762/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/20107/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/7685/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-06-07 12:11:45.000000000
+Message: 
+Patch Set 9: Code-Review-1
+
+(6 comments)
+Line:23, /COMMIT_MSG -> Might be worth explaining why this is the case - just an initial simplification or is there something fundamental with RangeScan which means OoO cannot be used?
+
+Line:125, docs/range_scans/range_scan_continue.md -> Perhaps choose an example length which means leb128 encoding doesn't map to simple integer count (>127?) - so it's more obvious in the hexdump below how the length is encoded?
+
+Line:149, docs/range_scans/range_scan_continue.md -> Possibly discussed before (and maybe I forgot the conclusion), but do we gain enough from packing multiple documents (including their key, CAS, flags etc) into a single response to outweigh the complexity of another way to send values over the wire?
+
+For example, to encode two documents (key0 and key1) with their various metadata and value would take:
+
+   24B (header)
+ + 25B (flags, expiry, seqno, CAS, datatype)
+ +  1B (key0 length prefix)
+ +  4B (key0)
+ +  1B (value length)
+ +  6B (value0)
+ + 25B (flags, expiry, seqno, CAS, datatype)
+ +  1B (key1 length prefix)
+ +  4B (key1)
+ +  1B (value length)
+ +  6B (value1)
+ = 91B
+ 
+Encoding the same as two response packets, with the standard 24B header (which already includes key length, value length, datatype and CAS) gives:
+
+   24B (header 1 - includes CAS, keylen, bodylen, datatype)
+ + 16B (flags, expiry, seqno)
+ + 4B (key0)
+ + 6B (value0)
+ + 24B (header 2 - includes CAS, keylen, bodylen, datatype)
+ + 16B (flags, expiry, seqno)
+ + 4B (key1)
+ + 6B (value1)
+ = 100B
+
+That's an extra ~9% if we used framing similar to current GET, at arguably a very minimal value size. If the value sizes were instead 100B (which still feels small for most real-world documents) then the above totals become 279B and 288B, or only 0.3% smaller with the single-header approach.
+
+Note that _if_ the value size goes over 127 (what can be encoded in a LEB128 in a single byte) then the size difference gets even smaller, as we must spend 2 bytes (or more) per value to encode.
+
+The complexity increase may seen small (and one could argue it is), but it's another framing style for both KV-Engine and all the SDKs to support; add in things like making sure XATTRs are correctly encoded / removed as appropriate.
+
+Comments / thoughts ... ?
+
+Line:90, engines/ep/src/range_scans/range_scan_callbacks.h -> Please document these - particulary `buffer` as not obvious from name / type what it is used for.
+
+Line:35, include/mcbp/codec/range_scan_continue_codec.h -> Suggest making explicit that the (encoded) key is appended to the end of the vector, not replacing it.
+
+Line:72, include/mcbp/codec/range_scan_continue_codec.h -> Similarly here.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2022-06-07 13:38:58.000000000
+Message: 
+Patch Set 9:
+
+(6 comments)
+Line:23, /COMMIT_MSG -> Will do, but this is just a simplification, longer term we could make it work with OOO (have the I/O task try..acquire the connection somehow)
+
+Line:125, docs/range_scans/range_scan_continue.md -> Ack
+
+Line:149, docs/range_scans/range_scan_continue.md -> Some early feedback was to keep the framing overall the same, but yes we have to have more varint "headers" to frame each variable chunk.
+
+I was also motivated by size improvements following the usage Query are going to use, that is request continue in batches of 512 (whether a vbucket/range will include more or less than 512 is of course unknown), but if 1 batch was 512 the saving seemed useful.
+
+Fixed:
+512*24B (headers) +
+512*16B (extra metadata) = 20,480B
+
+Vs
+1 x 24B +
+512 x 25B meta 
+512 x varints for key (1B min 2B max) + 
+512 x varints for value (1B min 4B max) = 
+
+The min/max based on the varints 
+
+13,824B min (-32% from fixed)
+15,872B max (-22% from fixed)
+
+Although reality is more complex as internally there's a buffer (to be configurable) which fills and triggers each 24B header + data, single 20MB document will currently fill the buffer and trigger the "send"...
+
+Line:90, engines/ep/src/range_scans/range_scan_callbacks.h -> Ack
+
+Line:35, include/mcbp/codec/range_scan_continue_codec.h -> Ack
+
+Line:72, include/mcbp/codec/range_scan_continue_codec.h -> Ack
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-06-07 13:44:55.000000000
+Message: 
+Patch Set 9:
+
+(1 comment)
+Line:149, docs/range_scans/range_scan_continue.md -> So in that query example we are not including the actual value sizes - I was more thinking that once the actual value is included, the difference becomes arguably negligible, assuming a value size or 100B or larger.
+
+I definitely think it's worthwhile for the key-only case (given we can probably assume keys are typically <24B), and hence adding a header per key would double the network cost.
+
+Have you discussed the new packed encoding with the SDK folks - what is their take?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-06-07 14:16:16.000000000
+MISMATCHED INLINE COMMENT
+Line:149, docs/range_scans/range_scan_continue.md -> Nod. If people are broadly happy with it, and it has some small but non-zero benefit to size then we can stick with the encoding you have here.
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2022-06-07 14:12:55.000000000
+MISMATCHED INLINE COMMENT
+Line:149, docs/range_scans/range_scan_continue.md -> iirc the take is above, keep bulk encoding same/similar and no feedback (negative or positive) on framing from the toy-build people have been using
+----------------------------------------------------------------------------------------------------------------------

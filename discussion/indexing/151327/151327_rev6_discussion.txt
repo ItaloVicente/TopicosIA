@@ -1,0 +1,96 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-45666 Fix boot race of getClientStats and updateIndexStats2NoLock
+
+Client bootstrap calls getClientStats() once to get a complete
+IndexStats2 object to initialize local cache with. Meanwhile the
+normal event-handling loop is started, which receives and processes
+incoming IndexStats2 objects from periodic Lifecycle broadcasts in
+updateIndexStats2NoLock(). This results in a race where a the former
+could overwrite the cache with an older version than the latter has
+already cached, causing later nil pointer deref to cached entry if a
+bucket was added in the newer version it overwrote that the older
+version does not have an entry for.
+
+The fix is to change getClientStats() to do compare-and-swap and only
+put its entry into the cache if the cache is still nil. I also removed
+some cache validation code that was not needed, because either the
+cache (w.clientStats) is nil (only until initialized), or it contains
+a complete IndexStats2 object, as we never cache incomplete objects,
+so if the cache pointer is non-nil we do not have to run through it
+to see if it is complete or not.
+
+I also made a couple performance improvements:
+1. Eliminated the unnecessary cloning of the indexStats2 when it
+   gets cached.
+2. 14 cases: skip converting byte slices to strings for Debug log
+   messags if they won't be logged.
+
+Finally, I changed the Indexer broadcast to send a complete object
+every 5 minutes in case the original response to getClientStats() got
+lost or corrupted. Otherwise the client would have no list of indexes
+indefinitely (until either an index or a bucket was created or
+dropped).
+
+Change-Id: Ib807a653770b0c21acf9353c6917ea62e1ac576b
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Kevin Cherkauer
+Date: 2021-04-19 23:12:23.000000000
+Message: 
+Patch Set 6: Patch Set 5 was rebased
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2021-04-19 23:21:48.000000000
+Message: 
+Patch Set 6:
+
+(3 comments)
+
+Varun -- I have made the updates to address your review as we discussed last week. Also a couple performance improvements (eliminate cloning; defn.go don't convert marshaled byte slices to strings for Debug log messages if they will not be logged).
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2021-04-20 03:45:51.000000000
+Message: 
+Patch Set 6: Code-Review+1
+
+PASS sanity,unit,functional,integration with storage fdb. See http://ci2i-unstable.northscale.in/gsi-20.04.2021-05.30.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: VarunVelamuri
+Date: 2021-04-20 07:36:56.000000000
+Message: 
+Patch Set 6: Code-Review+2
+
+(1 comment)
+Line:235, secondary/manager/client/defn.go -> Minor: I think we can leave this code as it is for future use
+
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2021-04-20 08:07:32.000000000
+Message: 
+Patch Set 6:
+
+PASS sanity,unit,functional,integration with storage plasma. See http://ci2i-unstable.northscale.in/gsi-20.04.2021-09.27.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2021-04-20 11:50:19.000000000
+Message: 
+Patch Set 6:
+
+PASS sanity,unit,functional,integration with storage memdb. See http://ci2i-unstable.northscale.in/gsi-20.04.2021-13.48.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2021-04-20 15:40:40.000000000
+Message: 
+Patch Set 6:
+
+PASS sanity,unit,functional,integration with storage fdb. See http://ci2i-unstable.northscale.in/gsi-20.04.2021-17.31.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2021-04-20 16:19:25.000000000
+MISMATCHED INLINE COMMENT
+Line:235, secondary/manager/client/defn.go -> I put it back commented out. There is a cost to having it there as it will generate grep hits and sometimes time spent maintaining unused code, or else letting it slide out of alignment, and it seems unlikely it will ever be used.
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,250 @@
+======================================================================================================================
+DESCRIPTION:
+
+Do not create reflog for remote tracking branches during clone
+
+When using JGit on a non-bare repository, the CloneCommand
+creates a local reflog for tracking the changes made to all refs.
+
+Whilst the C implementation of Git uses a packed refs implementation
+that skips the creation of reflogs, the JGit one does not
+and therefore causes the generation of a large number of reflogs files.
+
+When using JGit for working with a large Git repository, it may cause
+a significant slowdown for the whole operation because of the
+creation of a potentially large number of files.
+
+The creation of the remote-tracking refs (refs/remotes/*) during
+clone is not an issue for the local filesystem because all of them are
+stored in a single packed-refs file. However, the creation of a large
+number of ref logs on a local filesystem that may not be tuned to
+managing so many files can be problematic.
+
+When a user (or a CI system) performs the CloneCommand against
+a potentially large repository, it is typically interested in working
+with a single branch or tag and is unlikely to work with all the
+remote-tracking refs.
+
+The C implementation of Git documents the limitation explicitly
+in packed-backend.c:
+
+/*
+ * A `ref_store` representing references stored in a `packed-refs`
+ * file. It implements the `ref_store` interface, though it has some
+ * limitations:
+ *
+ * - It cannot store symbolic references.
+ *
+ * - It cannot store reflogs.
+ *
+ * - It does not support reference renaming (though it could).
+ *
+ * On the other hand, it can be locked outside of a reference
+ * transaction. In that case, it remains locked even after the
+ * transaction is done and the new `packed-refs` file is activated.
+ */
+
+Bug: 579805
+Change-Id: I58d0d36a8a4ce42e0f59b8bf063747c4b81bd859
+Signed-off-by: Luca Milanesio <luca.milanesio@gmail.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Luca Milanesio
+Date: 2022-05-18 12:40:35.000000000
+Message: 
+Uploaded patch set 12: New patch set was added with same tree, parent, and commit message as Patch Set 11.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2022-05-18 12:40:45.000000000
+Message: 
+Patch Set 12: -Verified
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/5754/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2022-05-18 12:53:17.000000000
+Message: 
+Patch Set 12: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/5754/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2022-05-19 19:55:25.000000000
+Message: 
+Patch Set 12: Code-Review-1
+
+(7 comments)
+Line:10, /COMMIT_MSG -> reflogs for all branches including remote tracking branches.
+
+Line:12, /COMMIT_MSG -> I don't think this is related to how packed refs are implemented
+
+Line:24, /COMMIT_MSG -> is there any other disadvantage besides the slowdown which is already mentioned in the previous paragraph ?
+
+Line:26, /COMMIT_MSG -> I think this is irrelevant, the documentation of core.logallrefupdates [1] says that if this option is true reflogs are created for all branches including remote branches, and the default of this option is true. On the first fetch after a clone which updates a remote tracking branch C git also creates the corresponding reflog.
+
+[1] https://git-scm.com/docs/git-config#Documentation/git-config.txt-corelogAllRefUpdates
+
+Line:31, /COMMIT_MSG -> I think you misinterpret this comment in the source code of the C implementation, it just says that you cannot store reflogs inside packed-refs, this is a limitation of the storage format and not of its implementation. C git stores reflogs in extra files
+
+ refs/logs/<hierarchical branch name>
+
+in the same way like jgit does.
+
+C git deliberately does some shortcuts on clone (and only on clone), see [1]:
+
+"git clone" uses shortcuts when creating the initial set of
+references:
+* It writes them directly to packed-refs.
+* It doesn't lock the individual references (though it does lock 
+  the packed-refs file).
+* It doesn't check for refname conflicts between two new references 
+  or between one new reference and any hypothetical old ones.
+* It doesn't create reflog entries for the reference creations.
+
+But it creates a reflog for refs/heads/master which is a local branch and it creates a reflog for refs/remotes/origin/HEAD:
+
+$ cat ./logs/refs/remotes/origin/HEAD
+0000000000000000000000000000000000000000 88d5f51e61f7f90b4f760261f07c95d8dd3d7299 Matthias Sohn <matthias.sohn@sap.com> 1652988705 +0200	clone: from https://git.eclipse.org/r/jgit/jgit
+
+jgit does not create a reflog for refs/remotes/origin/HEAD (but it should)
+
+
+[1] https://github.com/git/git/commit/58f233ce1ed67bbc31a429fde5c65d5050fdbd7d
+
+Line:119, org.eclipse.jgit.test/tst/org/eclipse/jgit/api/CloneCommandTest.java -> We need another test demonstrating that a subsequent fetch updating any of the remote tracking branches creates the corresponding reflog which wasn't created during clone.
+
+And we need a test showing that
+jgit init
+jgit fetch <sourceRepoUrl> refs/heads/*:refs/remotes/origin/*
+creates reflogs for all remote tracking branches like C git does
+
+Line:474, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/PackedBatchRefUpdate.java -> I think this is wrong, the shortcut skipping creation of reflogs for remote tracking branches should only be taken if the ref creation is done during clone. If we happen to update multiple refs via PackedBatchRefUpdate during a fetch we must track the ref updates in their respective reflogs.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2022-06-09 11:15:44.000000000
+MISMATCHED INLINE COMMENT
+Line:10, /COMMIT_MSG -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2022-06-09 11:15:44.000000000
+MISMATCHED INLINE COMMENT
+Line:12, /COMMIT_MSG -> Mmm, that's not what I see in the code though, see the L41 of the commit message.
+
+The issue I believe is that the C implementation uses the packed-backend implementation that doesn't create a ref-log, whilst JGit doesn't have a different implementation and relies on the same code-base used but updating any refs, hence always generates a reflog, even during the clone phase, for all refs, either local or remote.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2022-06-24 22:41:20.000000000
+MISMATCHED INLINE COMMENT
+Line:24, /COMMIT_MSG -> Clone by default uses a refspec +refs/heads/*:refs/remotes/origin/*. This is an explicit directive to fetch these refs and how to map them to remote tracking refs in the clone.
+
+If you don't want all remote refs you can use a custom refspec to only fetch the ones you are interested in.
+
+Don't know how developers in a repo with millions of branches know which branches are relevant for them. 
+
+I guess they don't clone and checkout the complete repository and not all of its history.
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2022-06-25 11:09:26.000000000
+MISMATCHED INLINE COMMENT
+Line:24, /COMMIT_MSG -> > Clone by default uses a refspec +refs/heads/*:refs/remotes/origin/*. This is an explicit directive to fetch these refs and how to map them to remote tracking refs in the clone.
+
+Correct, and the JGit behaviour is compliant with that spec.
+
+> If you don't want all remote refs you can use a custom refspec to only fetch the ones you are interested in.
+
+I believe here the discussion is about reflogs: having 1M remote refs isn't an issue, as they are all lines in a single packed ref file. Having 1M local files in the reflog is an issue instead, and that's the problem I am trying to address.
+
+> Don't know how developers in a repo with millions of branches know which branches are relevant for them. 
+> 
+> I guess they don't clone and checkout the complete repository and not all of its history.
+
+They clone and get the history of a single branch typically, but by default they have the remote refs to all the others.
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2022-06-09 11:15:44.000000000
+MISMATCHED INLINE COMMENT
+Line:24, /COMMIT_MSG -> Well, yes: you can run out of inodes on your local filesystem. If I clone 1 branch of a remote repository with 4M refs, I will need 4M inodes when using JGit for doing a clone, which is unexpected isn't it?
+
+Companies using mono-repos, have 1 repository for the whole company, which easily translates to millions of refs. However, when you clone the repo of 1 specific branch, you don't need to have the reflog of all remote refs (millions) that you will never ever care about.
+
+Only when you *fetch them explicitly* then i twill make sense to create a reflog for them.
+
+Does that make sense?
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2022-06-09 11:15:44.000000000
+MISMATCHED INLINE COMMENT
+Line:26, /COMMIT_MSG -> > I think this is irrelevant,
+
+I see your point, but I believe that explaining WHY I am making this change as part of the commit message is relevant to understand the context and the objective of my change.
+
+> >the documentation of core.logallrefupdates [1] says that if this option is true reflogs are created for all branches including remote branches, and the default of this option is true. On the first fetch after a clone which updates a remote tracking branch C git also creates the corresponding reflog.
+
+JGit creates the reflogs of all remotes even when core.logallrefupdates is set to false. Do you believe we should raise a separate bug for that? Maybe that's the solution instead of changing the behaviour of the clone?
+
+> [1] https://git-scm.com/docs/git-config#Documentation/git-config.txt-corelogAllRefUpdates
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2022-06-25 19:57:07.000000000
+MISMATCHED INLINE COMMENT
+Line:26, /COMMIT_MSG -> I think that's another bug
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2022-06-09 11:15:44.000000000
+MISMATCHED INLINE COMMENT
+Line:31, /COMMIT_MSG -> > I think you misinterpret this comment in the source code of the C implementation, it just says that you cannot store reflogs inside packed-refs, this is a limitation of the storage format and not of its implementation. C git stores reflogs in extra files
+> 
+>  refs/logs/<hierarchical branch name>
+> 
+> in the same way like jgit does.
+
+True, but it is done explicitly when it makes esne and not as part of the packed-ref.c implementation of the packed-refs. In JGit instead it is part of the implementation of PackedBatchRefUpdate
+hence the divergence of behaviour with the C implementation.
+
+Creating a reflog should be done IMHO explicitly when it is
+desired and useful, not implicitly as the update process of the
+packed-refs.
+
+> C git deliberately does some shortcuts on clone (and only on clone), see [1]:
+> 
+> "git clone" uses shortcuts when creating the initial set of
+> references:
+> * It writes them directly to packed-refs.
+
+Yes, and that *does not* create the ref logs.
+
+> * It doesn't lock the individual references (though it does lock 
+>   the packed-refs file).
+
+Yes, I've raised that already. The JGit behaviour of locking the individual refs was causing the local system to run out of file descriptors, but that's a different discussion :-)
+
+> * It doesn't check for refname conflicts between two new references 
+>   or between one new reference and any hypothetical old ones.
+> * It doesn't create reflog entries for the reference creations.
+
+Correct.
+
+> But it creates a reflog for refs/heads/master which is a local branch and it creates a reflog for refs/remotes/origin/HEAD:
+> 
+> $ cat ./logs/refs/remotes/origin/HEAD
+> 0000000000000000000000000000000000000000 88d5f51e61f7f90b4f760261f07c95d8dd3d7299 Matthias Sohn <matthias.sohn@sap.com> 1652988705 +0200	clone: from https://git.eclipse.org/r/jgit/jgit
+
+Yes, that is done *explicitly* and not *implicitly* as part of the update of refs in packed-refs file.
+
+> [1] https://github.com/git/git/commit/58f233ce1ed67bbc31a429fde5c65d5050fdbd7d
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2022-06-09 14:04:47.000000000
+MISMATCHED INLINE COMMENT
+Line:119, org.eclipse.jgit.test/tst/org/eclipse/jgit/api/CloneCommandTest.java -> Sure, good idea, but not in the clone command test though, as it isn't technically a clone. Maybe adding it to FetchCommandTest could be a better place.
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2022-06-09 11:15:44.000000000
+MISMATCHED INLINE COMMENT
+Line:474, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/PackedBatchRefUpdate.java -> I agree, done.
+----------------------------------------------------------------------------------------------------------------------

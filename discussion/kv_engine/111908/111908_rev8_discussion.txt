@@ -1,0 +1,210 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-35001: Consumer: Avoid duplicate PREs after disk/mem transition
+
+Summary:
+
+When transitioning to the inMemory phase of an Active DCP stream,
+ensure that the initial in-memory Snapshot has the CKPT flag set, to
+avoid the replica potentially seeing duplicate keys in the same
+Checkpoint.
+
+Details:
+
+Consider the following scenario of items on disk and in memory
+(checkpoint manager):
+
+    Disk:
+    1:PRE(a), 2:CMT(a), 3:SET(b)
+
+    Memory:
+                        3:CKPT_START
+                        3:SET(b),     4:PRE(a), 5:SET(c)
+
+(items 1..2 were in a removed checkpoint and no longer in-memory.)
+
+An ep-engine replica attempting to stream all of this (0..infinity)
+will result in a backfill of items 1..3, with a checkpoint cursor
+being placed at seqno:4. Note this isn't the start of the Checkpoint
+(which is 3) and hence not pointing at a checkpoint_start item.
+
+As such when this is streamed over DCP (up to seqno:4) the consumer
+will see:
+
+    SNAPSHOT_MARKER(start=1, end=3, flags=DISK|CKPT)
+    1:PRE(a)
+    2:CMT(a)
+    3:SET(b)
+    SNAPSHOT_MARKER(start=4, end=5, flags=MEM)
+    4:PRE(a),
+    [[[missing seqno 5]]
+
+If the consumer puts all of these mutations in the same Checkpoint,
+then it will result in duplicate PRE(a) items (which breaks Checkpoint
+invariant).
+
+Address this by adding the CKPT flag to the Snapshot marker when
+transitioning between disk and memory snapshots.
+
+Note there is still an oustanding issue with the calculation of the
+failover table branch point as a consequence of this change; however
+that is being deferred for a second MB - see MB-35003.
+
+Change-Id: Idfb3b676136df0a3a6af7e626d793b6e696d7dfe
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2019-07-16 10:55:07.000000000
+Message: 
+Patch Set 8: Patch Set 7 was rebased
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-07-16 11:53:07.000000000
+Message: 
+Patch Set 8: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/12913/ : FAILURE
+
+ThreadSanitizer issue: lock-order-inversion (potential deadlock) (/home/couchbase/jenkins/workspace/kv_engine-threadsanitizer-master/install/lib/libtsan.so.0+0x2953b) in pthread_rwlock_rdlock  ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/12913/ )
+
+Failure of a CTest test 179/180 Test #175: cluster_test .................................................................Child aborted ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/12913/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/21941/ : FAILURE
+
+Failure of a CTest test  ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/21941/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/21113/ : FAILURE
+
+One of more core files found at the end of the build. Data for post-mortem saved to archived_core_dumps.tar.bz2 under "Build Artifacts". ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/21113/ )
+
+Failure of a CTest test 180/201 Test #178: memcached_testapp.ep.CleanOrUnclean/PersistToTest ............................ ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/21113/ )
+
+Failure of a GoogleTest test:
+
+CleanOrUnclean/PersistToTest.ConsistentStateAfterShutdown/Clean, where GetParam() = Clean (249 ms) ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/21113/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/19751/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/12118/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/18807/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/2774/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/5692/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-07-16 14:57:24.000000000
+Message: 
+Patch Set 8:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/21944/ : ABORTED
+
+Failure of a CTest test 119/184 Test #122: memcached_testapp.default.TransportProtocols/NoBucketStatsTest ............... ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/21944/ )
+
+Failure of a GoogleTest test:
+
+TransportProtocols/NoBucketStatsTest.TestTopkeysNoBucket/Mcbp, where GetParam() = Mcbp (1 ms) ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/21944/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/12925/ : FAILURE
+
+ThreadSanitizer issue: lock-order-inversion (potential deadlock) (/home/couchbase/jenkins/workspace/kv_engine-threadsanitizer-master/install/lib/libtsan.so.0+0x2953b) in pthread_rwlock_rdlock  ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/12925/ )
+
+Failure of a CTest test 179/180 Test #175: cluster_test .................................................................Child aborted ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/12925/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/21124/ : FAILURE
+
+One of more core files found at the end of the build. Data for post-mortem saved to archived_core_dumps.tar.bz2 under "Build Artifacts". ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/21124/ )
+
+Failure of a CTest test 194/201 Test #196: cluster_test .................................................................Child aborted ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/21124/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/19751/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/12118/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/18807/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/2774/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/5692/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-07-16 17:22:13.000000000
+Message: 
+Patch Set 8:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/12934/ : FAILURE
+
+ThreadSanitizer issue: lock-order-inversion (potential deadlock) (/home/couchbase/jenkins/workspace/kv_engine-threadsanitizer-master/install/lib/libtsan.so.0+0x2953b) in pthread_rwlock_rdlock  ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/12934/ )
+
+Failure of a CTest test 179/180 Test #175: cluster_test .................................................................Child aborted ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/12934/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/21132/ : FAILURE
+
+Failure of a CTest test  27/201 Test  #28: ep-engine-persistence-unit-tests.rocksdb ..................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/21132/ )
+
+Failure of a GoogleTest test:
+
+CleanOrUnclean/PersistToTest.ConsistentStateAfterShutdown/Clean, where GetParam() = Clean (213 ms) ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/21132/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/19751/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/12118/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/18807/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/21954/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/2774/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/5692/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-07-16 19:06:28.000000000
+Message: 
+Patch Set 8:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/12936/ : FAILURE
+
+ThreadSanitizer issue: lock-order-inversion (potential deadlock) (/home/couchbase/jenkins/workspace/kv_engine-threadsanitizer-master/install/lib/libtsan.so.0+0x2953b) in pthread_rwlock_rdlock  ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/12936/ )
+
+Failure of a CTest test 179/180 Test #175: cluster_test .................................................................Child aborted ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/12936/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/19751/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/12118/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/18807/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/21954/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/2774/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/5692/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/21134/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-07-17 07:07:44.000000000
+Message: 
+Patch Set 8: Verified+1
+
+Manually overriding TSan failure - this is a known intermittent test failure tracked via https://issues.couchbase.com/browse/MB-35073
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-07-17 07:08:08.000000000
+Message: 
+Removed Verified-1 by Build Bot <build@couchbase.com>
+
+----------------------------------------------------------------------------------------------------------------------

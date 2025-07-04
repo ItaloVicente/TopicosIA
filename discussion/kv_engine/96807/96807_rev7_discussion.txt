@@ -1,0 +1,89 @@
+======================================================================================================================
+DESCRIPTION:
+
+Run engine_testapp tests in same process
+
+engine_testapp currently runs each test in it's own process - it loads
+the testsuite plugin, then exec()s the test in a child process; with
+the parent waiting for the child's status code.
+
+While this does have some advantages - for example a segfault in a
+single test doesn't take down the whole suite - it does come with
+noticable runtime overheads to perform the child creation -
+particulary on Windows where process creation is more expensive than
+Linux.
+
+Additionally, this model means that we dlopen() the engine once for
+every test (and in a new process each time); which requires the
+runtime linker to re-link each time.
+
+To reduce these costs; change engine_testapp to run each test in the
+same (parent) process. To achieve this a few areas of the code had to
+be changed:
+
+* The test failure function abort_msg() previously called abort() and
+  relied on the parent process reading the exit code. This prevents us
+  continuing with the rest of the tests in the testsuite. Replace this
+  with throwing a new exception type, which is caught by the top-level
+  test execution loop.
+
+* Previously each test case ran with a "clean" instance of the
+  testsuite plugin and engine_testapp (as each ran in a new
+  process). This is no longer the case; so any latent bugs where a
+  test didn't clean up correctly, or reset state back to default are
+  now highlighed. Identify and fix these - for example in mock_dcp not
+  all last_dcp messages were correctly reset in clear_dcp_data().
+
+* Update default_engine to delete its EngineManager when shutting down
+  the default.so plugin - previously if you then tried to re-open the
+  plugin (and create default buckets) it would fail as it was still in
+  the 'shutdown' state from the previous opening.
+
+On macOS this gives ~12% reduction in user+sys for kv_engine tests:
+
+    time ctest -j8
+
+    Before: 1386 user+sys
+    After:  1222 user+sys
+
+Change-Id: Idcaabc1e74f7a139df2504ddc97fbacb484c5dd1
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2018-07-16 10:12:41.000000000
+Message: 
+Uploaded patch set 7.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-07-16 10:42:47.000000000
+Message: 
+Patch Set 7: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/10390/ : FAILURE
+
+One of more core files found at the end of the build. Data for post-mortem saved to archived_core_dumps.tar.bz2 under "Build Artifacts". ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/10390/ )
+
+Failure of a CTest test  28/194 Test  #29: ep_testsuite.value_eviction.comp_passive ..................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/10390/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/2240/ : FAILURE
+
+ThreadSanitizer issue: heap-use-after-free (/usr/local/lib64/libtsan.so.0+0x5d38c) in __tsan_atomic32_load  ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/2240/ )
+
+Failure of a CTest test  32/173 Test  #34: ep_testsuite_basic.value_eviction.comp_off ................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/2240/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/99/ : FAILURE
+
+Failure of a CTest test  23/174 Test  #26: ep_testsuite.value_eviction.comp_off ......................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/99/ )
+
+AddressSanitizer issue: heap-use-after-free /home/couchbase/jenkins/workspace/kv_engine-ASan-UBSan-master/kv_engine/engines/ep/src/bucket_logger.cc:39 in BucketLogger::_sink_it(spdlog::details::log_msg&) ( http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/99/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/9360/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/9239/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/10507/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

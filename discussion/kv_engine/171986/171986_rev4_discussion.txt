@@ -1,0 +1,297 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-51105: Stop ActiveStream from sending non WeaklyMonotonic snapStart
+
+Problem:
+MB-51105 showed that just after a rebalance of a cluster, a KV node
+would crash when trying to process data for a collection filtered
+stream. Due to ActiveStream::nextSnapStart throwing as it's
+WeaklyMonotonic property has been violated.
+
+Cause:
+This crash is due to a checkpoint within a recently promoted active
+node, having an incorrect snapshot range (see figure 1, checkpoint
+id:3). This could happen in a edge case where during a takeover stream
+the Active node has a number of writes to the vbucket being move. After
+the replica has moved to the pending state. This is legal however,
+during the processing of these new mutations place the streams cursor
+in the previous checkpoint which only has meta items from the cursor
+inwards, meaning there's nothing to send (but means we can still
+register the cursor in it). Then when we into the next checkpoint we'll
+pick up the last checkpoint's snapshot range (as we've not discarded it)
+and set ActiveStream::nextSnapStart to the last checkpoints snapshot
+range. Hence we send a snapshot with an incorrect snapshot start.
+
+But for us to full hit the bug of MB-51105 and be non WeaklyMonotonic,
+the initial disk snapshot must include a few items from the current open
+checkpoint that's in memory. After the disk snapshot has been sent we
+when need to send the memory checkpoint in chunks. This means that
+snapshot range created on the original replica will have a snapshot
+range that starts at the disk snapshot end +1. However, when we hit the
+issue described above we'll pick up the snapshot start of the checkpoint
+which is a seqno that was send in the disk snapshot.
+
+Fix:
+To fix this bug we need to ensure that we don't use Snapshot range from
+previous checkpoints. To do this every time we see a checkpoint_end item
+during ActiveStream::processItems(), remove the head of the
+OutstandingItemsResult::ranges, ensuring that the current head's end
+seqno is < the queue_op::checkpoint_end's seqno.
+
+Figure 1:
+CheckpointManager[0x10e59ea00] with numItems:39 checkpoints:4
+    Checkpoint[0x10e59ec80] with id:1 seqno:{1,16} snap:{0,16, visible:16} state:Closed numCursors:1 type:InitialDisk hcs:0 items:[
+        {1,empty,cid:0x1:empty,118,[m]}
+        {1,checkpoint_start,cid:0x1:checkpoint_start,129,[m]}
+        {1,set_vbucket_state,cid:0x1:set_vbucket_state,207,[m]}{"failover_table":[{"id":43660393103423,"seq":0}],"state":"replica"}
+        {1,system_event,cid:0x1:0x0:0x9:_collection,191,}
+...
+        {17,checkpoint_end,cid:0x1:checkpoint_end,127,[m]}
+]
+    Checkpoint[0x10cbbba00] with id:2 seqno:{17,31} snap:{17,31, visible:31} state:Closed numCursors:0 type:Memory hcs:none  items:[
+        {17,empty,cid:0x1:empty,118,[m]}
+        {17,checkpoint_start,cid:0x1:checkpoint_start,129,[m]}
+...
+        {32,set_vbucket_state,cid:0x1:set_vbucket_state,207,[m]}{"failover_table":[{"id":43660393103423,"seq":0}],"state":"replica"}
+        {32,set_vbucket_state,cid:0x1:set_vbucket_state,207,[m]}{"failover_table":[{"id":43660393103423,"seq":0}],"state":"pending"}
+        {32,checkpoint_end,cid:0x1:checkpoint_end,127,[m]}
+]
+    Checkpoint[0x10cbbbf00] with id:3 seqno:{32,33} snap:{12,33, visible:33} state:Closed numCursors:0 type:Memory hcs:none  items:[ <<----- BANG!
+        {32,empty,cid:0x1:empty,118,[m]}
+        {32,checkpoint_start,cid:0x1:checkpoint_start,129,[m]}
+...
+        {34,checkpoint_end,cid:0x1:checkpoint_end,127,[m]}
+]
+    Checkpoint[0x10cbbc180] with id:4 seqno:{34,34} snap:{34,34, visible:33} state:Open numCursors:0 type:Memory hcs:none  items:[
+        {34,empty,cid:0x1:empty,118,[m]}
+        {34,checkpoint_start,cid:0x1:checkpoint_start,129,[m]}
+        {34,set_vbucket_state,cid:0x1:set_vbucket_state,206,[m]}{"failover_table":[{"id":43660393103423,"seq":0}],"state":"active"}
+
+Change-Id: Ifede1a5a18636be149f2b0847a59e483eaf28485
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Richard de Mellow
+Date: 2022-03-10 10:54:06.000000000
+Message: 
+Uploaded patch set 4.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-03-10 11:16:35.000000000
+Message: 
+Patch Set 4: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/14866/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-neo/51/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-neo/52/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-neo/61/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/neo/52/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/neo/51/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/neo/52/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/neo/51/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/neo/52/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/neo/54/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/neo/46/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2022-03-10 13:57:26.000000000
+Message: 
+Patch Set 4: Code-Review-1
+
+(1 comment)
+Line:3850, engines/ep/tests/module_tests/collections/evp_store_collections_dcp_test.cc -> I see that you're testing multiple/different cases all in the same tests ?
+Could we split in dedicated tests please? Eg, 1 for SW, 1 for the collection case, etc..
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2022-03-10 14:02:10.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:12, /COMMIT_MSG -> Is the bug addressed here only possible with collection filters?
+Can we hit this issue (or a variation of hit) with pure SyncRepl (ie, no other collection than the default one present) ?
+I'm thinking on relations of this issue here with the old MB-50333..
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-03-10 14:33:00.000000000
+Message: 
+Patch Set 4:
+
+(2 comments)
+Line:12, /COMMIT_MSG -> The crash would only be observed by a collection stream IIRC. However the bug that causes a replica's checkpoint state to be inconsistent occurs on a replication stream. I think we're still okay with regards to MB-50333 as we're still recording the start seqno of a snapshot that we're sending items from. This patch is just making sure that we're picking the right snapshot range for the checkpoint.
+
+Line:3850, engines/ep/tests/module_tests/collections/evp_store_collections_dcp_test.cc -> It's all one test but its probably more of a system test than a unit test given what it's doing. But all these phases are required to hit the bug in the way that MB-51105 hit the bug. So it wouldn't make sense to split it up.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2022-03-10 14:36:39.000000000
+Message: 
+Patch Set 4: -Code-Review
+
+(2 comments)
+Line:12, /COMMIT_MSG -> Ack
+
+Line:3850, engines/ep/tests/module_tests/collections/evp_store_collections_dcp_test.cc -> Ok, my comment was related to the possibility of hitting this bug (or a variation of it) with SyncRepl only, thus the possibility of a dedicated SR-only test.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-03-10 14:51:21.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:3850, engines/ep/tests/module_tests/collections/evp_store_collections_dcp_test.cc -> I'm not really sure what we would gain from creating a SyncRep version only of the test, it would be be very similar to this test, but would probably require another take stream for us to hit it in a very contrived way. Give the same code is running for a replication and collections stream we're excreting the same code. Just that a collection stream makes it far easier to hit the crash after the replication stream has poisoned the checkpoint snapshot range.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2022-03-10 14:53:24.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:3850, engines/ep/tests/module_tests/collections/evp_store_collections_dcp_test.cc -> Sorry probably not clear - In my last comment I left implicit that, given that we can't hit the bug with SR-only, then I'm with you than there's no reason for a SR-only test 👍
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2022-03-10 14:57:26.000000000
+Message: 
+Patch Set 4: Code-Review-1
+
+(1 comment)
+Line:1184, engines/ep/src/dcp/active_stream.cc -> Could you document on why this if-condition please?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-03-10 15:28:16.000000000
+Message: 
+Patch Set 4:
+
+(2 comments)
+Line:1184, engines/ep/src/dcp/active_stream.cc -> More of a sanity check, really it probably could be implicit but probably best checking. I'll add a critical warning if there not too (throw would be better but seems the wrong thing to add at this point in the release).
+
+Line:3850, engines/ep/tests/module_tests/collections/evp_store_collections_dcp_test.cc -> Done
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-03-10 15:57:41.000000000
+Message: 
+Patch Set 4: Code-Review-1
+
+(13 comments)
+Line:19, /COMMIT_MSG -> moved?
+
+Line:24, /COMMIT_MSG -> Somewhat long / confusing sentence. Maybe break down into multiple, something like:
+
+> This is legal, however during the processing of these new mutations the streams' cursor is placed in the previous checkpoint, such that only meta items remain for that cursor. This means there's nothing to send for this stream.
+
+Line:36, /COMMIT_MSG -> Reading this whole description (from ~line 16 to 36), I think it might be easier for the reader if you break it down into a numbered list of steps which much occur. That makes it much easier to refer to when things should / shouldn't happen (e.g. "note at step 3 we should have done XXX but instead YYY" etc.
+
+You can also refer more to the checkpoint diagram below - or maybe even copy and paste extracts of the diagram so the reader can see over time how the state of the CM changes to the "bad" state.
+
+Line:3867, engines/ep/tests/module_tests/collections/evp_store_collections_dcp_test.cc -> Do we need 10 documents here? Can we demonstrate the issue with fewer?
+
+Line:3882, engines/ep/tests/module_tests/collections/evp_store_collections_dcp_test.cc -> Similary here, do we need 5?
+
+Line:3891, engines/ep/tests/module_tests/collections/evp_store_collections_dcp_test.cc -> Same
+
+Line:3918, engines/ep/tests/module_tests/collections/evp_store_collections_dcp_test.cc -> Ditto
+
+Line:3930, engines/ep/tests/module_tests/collections/evp_store_collections_dcp_test.cc -> Again, why 5?
+
+Line:3932, engines/ep/tests/module_tests/collections/evp_store_collections_dcp_test.cc -> Also, do we actually need two different collections in play to hit this? I didn't think it had anything to do with collections...?
+
+Line:3988, engines/ep/tests/module_tests/collections/evp_store_collections_dcp_test.cc -> You might have found using the dcp_reflection_test easier to work with here, given it joins two ep-engines together and you don't need to manually generate all the takeover sequence of events.
+
+Line:4000, engines/ep/tests/module_tests/collections/evp_store_collections_dcp_test.cc -> Do we need two writes here - would 1 suffice?
+
+Line:4009, engines/ep/tests/module_tests/collections/evp_store_collections_dcp_test.cc -> below
+
+Line:4033, engines/ep/tests/module_tests/collections/evp_store_collections_dcp_test.cc -> Again, would 1 work?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-03-10 21:35:50.000000000
+MISMATCHED INLINE COMMENT
+Line:19, /COMMIT_MSG -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-03-10 21:35:50.000000000
+MISMATCHED INLINE COMMENT
+Line:24, /COMMIT_MSG -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-03-10 21:35:50.000000000
+MISMATCHED INLINE COMMENT
+Line:36, /COMMIT_MSG -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-03-10 21:35:50.000000000
+MISMATCHED INLINE COMMENT
+Line:1184, engines/ep/src/dcp/active_stream.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-03-10 21:35:50.000000000
+MISMATCHED INLINE COMMENT
+Line:3867, engines/ep/tests/module_tests/collections/evp_store_collections_dcp_test.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-03-10 21:35:50.000000000
+MISMATCHED INLINE COMMENT
+Line:3882, engines/ep/tests/module_tests/collections/evp_store_collections_dcp_test.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-03-10 21:35:50.000000000
+MISMATCHED INLINE COMMENT
+Line:3891, engines/ep/tests/module_tests/collections/evp_store_collections_dcp_test.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-03-10 21:35:50.000000000
+MISMATCHED INLINE COMMENT
+Line:3918, engines/ep/tests/module_tests/collections/evp_store_collections_dcp_test.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-03-10 21:35:50.000000000
+MISMATCHED INLINE COMMENT
+Line:3930, engines/ep/tests/module_tests/collections/evp_store_collections_dcp_test.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-03-10 21:35:50.000000000
+MISMATCHED INLINE COMMENT
+Line:3932, engines/ep/tests/module_tests/collections/evp_store_collections_dcp_test.cc -> Yes, as to hit the WeaklyMonotonic violation that throws an exception, we need to use a collection stream so that it processes multiple snapshot markers without sending any data, causing us to update the nextSnapshotStart multiple times. So that we pick up the bad snapshot start.
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-03-10 21:35:50.000000000
+MISMATCHED INLINE COMMENT
+Line:3988, engines/ep/tests/module_tests/collections/evp_store_collections_dcp_test.cc -> I did start off with the reflection tests, however I felt that these tests gave me a greater control over the sequence of evens and made it easer to reason with hence why I've written it here.
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-03-10 21:35:50.000000000
+MISMATCHED INLINE COMMENT
+Line:4000, engines/ep/tests/module_tests/collections/evp_store_collections_dcp_test.cc -> Will remove.
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-03-10 21:35:50.000000000
+MISMATCHED INLINE COMMENT
+Line:4009, engines/ep/tests/module_tests/collections/evp_store_collections_dcp_test.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-03-10 21:35:50.000000000
+MISMATCHED INLINE COMMENT
+Line:4033, engines/ep/tests/module_tests/collections/evp_store_collections_dcp_test.cc -> Done
+----------------------------------------------------------------------------------------------------------------------

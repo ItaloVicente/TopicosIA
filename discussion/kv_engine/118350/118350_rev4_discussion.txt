@@ -1,0 +1,196 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-36971: Send the HCS when streaming a Disk-Checkpoint
+
+For Durability we need to keep track of the original source of a
+Checkpoint, Disk/Memory. The reason is that, because of on-disk
+deduplication and topology changes, a Producer we may end up with
+streaming a disk-snapshot from memory. See MB-35245 for details.
+
+We already send the HCS in the SnapshotMarker for disk-snapshot from
+disk (done in MB-34017). We need to do the same for disk-snapshot from
+memory.
+
+By missing that we could end up with a newly promoted Active
+re-committing already-committed Prepares and Replicas failing with
+"Prepare not found in the HashTable" (legal at Replica, given that the
+Prepare has been already committed and removed from the HT). See
+MB-36971 for details.
+
+Change-Id: I6e360cc81a6f05ea4165c82d754b3af1112bac5b
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2019-11-22 10:43:35.000000000
+Message: 
+Uploaded patch set 4.
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2019-11-22 10:52:43.000000000
+Message: 
+Patch Set 4: Code-Review-1
+
+(1 comment)
+
+I believe you can just use the HCS already in the ItemForCursor result (CheckpointSnapshotRange). This is only set when we getItemsForCursor past a checkpoint end but this should always happen for an active sending a disk checkpoint as the checkpoint should always be complete.
+Line:88, engines/ep/src/checkpoint_manager.h -> This should already exist in CheckpointSnapshotRange which is per-checkpoint whilst ItemsPerCursor is not
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-11-22 11:23:22.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:88, engines/ep/src/checkpoint_manager.h -> Checking if we can use the one in CheckpointSnapshotRange.
+
+But why CheckpointType is not in CheckpointSnapshotRange too ?
+I guess it is because CM::getItemsForCursor returns items from multiple checkpoints *only of the same type*.
+So I guess that we are good with both CheckpointType and HCS here.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2019-11-22 11:24:35.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:88, engines/ep/src/checkpoint_manager.h -> Yeah that's right. HCS was origninally in ItemsForCursor too but had to be moved for some other reason. There wasn't a need to move CheckpointType
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2019-11-22 11:25:20.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:88, engines/ep/src/checkpoint_manager.h -> We can't move HCS here because we could return 2 disk snapshots with 2 different HCS
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2019-11-22 11:29:05.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:88, engines/ep/src/checkpoint_manager.h -> So say you have to disk checkpoints and ASCheckpointProcessorTask picks up both in a single run of itemsForCursor. We call snapshot which will put the HCS in the SnapshotMarker and we need to put the correct HCS in there
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-11-22 11:29:49.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:88, engines/ep/src/checkpoint_manager.h -> Yeah that would be wrong, *must* use the one in CheckpointSnapshotRange
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-11-22 12:33:52.000000000
+Message: 
+Patch Set 4: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/22636/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/221/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/246/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/244/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/248/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/240/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/245/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-11-24 05:15:57.000000000
+Message: 
+Removed reviewer Trond Norbye.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-11-24 05:16:00.000000000
+Message: 
+Removed reviewer Richard de Mellow.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-11-24 05:16:01.000000000
+Message: 
+Removed reviewer Paolo Cocchi.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-11-24 05:16:02.000000000
+Message: 
+Removed reviewer Jim Walker.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-11-24 05:16:03.000000000
+Message: 
+Removed reviewer Dave Finlay.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-11-24 05:16:05.000000000
+Message: 
+Removed reviewer Dave Rigby.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-11-24 05:16:07.000000000
+Message: 
+Removed reviewer James Harrison.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-11-24 05:16:10.000000000
+Message: 
+Removed reviewer Daniel Owen.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-11-24 05:16:11.000000000
+Message: 
+Removed reviewer Ben Huddleston with the following votes:
+
+* Code-Review-1 by Ben Huddleston <ben.huddleston@couchbase.com>
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-11-26 11:02:12.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:88, engines/ep/src/checkpoint_manager.h -> Reviewing the above.
+
+That is all correct, but another way of fixing is to keep the HCS here and ensuring that we *never* return 2 Disk Snapshots from CM::getItemsForCursor.
+Note that it is the same approach that we currently use for keeping the CheckpointType here, ie ensuring that we never return 2 Snapshots of different type from the CM.
+
+I do not like how we do for CheckpointType. I think that it should be moved into SnapshotRange (its natural place) and that we should not rely on caveats of CM for ensuring the correctness of what we get here.
+So I would say that placing the HCS into SnapshotRange is the correct thing to do.
+
+But, leaving it here would make unnecessary all the changes in ActiveStream::processItems and make this patch simpler.
+
+@DR Your thoughts about the above?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-11-26 11:20:08.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:88, engines/ep/src/checkpoint_manager.h -> Let's do whatever is the smallest, correct change for 6.5.0. We can clean it up as you suggest in a follow-up patch for 6.5.1 .
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-11-26 11:23:39.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:88, engines/ep/src/checkpoint_manager.h -> A side effect (possible minor perf degradation) of the smallest way: if we have multiple and consequent DiskCheckpoints in CM, then CheckpointProcessorTask will pick up only one at each run. So, multiple runs of the task necessary for streaming all Disk Checkpoints in that case.
+
+----------------------------------------------------------------------------------------------------------------------

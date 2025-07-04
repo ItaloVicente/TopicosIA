@@ -1,0 +1,198 @@
+======================================================================================================================
+DESCRIPTION:
+
+RefDirectory: Trust packed-refs based on new backward-compatible config
+
+Commit 218cf340 enabled the 'trustfolderstat' core configuration also
+for packed-refs files, beside the objects/pack folder which already had
+it considered (in ObjectDirectory).
+
+For sites requiring trustfolderstat set to false, because of old legacy
+NFS storage constraints for example, not trusting packed-refs as well
+may degrade performance dramatically. This despite those sites still
+tolerating the fact of not trusting objects/pack folders alongside.
+
+Introduce a new, optional 'trustfilestat' core configuration, defaulting
+to the formerly well-known trustfolderstat for backward compatibility.
+Allow storage-challenged sites to not trust-folderstat while trusting
+packed-refs files that way, so they get production-scale performance.
+
+Change-Id: Ic2718c816872958b07379470c3525cb355b9cad0
+Signed-off-by: Marco Miller <marco.miller@ericsson.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Marco Miller
+Date: 2020-10-29 22:36:05.000000000
+Message: 
+Uploaded patch set 3.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2020-10-29 22:36:11.000000000
+Message: 
+Patch Set 3:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/3838/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2020-10-29 23:08:44.000000000
+Message: 
+Patch Set 3: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/3838/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2020-11-01 19:58:27.000000000
+Message: 
+Patch Set 3:
+
+(2 comments)
+Line:16, /COMMIT_MSG -> I don't understand this sentence
+
+Line:18, /COMMIT_MSG -> Do you have evidence that this works on NFS and the typically involved NFS client caching without causing corruption like lost ref updates ? If you can trust timestamps for packed-refs why can't you also trust them for the pack folder ?
+
+I think if you can trust file timestamps or not depends on the file system but shouldn't depend on the actual file.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Marco Miller
+Date: 2020-11-02 22:31:13.000000000
+Message: 
+Patch Set 3:
+
+(2 comments)
+Line:16, /COMMIT_MSG -> Ack; I can improve it soon.
+
+Line:18, /COMMIT_MSG -> > Do you have evidence that this works on NFS and the typically involved NFS client caching without causing corruption like lost ref updates ? If you can trust timestamps for packed-refs why can't you also trust them for the pack folder ?
+
+Our evidence came from trying to use the aforementioned jgit commit 218cf340 in production. We had to revert that specific commit (server) and pin our jgit gc client to a version before that commit. Otherwise our jgit performance would severely degrade.
+
+> I think if you can trust file timestamps or not depends on the file system but shouldn't depend on the actual file.
+
+Well, after doing as above, we were able to recover usable jgit performance again. At least that is our experience with this and given our own NFS storage setup, plus our large repos and their characteristics. Maybe other experiences elsewhere differed. That's why this proposed config option defaults to the existing one.
+
+We need to benefit from this cleaner option, as opposed to reverting and pinning to a much older version. We also need to match our client and server versions as we upgrade.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2020-11-03 00:22:25.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:18, /COMMIT_MSG -> Sure, performance is better if we assume timestamps are always correct and can be used to detect if there was a change.
+
+My concern is regarding correctness. Would you accept lost ref updates in favour of better performance ? I'd expect if you cannot trust metadata of the pack folder to be always correct because the NFS client caches file metadata then you also can't trust it for the metadata of other files e.g. packed-refs.
+
+Can you implement a test rapidly updating refs from multiple threads using PackedBatchRefUpdate which fails if there are lost updates and run that for many iterations on a NFS filesystem ?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Halstrick
+Date: 2020-11-09 08:56:26.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:18, /COMMIT_MSG -> I am asking the same question as Matthias: Do you really want to not trust mtimes of folders but trust mtime of files?
+But there is one thing where I agree the commit 218cf340 is problematic. The config option is called trust"folder"stat
+and I introduced to use this config option to deal with stats of files. Difficult decision: introducing trustfilestat
+maybe correctly telling where we want to special-handle mtimes, but it is not proven (to me) that this is a functionality
+which is bringing benefits. Yes, it's faster, but maybe incorrect with this option.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Marco Miller
+Date: 2020-11-11 17:10:49.000000000
+Message: 
+Patch Set 3:
+
+This new option may lead to incorrect results, yes (or not, depending on traffic circumstances); I share your concerns. I was proposing it still though, based on Ericsson-internal production "experience" with packed-refs being trusted (while not trusting objects/pack). Without trusting packed-refs, we had major performance losses; trusting them made us reliable again. I understand that this is a trivial outcome of trusting packed-refs, yes.
+
+I cannot guarantee reliability across deployments with this current new option enabled. Internally, we keep it in for now as a "handy" switch, currently set to true -but that may change. We plan to exercise it further in staging soon as we test our gerrit upgrades.
+
+An alternative could be to instead bring our gc back on our primary serving node(s), *if* those can be scaled accordingly: that is an even bigger change for us internally (currently). Removing the NFS variable here and there is always wanted, yet sometimes hard to do.
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2020-11-11 20:46:18.000000000
+Message: 
+Patch Set 3:
+
+(7 comments)
+
+I do share the pain that Marco is experiencing and I do support the change :-)
+Line:15, /COMMIT_MSG -> We've experienced that too and reverted to trustfolderstat always set to true, also if that would mean out-of-sync JGit cache.
+
+For small repos, the reload of the packed refs isn't a big issue. However, for mono-repos, becomes so significant that Gerrit becomes unusable.
+
+Line:18, /COMMIT_MSG -> 'trustfilestat' doesn't really tell the full story of the refs. Why don't we have a more explicit flag for that?
+
+Example: trustRefStat?
+
+P.S. Having trustRefStat set to true won't be a big issue anymore, once [1] will be merged.
+
+[1] https://gerrit-review.googlesource.com/c/plugins/high-availability/+/284999
+
+Line:47, Documentation/config-options.md -> + default: equal to the same value of trustFolderStat
+
+Line:47, Documentation/config-options.md -> can massively impact performance for repositories with a large number of refs.
+
+Line:47, Documentation/config-options.md -> trustRefStat?
+
+Line:909, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/RefDirectory.java -> trustRefStat?
+
+Line:699, org.eclipse.jgit/src/org/eclipse/jgit/lib/ConfigConstants.java -> trustrefstat?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Halstrick
+Date: 2020-11-12 09:45:13.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:18, /COMMIT_MSG -> We want to introduce the possibility to trust the mtime of files containing refs but not trust the mtime of folders potentially containing files containing refs. And we are doing that only in the context of ref-handling (not e.g. for handling of work-tree files, config files, etc). I like the idea to have a config param which name contains 'ref'. I think a boolean parameter trustRefStat is no sufficient because it doesn't express the different handling of refs based on their storage. So maybe a config param trustRefStat with values 'true' (trust mtime of all file/folders containing refs), 'false' (never trust mtime of files/folders containing refs) and 'filesOnly' (trust mtime of files containing refs e.g. in objects/pack but don't trust the mtime of folders containing files with refs), 'foldersOnly' (if this is really needed?) would be good.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2020-11-12 12:44:36.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:18, /COMMIT_MSG -> > We want to introduce the possibility to trust the mtime of files containing refs but not trust the mtime of folders potentially containing files containing refs. And we are doing that only in the context of ref-handling (not e.g. for handling of work-tree files, config files, etc). I like the idea to have a config param which name contains 'ref'. I think a boolean parameter trustRefStat is no sufficient because it doesn't express the different handling of refs based on their storage. So maybe a config param trustRefStat with values 'true' (trust mtime of all file/folders containing refs), 'false' (never trust mtime of files/folders containing refs) and 'filesOnly' (trust mtime of files containing refs e.g. in objects/pack but don't trust the mtime of folders containing files with refs), 'foldersOnly' (if this is really needed?) would be good.
+
+I like your 3-state idea (true, false, foldersOnly). The reason why it should more tied to 'ref' rather than files/folders in general is because those are the only *mutable* entity that can cause problems.
+
+Example: you have two JGit Servers that are sharing the same repos over NFS. If they are both creating a new SHA1 at the same time, they won't conflict on anything, unless there is a SHA1 collision of course. If they are both updating the *same ref*, they will get in trouble because they both want to update a mutable entity from an initial state S0 to two different diverging states.
+
+With [1] we will prevent that situation to happen using a global ref-db, making then the concurrent update of refs possible, even without having to re-read all the refs all the times from the filesystem. How? Just because the global ref-db contains a globally consistent view of the refs.
+
+It would be nice to have then [1] refactored and integrated with JGit in the future, so that we could benefit from it also outside the Gerrit Code Review context.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Halstrick
+Date: 2020-11-12 13:56:31.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:18, /COMMIT_MSG -> > I like your 3-state idea (true, false, foldersOnly). The reason why it should more tied to 'ref' rather than files/folders in general is because those are the only *mutable* entity that can cause problems.
+
+Great. But it would be the 3-state true, false, filesOnly. We want to be able to trust mtimes of files and not the mtimes of folders.
+
+> Example: you have two JGit Servers that are sharing the same repos over NFS. If they are both creating a new SHA1 at the same time, they won't conflict on anything, unless there is a SHA1 collision of course. If they are both updating the *same ref*, they will get in trouble because they both want to update a mutable entity from an initial state S0 to two different diverging states.
+> 
+> With [1] we will prevent that situation to happen using a global ref-db, making then the concurrent update of refs possible, even without having to re-read all the refs all the times from the filesystem. How? Just because the global ref-db contains a globally consistent view of the refs.
+> 
+> It would be nice to have then [1] refactored and integrated with JGit in the future, so that we could benefit from it also outside the Gerrit Code Review context.
+
+Got that, thanks. [1] helps in the context of gerrit and integrating that into jgit would be nice. But the problem may also happen in non-gerrit use cases. I could imagine that applications using jgit to update shared repos located on NFS don't want to miss ref-updates.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Marco Miller
+Date: 2021-01-28 17:16:48.000000000
+Message: 
+Abandoned
+
+Thanks again Christian, Luca and Matthias for your comments so far on this review. I recently became unable to focus on reworking this change accordingly. So I'm abandoning it for now, to make that visible and un-clutter our review dashboards. We can restore it anytime we want or if need be. For now, I'll be testing this backward-compatible config switch internally, and disable it if troublesome (updates loss). As a way to test this whole idea too.
+----------------------------------------------------------------------------------------------------------------------

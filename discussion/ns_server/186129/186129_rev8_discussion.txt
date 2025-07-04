@@ -1,0 +1,208 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-55464: Add sample bucket loading events
+
+On events endpoint we now publish status of sample loading task,
+including the task_id for identifying the status of a specific task.
+
+Examples,
+
+Started:
+{
+      "timestamp": "2023-02-07T09:31:18.188Z",
+      "event_id": 24,
+      "component": "ns_server",
+      "description": "Sample loading started",
+      "severity": "info",
+      "node": "cb.local",
+      "otp_node": "n_0@cb.local",
+      "uuid": "1792272c-bd2a-4f75-8eb5-e50201a5e4b5",
+      "extra_attributes": {
+        "bucket": "default",
+        "task_id": "30742786-c553-45bd-83c3-340c1561686f"
+      }
+}
+
+Succeeded:
+{
+      "timestamp": "2023-02-07T09:31:27.673Z",
+      "event_id": 25,
+      "component": "ns_server",
+      "description": "Sample loading completed",
+      "severity": "info",
+      "node": "cb.local",
+      "otp_node": "n_0@cb.local",
+      "uuid": "613411d6-d15d-47ad-8047-ee991d4a336f",
+      "extra_attributes": {
+        "bucket": "default",
+        "task_id": "30742786-c553-45bd-83c3-340c1561686f"
+      }
+}
+
+Failed:
+{
+      "timestamp": "2023-02-06T13:49:54.881Z",
+      "event_id": 26,
+      "component": "ns_server",
+      "description": "Sample loading failed",
+      "severity": "error",
+      "node": "cb.local",
+      "otp_node": "n_0@cb.local",
+      "uuid": "be9656fb-3b65-40fe-b086-9e5f789dcec4",
+      "extra_attributes": {
+        "bucket": "default",
+        "task_id": "84869e8a-2fe6-4eec-ba49-50a3f0ad8895"
+       }
+}
+
+Change-Id: Id069ef18f5adc7c62b19049ec29a807cfee126a5
+Co-authored-by: Peter Searby <peter.searby@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Peter Searby
+Date: 2023-02-07 17:54:01.000000000
+Message: 
+Uploaded patch set 8.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2023-02-07 17:54:11.000000000
+Message: 
+Patch Set 8:
+
+Build Started https://cv.jenkins.couchbase.com/job/ns-server-test/34219/ (1/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2023-02-07 17:54:15.000000000
+Message: 
+Patch Set 8:
+
+Build Started https://cv.jenkins.couchbase.com/job/ns-server-ns-test/1804/ (2/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2023-02-07 18:11:16.000000000
+Message: 
+Patch Set 8: Well-Formed+1
+
+Build Successful 
+
+https://cv.jenkins.couchbase.com/job/ns-server-test/34219/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/ns-server-ns-test/1804/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2023-02-07 18:32:25.000000000
+Message: 
+Patch Set 8:
+
+(2 comments)
+Line:73, src/event_log.erl -> Couple of questions:
+
+1. Do we know the max number of samples we'll load per sec? The volume of events we'll add per day? 
+
+2. How control plane plans to retrieve these event logs - i.e will they fetch the most recent 50 event logs and If the taskID is not found fetch the last 100 event logs? The /events is a heavy call and we should make it explicit on how frequently it should be called and the number of items they retrieve. Also I hope they don't make multiple /events call for each of the sample buckets loaded. 
+
+3. Partly discussed this before - why not just populate these statuses in chronicle and ns_config? 
+- We could maintain N status and clean-up them after large time intervals.
+- We could continue to use /tasks endpoint to retrieve the current statuses of all the running tasks and the ones completed. 
+- The cost to maintain these status is much lesser vs adding them in event logs where they won't be rotated out until we have added another 10K new event logs.
+
+Line:105, src/samples_loader_tasks.erl -> If we do go the event log route - would have to add an event log (cb_sample_loader_failed) for all the tasks that might be currently running and would be aborted when terminate/2 is called.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Peter Searby
+Date: 2023-02-07 18:50:12.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:73, src/event_log.erl -> Not sure about 1 and 2 as those are control plane concerns.
+For Q3, I completely agree that we should ideally use something other than the events endpoint if possible. The main concern is that currently the tasks endpoint is using ns_heart to sync the statuses, which means that we could risk overburdening the heartbeat. It might be possible to somehow detach the tasks endpoint from this heartbeat, but that would not be simple. I can have a closer look in case I see some way of detangling tasks from heartbeat, but I'm not confident it would be productive.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2023-02-07 19:24:48.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:73, src/event_log.erl -> 1 is a good point. Theoretically, we could have 80 buckets created, sample data loaded, and bucket deleted in a loop. Essentially down to how CP decides to load the system. Guesstimating the practical implication, the number will probably be around a few(say 5) sample loads a sec. 
+
+On 2, @Peter we should probably check with Jem on if CP already uses events endpoint. If not, what is the plan to retrieve these details. 
+
+On 3, 
+> We could maintain N status and clean-up them after large time intervals.
+
+We should invest some time into figuring out if this is feasible. 
+
+> We could continue to use /tasks endpoint to retrieve the current statuses of all the running tasks and the ones completed.
+
+This is bound to cause lot of unnecessary load on ns_heart which we use to proxy other information across the node too. In general, would like to keep ns_heart as small a payload as possible and we probably need to look into removing the sample loading tasks from ns_heart in elixir since while loading we could have 80 buckets worth of data shuffled to all the nodes needlessly. 
+
+> The cost to maintain these status is much lesser vs adding them in event logs where they won't be rotated out until we have added another 10K new event logs.
+
+IMO, the cost is not prohibitive since we already have bucket creation, collection creation, bucket warmup etc, for each bucket and having 2 additional events for sample tasks doesn't add too much to the burden.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2023-02-08 01:36:42.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:73, src/event_log.erl -> > We should invest some time into figuring out if this is feasible.
+
+Here's my current thinking:
+
+1. Have a samples_loader_tasks_status key whose value is a proplists: [{TaskId1, Status1} ... {TaskId2, Status2}], which gets updated every time a TaskId's status changes.
+2. sample_loader_tasks gen_server has a handle_info(cleanup, ..) which gets called every hour (or more) and removes any TaskId with status - 'completed' or 'failed'.
+
+There is more we can do - like running it on only on master_node etc. But even without that this should work. What do you think?
+
+> This is bound to cause lot of unnecessary load on ns_heart which we use to proxy > other information across the node too. In general, would like to keep ns_heart as > small a payload as possible and we probably need to look into removing the sample > loading tasks from ns_heart in elixir since while loading we could have 80 > buckets worth of data shuffled to all the nodes needlessly.
+
+mm .. you wouldn't have to rely on ns_heart if the statuses are in ns_config/chronicle though. What I meant to say was with the current model CP has to go to /events endpoint to get the status of completed tasks (since they disappear from /tasks endpoint on completion/failure). With the alternate approach you read the statuses directly from ns_config/chronicle on the local node, when building the /tasks response for both "currently running" and "completed" tasks.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2023-02-08 03:18:57.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:73, src/event_log.erl -> > Here's my current thinking:
+
+FYI. One of the requirement is that we need be able to execute task on one node and be able to retrieve status from another node. 
+
+So essentially this needs to run on the master node or use ns_config/chronicle in some form. 
+
+Not saying I'm opposed to idea. Just needs more thought. 
+
+>With the alternate approach you read the statuses directly from ns_config/chronicle on the local node, when building the /tasks response for both "currently running" and "completed" tasks.
+
+Ack. This is definitely an option.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jem Gunay
+Date: 2023-02-08 13:14:00.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:73, src/event_log.erl -> Hey all - skimmed through the above and brain dumped relevant CP context - let me know if I missed anything 😊
+
+* The sample dataset contains ~31k samples; at most we'll only import this once per the lifetime of a serveless database (note that many users will also skip the import as it is optional). I believe the maximum serverless databases (buckets) per dataplane is 100. So theoretically, absolute worst case all 100 DBs could be deployed to a DP within a small window with import requested.
+* We'll start validating the status of a sample import directly after deployment via a new CP job. The sample import should complete within minutes worst-case - any longer than this and we'd want to flag this issue anyways; therefore, I think the CP should attempt to validate for an absolute max of 5-10 minutes before timing out and assuming import failure, so we'd need the status logs (however they're exposed) to hang around for a minimum of a few minutes to allow this. My original plan for this step was to query for all events (count == -1) from the last N minute(s) (around 1 or 2?) every 10-15 seconds and reverse search for the target taskId, as defining a max limit might lead to events dropping off the log before they can be observed during times of high-event load. But obviously, this will likely end up being an unreasonable volume of events for both the DP and CP to expose and process. Agreed in that it feels like the events endpoint is not the best match for exposing this information. 
+* To confirm, this ("One of the requirement is that we need be able to execute task on one node and be able to retrieve status from another node") is indeed the case as we dynamically select a node each time we perform import & status validation requests and can't guarantee we'll select the same one.
+* Looks like the only existing consumer of the events API is the internal support HTTP endpoint for proxying events queries to a dataplane (used for internal support only, not consumed in business logic).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Peter Searby
+Date: 2023-02-22 18:07:38.000000000
+Message: 
+Abandoned
+
+Going with https://review.couchbase.org/c/ns_server/+/187076 instead
+----------------------------------------------------------------------------------------------------------------------

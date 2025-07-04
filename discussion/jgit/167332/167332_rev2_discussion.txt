@@ -1,0 +1,86 @@
+======================================================================================================================
+DESCRIPTION:
+
+Apache SSH client - close channel gracefully
+
+Resolve race condition between server sending
+SSH_MSG_CHANNEL_CLOSE and us closing the channel.
+
+Bug: 565854
+Change-Id: I386eff60dc249ffc20c049504af6c9e28f2fdaef
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Michal Pasierb
+Date: 2020-08-06 10:23:42.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2020-08-06 10:23:48.000000000
+Message: 
+Patch Set 2:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/3476/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2020-08-06 10:51:06.000000000
+Message: 
+Patch Set 2: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/3476/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2020-08-06 10:51:09.000000000
+Message: 
+Patch Set 2:
+
+(2 comments)
+Line:153, org.eclipse.jgit.ssh.apache/src/org/eclipse/jgit/transport/sshd/SshdSession.java -> This one should probably also shut down gracefully?
+
+Line:252, org.eclipse.jgit.ssh.apache/src/org/eclipse/jgit/transport/sshd/SshdSession.java -> So timeoutMillis is no longer the timeout for the command... timeoutMillis can be <= 0, indicating to wait indefinitely. Which might be a problem if keep_alive is set but the server never replies on the close, or never sends back the exit value. 
+
+I do wonder if we can't just replace the two channel.close(true) calls with channel.close(false).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Michal Pasierb
+Date: 2020-08-06 12:00:54.000000000
+Message: 
+Patch Set 2:
+
+(2 comments)
+
+I will see if something simpler is possible.
+Line:153, org.eclipse.jgit.ssh.apache/src/org/eclipse/jgit/transport/sshd/SshdSession.java -> If the channel didn't open, we can't send data there. I would leave it as is.
+
+Line:252, org.eclipse.jgit.ssh.apache/src/org/eclipse/jgit/transport/sshd/SshdSession.java -> > I do wonder if we can't just replace the two channel.close(true) calls with channel.close(false).
+
+No we can't. In such case the exceptions still happen. We have to at least wait for ClientChannelEvent.CLOSED. I have changed the logic between patchset 1 and 2 because exitValue() was throwing exception due to closed channel (inited by us) before server was able to send command exit status.
+
+I was aware of the indefinite wait problem with this change. However I assume the caller always sets the timeout in production use.
+
+The change assumes proper ssh server behavior - when the command terminates it should send it's exit code and close the channel. I wonder if this assumption is too strong.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2020-08-06 12:50:14.000000000
+Message: 
+Patch Set 2:
+
+(2 comments)
+Line:153, org.eclipse.jgit.ssh.apache/src/org/eclipse/jgit/transport/sshd/SshdSession.java -> But here the channel _has_ opened. In the exception handler above it didn't open.
+
+Line:252, org.eclipse.jgit.ssh.apache/src/org/eclipse/jgit/transport/sshd/SshdSession.java -> > > I do wonder if we can't just replace the two channel.close(true) calls with channel.close(false).
+> 
+> No we can't. In such case the exceptions still happen. We have to at least wait for ClientChannelEvent.CLOSED. I have changed the logic between patchset 1 and 2 because exitValue() was throwing exception due to closed channel (inited by us) before server was able to send command exit status.
+
+That sounds like a problem of the server. Either the server should return its corresponding CLOSE only after it has sent the EXIT_CODE, or deal with a client not interested in the exit code. I guess it's the latter. A client may close a connection anytime, and the server may need to reap started commands anyway. I don't think fetch/push ever wait for an exit code from git-upload-pack/git-receive-pack -- the git protocol already indicates success or failure. The only other place where JGit client-side uses SSH is SshSupport, and that also looks as if it doesn't need to wait for an exit code when calling destroy().
+
+> I was aware of the indefinite wait problem with this change. However I assume the caller always sets the timeout in production use.
+
+Not really. See SshSupport. That should therefore be changed...
+
+----------------------------------------------------------------------------------------------------------------------

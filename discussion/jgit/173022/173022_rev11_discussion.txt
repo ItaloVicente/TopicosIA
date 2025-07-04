@@ -1,0 +1,182 @@
+======================================================================================================================
+DESCRIPTION:
+
+Add getsRefsExcludingPrefixesWithPrefix to ReftableDatabase
+
+We sometimes want to get all the refs except specific prefixes,
+similarly to getRefsByPrefix that gets all the refs of a specific
+prefix.
+
+One use-case is for Gerrit to be able to get all the refs except
+refs/changes; in Gerrit we often have lots of refs/changes, but very
+little other refs. Currently, to get all the refs except refs/changes we
+need to get all the refs and then filter the refs/changes, which is very
+inefficient. With this method, we can simply skip the unneeded prefix so
+that we don't have to go over all the elements.
+
+RefDirectory and RefTreeDatabase still use the inefficient
+implementation, since there isn't a simple way to use Refcursor to
+achieve the efficient implementation (as done in ReftableDatabase).
+
+Specifying a prefix to include is also supported.
+
+Change-Id: I8c5db581acdeb6698e3d3a2abde8da32f70c854c
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Gal Paikin
+Date: 2020-12-14 10:48:25.000000000
+Message: 
+Patch Set 11: Patch Set 10 was rebased
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2020-12-14 10:48:37.000000000
+Message: 
+Patch Set 11:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/4134/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2020-12-14 11:35:07.000000000
+Message: 
+Patch Set 11: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/4134/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Han-Wen NIenhuys
+Date: 2020-12-14 18:48:25.000000000
+Message: 
+Patch Set 11:
+
+(1 comment)
+
+IIRC I had to add FileReftableTest.java to get coverage for reftable.  How does your new code get tested?
+Line:284, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/reftable/ReftableDatabase.java -> maybe swap the order of args.
+
+Perhaps we could do away with the WithSkips suffix, ie. do  an overload which looks like
+
+  getRefsByPrefix(String prefix, Set<String> exclude)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Han-Wen NIenhuys
+Date: 2020-12-14 18:54:32.000000000
+Message: 
+Patch Set 11:
+
+(1 comment)
+Line:299, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/reftable/ReftableDatabase.java -> I didn't think this through. Can you confirm this will work OK if you have overlapping exclusions?
+
+eg. 
+
+   getByPrefix("refs/", exclude=["refs/changes/", refs/changes/01/"])
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonathan Nieder
+Date: 2020-12-14 19:23:16.000000000
+Message: 
+Patch Set 11:
+
+(1 comment)
+Line:7, /COMMIT_MSG -> > getsRefsExcludingPrefixesWithPrefix
+
+That name is not particularly intuitive. What is a prefix with a prefix?
+
+We can't use `getRefsByPrefix(include, exclude)` since that's already taken by `getRefsByPrefix(prefix1, prefix2)`. Would it make sense to use a builder pattern, like `refs().withPrefix(include).excludingPrefix(exclude)`?
+
+Also, this doesn't match what's in the code (`getRefsByPrefixWithSkips`).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Han-Wen NIenhuys
+Date: 2020-12-16 18:43:32.000000000
+MISMATCHED INLINE COMMENT
+Line:7, /COMMIT_MSG -> hmm. I wish the `getRefsByPrefix(prefix1, prefix2)` didn't exist, because now getRefsByPrefix("inc", "inc/a") does something completely different from  getRefsByPrefix("inc", ImmutableSet.of("inc/a"))
+
+I think getRefsByPrefixWithSkips is better.
+----------------------------------------------------------------------------------------------------------------------
+Author: Gal Paikin
+Date: 2021-01-05 23:04:19.000000000
+MISMATCHED INLINE COMMENT
+Line:7, /COMMIT_MSG -> yea, that's probably a good point too.
+Reverted.
+----------------------------------------------------------------------------------------------------------------------
+Author: Gal Paikin
+Date: 2020-12-16 17:30:21.000000000
+MISMATCHED INLINE COMMENT
+Line:7, /COMMIT_MSG -> Done, went with overloading getRefsByPrefix (since it's String, Set<String>, hence a new signature).
+----------------------------------------------------------------------------------------------------------------------
+Author: Gal Paikin
+Date: 2020-12-16 17:30:21.000000000
+MISMATCHED INLINE COMMENT
+Line:284, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/reftable/ReftableDatabase.java -> Done
+I think I'll keep "include" rather than prefix for clarity.
+----------------------------------------------------------------------------------------------------------------------
+Author: Gal Paikin
+Date: 2020-12-16 17:30:21.000000000
+MISMATCHED INLINE COMMENT
+Line:299, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/reftable/ReftableDatabase.java -> Specifically your example works fine, but you're onto something since if we added "refs/tags" to your example, it would still return refs/tags.
+
+I fixed it now and added more tests.
+----------------------------------------------------------------------------------------------------------------------
+Author: Han-Wen NIenhuys
+Date: 2020-12-16 18:43:32.000000000
+MISMATCHED INLINE COMMENT
+Line:312, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/reftable/ReftableDatabase.java -> I saw the new code, but it looks kind of complicated. Couldn't you do something like
+
+
+while (rc.next()) {
+ Ref ref;
+ while (true) {
+   ref = ...
+   if (ref == null .. ) break;
+   if (currExclude != null && ref.name.startswith(currExclude)) {
+      rc.seekPast(currExclude);
+      currExclude = ..
+      continue;
+   }
+   break;
+  }
+  if (ref != null) {
+    all.add(ref)
+  }
+}
+----------------------------------------------------------------------------------------------------------------------
+Author: Han-Wen NIenhuys
+Date: 2021-01-14 13:44:45.000000000
+MISMATCHED INLINE COMMENT
+Line:312, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/reftable/ReftableDatabase.java -> yeah, this looks much more like I expected.
+
+(My reasoning is that both refs and excludes are in the same namespace, so you should be able to sort both, and then walk over them in parallel as if it was a merge)
+----------------------------------------------------------------------------------------------------------------------
+Author: Gal Paikin
+Date: 2021-01-05 23:04:19.000000000
+MISMATCHED INLINE COMMENT
+Line:312, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/reftable/ReftableDatabase.java -> filtering for non existing etc will still be needed.
+
+IIUC the only difference between this code and mine is the while(true) and getting rid of the "else". white(true) is not really needed but I can get rid of the else and add a continue instead - done.
+----------------------------------------------------------------------------------------------------------------------
+Author: Han-Wen NIenhuys
+Date: 2021-01-13 13:13:32.000000000
+MISMATCHED INLINE COMMENT
+Line:312, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/reftable/ReftableDatabase.java -> Why do you need to filter for non-existing prefixes? If you have {refs/a, refs/b, refs/d}, and you do skipPastPrefix("refs/c") on a cursor, you'll just go refs/d , which is what you want, no?
+----------------------------------------------------------------------------------------------------------------------
+Author: Gal Paikin
+Date: 2021-01-14 13:27:50.000000000
+MISMATCHED INLINE COMMENT
+Line:312, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/reftable/ReftableDatabase.java -> example:
+Refdatabase: [refs/a, refs/b, refs/d]
+exclude: [refs/c, refs/d]
+
+Result: nothing is skipped, refs/d is also returned.
+The reason this happens is because my algorithm goes lexicographically and looks for refs/c, but since it never finds it and just assumes it will eventually find it, so it never checks for refs/d.
+
+I wonder if it makes sense to instead check if the string is lexicographically bigger than the prefix, and at that point skip to the next to_exclude ref prefix...
+
+Edit: I wondered. I guess it makes sense to add a while loop there to skip to the next prefix to exclude and then we can get rid of those 2 methods that remove overlaps and non-existent.
+If we return R results, this is actually O(R) extra checks. This is instead of O(Mlog(N)) extra checks (where M is the number of elements to exclude and N is the size of the database, Log(N) since we're doing a few seeks in the methods I just removed).
+
+It seems fine to me since it strongly improves code quality and *maybe* not great if we return most of the database (at least in our cases though, that won't happen).
+I think I just tried to over-optimize since I preferred MlogN over R.
+----------------------------------------------------------------------------------------------------------------------

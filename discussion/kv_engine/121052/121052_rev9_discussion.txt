@@ -1,0 +1,142 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-37546: Early-return if nothing to flush in EPBucket::flushVBucket
+
+Before this change, the logic is:
+
+  if (have-something-to-flush) {
+    <many lines of code for flushing to disk>
+  }
+  <epilogue>
+
+The epilogue, which is executed regardless of whether we have flushed
+or not, performs:
+  - KVStore::pendingTasks()
+  - Notify satisfied SeqnoPersistence requests
+  - Checkpoint related operations:
+    - Wakeup CheckpointRemover if CM has checkpoints that can be removed
+    - Notify satisfied CheckpointPersistence requests
+
+With this change we remove the extra indentation of many lines of code:
+
+  if (nothing-to-flush) {
+    return;
+  }
+  <many lines of code for flushing to disk>
+  <epilogue>
+
+The side effect of this is that we do /not/ execute the <epilogue> if we
+early-return. But:
+  - KVStore::pendingTasks() does not need to be executed as by
+    definition "is called after persisting a batch of data to perform
+    any pending tasks on the underlying store"
+  - There is definitely no HighPrio reqs to notify as we have not
+    persisted anything
+So that is fine.
+
+Now about the Checkpoint related operations:
+  - Wakeup CheckpointRemover
+      I am keeping this by executing it unconditionally just after the
+      call to VB::getItemsForPersistence(), as the persistence cursor
+      could have just moved to the beginning of a new checkpoint, which
+      may make the previous checkpoint eligible for removal.
+      Also, it is safe to execute this step regardless of whether (1)
+      nothing-to-flush or (2) flush-success or (3) flush-failure.
+      Note that before this change we missed to execute this step before
+      some nested return statement. Which is fixed here.
+  - Notify satisfied CheckpointPersistence request
+      This step must still be executed if we early-return because
+      (again) the persistence cursor could have moved.
+      But, we cannot execute this step unconditionally because we cannot
+      notify if we perform a flush and the flush fails.
+      So, this step is executed if (1) nothing-to-flush or (2)
+      flush-success, but not executed if (3) flush-failure.
+
+For reference, the CheckpointPersistence command seems to be just legacy
+from TAP, so we can probably remove it in a follow-up.
+
+Change-Id: I12fb3f0afffcfca2db768d3179592f0eda2a2f18
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2020-01-24 10:23:51.000000000
+Message: 
+Uploaded patch set 9.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-01-24 10:23:59.000000000
+Message: 
+Patch Set 9:
+
+Branch restricted. PLEASE READ this URL: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/165443/artifact/restricted.html : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-01-24 11:19:48.000000000
+Message: 
+Patch Set 9: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/761/ : FAILURE
+
+Failure of a CTest test [2020-01-24T10:35:40.983Z] 154/193 Test #156: memcached_testapp.ep.TransportProtocols/DurabilityTest .......................Child aborted ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/761/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/685/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/23867/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/750/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/757/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/749/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/mad-hatter/101/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/530/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-01-24 15:23:41.000000000
+Message: 
+Removed reviewer Trond Norbye.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-01-24 15:23:42.000000000
+Message: 
+Removed reviewer Jim Walker.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-01-24 15:23:44.000000000
+Message: 
+Removed reviewer Richard de Mellow.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-01-24 15:23:46.000000000
+Message: 
+Removed reviewer James Harrison.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-01-24 15:23:47.000000000
+Message: 
+Removed reviewer Dave Rigby.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-01-24 15:23:48.000000000
+Message: 
+Removed reviewer Ben Huddleston.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-01-24 15:23:50.000000000
+Message: 
+Removed reviewer Dave Finlay.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-01-24 15:23:51.000000000
+Message: 
+Removed reviewer Daniel Owen.
+----------------------------------------------------------------------------------------------------------------------

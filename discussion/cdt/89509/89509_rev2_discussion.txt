@@ -1,0 +1,170 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 511029 - Debug views become permanently pinned...
+
+... if they are closed and reopened whilst pinned.
+
+This was because IPartListener2 was being removed before #partClosed()
+was called.
+
+Change-Id: I16de016387131b775237b5d61639bb32107231fe
+Signed-off-by: Bruno Medeiros <bruno.do.medeiros@gmail.com>
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: CI Bot
+Date: 2017-01-25 16:37:58.000000000
+Message: 
+Patch Set 2:
+
+Build Started https://hudson.eclipse.org/cdt/job/cdt-verify/7296/
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc Khouzam
+Date: 2017-01-25 18:10:08.000000000
+Message: 
+Patch Set 2:
+
+Nice find.  Thanks.
+
+Did you try closing one of those views and then terminating the debug session and starting a new one? I'm getting a whole bunch of assertions in that case.
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc Khouzam
+Date: 2017-01-25 18:25:46.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:145, debug/org.eclipse.cdt.debug.ui/src/org/eclipse/cdt/debug/internal/ui/actions/PinDebugContextActionDelegate.java -> Is there a case where partClosed() will be called here but the dispose()
+method will not be called directly?
+If not, then why do we need this IPartListener2 and not rely on dispose()
+all the time?
+If so, then calling dispose() ourselves does more cleanup than we used to.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc Khouzam
+Date: 2017-01-25 18:35:20.000000000
+Message: 
+Patch Set 2:
+
+> Did you try closing one of those views and then terminating the
+ > debug session and starting a new one? I'm getting a whole bunch of
+ > assertions in that case.
+
+This is a different bug related to per-element formatting.  I will open a bug for it.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2017-01-25 19:09:40.000000000
+Message: 
+Patch Set 2: Code-Review-1 Verified-1
+
+Build Failed 
+
+https://hudson.eclipse.org/cdt/job/cdt-verify/7296/ : ABORTED
+----------------------------------------------------------------------------------------------------------------------
+Author: Bruno Medeiros
+Date: 2017-01-26 11:22:35.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+
+> > Did you try closing one of those views and then terminating the
+ > > debug session and starting a new one? I'm getting a whole bunch
+ > of
+ > > assertions in that case.
+ > 
+ > This is a different bug related to per-element formatting.  I will
+ > open a bug for it.
+
+Yeah, there was a few other pin related bugs I noticed, but those have bug reports opened already.
+Line:145, debug/org.eclipse.cdt.debug.ui/src/org/eclipse/cdt/debug/internal/ui/actions/PinDebugContextActionDelegate.java -> "Is there a case where partClosed() will be called here but the dispose() method will not be called directly?"
+
+I don't think so, because the lifecycle of the action delegate is bound to the lifecycle of the view part. I wish this was clearly document in code, or even enforced by API. Also, it's unclear at a glance which one gets called first. From testing it, dispose gets called first, which causes partClosed to not be called because IPartListener2 is removed.
+
+But, it's something that might change in the future. Imagine PinDebugContextActionDelegate gets refactored to use the commands/handlers mechanism instead. Then maybe partClosed would get called first. Or dispose not called at all?
+
+Note that in this particular case dispose() is re-entrant, if it gets called a second time I think it will simply have no effect. This way I reckon we are protected from having to care if both of dispose and partClose get called or if just one.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc Khouzam
+Date: 2017-01-26 16:21:35.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:145, debug/org.eclipse.cdt.debug.ui/src/org/eclipse/cdt/debug/internal/ui/actions/PinDebugContextActionDelegate.java -> Yes, dispose is re-entrant, so that is safe.
+However, I am concerned that partClosed() now calls: 
+		DebugUITools.removePartDebugContextListener(fPart.getSite(), this);
+		fPart.getSite().getWorkbenchWindow().getPartService().removePartListener(fPartListener);
+which it didn't call before.
+If there could be a scenario where partClosed() is called but dispose() is not,
+then partOpened() could be called and everything would continue to work properly with the previous code;
+however, with the new code, things won't work anymore.
+Therefore, I sugggest not calling dispose() from partClosed() but instead to leave
+partClosed() as before, and make the modificationly to dispose() and put a comment
+that partClosed() may not get called due to a race, so we uncheck the pin button directly
+in dispose() also.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Bruno Medeiros
+Date: 2017-01-26 17:33:32.000000000
+Message: 
+Patch Set 2:
+
+I don't quite understand your point..
+
+partOpened() isn't doing anything. Also, from my understanding, after partClosed() is notified no other part*() notifications will occur for that part, since it is gone forever. Therefore I don't understand the "If there could be a scenario where partClosed() is called but dispose() is not, then partOpened() could be called" ...
+
+The reference to a "race" is also not clear to me, do you mean a data race? But there is no multi-threading here.
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc Khouzam
+Date: 2017-01-26 20:37:03.000000000
+Message: 
+Patch Set 2:
+
+> I don't quite understand your point..
+ > 
+ > partOpened() isn't doing anything.
+
+Right.  I was awkwardly trying to say that if the class (PinDebugContextActionDelegate.java)
+was not disposed, it maybe continue to be used somehow (I don't know if that is possible).
+I just used partOpened() as one possibility of the platform saying "the view has been
+re-opened".  In that case, PinDebugContextActionDelegate, before this patch, would still be in
+a valid state.  However, after this patch, it is not in a valid state because we force
+a dispose().
+
+
+ > Also, from my understanding,
+ > after partClosed() is notified no other part*() notifications will
+ > occur for that part, since it is gone forever. Therefore I don't
+ > understand the "If there could be a scenario where partClosed() is
+ > called but dispose() is not, then partOpened() could be called" ...
+
+I was just playing it safe.  If the original code treated partClosed()
+differently than dispose(), I figure it might be for such a scenario.
+So, like the code does now, let's have partClosed() only setCheck(false)
+and removeDebugEventFilter(fPart) instead of calling the full dispose.
+
+The fix should then be to have dispose also call setCheck(false) and
+removeDebugEventFilter(fPart).
+
+ > The reference to a "race" is also not clear to me, do you mean a
+ > data race? But there is no multi-threading here.
+
+Sorry, I meant "race condition" where dispose() can get called before
+partClosed(), so dispose() must perform the same action as partClosed().
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc Khouzam
+Date: 2017-01-26 20:41:32.000000000
+Message: 
+Patch Set 2:
+
+Patchset 3 illustrates what I mean.
+We can revert to patchset 2 if you disagree.
+----------------------------------------------------------------------------------------------------------------------
+Author: Gerrit Code Review
+Date: 2017-01-30 17:42:01.000000000
+Message: 
+Change has been successfully rebased as 5c93171cbcc689fa9255f5f4d1db41d5e3e45ffc by Marc Khouzam
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,145 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-51805: Set PassiveStream::cur_snapshot_prepare on new stream
+
+We use the cur_snapshot_prepare member to determine if we should
+notify the PDM of any Memory snapshots. It is set when we see a
+prepare in any snapshot. Consider the following snapshot:
+
+[1:Prepare(A), 2:Mutation(B)] Type = Memory
+
+And the following sequence of events:
+
+1) SnapshotMarker (1-2) Type = Memory
+2) Prepare (1)
+3) Prepare (1) persisted
+4) Node restarts
+5) Stream reconnects
+6) SnapshotMarker (1-2) Type = Memory
+7) Mutation (2)
+
+In normal operation the PDM is notified when we received the item at the
+snapshot end (i.e. Mutation (2) at step 7). In this case, as the node
+has been restarted, the information that the snapshot contains a prepare
+is lost (cur_snapshot_prepare is not set until the stream sees a
+prepare.
+
+To solve this, we can correct the cur_snapshot_prepare state on
+PassiveStream acceptance. This should only be set if we are mid-snapshot
+so we check if the highest thing (prepare) tracked by the DM is greater
+than the snapshot start to determine if we are mid-snapshot (and that
+there is a prepare that we must notify the PDM about).
+
+Change-Id: Ibc298db0cfad0c3d61f3fa7aeb72a79f1c092be3
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Ben Huddleston
+Date: 2022-05-11 11:40:40.000000000
+Message: 
+Uploaded patch set 7: Patch Set 6 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Restriction Checker
+Date: 2022-05-11 11:40:57.000000000
+Message: 
+Patch Set 7: Well-Formed+1
+
+Permission granted to commit: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/298322/artifact/restricted.html : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-05-11 12:51:47.000000000
+Message: 
+Patch Set 7: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-neo/182/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/16442/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-neo/179/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-neo/242/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/neo/185/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/neo/181/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/neo/193/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/neo/186/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/neo/189/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/neo/236/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/neo/175/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2022-05-12 12:50:48.000000000
+Message: 
+Patch Set 7:
+
+(1 comment)
+Line:215, engines/ep/src/dcp/passive_stream.cc -> I have concern on whether this code here might set cur_snapshot_prepare=true in some case where we don't want to..
+
+So the point is: at first look I would say that the stream is surely sending lastTrackedPrepare.. but is that always true?
+Couldn't we end up sending only a snapshot that contains (eg) a commit (maybe just a subsequent mutation that has deduped all the previous mutations? ?
+If so, at that point it should be cur_snapshot_prepare=false ?
+
+Maybe you have already thought about that and there's logic that prevents that?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2022-05-12 13:49:59.000000000
+Message: 
+Patch Set 7:
+
+(1 comment)
+Line:215, engines/ep/src/dcp/passive_stream.cc -> > at first look I would say that the stream is surely sending lastTrackedPrepare.. but is that always true?
+
+Not sure I follow this.
+
+> Couldn't we end up sending only a snapshot that contains (eg) a commit (maybe just a subsequent mutation that has deduped all the previous mutations? ?
+
+Yes, and that's exactly why we need this
+
+> If so, at that point it should be cur_snapshot_prepare=false ?
+
+Well, that depends.
+
+This code is to deal with partial snapshots on re-connection of the stream mid-snapshot. In this scenario we stream all of the prepares before disconnecting. If we then stream the remaining part of the snapshot and there is no prepare then currently we do not notify the DM that we now have the full snapshot.
+
+It's only necessary to notify the DM of this snapshot if we have a prepare in it, which I'm determining from the stream snap start loaded from the CkptMgr being lower than the highest prepare we know about.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2022-05-13 09:52:35.000000000
+Message: 
+Patch Set 7:
+
+(1 comment)
+Line:215, engines/ep/src/dcp/passive_stream.cc -> Is it possible that:
+1. lastTrackedPrepared >= snapStart is verified -> cur_snapshot_prepare = true
+2. but, CM has multiple checkpoints (eg 2) and lastTrackedPrepared is in the 2nd one?
+
+If so, it should be cur_snapshot_prepare=false for the first snapshot sent over the reconnected stream (I believe)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2022-05-13 11:01:07.000000000
+Message: 
+Patch Set 7: Code-Review+1
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> Code good as per offline discussion, we're just expanding the comments in the code
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2022-05-13 15:42:59.000000000
+MISMATCHED INLINE COMMENT
+Line:215, engines/ep/src/dcp/passive_stream.cc -> Discussed via slack
+----------------------------------------------------------------------------------------------------------------------

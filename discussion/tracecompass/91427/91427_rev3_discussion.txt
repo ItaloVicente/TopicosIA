@@ -1,0 +1,87 @@
+======================================================================================================================
+DESCRIPTION:
+
+tmf: Deadlock closing a trace as a signal is calling getAnalysisModules
+
+When a trace is opened, a traceRangeUpdated signal is sent
+asynchronously. Depending on when this thread starts running, the trace
+might open and the user might close the trace before it starts.
+
+-The trace cannot finish disposing before the signal is finished because
+when it tries to dispose its analysis, they unregister themselves from
+the signal manager, but TmfSignalManager.unregister is synchronized
+-The signal cannot finish because it is waiting for the lock on the
+analysis map (being iterated in the dispose thread).
+
+Here is an illustration of it:
+Thread 1 (dispose): > analysis map lock > waiting on signal manager lock
+Thread 2 (signal) > signal manager lock > waiting on analysis map lock
+
+Bug: 512394
+Change-Id: I0f27aa6c976a54368f79cd885a561c6ce8ac3dba
+Signed-off-by: Marc-Andre Laperle <marc-andre.laperle@ericsson.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Marc-André Laperle
+Date: 2017-02-20 19:41:09.000000000
+Message: 
+Uploaded patch set 3.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2017-02-20 19:41:15.000000000
+Message: 
+Patch Set 3:
+
+Build Started https://hudson.eclipse.org/tracecompass/job/tracecompass-gerrit/12539/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2017-02-20 19:44:44.000000000
+Message: 
+Patch Set 3: Verified-1
+
+Build Failed 
+
+https://hudson.eclipse.org/tracecompass/job/tracecompass-gerrit/12539/ : ABORTED
+----------------------------------------------------------------------------------------------------------------------
+Author: Patrick Tasse
+Date: 2017-02-20 20:14:32.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:342, tmf/org.eclipse.tracecompass.tmf.core/src/org/eclipse/tracecompass/tmf/core/trace/TmfTrace.java -> It was pointless to synchronize on the map when reading it, because we don't even synchronize when writing on the map... [*]
+
+The writing(put) is done in UI thread when handling TmfTraceOpenedSignal which calls executeAnalysis(), and it is not synchronized on the trace like the dispose() method is.
+
+But dispose() is also called from the UI thread when the trace is closed (or sometimes when TmfTraceElement.closeEditors() is called, also from the UI thread).
+
+So it seems that no synchronization is needed, and it should be OK?
+
+[*] well except when the map was cleared here under synchronization, which means a thread calling getAnalysisModules() in the middle of a dispose() would get back an empty list after the lock is released, but if the getter beat the dispose to the lock, it could still get a list of modules that are then immediately disposed... the same that can happen now that we removed synchronization here.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc-André Laperle
+Date: 2017-02-21 14:46:43.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:342, tmf/org.eclipse.tracecompass.tmf.core/src/org/eclipse/tracecompass/tmf/core/trace/TmfTrace.java -> executeAnalysis can be called at any moment extenders of the class, so this could break iterating through analysis in dispose. This is why the synchronization is preserved for the iteration.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Patrick Tasse
+Date: 2017-02-21 15:33:39.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:342, tmf/org.eclipse.tracecompass.tmf.core/src/org/eclipse/tracecompass/tmf/core/trace/TmfTrace.java -> Oh, I missed that the map itself is a Collections.SynchronizedMap. And getAnalysisModules() returns a copy of the map values.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Gerrit Code Review
+Date: 2017-02-21 16:33:15.000000000
+Message: 
+Change has been successfully cherry-picked as 457c184f5e04b1ebef3b5dbe26da63231cf48aa8 by Marc-André Laperle
+----------------------------------------------------------------------------------------------------------------------

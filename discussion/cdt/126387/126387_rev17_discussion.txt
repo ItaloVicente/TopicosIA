@@ -1,0 +1,445 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 522200: [C++17] Add support for structured binding declarations
+
+Adds support for structured bindings:
+- Parser updated
+- Semantics updated
+- Tests for parser and bindings added
+
+Change-Id: I1de7b760041ac4ce4601f1b5032fdb0a197212a1
+Signed-off-by: Hansruedi Patzen <hansruedi.patzen@hsr.ch>
+Signed-off-by: Thomas Corbat <tcorbat@hsr.ch>
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Thomas Corbat
+Date: 2019-06-27 09:36:21.000000000
+Message: 
+Uploaded patch set 17.
+----------------------------------------------------------------------------------------------------------------------
+Author: CDT Bot
+Date: 2019-06-27 09:36:37.000000000
+Message: 
+Patch Set 17:
+
+Build Started https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-ui-only-pipeline/522/ (1/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: CDT Bot
+Date: 2019-06-27 09:36:38.000000000
+Message: 
+Patch Set 17:
+
+Build Started https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-other-pipeline/537/ (2/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: CDT Bot
+Date: 2019-06-27 09:59:03.000000000
+Message: 
+Patch Set 17: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-other-pipeline/537/ : SUCCESS
+
+https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-ui-only-pipeline/522/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Nathan Ridge
+Date: 2019-07-02 06:12:36.000000000
+Message: 
+Patch Set 17:
+
+(20 comments)
+
+Apologies for the long delay here. I've looked at most of the core changes so far. Haven't looked at rewrite or tests yet.
+
+A high-level comment: it would be nice to cache the type and value of the initializer expression somewhere, rather than recomputing it once for every binding.
+
+A suggestion for how this could be done:
+
+* Make ICPPASTStructuredBindingDeclaration an IASTImplicitNameOwner, and give it an implicit name which resolves to a CPPVariable representing the complete object being destructured. This variable would cache its type and initial value like all variables.
+
+* The individual bindings can then get this CPPVariable from the declaration, and do the additional processing specific to the binding.
+
+Let me know if that suggestion makes sense.
+Line:75, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/core/dom/ast/cpp/ICPPASTStructuredBindingDeclaration.java -> Why are we using Optional rather than null to signify no ref-qualifier or no initializer?
+
+Line:1683, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/AbstractGNUSourceCodeParser.java -> You could also have an attribute in this position:
+
+  auto [[maybe_unused]] variable;
+
+We need to check for this.
+
+Line:1701, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/AbstractGNUSourceCodeParser.java -> What will happen in C? Will we produce a syntax or semantic error?
+
+Line:325, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/CPPVariable.java -> It looks like this function handles a member get() function, but not a non-member get() function? Structured bindings can work with either.
+
+Line:327, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/CPPVariable.java -> You could also use classType.getMethods() as a starting point.
+
+Line:388, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/CPPVariable.java -> The standard wording places some semantic constraints on the aggregate decomposition case (http://eel.is/c++draft/dcl.struct.bind#5):
+
+* all of E's non-static data members shall be direct members of E or of the same base class of E
+* well-formed when named as e.name in the context of the structured binding
+* E shall not have an anonymous union member
+* the number of elements in the identifier-list shall be equal to the number of non-static data members of E
+
+We should at least check the last one, because it's useful for catching mistakes. For the others, please feel free to add a TODO.
+
+Line:397, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/CPPVariable.java -> Let's use EvalFixed.INCOMPLETE rather than null.
+
+Line:418, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/CPPVariable.java -> Same here, EvalFixed.INCOMPLETE.
+
+Line:2945, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/GNUCPPSourceParser.java -> We could avoid this duplicate check by setting a flag on Decl. However, it's probably cheap enough that it's not worth it.
+
+Line:2966, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/GNUCPPSourceParser.java -> Are we sure declSpec is a simple-decl-specifier at this point? Should we include that check in isAtStartOfStructuredBinding()? Or perhaps check for it here and issue a semantic error?
+
+Line:4814, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/GNUCPPSourceParser.java -> This refactoring does not preserve the setting of 'endOffset'.
+
+Line:1666, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/semantics/CPPSemantics.java -> Does this case actually need special handling? Won't the right thing happen if we just allow the existing logic to run?
+
+Line:404, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/semantics/CPPTemplates.java -> This change can be reverted.
+
+Line:2324, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/semantics/CPPTemplates.java -> This one too.
+
+Line:1965, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/semantics/CPPVisitor.java -> Here's what the latest wording says (http://eel.is/c++draft/dcl.struct.bind#4):
+
+"Otherwise, if the qualified-id std::tuple_­size<E> names a complete class type with a member named value, the expression std::tuple_­size<E>::value shall be a well-formed integral constant expression and the number of elements in the identifier-list shall be equal to the value of that expression."
+
+This implementation is close but there are a few subtle differences:
+
+* We should check for the presence of any member named "value", not necessarily a static field. If not present, proceed to paragraph 5 (aggregate decomposition).
+
+* If a member named "value" is present, commit to tuple decomposition. If anything goes wrong, issue an error (which for us means returning EvalFixed.INCOMPLETE from getInitializerEvaluation() or a ProblemType from createType().
+
+* In particular, if "value" is not a static field, or its type is not integral, or its initializer is not a constant expression, issue an error.
+
+* Then evaluate "value", and if the result does not match the number of initializers, issue an error.
+
+Line:1968, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/semantics/CPPVisitor.java -> Please give this function a more descriptive name, such as findTemplateInstances().
+
+Line:1998, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/semantics/CPPVisitor.java -> What if the user writes 
+
+  auto [x, y, z];
+
+at local scope? I think we need to check for this to avoid Optional.get() throwing a NoSuchElementException.
+
+Line:2020, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/semantics/CPPVisitor.java -> Use logical or (||) for combining booleans.
+
+Line:2028, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/semantics/CPPVisitor.java -> An explanatory comment with some examples would help make this function easier to understand.
+
+Line:928, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/semantics/SemanticUtil.java -> Const and volatile don't always create an IQualifierType, sometimes they're just represented as a flag on IPointerType; see ExpressionTypes.isVolatile(). Feel free to make that public and use it here.
+
+isConst() just above has the same problem, might as well fix that too.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Nathan Ridge
+Date: 2019-07-03 02:27:17.000000000
+Message: 
+Patch Set 17:
+
+(11 comments)
+
+Ok, done with the review now.
+
+Thanks a lot for working on this and once again apologies for the delay.
+Line:25, core/org.eclipse.cdt.core.tests/parser/org/eclipse/cdt/core/parser/tests/ast2/CommonCPPTypes.java -> If we're going to move CommonCPPTypes to its own file, let's move CommonCTypes to its own file as well to be consistent.
+
+Line:72, core/org.eclipse.cdt.core.tests/parser/org/eclipse/cdt/core/parser/tests/ast2/cxx14/constexpr/TestBase.java -> I'm not sure how much value there is in distinguishing these two cases. It may be simpler to just have a single function, assertEvaluationIsError(), which checks for either.
+
+Line:187, core/org.eclipse.cdt.core.tests/parser/org/eclipse/cdt/core/parser/tests/ast2/cxx17/StructuredBindingIndexTests.java -> To avoid confusion, please add a comment explaining that this testcase is actually ill-formed (due to the absence of get()), but we can still resolve the type (because we don't need get() for that).
+
+Line:43, core/org.eclipse.cdt.core.tests/parser/org/eclipse/cdt/core/parser/tests/ast2/cxx17/StructuredBindingTests.java -> Why do the test case names end in an underscore?
+
+Line:159, core/org.eclipse.cdt.core.tests/parser/org/eclipse/cdt/core/parser/tests/ast2/cxx17/StructuredBindingTests.java -> CommonCPPTypes.constVolatileOf(double_) would be a bit more readable.
+
+Line:265, core/org.eclipse.cdt.core.tests/parser/org/eclipse/cdt/core/parser/tests/ast2/cxx17/StructuredBindingTests.java -> Please add a test case with non-member get() as well.
+
+Line:289, core/org.eclipse.cdt.core.tests/parser/org/eclipse/cdt/core/parser/tests/ast2/cxx17/StructuredBindingTests.java -> This binding name is already used above.
+
+Line:325, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/CPPVariable.java -> Ok, I see now that this actually handles a non-member get() function as well (and there is a test case for it in constexpr.StructuredBindingTests). However, this is not obvious, and two explanatory comments would be helpful:
+
+* CPPSemantics.findBindings() will search for get() not only in the provided class scope, but also any parent scopes (therefore finding non-member get() functions as cadidates)
+
+* CPPSemantics.resolveFunction() will correctly handle either a member or a non-member function, even though we called LookupData.setFunctionArguments() with containsImpliedObject=true (which is normally only set for member lookups), because resolveFunction() ignores the argsContainImpliedObject flag if the binding it's considering isn't actually a method.
+
+This second point kind of feels like we're relying on an implementation detail of CPPSemantics.resolveFunction(). For bonus points, add a comment at the declaration of resolveFunction() saying that it supports mixed member/non-member lookups in this way. (This ability would come in handy for e.g. lookup of begin()/end() in range-based for loops as well, which we don't currently implement correctly.)
+
+Line:94, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/rewrite/astwriter/DeclarationWriter.java -> Should we not pass in and respect 'writeSemicolon', for the case where the structured binding declaration appears in a range-based for loop?
+
+Line:1395, core/org.eclipse.cdt.ui.tests/ui/org/eclipse/cdt/ui/tests/text/selection/CPPSelectionTestsIndexer.java -> Perhaps you meant to add the bug number after the underscore?
+
+Line:1436, core/org.eclipse.cdt.ui.tests/ui/org/eclipse/cdt/ui/tests/text/selection/CPPSelectionTestsNoIndexer.java -> indexOf() is preferable to hardcoding offsets.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Nathan Ridge
+Date: 2019-07-03 02:50:17.000000000
+Message: 
+Patch Set 17:
+
+I noticed an issue related to the handling of structured bindings in dependent contexts:
+
+    struct S {
+        int x;
+        int y;
+    };
+    
+    template <typename T>
+    constexpr auto waldo() {
+        auto [x, y] = T{1, 2};
+        return x;
+    }
+    
+    int main() {
+        waldo<S>();
+    }
+----------------------------------------------------------------------------------------------------------------------
+Author: Nathan Ridge
+Date: 2019-07-03 03:57:41.000000000
+Message: 
+Patch Set 17:
+
+> I noticed an issue related to the handling of structured bindings
+ > in dependent contexts:
+ > 
+ > struct S {
+ > int x;
+ > int y;
+ > };
+ > 
+ > template <typename T>
+ > constexpr auto waldo() {
+ > auto [x, y] = T{1, 2};
+ > return x;
+ > }
+ > 
+ > int main() {
+ > waldo<S>();
+ > }
+
+This is probably a consequence of bug 529303. We don't need to solve it in this patch.
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Corbat
+Date: 2019-07-05 12:25:10.000000000
+Message: 
+Patch Set 17:
+
+(30 comments)
+
+> Patch Set 17:
+> 
+> (11 comments)
+> 
+> Ok, done with the review now.
+> 
+> Thanks a lot for working on this and once again apologies for the delay.
+
+Thanks a lot for your review. I fixed as much as I could. There are a few questions left. The main issue is that ExecIncomplete Objects cannot be marshalled, which leads to issues when having evaluations result in FixedEval.INCOMPLETE. But I think this is an issue beyond the implementation of structured bindings.
+
+Adding an implicit name to the structured binding for the initializer sounds good to me. I'll approach this issue next week. However, I'll submit my progress to gerrit, since I already changed substantial parts of the code.
+Line:25, core/org.eclipse.cdt.core.tests/parser/org/eclipse/cdt/core/parser/tests/ast2/CommonCPPTypes.java -> Done
+
+Line:72, core/org.eclipse.cdt.core.tests/parser/org/eclipse/cdt/core/parser/tests/ast2/cxx14/constexpr/TestBase.java -> Done
+
+I still need to figure out the marshalling bug to be able to use assertEvaluationError() in all cases.
+
+Line:187, core/org.eclipse.cdt.core.tests/parser/org/eclipse/cdt/core/parser/tests/ast2/cxx17/StructuredBindingIndexTests.java -> Done
+
+Line:43, core/org.eclipse.cdt.core.tests/parser/org/eclipse/cdt/core/parser/tests/ast2/cxx17/StructuredBindingTests.java -> Done
+
+I think I left it as a placeholder for the bug number. I'll remove them.
+
+Line:159, core/org.eclipse.cdt.core.tests/parser/org/eclipse/cdt/core/parser/tests/ast2/cxx17/StructuredBindingTests.java -> Done
+
+Line:265, core/org.eclipse.cdt.core.tests/parser/org/eclipse/cdt/core/parser/tests/ast2/cxx17/StructuredBindingTests.java -> Done
+
+Line:289, core/org.eclipse.cdt.core.tests/parser/org/eclipse/cdt/core/parser/tests/ast2/cxx17/StructuredBindingTests.java -> Done
+
+Line:75, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/core/dom/ast/cpp/ICPPASTStructuredBindingDeclaration.java -> I consider it to be API that is more expressive. It is clear that an Optional return type can return an absent value, i.e. no RefQualifier, whereas I need to check the API documentation to figure out whether it could be null.
+
+What would be your reason not to use Optional? Efficiency?
+
+Line:1683, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/AbstractGNUSourceCodeParser.java -> Done
+
+Yes that seems reasonable. It wasn't an issue so far as a potential attribute would be consumed in a preceeding decl-spec-seq. Nevertheless, I've extended the check. I also changed the whole Method slightly:
+* Added a declspecifier parameter
+* Move the auto check to the method
+
+Line:1701, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/AbstractGNUSourceCodeParser.java -> Syntax error. Are you aware of any case in C where "auto [" would be valid right now? The cases I've checked already result in a syntax error.
+
+Line:325, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/CPPVariable.java -> Done
+I tried to add short comments and java doc to reflect the behavior. Even though I'm not a huge fan of comments, I see that they are helpful in this case. I keep struggling with the resolution of bindings and usually I'm not sure whether I'm using the infrastructure incorrectly or I just try to use it for use cases they had not been implemented for.
+
+Line:327, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/CPPVariable.java -> But that will not catch the non-member get() functions.
+
+Line:388, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/CPPVariable.java -> Done
+
+I added the todos and implemented the last point.
+
+Comment: Yes this is a simplified implementation of the evaluation. For the rules above I'm not sure whether they might change in the future, because I don't see really their need for the first point (maybe it's a lack of insight). 
+The second point is new compared to the standard wording of C++17 and I'm not sure how to check it.
+Regarding the last point, I think it would be still reasonable to try to evaluate a variable introduced by a structured binding, even if there are too few identifiers for the initializer. Wouldn't it be better to add a codan checker and postpone this analysis?
+
+Line:397, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/CPPVariable.java -> Done
+
+I think we have something needing attention here (and regarding the return null below).
+I changed it here (see other problem below), I had to change CPPASTStructuredBinding::getExecution() though, which returned ExecIncomplete.INSTANCE if the EvalFixed.INCOMPLETE evaluation had been encountered, to always return an ExecDeclarator. Otherwise, I ended up issues when marshalling ExecIncomplete.INSTANCE. This seems to be a general issue. No test case actually marshals ExecIncomplete.INSTANCE. I couldn't check with Toni as he's out of office right now.
+
+Line:418, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/CPPVariable.java -> This is code extracted. In the initial version there was a case that returned null. And I think it had been implemented this way deliberately. I tried returning INCOMPLETE here before, but ended up having problems when persisting the evaluation,  because it is not supported to marshal an incomplete evaluation yet. Which results in dozens of test errors/failures. I'm not sure whether it is a liability in the infrastructure or I just need to add a check at the right spot. I'm not sure whether we ever actually returned INCOMPLETE from this function in an existing case.
+
+Returning EvalFixed.INCOMPLETE results in issues regarding marshalling of the evaluation. I have to check why exactly. But there already was a case that returned null in this method. See comment below in evaluationOfInitializer()
+This EvalFixed.INCOMPLETE leads to ExecIncomplete.INSTANCE in CPPASTDeclarator::getExecution(), which in turn results in the marshalling problem. There is actually no test case in which the CPPVariable evaluation actually results in EvalFixed.INCOMPLETE (The same is true for CPPASTReturnStatement::getExecution(), which theoretically could result in ExecIncomplete:INSTANCE too).
+
+Line:2945, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/GNUCPPSourceParser.java -> Done
+
+Yes, it's preferrable to code duplication. I added a field to Decl and a local variable to avoid moving the code for handling the structured binding around.
+
+Line:2966, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/GNUCPPSourceParser.java -> Done
+
+I added a check to make sure declSpec is an ICPPASTSimpleDeclSpecifier. I would avoid the check in isAtStartOfStructuredBinding() because it would introduce a dependency to C++ infrastructure. Actually, this method already creates a logical dependency to C++, but since it also checks for templates it's not a new issue.
+I think the semantic error will occur automatically when parsing ahead in an illegal case.
+
+Line:4814, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/GNUCPPSourceParser.java -> Done
+
+I left the extracted method but set the endOffset again in case a ref-qualifier has been found.
+
+Line:1666, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/semantics/CPPSemantics.java -> Done
+
+Hm... No, no special treatment neccessary as far as I can see. I'll check with Hansruedi what the reason for this special treatment was.
+
+Line:404, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/semantics/CPPTemplates.java -> Done
+
+Line:2324, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/semantics/CPPTemplates.java -> Done
+
+Line:1965, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/semantics/CPPVisitor.java -> Done
+
+Added test cases that feature too many and too few names for the initializer, a non-static value member, a non-constexpr value member and a non-integral value member.
+
+Regarding the first point: I implemented the rules according to C++17, there was no explicit mentioning of value being a member. Do you have any insights why the wording was changed to "with a member named value"? How can std::tuple_­size<E>::value not be a static field if it is a well-formed integral constant expression? The only case I can come up with is in the context is a subtype of std::tuple_size<E> and that would be quite weird. But it is easy to fix.
+
+Line:1968, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/semantics/CPPVisitor.java -> Done
+
+Line:1998, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/semantics/CPPVisitor.java -> Done
+
+Added a test case for this
+
+Line:2020, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/semantics/CPPVisitor.java -> Done
+
+Line:2028, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/semantics/CPPVisitor.java -> Done
+
+I also added a check for volatile.
+
+Line:928, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/semantics/SemanticUtil.java -> Done
+
+Made ExpressionTypes.isVolatile() public and replaced the else block with a call to it.
+Applied the same to isConst().
+
+Line:94, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/rewrite/astwriter/DeclarationWriter.java -> Done
+
+Also added a test case to check structured bindings in range-based for loops
+
+Line:1395, core/org.eclipse.cdt.ui.tests/ui/org/eclipse/cdt/ui/tests/text/selection/CPPSelectionTestsIndexer.java -> Done
+
+Yes I probably did. I added it here. I don't see much value in the other files though, as I would add it to every case. Which is more distracting than helpful and it would hide cases from actual bug reports.
+
+Line:1436, core/org.eclipse.cdt.ui.tests/ui/org/eclipse/cdt/ui/tests/text/selection/CPPSelectionTestsNoIndexer.java -> Done
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Nathan Ridge
+Date: 2019-07-05 23:38:55.000000000
+Message: 
+Patch Set 17:
+
+(5 comments)
+
+After thinking about it a bit, I think we should just implement marhsal() and unmarshal() for ExecIncomplete. After all, we can store EvalFixed.INCOMPLETE in the index, and ExecIncomplete is the analogue of it for executions.
+Line:75, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/core/dom/ast/cpp/ICPPASTStructuredBindingDeclaration.java -> Mostly just consistency with existing AST API.
+
+However, I agree that Optional is a more expressive API, and I'm happy to introduce a policy that in new AST API (or just new API in general) we use Optional. I don't know if we have a place to write such a policy down, if not it can be unwritten for now.
+
+Line:1701, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/AbstractGNUSourceCodeParser.java -> No, "auto [" wouldn't be valid in C. I just wasn't sure about the mechanism by which it would produce a syntax error. I wanted to make sure we don't start silently accepting it in C.
+
+Line:327, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/CPPVariable.java -> Right, sorry, this is an old comment that I wrote before I realized that this implementation already works for non-member functions.
+
+Line:388, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/CPPVariable.java -> The second point is about access. Some test cases for it would be:
+
+  // Class with private fields
+  class Point {
+  private:
+    int x;
+    int y;
+
+    void foo() {
+      // OK, a member function can destructure a Point.
+      auto [x, y] = *this;
+    }
+
+    friend void bar(Point p) {
+      // OK, a friend function can destructure a Point.
+      auto [x, y] = p;
+    }
+  };
+
+  void baz(Point p) {
+    // Error, a non-member non-friend function cannot
+    // destructure a Point.
+    auto [x, y] = p;
+  }
+
+Granted, in CDT we already have many places where we don't check access, so it's fine not to check it here either; maybe just add a TODO.
+
+Regarding the last point, I agree that there is value in evaluating whatever we can even if the structured binding declaration as a whole is ill-formed. I'm happy to go with the Codan checker route (and feel free to leave the Codan checker for a future patch).
+
+Line:1965, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/semantics/CPPVisitor.java -> The idea is that if a member named "value" is present but it's not a static field, we should give an error rather than silently proceeding to try aggregate decomposition.
+
+Motivating example:
+
+  // This structure happens to work with aggregate decomposition.
+  struct Point {
+    int x;
+    int y;
+  };
+
+  // But the author wants different decomposition behaviour
+  // for it. (Maybe they want to store rectangular coordinates
+  // but want it to destructure into polar.)
+  // So, they override tuple_size.
+  // However, they make a mistake, and forget to make "value"
+  // static.
+  template <>
+  struct tuple_size<Point> {
+      const int value = 2;  // oops, no static
+  };
+
+  // tuple_element, get<> definitions omitted
+
+  // Now they attempt to perform the decomposition:
+  void foo(Point p) {
+    auto [r, theta] = p;
+  }
+
+Bad outcome: because tuple_size<Point>::value wasn't a static field, the compiler silently proceeds to try aggregate decomposition, that succeeds, and the user silently gets rectangular coordinates.
+
+Good outcome: because tuple_size<Point>::value wasn't a static field, the compiler issues an error.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Corbat
+Date: 2019-07-10 10:59:31.000000000
+Message: 
+Patch Set 17:
+
+(11 comments)
+
+I've implemented marshal() and unmarshal() for ExecIncomplete. I didn't change the cases returning null for non-structured-binding cases, as this still results in many further failing test cases (about 50), for example due to ExecDeclaration casts.
+Line:75, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/core/dom/ast/cpp/ICPPASTStructuredBindingDeclaration.java -> I guess this might be something to add to the API policy in the wiki (https://wiki.eclipse.org/CDT/policy#API). However, should check with the other committers on the mailing list first.
+
+Line:327, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/CPPVariable.java -> Done
+
+Line:388, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/CPPVariable.java -> Done
+
+I've reverted the check for the exact number of field match and added the accessibility check to the comment.
+
+Line:1965, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/cpp/semantics/CPPVisitor.java -> Done
+
+Ok, that makes sense. I had already added a similar test case.
+
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,122 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-41844: Avoid data race in FollyExecutorPool::doTaskQStat
+
+As seen in TSan testing with FollyExecutorPool when running
+ep_perfsuite:
+
+    Running [0013/0017]: Stat latency with 100 vbuckets. Also sets & DCP traffic on separate thread...==================
+
+    WARNING: ThreadSanitizer: data race (pid=16435)
+    Read of size 8 at 0x7b24000053f8 by main thread (mutexes: write M386882167168307840):
+    #0 folly::HHWheelTimerBase<>::Callback::isScheduled() const follytsan/folly/io/async/HHWheelTimer.h:121:14 (libep.so+0x5c63b6)
+    #1 FollyExecutorPool::doTaskQStat(...) kv_engine/engines/ep/src/folly_executorpool.cc:839:30 (libep.so+0x34ff85)
+    #2 EventuallyPersistentEngine::doWorkloadStats(...) kv_engine/engines/ep/src/ep_engine.cc:4115:17 (libep.so+0x2e67d6)
+    #3 EventuallyPersistentEngine::getStats(...) kv_engine/engines/ep/src/ep_engine.cc:4670:16 (libep.so+0x2d689a)
+    ...
+
+    Previous write of size 8 at 0x7b24000053f8 by thread T1:
+    #0 memset <null> (ep_perfsuite+0x4b3a42)
+    #1 folly::HHWheelTimerBase<>::Callback::cancelTimeoutImpl() follytsan/folly/io/async/HHWheelTimer.cpp:86:15 (libep.so+0x5c6507)
+    #2 folly::HHWheelTimerBase<>::Callback::cancelTimeout() follytsan/folly/io/async/HHWheelTimer.h:114:7 (libep.so+0x5c6507)
+    #3 FollyExecutorPool::TaskProxy::wake() kv_engine/engines/ep/src/folly_executorpool.cc:239:9 (libep.so+0x35e3e9)
+    #4 FollyExecutorPool::State::wakeTask(unsigned long) kv_engine/engines/ep/src/folly_executorpool.cc:352:29 (libep.so+0x3625cf)
+    #5 FollyExecutorPool::wake(unsigned long)::$_9::operator()() const kv_engine/engines/ep/src/folly_executorpool.cc:731:32 (libep.so+0x3515d1)
+    ...
+
+Issue is how FollyExecutorPool::doTaskQStat() is implemented. It takes
+a copy of the taskOwners map on the eventBase thread to attempt to
+avoid races; however this is a shallow copy - the actual TaskProxy
+objects which the map references via shared_ptr are not copied.  As
+such, when the TaskProxy objects are read by the non-eventBase thread
+a race is seen.
+
+Solution is to instead of taking a (shallow) copy and then
+manipulating the copy, just move the entire work onto the eventBase
+thread.
+
+Change-Id: I19de6911944370e836c9905e99c860ee3d5ccb0b
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2020-10-06 11:15:43.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-10-06 11:40:09.000000000
+Message: 
+Patch Set 2: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/6201/ : FAILURE
+
+Failure of GoogleTest "AllBackends/DurabilityEPBucketTest.PersistPrepareDelete/persistentRocksdb_value_only":
+
+<pre>
+[ RUN      ] AllBackends/DurabilityEPBucketTest.PersistPrepareDelete/persistentRocksdb_value_only
+[2020-10-06T11:25:33.702Z] ../kv_engine/engines/ep/tests/module_tests/evp_store_durability_test.cc:474: Failure
+[2020-10-06T11:25:33.702Z] Expected equality of these values:
+[2020-10-06T11:25:33.702Z]   1
+[2020-10-06T11:25:33.702Z]   ckptList.size()
+[2020-10-06T11:25:33.702Z]     Which is: 2
+[2020-10-06T11:25:33.702Z] [  FAILED  ] AllBackends/DurabilityEPBucketTest.PersistPrepareDelete/persistentRocksdb_value_only, where GetParam() = ("persistentRocksdb", "value_only") (8264 ms)
+AllBackends/DurabilityEPBucketTest.PersistPrepareDelete/persistentRocksdb_value_only
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/6201/ )
+
+Failure of a CTest test [2020-10-06T11:22:13.659Z]  82/395 Test  #82: ep-engine_ep_unit_tests.ExecutorPoolEpEngineTest/TestExecutorPool ........................................... ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/6201/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/6433/ : FAILURE
+
+ThreadSanitizer issue: data race (/home/couchbase/jenkins/workspace/kv_engine.threadsanitizer_master/build/kv_engine/ep_testsuite_dcp+0x530dbe) in operator delete(void*, unsigned long)  ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/6433/ )
+
+Failure of a CTest test [2020-10-06T11:26:12.315Z]   7/386 Test #248: ep_testsuite_dcp.full_eviction.magma ........................................................................ ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/6433/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/3429/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/4902/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/26699/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/30891/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/5277/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/6319/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/14093/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-10-06 13:50:41.000000000
+Message: 
+Patch Set 2:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/6206/ : ABORTED
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/6433/ : FAILURE
+
+ThreadSanitizer issue: data race (/home/couchbase/jenkins/workspace/kv_engine.threadsanitizer_master/build/kv_engine/ep_testsuite_dcp+0x530dbe) in operator delete(void*, unsigned long)  ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/6433/ )
+
+Failure of a CTest test [2020-10-06T11:26:12.315Z]   7/386 Test #248: ep_testsuite_dcp.full_eviction.magma ........................................................................ ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/6433/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/3429/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/4902/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/26699/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/30891/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/5277/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/6319/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/14093/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

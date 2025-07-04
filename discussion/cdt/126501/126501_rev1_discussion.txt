@@ -1,0 +1,132 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 537306 - Add initial implementation for "$cquery/publishSemanticHighlights"
+
+Change-Id: I598cda18678f7b268a72e4aa5dfe9563d33727bd
+Signed-off-by: Manish Khurana <mkmanishkhurana98@gmail.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Manish Khurana
+Date: 2018-07-23 18:36:24.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-07-23 18:36:32.000000000
+Message: 
+Patch Set 1:
+
+Build Started https://ci.eclipse.org/cdt/job/cdt-verify-test-lsp4e-cpp/49/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-07-23 18:42:32.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/cdt/job/cdt-verify-test-lsp4e-cpp/49/ : SUCCESS. p2 repository available on https://ci.eclipse.org/cdt/job/cdt-verify-test-lsp4e-cpp/49/artifact/lsp4e-cpp/org.eclipse.lsp4e.cpp.site/target/repository/ for approximately 7 days.
+----------------------------------------------------------------------------------------------------------------------
+Author: Nathan Ridge
+Date: 2018-07-26 03:19:41.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:199, lsp4e-cpp/org.eclipse.lsp4e.cpp.language/src/org/eclipse/lsp4e/cpp/language/PresentationReconcilerCPP.java -> We should use the other style properties (bold, italic, strikethrough, underline) as well, not just color.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Nathan Ridge
+Date: 2018-07-26 05:47:13.000000000
+Message: 
+Patch Set 1:
+
+I believe I discovered the reason why we are seeing the behaviour where semantic highlighting sometimes disables the lexical highlighting.
+
+PresentationReconciler is designed so that it doesn't update the entire document's presentation after every change. Rather, in response to each change, it computes a region for which the presentation needs to be updated, and only updates that region. This region is called the "damage" region, and is passed in as the first argument to createPresentation().
+
+Accordingly, PresentationReconciler.createPresentation() only adds those lexical highlighting ranges to the presentation which overlap the damage region.
+
+What we are doing, is adding _all_ semantic highlighting ranges to the presentation, regardless of whether they overlap the damage region.
+
+As a result, in cases where the damage region is smaller than the whole document (which is most cases), the resulting presentation has lexical ranges for just the damage region, but semantic ranges for the whole document.
+
+The reconciler computes the "extent" of the presentation, which is the region encompassing all the ranges in the presentation, and updates that part of the document with the ranges. Since we have added semantic ranges for the whole document, the extent will be the whole document, and therefore the whole document's style ranges will be replaced with the style ranges in the presentation. However, those style ranges are missing the lexical ranges from the parts of the document that were outside the damage region.
+
+As a result, parts of the document outside of the damage region lose their lexical highlighting.
+
+The solution is for our override of createPresentation() to respect the contract of that function: only add those semantic ranges to the presentation, which overlap the damage region. Then, the "extent" of the presentation will be just the damage region, and only that part of the document's style ranges will be updated, and lexical ranges outside of that region will be preserved from previous reconciles that touched those areas.
+
+Let me know if that makes sense.
+----------------------------------------------------------------------------------------------------------------------
+Author: Nathan Ridge
+Date: 2018-07-26 05:58:37.000000000
+Message: 
+Patch Set 1:
+
+A numerical example may be helpful to illustrate the issue.
+
+Suppose a document has lexical ranges at [20,25] and [70,75], and semantic ranges at [5,10], [50,55], and [100,105].
+
+Suppose the damage region is [50,80].
+
+Of the lexical ranges, PresentationReconciler will only add [70,75] to the presentation, because that's the only one that overlaps the damage region.
+
+However, we add all the semantic ranges: [5,10], [50,55], and [100,105].
+
+The resulting presentation therefore has four ranges: [5,10], [50,55], [70,75], and [100,105].
+
+The "extent" of this presentation is [5,105].
+
+The reconciler then says, "Oh, the presentation has been updated in the range [5,105], let me redraw that area." It replaces all the currently drawn style ranges in the range [5,105], with the four that are in the presentation: [5,10], [50,55], [70,75], and [100,105].
+
+The result is that the lexical range [20,25] has been lost.
+
+The correct behaviour here would be for us to only add the semantic range [50,55] to the presentation, because it is the only one that overlaps the damage region. As a result, the two ranges added to the presentation will be just [50,55] and [70,75]. The "extent" of the resulting presentation will be [50,75], and only that area will be redrawn. The existing ranges outside of that area ([5,10], [20,25], and [100,105]), which have been drawn during some previous reconcile, are preserved.
+----------------------------------------------------------------------------------------------------------------------
+Author: Manish Khurana
+Date: 2018-07-26 06:03:35.000000000
+Message: 
+Patch Set 1:
+
+> A numerical example may be helpful to illustrate the issue.
+ > 
+ > Suppose a document has lexical ranges at [20,25] and [70,75], and
+ > semantic ranges at [5,10], [50,55], and [100,105].
+ > 
+ > Suppose the damage region is [50,80].
+ > 
+ > Of the lexical ranges, PresentationReconciler will only add [70,75]
+ > to the presentation, because that's the only one that overlaps the
+ > damage region.
+ > 
+ > However, we add all the semantic ranges: [5,10], [50,55], and
+ > [100,105].
+ > 
+ > The resulting presentation therefore has four ranges: [5,10],
+ > [50,55], [70,75], and [100,105].
+ > 
+ > The "extent" of this presentation is [5,105].
+ > 
+ > The reconciler then says, "Oh, the presentation has been updated in
+ > the range [5,105], let me redraw that area." It replaces all the
+ > currently drawn style ranges in the range [5,105], with the four
+ > that are in the presentation: [5,10], [50,55], [70,75], and
+ > [100,105].
+ > 
+ > The result is that the lexical range [20,25] has been lost.
+ > 
+ > The correct behaviour here would be for us to only add the semantic
+ > range [50,55] to the presentation, because it is the only one that
+ > overlaps the damage region. As a result, the two ranges added to
+ > the presentation will be just [50,55] and [70,75]. The "extent" of
+ > the resulting presentation will be [50,75], and only that area will
+ > be redrawn. The existing ranges outside of that area ([5,10],
+ > [20,25], and [100,105]), which have been drawn during some previous
+ > reconcile, are preserved.
+
+Thanks! Completely understood it. I'll look into this and upload a new patch.
+----------------------------------------------------------------------------------------------------------------------

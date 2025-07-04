@@ -1,0 +1,194 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 477391 - Provide a deferred way to create ImageDescriptors in JFace
+
+Since a majority of images are not used at any one time, calculating the
+URL necessary for the image is an expensive (in terms of I/O) operation.
+By using a Supplier<URL> instead, we can defer the lookup of the image's
+URL until the image data is actually requested (which should be when the
+image is displayed on screen).
+
+Code that uses ImageDescriptor.createFromURL(expensiveURL) can be
+refactored into ImageDescripor.createFromURLSupplier(()->expensiveURL)
+to see performance gains.
+
+Since this is new API, only callers that have been updated to use the
+new method will see the benefit.
+
+Change-Id: I3420c72dabf1d32234bed0b549fb70a246597b52
+Signed-off-by: Alex Blewitt <alex.blewitt@gmail.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Alex Blewitt
+Date: 2020-05-30 18:09:23.000000000
+Message: 
+Uploaded patch set 3.
+----------------------------------------------------------------------------------------------------------------------
+Author: Platform Bot
+Date: 2020-05-30 18:10:28.000000000
+Message: 
+Patch Set 3:
+
+Build Started https://ci.eclipse.org/platform/job/eclipse.platform.ui-Gerrit/22798/
+----------------------------------------------------------------------------------------------------------------------
+Author: Platform Bot
+Date: 2020-05-30 20:30:32.000000000
+Message: 
+Patch Set 3: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/platform/job/eclipse.platform.ui-Gerrit/22798/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Alex Blewitt
+Date: 2020-05-30 21:55:02.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:33, bundles/org.eclipse.jface/src/org/eclipse/jface/resource/DeferredImageDescriptor.java -> This version number might need to be updated, since I suspect this is targeted for 2020-09 instead of anything more recent.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Becker
+Date: 2020-06-02 06:26:50.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:201, bundles/org.eclipse.jface/src/org/eclipse/jface/resource/ImageDescriptor.java -> Every caller has to create a supplier to call this method.
+Can we somehow remove this boilerplate code.
+E.g. by only handing-in the URL and creating the supplier inside createFromURLSupplier?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Alex Blewitt
+Date: 2020-06-02 08:37:54.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:201, bundles/org.eclipse.jface/src/org/eclipse/jface/resource/ImageDescriptor.java -> Well, we could - but then that would completely revert the intent of the change. The problem is that the URL is costly to calculate, because in order to return it, it has to go through several filesystems looking for matches (including different languages etc.). The point of having this supplier is to defer the cost of calculating the URL until it is needed.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Lars Vogel
+Date: 2020-06-02 08:40:44.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+
+Could we maybe add a method taking a String and calculating the URL as needed via the Supplier?
+Line:201, bundles/org.eclipse.jface/src/org/eclipse/jface/resource/ImageDescriptor.java -> Done
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Alex Blewitt
+Date: 2020-06-02 10:50:56.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:201, bundles/org.eclipse.jface/src/org/eclipse/jface/resource/ImageDescriptor.java -> The problem is that the string itself is both a placeholder and an bundle (in most cases) but there could be other means. The string is interpolated and used to do lookups (e.g. replacing $nl and other items inside there). In the end, you have two choices:
+
+1. Implement this as  a generic 'Give me a URL and I don't care how you calculate it'
+2. Pass through all the information needed to delegate to a bundle's findResource method (including fallback options) that could be used by any application
+
+In the latter case, the JFaceResources has a means of finding an image and, if not found, returning to a fallback. The API is going to get massively more complicated and tightly bound to its implementation if we do that -- or we could just use the standard Java API that allows anyone to determine how the URL could be created.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Lars Vogel
+Date: 2020-06-02 10:55:27.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:201, bundles/org.eclipse.jface/src/org/eclipse/jface/resource/ImageDescriptor.java -> Sounds reasonable for me, +1 for Alex current implementation suggestion.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexander Fedorov
+Date: 2020-06-02 12:34:33.000000000
+Message: 
+Patch Set 3:
+
+(2 comments)
+Line:49, bundles/org.eclipse.jface/src/org/eclipse/jface/resource/DeferredImageDescriptor.java -> I suggest to move `supplier` argument to the first position and also add another constructor:
+
+`DeferredImageDescriptor(Supplier<URL> supplier)
+//useImageData=true`
+
+and may be even one more:
+
+`DeferredImageDescriptor(Class<?> class, String path) 
+// create Supplier using FrameworkUtil#getBundle , FileLocator#find`
+
+Line:201, bundles/org.eclipse.jface/src/org/eclipse/jface/resource/ImageDescriptor.java -> 1) +1 to have API for postponed calculation
+2) can be implemented later with 
+`class ImageUrl implements Supplier<URL>` that will have a number of constructors to support different input combinations
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Alex Blewitt
+Date: 2020-06-02 13:10:36.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:49, bundles/org.eclipse.jface/src/org/eclipse/jface/resource/DeferredImageDescriptor.java -> I had it the other way around earlier, but decided that was the wrong order because it meant the difference at the callsite of:
+
+new DeferredImageDescriptor(true, () -> { // the true/false here is close to constructor
+ ...
+});
+
+to
+
+new DeferredImageDescriptor(() -> {
+  ...
+},true); // the 'true/false' is here which is disconnected from the contructor
+
+Regarding adding constructors: I'm not sure it makes sense to have lots and lots of constructors here, especially since it's an internal class that's forwarded from ImageDescriptor.deferred(Supplier<URL>). If you have lots of constructors here, you have lots of static constructors on the access method.
+
+All of these just are ways to have hard-coded Supplier<URL> which are not ImageDescriptor specific and could be provided by another class. For example, you could have 
+
+class FileLocator {
+  find(Bundle bundle, String file) -> Supplier<URL>
+}
+
+and then use that everywhere a Supplier<URL> is needed.
+
+TL;DR putting lots of specific handy wrappers here is the wrong place, and other places would be more useful.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexander Fedorov
+Date: 2020-06-02 15:07:42.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:49, bundles/org.eclipse.jface/src/org/eclipse/jface/resource/DeferredImageDescriptor.java -> you are right, not the right place.
+
+how about "require not null" for `supplier` argument?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Alex Blewitt
+Date: 2020-06-02 17:19:27.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:49, bundles/org.eclipse.jface/src/org/eclipse/jface/resource/DeferredImageDescriptor.java -> No objections, but do you mean:
+
+1. @NotNull
+2. Assert.notNull(supplier)
+3. Objects.requireNonNull(supplier)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexander Fedorov
+Date: 2020-06-02 17:26:20.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:49, bundles/org.eclipse.jface/src/org/eclipse/jface/resource/DeferredImageDescriptor.java -> Personally I prefer 
+`Objects.requireNonNull(supplier)`
+
+----------------------------------------------------------------------------------------------------------------------

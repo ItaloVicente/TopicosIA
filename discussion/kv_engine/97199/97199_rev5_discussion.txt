@@ -1,0 +1,182 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-30532: Don't acquire the queueLock for computing the checkpoint-id
+
+Currently in the execution of PassiveStream::handleSnapshotEnd we
+acquire/release the CheckpointManager::queueLock twice:
+- when getting the id of the open checkpoint for computing the newId
+- when calling CM::checkAndAddNewCheckpoint(newId)
+
+Given that the CM::checkAndAddNewCheckpoint function is called only
+by PS::handleSnapshotEnd and it executes under queueLock, then we can
+just compute the newId in CM::checkAndAddNewCheckpoint.
+
+Change-Id: I4a9f317efecc4a77faec9b14980fa7ccc92edb6b
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2018-07-20 16:18:22.000000000
+Message: 
+Uploaded patch set 5.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-07-20 16:42:15.000000000
+Message: 
+Patch Set 5: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/10529/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/9371/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/2395/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/10662/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/243/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/9514/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-07-23 12:43:58.000000000
+Message: 
+Patch Set 5: Code-Review-1
+
+(3 comments)
+File Comment: /COMMIT_MSG -> Would be nice to see the before/after perf numbers in the commit message (from your new benchmark).
+Line:7, /COMMIT_MSG -> This is all correct; however I think the key part of this change isn't only locking once, but it's not iterating all checkpoints in the manager when determining the new ID - i.e. it's changing from an O(n) to O(1) algorithm. 
+
+Assuming I'm right, I think it's worth re-phrasing the commit message to focus on that.
+
+Line:350, engines/ep/tests/module_tests/checkpoint_test.cc -> I'm surprised your patch is changing test behaviour - i.e. the range is now different.
+
+Let's discuss this when you get back.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2018-07-30 12:39:32.000000000
+Message: 
+Patch Set 5:
+
+(1 comment)
+Line:350, engines/ep/tests/module_tests/checkpoint_test.cc -> These are the behaviours before/after my change:
+
+Caption:
+cs = checkpoint start
+ce = checkpoint end
+
+[Before]
+
+1) we add 10 items in the open (unique) checkpoint; we have just the persistence cursor on it:
+
+id=1
+| cs  1  2  3  4  5  6  7  8  9  10 | 
+  ^
+
+2) we create a new checkpoint. Now we have 1 closed referenced checkpoint (not that the cursor is still on it) and the new open one with id=2
+
+id=1                                          id=2
+| cs  1  2  3  4  5  6  7  8  9  10  ce |     | cs |
+  ^ 
+
+3) we do manager->getAllItemsForCursor(). This moves the cursor to the start of the second checkpoint
+
+id=1                                          id=2
+| cs  1  2  3  4  5  6  7  8  9  10  ce |     | cs |
+                                                ^ 
+
+4) we do manager->checkAndAddNewCheckpoint(1, ..).
+In the original code that collapses the 2 checkpoints in a new single one having [id=3, rangeStart=1, rangeEnd=10]:
+
+id=3
+| cs  1  2  3  4  5  6  7  8  9  10 | 
+                                 ^
+
+5) we do manager->getAllItemsForCursor(). We expect:
+- no items
+- range [1, 10]
+
+
+[After]
+! We don't collapse anymore !
+
+1) same as above
+2) same as above
+3) we do manager->getAllItemsForCursor(), same as above
+4) we do manager->checkAndAddNewCheckpoint(1, ..). 
+Now the code tries to create the 3rd checkpoint. But, given that the 2nd one is empty, it just updates the open checkpoint id to 3:
+
+id=1                                          id=3
+| cs  1  2  3  4  5  6  7  8  9  10  ce |     | cs |
+                                                ^ 
+
+5) we do manager->getAllItemsForCursor(). We expect:
+- no items
+- range [10, 10]
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-07-30 12:49:56.000000000
+Message: 
+Patch Set 5:
+
+(1 comment)
+Line:350, engines/ep/tests/module_tests/checkpoint_test.cc -> Thanks for the detailed explanation - that's clear now. Couple of comments:
+
+* You don't mention that the checkpoint collapsing no longer occurs in the commit message. I think this needs to be explicit (as it's a change in external behaviour; nut just changing internal details of when we acquire locks).
+* I think I'm still missing something - *why* do we no longer collapse the checkpoints here? In fact; why is it safe for us to remove the checkpoint collapsing code in the first place?
+
+(To put this another way - the current commit message is phrased in terms of simply optimising the implementation of checkpoint end; however in reality you are  also changing behaviour (which allows you to optimise things).
+
+The change in behaviour is much more important to highlight (IMHO); could you re-phase the commit to focus on this please?
+
+Furthermore, I'm thinking you should split this patch further - first making the change which removes possibility to collapse checkpoints; and then making the optimisations to locking / assuming checkpoint IDs are incrementing.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2018-07-30 14:07:11.000000000
+Message: 
+Patch Set 5:
+
+(1 comment)
+Line:350, engines/ep/tests/module_tests/checkpoint_test.cc -> Sure I'm fixing the commit message (which is currently wrong in many different ways :) ).
+
+Ensuring that checkpoint IDs are strictly incremental here is the key:
+1) we cannot face anymore the case where newId<=prevId. 
+That was the only condition that triggered checkpoint-collapsing.
+2) we don't need to check if newId<=prevId applies (this one is the big optimization, it is a (slow) linear scan on CM::checkpointList)
+
+I could split again in multiple patches, but this is a kind of unique logic set of changes:
+- we compute id=prevId+1 under lock inside the CM::checkAndAddNewCheckpoint (first optimization, we lock once rather than twice)
+- so, we ensure that id>prevId always
+- so, we don't need to scan the CM::checkpointList to check if id<=prevId (second optimization)
+- so, we don't need to collapse to ensure that checkpoint IDs are incremental (change in behaviour, it was executed only if id<=prevId)
+
+I can keep this change and add the changes-logic-sequence mentioned into the commit message.
+Or, I can split in multiple changes as suggested.
+I'm happy with both.
+
+-------------------
+Some comments about collapsing follow. My considerations may be wrong, so others' opinion is very welcome :) :
+
+I'm not 100% sure of what is the main purpose of the  CM::collapseCheckpoint function.
+Looking at code, it is a way to ensure that the checkpoint IDs are incremental.
+But, it seems also a way for decreasing memory usage, as we do de-duplication in there. Probably it is not a case that this code is executed only when mem_used>high_wat.
+
+Note that the function is not covered by unit tests, apart from the one above where we check the range, but:
+- we don't test de-duplication
+- we don't test cursor re-positioning
+
+So:
+
+1) in theory, on one side we could have an increase in memory usage as we don't collapse anymore. But, this change aims to prevent high memory usage by closing checkpoints ASAP (snap-end) rather than letting them growing and then collapsing if mem_used>high_wat
+- a criticism to this is that with collapsing/de-dup we release memory immediately, while with checkpoint-closing the release is deferred to when the closed-checkpoint becomes unreferenced and the CheckpointRemover task runs
+- but, a good point is that the memory release on collapsing/de-dup depends on the type of workload (creates/updates), while checkpoint-closing doesn't
+
+2) about the change in behaviour, it seems to me that here our worst-case is that we don't run some untested code, so not so bad :)
+
+----------------------------------------------------------------------------------------------------------------------

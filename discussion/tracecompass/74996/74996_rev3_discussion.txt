@@ -1,0 +1,158 @@
+======================================================================================================================
+DESCRIPTION:
+
+ss: replace Direct Mapping SHT cache by LRU
+
+The read cache in HTIO was implemented as a Direct Mapped
+cache, which has a high cache miss ratio.
+
+This patch implements a LRU cache with a LinkedHashMap
+and SoftReferences that has a lower overhead than GuavaCache
+and much higher hit ratio than Direct Mapping.
+
+statesystem.perf/tests are on average 31% faster
+(max 68% faster, min 19% slower, stddev 26%)
+
+Typical Miss Ratios:
+(xeon phi trace and scrolling around in control flow view)
+CacheSize    256    32    (nodes)
+LRU          1.6%   3%
+DM           2.5%   38%
+
+Change-Id: Iddfc12107097ecd99d0b76da5ace6f495c933d35
+Signed-off-by: Loïc Prieur-Drevon <loic.prieurdrevon@gmail.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Loic Prieur-Drevon
+Date: 2016-06-10 13:26:13.000000000
+Message: 
+Uploaded patch set 3.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2016-06-10 13:26:19.000000000
+Message: 
+Patch Set 3:
+
+Build Started https://hudson.eclipse.org/tracecompass/job/tracecompass-gerrit/8975/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2016-06-10 14:09:23.000000000
+Message: 
+Patch Set 3: Code-Review+1
+
+Build Successful 
+
+https://hudson.eclipse.org/tracecompass/job/tracecompass-gerrit/8975/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthew Khouzam
+Date: 2016-06-10 17:52:44.000000000
+Message: 
+Patch Set 3:
+
+@ loic, careful with your tests that you put in the ods, the largest variations are for things that swing from 1 to 2... I'm sure rounding/background noise is playing a lot in there,
+----------------------------------------------------------------------------------------------------------------------
+Author: Loic Prieur-Drevon
+Date: 2016-06-10 19:15:44.000000000
+Message: 
+Patch Set 3:
+
+> @ loic, careful with your tests that you put in the ods, the
+ > largest variations are for things that swing from 1 to 2... I'm
+ > sure rounding/background noise is playing a lot in there,
+
+Thanks for noticing that, my whole analysis was biased....
+
+So in conclusion, to decide between Direct Mapping (current), LRU and Guava:
+1. LRU and Guava have the same hit ratio, far better than DM
+2. LRU and Guava have similar performance, no regression to DM (slight overhead is largely compensated by higher hit ratio)
+3. Guava handles concurrent queries better
+4. Not using write-through slows down cache warmup
+
+GuavaCache with write-through?
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthew Khouzam
+Date: 2016-06-10 21:03:15.000000000
+Message: 
+Patch Set 3:
+
+To be clear, we have a cache of 256 right now. So there is no gain to change until we reduce the cache size.
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2016-06-14 01:02:09.000000000
+Message: 
+Patch Set 3:
+
+Thanks Loïc for the benchmarks!
+
+> GuavaCache with write-through?
+
+Sounds good to me. Good idea to add back the write-through (or is it more write-back in this case?) I forgot about it in my patch.
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2016-06-23 21:23:32.000000000
+Message: 
+Patch Set 3:
+
+I have updated https://git.eclipse.org/r/#/c/70713/ , along with another patch after that one that reduces the synchronized sections. We don't really measure that impact in the benchmarks, but it should help in cases where a statesystem is queried by several threads at the same time.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthew Khouzam
+Date: 2016-06-24 00:56:33.000000000
+Message: 
+Patch Set 3:
+
+Why not make a benchmark to prove it works better?
+----------------------------------------------------------------------------------------------------------------------
+Author: Loic Prieur-Drevon
+Date: 2016-06-24 03:46:51.000000000
+Message: 
+Patch Set 3:
+
+I included the difference between the synchronised sections vs the synchronised data structure (synchronised column in the ods) with the statesystem perf benchmarks (though these don't compare concurrent workload)
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthew Khouzam
+Date: 2016-06-29 22:23:12.000000000
+Message: 
+Patch Set 3:
+
+@Loic, as I am not maintainer of this section of code, I will remove myself from the review. If you want my feedback I am available by every means possible. Mail, IRC, Phone, come by, or add me to the review.
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2016-06-29 23:53:53.000000000
+Message: 
+Patch Set 3: Code-Review-1
+
+(1 comment)
+
+Tbh, I'm really biased towards the Guava caches. The fact that they handle the key comparisons, as well as weak/soft references for you, results in much clearer code. This is not particularly easy to understand:
+
+  if (softNode != null && softNode.get() != null && softNode.get().getSequenceNumber() == seqNumber) {
+    return softNode.get();
+  }
+
+Unless we find noticeable performance differences, I'd rather go with https://git.eclipse.org/r/#/c/70713/ .
+
+There's also the possible, albeit very unlikely, case of different SS objects ending up with the same hashCode, which would cause key clashes. The cache being static means that it is used not just by one state system or one trace, but by the whole application.
+Line:121, statesystem/org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/internal/statesystem/core/backend/historytree/HT_IO.java -> You could technically have two different state systems with two HT_IO objects that have the same hashCode (you should probably go buy a lottery ticket if that does happen!).
+
+If it was just a case of such a clash causing the nodes to bump each other out of a non-fully-associative cache, it wouldn't be that bad, but here the problem is that nodes from completely different trees could be returned!!
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Loic Prieur-Drevon
+Date: 2016-06-30 00:03:35.000000000
+Message: 
+Patch Set 3:
+
+In one of my last comments on this patch or the guava one, I said I was also in favor of guava (after my misinterpreting my benchmarks and all).
+I will mark this one as abandoned to be clear.
+
+Checking the node sequence number ensures that the correct node is returned, except if both trees have the same hash code...
+----------------------------------------------------------------------------------------------------------------------
+Author: Loic Prieur-Drevon
+Date: 2016-06-30 00:03:50.000000000
+Message: 
+Abandoned
+
+Guava cache is better.
+----------------------------------------------------------------------------------------------------------------------

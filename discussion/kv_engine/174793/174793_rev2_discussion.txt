@@ -1,0 +1,80 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-52135: Remove isStalePriv() check in StoredValue::getNext()
+
+During performance testing with large number of Buckets and low quota
+(see CBD-4733 for details), performance profile highlights a large
+amount of time spent in HashTable::pauseResumeVisit, specifically the
+function itself (i.e. not calling any child functions).
+
+90% of the samples inside HashTable::pauseResumeVisit land inside
+getNext(), specifically the call to isStalePriv(). The isStalePriv
+call (and resulting bit test) is likely costly to two reasons:
+
+1. Cache-miss on reading the first (temporal) element from the
+   HashTable object (we are pointer-chasing iterating the HashTable
+   and hence unlikely to have this cache line in cache).
+
+2. Requiring atomic (acquire) memory ordering on the read. As per
+   cppreference.com:
+
+    A load operation with this memory order performs the acquire
+    operation on the affected memory location: no reads or writes in
+    the current thread can be reordered before this load. All writes
+    in other threads that release the same atomic variable are visible
+    in the current thread (see Release-Acquire ordering below)
+
+i.e. this constrains the instruction reordering the CPU is permitted
+to perform.
+
+Given the call to isStalePriv() is just a sanity check (and we've had
+stale flag - added for Ephemeral for a long time) I think it's safe to
+remove it now. This is unlikely to remove all the cost associated with
+traversing the HashTable chains (we will still be paying the cache
+miss cost), but by allowing micro-architectural optimisations to more
+readily occur we should hopefully be able to hide some of that cost.
+
+Note that we _do_ still leave the sanity check in
+StoredValue::setNext() - this has not been observed to be hot in
+profiles, and it's actually more important that we don't accidently
+link the chains together in the wrong way.
+
+Change-Id: Idddba064c83e9844e7f226284ab88c52cb42b54f
+Reviewed-on: https://review.couchbase.org/c/kv_engine/+/174793
+Tested-by: Build Bot <build@couchbase.com>
+Reviewed-by: Ben Huddleston <ben.huddleston@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2022-05-13 15:27:53.000000000
+Message: 
+Change has been successfully cherry-picked as 76802452698589a10e1d9d0daa87d2e454c1e039
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-05-13 15:27:59.000000000
+Message: 
+Patch Set 2:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-master/11127/ (1/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-05-13 15:27:59.000000000
+Message: 
+Patch Set 2:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-TSan-master/7246/ (2/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-05-13 16:03:43.000000000
+Message: 
+Patch Set 2:
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-master/11127/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-TSan-master/7246/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,132 @@
+======================================================================================================================
+DESCRIPTION:
+
+Validate onDiskPrepares pre and post compaction
+
+In MB-41747 on_disk_prepares reach a value which is causing std::stroul
+to fail parsing the value. This patch validate that on_disk_prepares
+have the expected value before and after compaction runs to try to
+identify when the value gets out of sync (note that the bug may still
+be in the code when we don't crash as std::stroul will only fail when
+the value exceed the legal range, and not if we're "slightly" out of
+sync (which is just as bad))
+
+Change-Id: I018bd3e0f358b140bd2c0dda2f69f7381d3101d7
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Trond Norbye
+Date: 2020-10-19 07:12:41.000000000
+Message: 
+Patch Set 4: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: Daniel Owen
+Date: 2020-10-19 07:25:29.000000000
+Message: 
+Patch Set 4: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-10-19 08:54:04.000000000
+Message: 
+Patch Set 4: Code-Review-1
+
+(2 comments)
+Line:1199, engines/ep/src/couch-kvstore/couch-kvstore.cc -> A throw std::logic error is probably more suitable - that won't necessarily take down all buckets on the system if only one is affected (depending on where we throw from).
+
+Line:1395, engines/ep/src/couch-kvstore/couch-kvstore.cc -> Ditto
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2020-10-19 09:04:08.000000000
+Message: 
+Patch Set 4:
+
+@dave The sole intention is to get this validated in as many use cases as possible (run via tests from QE). I've not been able to "reproduce" this with the resources I've got available, so its not that likely to kick in, and what I'm afraid of with switching to an exception is that the test framework won't catch the error in the error reporting so QE won't report the crash if they encounter it in a test run...
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-10-19 09:08:22.000000000
+Message: 
+Patch Set 4:
+
+> Patch Set 4:
+> 
+> @dave The sole intention is to get this validated in as many use cases as possible (run via tests from QE). I've not been able to "reproduce" this with the resources I've got available, so its not that likely to kick in, and what I'm afraid of with switching to an exception is that the test framework won't catch the error in the error reporting so QE won't report the crash if they encounter it in a test run...
+
+So exceptions in backend threads (compaction, flusher) are not caught and _will_ crash the process. 
+
+We shouldn't have explicit aborts for a number of reasons (see https://github.com/couchbase/kv_engine/blob/master/docs/ErrorHandling.md), but mainly:
+
+1. They _always_ take down the entire process (cannot be constrained like exceptions).
+2. They cannot be tested (caught in test frameworks).
+3. Even though they might be "temporary", it's all too easy to forget about such aborts / they stay in longer than initially expected and cause problems for other use-cases.
+
+Given in this particular case a thrown exception will also kill the process there's no downside to using them over abort here.
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2020-10-19 09:12:55.000000000
+Message: 
+Patch Set 4:
+
+> Patch Set 4:
+> 
+> > Patch Set 4:
+> > 
+> > @dave The sole intention is to get this validated in as many use cases as possible (run via tests from QE). I've not been able to "reproduce" this with the resources I've got available, so its not that likely to kick in, and what I'm afraid of with switching to an exception is that the test framework won't catch the error in the error reporting so QE won't report the crash if they encounter it in a test run...
+> 
+> So exceptions in backend threads (compaction, flusher) are not caught and _will_ crash the process. 
+> 
+> We shouldn't have explicit aborts for a number of reasons (see https://github.com/couchbase/kv_engine/blob/master/docs/ErrorHandling.md), but mainly:
+> 
+> 1. They _always_ take down the entire process (cannot be constrained like exceptions).
+
+That is what I want
+
+> 2. They cannot be tested (caught in test frameworks).
+> 3. Even though they might be "temporary", it's all too easy to forget about such aborts / they stay in longer than initially expected and cause problems for other use-cases.
+
+well, if they trigger it means that we do have the bug and it is fatal as we've now got inconsistent data so it is exactly what I want.
+
+> 
+> Given in this particular case a thrown exception will also kill the process there's no downside to using them over abort here.
+
+It takes a code change, CV, wait for review, +++ and offers little / nothing of benefit as the end result is the same: process will crash..
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-10-19 09:26:14.000000000
+Message: 
+Patch Set 4:
+
+> Patch Set 4:
+> 
+> > Patch Set 4:
+> > 
+> > > Patch Set 4:
+> > > 
+> > > @dave The sole intention is to get this validated in as many use cases as possible (run via tests from QE). I've not been able to "reproduce" this with the resources I've got available, so its not that likely to kick in, and what I'm afraid of with switching to an exception is that the test framework won't catch the error in the error reporting so QE won't report the crash if they encounter it in a test run...
+> > 
+> > So exceptions in backend threads (compaction, flusher) are not caught and _will_ crash the process. 
+> > 
+> > We shouldn't have explicit aborts for a number of reasons (see https://github.com/couchbase/kv_engine/blob/master/docs/ErrorHandling.md), but mainly:
+> > 
+> > 1. They _always_ take down the entire process (cannot be constrained like exceptions).
+> 
+> That is what I want
+> 
+> > 2. They cannot be tested (caught in test frameworks).
+> > 3. Even though they might be "temporary", it's all too easy to forget about such aborts / they stay in longer than initially expected and cause problems for other use-cases.
+> 
+> well, if they trigger it means that we do have the bug and it is fatal as we've now got inconsistent data so it is exactly what I want.
+> 
+> > 
+> > Given in this particular case a thrown exception will also kill the process there's no downside to using them over abort here.
+> 
+> It takes a code change, CV, wait for review, +++ and offers little / nothing of benefit as the end result is the same: process will crash..
+
+The important different (IMHO) is that we arn't breaking our Error handling policy and introducing undesirable code (even temporarily) in the system. If you change that to an exception the code can stay in forever, there's no need to remove it (although we might later want to catch it before the call-stack leaves couchstore.
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2020-10-19 09:32:46.000000000
+Message: 
+Abandoned
+----------------------------------------------------------------------------------------------------------------------

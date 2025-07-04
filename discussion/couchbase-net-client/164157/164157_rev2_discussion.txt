@@ -1,0 +1,95 @@
+======================================================================================================================
+DESCRIPTION:
+
+[WIP] NCBC-2989: Use transient HttpClient instances
+
+Motivation
+----------
+We currently use a singleton CouchbaseHttpClient which inherits from
+HttpClient. Using a singleton HttpClient is common practice and known to
+A) improve performance by allowing HTTP keep-alives and reducing DNS
+requests and B) avoid problems with TCP port depletion.
+
+However, the common practice is misunderstood. In fact, it is the
+HttpClientHandler within the HttpClient that should be reused, more so
+than the HttpClient itself. Additionally, it should only be reused for a
+limited period of time. Failure to replace the HttpClientHandler
+occasionally can cause unexpected network failures if DNS names are
+changed to refer to new IP addresses.
+
+More importantly, our current pattern of a singleton CouchbaseHttpClient
+introduces side effects. There are multiple places in the codebase where
+we are setting properties on this client as if it was transient when it
+is in fact a singleton. Setting these properties is affecting other
+usages of the singleton by other internal services. Examples include
+setting the Timeout to infinite or setting a per-connection ID on
+DefaultRequestHeaders.
+
+Modifications
+-------------
+Drop CouchbaseHttpClient in favor of CouchbaseHttpClientFactory, and
+replace all usages of CouchbaseHttpClient with transient, short-lived
+HttpClient instances created by CouchbaseHttpClientFactory.
+
+Within the factory, reuse the same HttpMessageHandler stack for each
+HttpClient created. Replace this stack with a new stack once it is two
+minutes old. Use GC to track when the old stack is no longer in use and
+dispose of the old handlers. This is based on the pattern used by
+Microsoft.Extensions.Http.
+
+Change AuthenticatingHttpMessageHandler to a DelegatingHandler.
+
+Results
+-------
+Each consuming service may safely manipulate the HttpClient with
+values such as timeouts and connection ID headers without affecting
+other services.
+
+If DNS addresses change to refer to a new Couchbase node IP, the
+HttpClient will switch to the new servers within 2 minutes rather than
+continuing to reuse the same connection to the old IP indefinitely.
+
+We can more easily change the backing message handler from
+HttpClientHandler to some other implementation in the future.
+
+Note: This approach adds more complexity around HttpClient, for which it
+would have been nice to use the thoroughly tested
+Microsoft.Extensions.Http package. However, this would have required
+bringing in Microsoft.Extensions.DependencyInjection and more as a
+dependency.
+
+Change-Id: Ifd77d34288b29206634259bd34bcc271642a7983
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Brant Burnett
+Date: 2021-10-22 22:24:16.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-10-22 22:24:23.000000000
+Message: 
+Patch Set 2:
+
+Build Started http://sdk.jenkins.couchbase.com/job/dotnet/job/sdk/job/couchbase-net-client-cv-trigger/2800/
+----------------------------------------------------------------------------------------------------------------------
+Author: Brant Burnett
+Date: 2021-10-22 22:25:47.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+
+I've commented on the issue you mentioned about SocketsHttpHandler. For this changeset, I've rewritten how AuthenticatingHttpClientHandler works to make it easy to replace HttpClientHandler in the future.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-10-22 22:28:18.000000000
+Message: 
+Patch Set 2: Verified+1
+
+Build Successful 
+
+http://sdk.jenkins.couchbase.com/job/dotnet/job/sdk/job/couchbase-net-client-cv-trigger/2800/ : success
+----------------------------------------------------------------------------------------------------------------------

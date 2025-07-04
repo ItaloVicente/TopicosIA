@@ -1,0 +1,87 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-52383: Ensure we yield correctly when loading data during warmup
+
+Problem:
+During analysis of our warmup code we observed that
+WarmupVbucketVisitor's callback was never yielding thus causing us to
+disregard max time splice it should spend backfilling before running
+another reader thread task. This behaviour can cause delta rebalance to
+time out as large data buckets can block smaller buckets from warming up
+in a timely manner, see MB-47267 for more information.
+
+Cause:
+This was due to WarmupVbucketVisitor::visit() not correctly updating the
+state of LoadStorageKVPairCallback when calling
+LoadStorageKVPairCallback::updateDeadLine(). This was due to us storing
+the LoadStorageKVPairCallback as kvCallback using the 'auto' keyword
+rather than an 'auto&'. This caused deep copy to occur and us to call
+updateDeadLine() on the copied value. Meaning the
+LoadStorageKVPairCallback used for the backfill had a deadline of
+std::chrono::steady_clock::time_point::max(), so it could run for as
+long as it needed without yielding.
+
+This should have been picked up by the test
+test_reader_thread_starvation_warmup() in ep_testsuite.cc. However, the
+test was broken due to the 'num_reader_threads' not being set to 1 by
+the config argument correctly. When we did set the number of reader
+threads correctly the test deadlocks showing it never exercised the code
+correctly and so would never have found this bug.
+
+Fix:
+To fix this change 'kvCallback' in  WarmupVbucketVisitor::visit() to be
+an 'auto&' rather than just an 'auto'.
+
+Also more ensure fix the test to defend this code correctly. To do this
+we've modified the vistWarmupHook so that it now records how many times
+it's been called so that we can ensure that on the 'slowBucket' we do
+yield. This can be identified if the vistWarmupHook gets called more
+than 2 times, as this is the minimum number of time it will be called.
+Also to ensure we do yield if we've be called more than two times then
+sleep for 9ms to we only have 1ms to warmup itmes in.
+
+Change-Id: I18e17dd5752a1d0dc42bfcf14c4e300b77425ae8
+Reviewed-on: https://review.couchbase.org/c/kv_engine/+/175496
+Reviewed-by: James H <james.harrison@couchbase.com>
+Reviewed-by: Dave Rigby <daver@couchbase.com>
+Tested-by: Build Bot <build@couchbase.com>
+Well-Formed: Restriction Checker
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Richard de Mellow
+Date: 2022-06-21 10:23:37.000000000
+Message: 
+Change has been successfully cherry-picked as 564986e3d40e5229de855a0088beaf3c49d23cee
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-06-21 11:04:02.000000000
+Message: 
+Patch Set 4:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-TSan-neo/196/ (1/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-06-21 11:43:27.000000000
+Message: 
+Patch Set 4:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-neo/343/ (2/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-06-21 11:45:55.000000000
+Message: 
+Patch Set 4:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-neo/343/ : FAILURE
+
+Compile error at /home/couchbase/jenkins/workspace/kv_engine-post-commit-neo/kv_engine/xattr/blob.cc:96:40:
+error: ?cb::sized_buffer<char>::value_type* cb::sized_buffer<char>::buf? is private within this context
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-neo/343/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-TSan-neo/196/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

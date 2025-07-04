@@ -1,0 +1,291 @@
+======================================================================================================================
+DESCRIPTION:
+
+Fix UnkownHostKey despite host key being in known_hosts
+
+JSch prefers ssh-rsa key type. When the remote server supports ssh-rsa
+key type then this key type will be used even if the known_hosts file
+contains a host key for that host, but with different key type.
+This caused an unexpected UnkownHostKey error.
+
+To fix the issue first scan the known_hosts, the HostKeyRepository in
+JSch API, for any already existing host key for the target host. If one
+such key is present, set that key's type as the preferred key type for
+this session.
+
+More info in [1].
+
+TEST PLAN:
+* connect to an SSH server which by default uses some other host key type,
+  not ssh-rsa
+* check the key type in the known_hosts file, it should be something like:
+[ssh-server.example.org]:2222 ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTI
+The key type is ecdsa-sha2-nistp256
+* let JGit connect to this host and port
+* without this change, the connection will fail because JSch would prefer
+  ssh-rsa key type and ignore the existing key in the known_hosts
+* with this change the connection will succeed as it will use the
+  existing key (type)
+
+[1] https://stackoverflow.com/a/34688253
+
+Change-Id: I236df2a860ddd9289a0a820ddf09c2dea3673d36
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Sasa Zivkov
+Date: 2018-10-04 13:13:43.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-10-04 13:13:49.000000000
+Message: 
+Patch Set 1:
+
+Build Started https://ci.eclipse.org/jgit/job/jgit.gerrit/14272/
+----------------------------------------------------------------------------------------------------------------------
+Author: Sasa Zivkov
+Date: 2018-10-04 13:14:30.000000000
+Message: 
+Patch Set 1: Verified+1
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-10-04 13:27:34.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/jgit.gerrit/14272/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2018-10-04 13:50:54.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:140, org.eclipse.jgit/src/org/eclipse/jgit/transport/OpenSshConfig.java -> Please don't make this public. I'm in the process of refactoring all this SSH business anyway for bug 520927 and I'd like to move this elsewhere. If you make it public, I can't do so anymore, and we'll end up with several SSH_DEFAULT_PORT constants. For this change, it doesn't look as if changing package visibility to public was necessary.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: David Pursehouse
+Date: 2018-10-04 23:17:09.000000000
+Message: 
+Patch Set 1:
+
+(3 comments)
+Line:12, /COMMIT_MSG -> Unknown
+
+Line:248, org.eclipse.jgit/src/org/eclipse/jgit/transport/JschConfigSessionFactory.java -> Make this static?
+
+Line:256, org.eclipse.jgit/src/org/eclipse/jgit/transport/JschConfigSessionFactory.java -> static?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonathan Nieder
+Date: 2018-10-04 23:26:46.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:7, /COMMIT_MSG -> Thanks for working on this.
+
+The word "Fix" is telling me that this patch would make the world better than the world before it, but that goes without saying, so it doesn't belong in the subject line of the change.
+
+Can you summarize briefly what improvement this patch makes, to make the output of commands like "git shortlog" more useful? For example, how about something like
+
+ ssh: Scan for all of the server-presented host keys in known_hosts
+
+?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2018-10-05 06:23:20.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:251, org.eclipse.jgit/src/org/eclipse/jgit/transport/JschConfigSessionFactory.java -> I'm not convinced this is good. This limits the available algorithms for negotiation to exactly one. What if the server had such a key in the past, but now has key of a different type? You'd get some message that no common algorithms existed. What you'd really want is to get the new key and then detect a changed host key and inform the user about that.
+
+So I think instead of reducing this list to one single algorithm you should re-order the algorithms such that the existing key type comes first.
+
+Moreover, note that "server_host_key" is mapped to "HostKeyAlgorithms". So how does this interact with line 244 above? Does this need to come before or after, or does it not matter?
+
+Also note that the user can define HostKeyAlgorithms for this host in his ssh config file.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2018-10-05 08:19:21.000000000
+Message: 
+Patch Set 1: Code-Review-1
+
+(1 comment)
+Line:251, org.eclipse.jgit/src/org/eclipse/jgit/transport/JschConfigSessionFactory.java -> > Also note that the user can define HostKeyAlgorithms for this host
+ > in his ssh config file.
+
+Meaning: if something like this is done it should be done only if the user did not specify a HostKeyAlgorithms in his ssh config file.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Sasa Zivkov
+Date: 2018-10-05 08:35:25.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:251, org.eclipse.jgit/src/org/eclipse/jgit/transport/JschConfigSessionFactory.java -> > What you'd
+ > really want is to get the new key and then detect a changed host
+ > key and inform the user about that.
+
+The main issue I am trying to solve is Gerrit's replication plugin
+failing to connect because of the issue described in the commit message. In that case there is no interactive session and we cannot
+inform the user.
+
+> Meaning: if something like this is done it should be done only if the
+> user did not specify a HostKeyAlgorithms in his ssh config file.
+
+Makes sense, agreed.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2018-10-05 08:48:54.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:251, org.eclipse.jgit/src/org/eclipse/jgit/transport/JschConfigSessionFactory.java -> > > What you'd
+ > > really want is to get the new key and then detect a changed host
+ > > key and inform the user about that.
+ > 
+ > The main issue I am trying to solve is Gerrit's replication plugin
+ > failing to connect because of the issue described in the commit
+ > message. In that case there is no interactive session and we cannot
+ > inform the user.
+
+Gerrit replication is not the only use case here. Interactive use also is. If you re-order the host key algorithms such that the existing key type(s) come(s) first Gerrit replication should work, and if the server really doesn't have an ECDSA key anymore and client and server agree on RSA or whatever, then you do have a case of a modified server key and Gerrit replication should fail, and in interactive use the user is to be informed with a meaningful message. And meaningful is the normal modified key handling, not some message about no common host key algorithms found.
+
+Also, the known_hosts file could contain several entries for the same host (one for the ECDSA key, and one for the RSA key). In such cases you'd want the client to accept the host key in both cases (server send ECDSA or server sends RSA).
+
+So restricting this to a single algorithm is IMO not correct.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Sasa Zivkov
+Date: 2018-10-05 09:55:19.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:7, /COMMIT_MSG -> > The word "Fix" is telling me that this patch would make the world
+ > better than the world before it, but that goes without saying, so
+ > it doesn't belong in the subject line of the change.
+
+In general or for this change only? See the output of:
+$ git log --oneline --grep Fix --no-merges
+
+
+ > 
+ > Can you summarize briefly what improvement this patch makes, to
+ > make the output of commands like "git shortlog" more useful? For
+ > example, how about something like
+ > 
+ > ssh: Scan for all of the server-presented host keys in known_hosts
+ > 
+ > ?
+
+This subject tells what was done.
+The existing subject tells which issue was addressed with this change.
+Looking at the output of git log I think we can find examples for both
+styles.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2018-10-05 17:46:26.000000000
+Message: 
+Patch Set 1:
+
+Form "man 5 ssh-config": "If hostkeys are known for the destination host then this default is modified to prefer their algorithms."[1]
+
+So openssh also changes the order to put algorithms for which there already host keys first, unless the default has been modified or overridden via HostKeyAlgorithms. The ordering occurs _only_ if there is no HostKeyAlgorithms setting active. (Confirmed by code inspection in the openssh sources[2].)
+
+[1] http://man.openbsd.org/OpenBSD-current/man5/ssh_config.5
+[2] https://github.com/openssh/openssh-portable/blob/master/sshconnect2.c#L180
+----------------------------------------------------------------------------------------------------------------------
+Author: Sasa Zivkov
+Date: 2018-10-08 15:22:36.000000000
+Message: 
+Patch Set 1:
+
+> Form "man 5 ssh-config": "If hostkeys are known for the destination
+ > host then this default is modified to prefer their algorithms."[1]
+ > 
+ > So openssh also changes the order to put algorithms for which there
+ > already host keys first, unless the default has been modified or
+ > overridden via HostKeyAlgorithms. The ordering occurs _only_ if
+ > there is no HostKeyAlgorithms setting active. (Confirmed by code
+ > inspection in the openssh sources[2].)
+ > 
+ > [1] http://man.openbsd.org/OpenBSD-current/man5/ssh_config.5
+ > [2] https://github.com/openssh/openssh-portable/blob/master/sshconnect2.c#L180
+
+I fully agree and already have prepared the next patch set which does exactly that: modify the order of key types so that the known ones come first. Will push the next PS soon.
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonathan Nieder
+Date: 2018-10-08 15:34:59.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:7, /COMMIT_MSG -> In general. If your goal is to describe what is fixed by this change, the word "Fix" still doesn't help. All changes fix something. It adds zero bits of information.
+
+Plenty of existing subject lines are unhelpful, but that doesn't mean new ones should follow their lead.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonathan Nieder
+Date: 2018-10-08 15:38:09.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:7, /COMMIT_MSG -> An example from the log: "Fix fetch refspecs when not cloning all branches". That one's not so bad. :)
+
+Basically, what I'm saying is to imagine this change in a shortlog and try to guess what improvement the change will bring to the user's life. If the subject line doesn't allow you to do that, then that's the point to ask for help with coming up with a subject line for the change.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Sasa Zivkov
+Date: 2018-10-08 15:44:18.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:7, /COMMIT_MSG -> Your points are all clear to me, I am all for having good subjects. IMHO, the subject wasn't that bad and completely useless, but I will try to make it better.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Sasa Zivkov
+Date: 2018-10-08 15:54:16.000000000
+MISMATCHED INLINE COMMENT
+Line:7, /COMMIT_MSG -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonathan Nieder
+Date: 2018-10-16 20:09:54.000000000
+MISMATCHED INLINE COMMENT
+Line:7, /COMMIT_MSG -> Ack
+----------------------------------------------------------------------------------------------------------------------
+Author: Sasa Zivkov
+Date: 2018-10-08 15:54:16.000000000
+MISMATCHED INLINE COMMENT
+Line:12, /COMMIT_MSG -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Sasa Zivkov
+Date: 2018-10-08 15:54:16.000000000
+MISMATCHED INLINE COMMENT
+Line:248, org.eclipse.jgit/src/org/eclipse/jgit/transport/JschConfigSessionFactory.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Sasa Zivkov
+Date: 2018-10-08 15:54:16.000000000
+MISMATCHED INLINE COMMENT
+Line:251, org.eclipse.jgit/src/org/eclipse/jgit/transport/JschConfigSessionFactory.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Sasa Zivkov
+Date: 2018-10-08 15:54:16.000000000
+MISMATCHED INLINE COMMENT
+Line:256, org.eclipse.jgit/src/org/eclipse/jgit/transport/JschConfigSessionFactory.java -> Done
+----------------------------------------------------------------------------------------------------------------------

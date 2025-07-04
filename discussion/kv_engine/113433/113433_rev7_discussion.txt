@@ -1,0 +1,315 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-35003: Set fail-over seqno to be the end seqno of previous complete snapshot
+
+This commit changes how the flushVBucket function updates the current
+snapshot range for pending/replica vbuckets only. Note the flusher is
+shared between active/pending/replica vbuckets and as such these changes
+are live for all vbucket states, however active vbuckets always
+overwrite the snapshot range with the high flushed seqno.
+
+This description first covers some examples of how the flusher managed
+the snapshot range prior to the change.
+
+*Note*: in all of these examples the current/final snapshot is partially
+received.
+
+ex1:
+
+Before this commit the flusher very much follows what the checkpoint
+manager tells it, e.g. a partially received snapshot {4,8} resulted in
+the following disk state:
+
+  vbstate.range = {4,8}
+  seqno index = 1,2,3,4,5,6
+
+ex2:
+
+Before this commit multiple checkpoint snapshots could be flushed as a
+combined set of items, e.g. receipt of snapshots {1,3} and {4,8}
+followed by a flush results in the following disk state:
+
+  vbstate.range = {1,8}
+  seqno index = 1,2,3,4,5,6
+
+ex3:
+
+A further important example is from MB-35003 itself, in that when the
+producer switches from 'backfill' to 'in-memory' the first in-memory
+snapshot is now tagged with the 'checkpoint' flag, this was introduced
+in MB-35001.
+
+Before MB-35001 a disk followed by memory snapshot looked as follows,
+here we have {1,3, disk} and {4,8, memory}. When a snapshot is received
+without the checkpoint flag, the snapshot items just enter the current
+checkpoint. Once the flusher is past the {1,3} snapshot, the subsequent
+snapshot is just an extension of the current one, tagging snapshots with
+the checkpoint flag means a new checkpoint is opened, which can yield a
+new outcome.
+
+With MB-35001, the addition of the checkpoint flag means the following
+is now a possible outcome of the flusher:
+
+  vbstate.range = {5,8}
+  seqno index = 1,2,3,4,5,6
+
+An important outcome of this commit is what happens during replica to
+active promotion, and where we set the seqno of the fail-over table
+entry. The logic is as follows:
+
+  if (highSeqno == vbstate.range.end) {
+    newEntry.seqno = highseqno
+  } else {
+    newEntry.seqno = vbstate.range.start
+  }
+
+With the examples above, promotion to active yields the following new
+fail-over entry seqno.
+
+ex1: 4
+ex2: 1
+ex3: 5
+
+In all of these examples, because of the partial snapshot the fail-over
+entry seqo is always the start of a snapshot, and ex3 it's the start of
+an artificial checkpoint.
+
+This commit changes the outcome of all of these examples, instead of the
+start of the partial snapshot, the fail-over entry seqno will become the
+end of the last complete snapshot.
+
+To achieve this the flusher now gets more information about the set of
+items it is flushing.
+
+The checkpoint manager is changed so that the flusher receives.
+
+* The entire set of items to flush.
+* A vector of snapshot_range_t for individual checkpoint that makes up
+  the set of items.
+
+As the flusher iterates through the set of items to flush, the seqno of
+each flushed item is compared against the end seqno of each snapshot. If
+there is a match, the flusher concludes it has all the items of that
+particular snapshot and it can now change the start seqno of the
+vbucket's range to be that of the completed snapshot.
+
+Each example from above now changes to have the following outcomes.
+
+ex1:
+  vbstate.range = {3,8}
+  seqno index = 1,2,3,4,5,6
+
+  fail-over = 3
+
+ex2:
+  vbstate.range = {3,8}
+  seqno index = 1,2,3,4,5,6
+
+  fail-over = 3
+
+ex3:
+  vbstate.range = {3,8}
+  seqno index = 1,2,3,4,5,6
+
+  fail-over = 3
+
+A final notable difference that this commit makes is that once the
+flusher has absolutely flushed to the very end of the range, the state
+now looks as follows.
+
+  vbstate.range = {8,8}
+  seqno index = 1,2,3,4,5,6,7,8
+
+I.e. start = end = high-seqno
+
+There seems to be no advantage to adapting the flusher further to
+maintain the prior behaviour, where in an absolutely flushed scenario we
+maintain the range.start to reflect some lower value. In all failure and
+fail-over scenarios, when the high-seqno matches the range.end, the
+range.start is not used.
+
+Change-Id: I54e3851378a9e19ad350fc17741fa19dfa69b2fa
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jim Walker
+Date: 2019-08-20 07:41:07.000000000
+Message: 
+Uploaded patch set 7.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-08-20 08:23:12.000000000
+Message: 
+Patch Set 7: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/13696/ : FAILURE
+
+Failure of a GoogleTest test:
+
+DurabilityTest.MB34780 (53826 ms) ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/13696/ )
+
+Failure of a CTest test 178/179 Test #174: cluster_test ................................................................. ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/13696/ )
+
+ThreadSanitizer issue: signal-unsafe call inside of a signal (/home/couchbase/jenkins/workspace/kv_engine-threadsanitizer-master/install/lib/libtsan.so.0+0x274e1) in __interceptor_malloc  ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/13696/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/21824/ : FAILURE
+
+One of more core files found at the end of the build. Data for post-mortem saved to archived_core_dumps.tar.bz2 under "Build Artifacts". ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/21824/ )
+
+Failure of a GoogleTest test:
+
+DurabilityTest.MB34780 (574 ms) ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/21824/ )
+
+Failure of a CTest test  33/200 Test  #35: ep_testsuite.full_eviction.rocksdb ........................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/21824/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/6446/ : FAILURE
+
+Timeout of a CTest test [2019-08-20T08:23:09.809Z] 181/181 Test  #25: ep-engine_ep_unit_tests ......................................................} ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/6446/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/19447/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/22753/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/3485/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/20437/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/12753/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-08-20 10:13:37.000000000
+Message: 
+Patch Set 7:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/22758/ : FAILURE
+
+Failure of a CTest test  33/184 Test  #33: ep_testsuite_basic.full_eviction.comp_passive ................................ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/22758/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/13703/ : FAILURE
+
+Failure of a GoogleTest test:
+
+DurabilityTest.MB34780 (52040 ms) ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/13703/ )
+
+Failure of a CTest test 178/179 Test #174: cluster_test ................................................................. ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/13703/ )
+
+ThreadSanitizer issue: signal-unsafe call inside of a signal (/home/couchbase/jenkins/workspace/kv_engine-threadsanitizer-master/install/lib/libtsan.so.0+0x274e1) in __interceptor_malloc  ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/13703/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/6452/ : FAILURE
+
+AddressSanitizer issue: 2281612 byte(s) leaked in 1936 allocation(s). ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/6452/ )
+
+Failure of a CTest test [2019-08-20T10:08:50.125Z]  43/181 Test  #35: ep_testsuite_basic.full_eviction.comp_passive ................................Child aborted ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/6452/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/21829/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/19452/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/3490/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/20442/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/12758/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-08-20 13:15:02.000000000
+Message: 
+Patch Set 7: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-08-20 14:02:37.000000000
+Message: 
+Patch Set 7:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/22771/ : FAILURE
+
+Failure of a GoogleTest test:
+
+TransportProtocols/TouchTest.Gat_Hit/Mcbp, where GetParam() = Mcbp (1 ms) ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/22771/ )
+
+Failure of a CTest test 172/184 Test #173: memcached_testapp.ep.TransportProtocols/TouchTest ............................ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/22771/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/21842/ : FAILURE
+
+Failure of a GoogleTest test:
+
+CleanOrUnclean/PersistToTest.ConsistentStateAfterShutdown/Clean, where GetParam() = Clean (261 ms) ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/21842/ )
+
+Failure of a CTest test 178/200 Test #177: memcached_testapp.ep.CleanOrUnclean/PersistToTest ............................ ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/21842/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/6462/ : FAILURE
+
+AddressSanitizer issue: 2281622 byte(s) leaked in 1936 allocation(s). ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/6462/ )
+
+Failure of a CTest test [2019-08-20T13:58:41.838Z]  45/181 Test  #35: ep_testsuite_basic.full_eviction.comp_passive ................................Child aborted ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/6462/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/19461/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/13714/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/3503/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/20451/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/12768/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-08-20 14:56:30.000000000
+Message: 
+Patch Set 7:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/21846/ : FAILURE
+
+Failure of a CTest test  35/200 Test  #36: ep_testsuite_basic.value_eviction.comp_passive ............................... ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/21846/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/6466/ : FAILURE
+
+AddressSanitizer issue: 2281611 byte(s) leaked in 1936 allocation(s). ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/6466/ )
+
+Failure of a CTest test [2019-08-20T14:50:45.588Z]  46/181 Test  #34: ep_testsuite_basic.value_eviction.comp_active ................................Child aborted ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/6466/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/22778/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/19465/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/13719/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/3507/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/20455/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/12772/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-08-20 16:02:04.000000000
+Message: 
+Patch Set 7: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/22778/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/19465/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/13719/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/3507/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/20455/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/12772/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/6467/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/21847/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

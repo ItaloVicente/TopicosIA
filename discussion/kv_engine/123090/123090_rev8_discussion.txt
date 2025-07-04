@@ -1,0 +1,126 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-37798: Read vbstate from disk for scans
+
+MB-35631 changed when cachedVBState gets updated so the latest vbstate
+is found on disk, not in the cache. Scans should use the latest
+vbstate. To fix this, we need to add a new function that reads vbstate
+from disk without loading the cache. To do this, we'll rename the
+existing function, readVBStateFromDisk to loadVBStateCache and repurpose
+the old function to just reading the vbstate from disk.
+
+The test added reflects the current broken state of dcp scans which
+don't retain the scan snapshot. That will be fixed in a subsequent
+checkin.
+
+Change-Id: If9771c6c66f234b32f04816b709489cd1a4dfe70
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Scott Lashley
+Date: 2020-03-04 23:08:33.000000000
+Message: 
+Uploaded patch set 8: Patch Set 7 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-03-05 00:06:05.000000000
+Message: 
+Patch Set 8: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/22759/ : ABORTED
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/22759/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/26623/ : FAILURE
+
+Failure of a CTest test  54/192 Test  #53: ep_testsuite_dcp.full_eviction.magma ......................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/26623/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/940/ : FAILURE
+
+<p>clang-tidy suggested the following changes:
+
+<pre>
+
+cat &lt;&lt;&quot;EOF&quot; | patch -p1
+diff --git a/engines/ep/tests/module_tests/kvstore_test.cc b/engines/ep/tests/module_tests/kvstore_test.cc
+index 208a10e..743809b 100644
+--- a/engines/ep/tests/module_tests/kvstore_test.cc
++++ b/engines/ep/tests/module_tests/kvstore_test.cc
+@@ -2940,7 +2940,7 @@ public:
+           endSeqno(endSeqno),
+           enomemSeqno(enomemSeqno){};
+ 
+-    void callback(GetValue&amp; result) {
++    void callback(GetValue&amp; result) override {
+         EXPECT_LE(startSeqno, result.item-&gt;getBySeqno());
+         EXPECT_LE(result.item-&gt;getBySeqno(), endSeqno);
+         if (!didEnomem &amp;&amp; result.item-&gt;getBySeqno() == enomemSeqno) {
+EOF
+
+</pre> ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/940/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/2280/ : FAILURE
+
+Failure of a CTest test [2020-03-04T23:16:09.296Z]  75/198 Test  #56: ep_testsuite_dcp.full_eviction.rocksdb ....................................... ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/2280/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/10159/ : FAILURE
+
+Failure of a CTest test [2020-03-04T23:56:37.895Z]  35/199 Test  #48: ep_testsuite_dcp.value_eviction.comp_passive .................................Child aborted ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/10159/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/25017/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/15816/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/1376/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/2318/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/2343/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2020-03-05 09:19:16.000000000
+Message: 
+Patch Set 8: Code-Review-1
+
+(1 comment)
+Line:67, engines/ep/src/magma-kvstore/magma-kvstore.h -> This is identical to the reset code below.
+
+Note I added reset because it is preferential to have an explicit assignment which allows violation of the monoticity... having an assignment operator now allows for easy mistakes where we can set the kvstore rev to any value opening up the possibility for the kvstoreRev to go backwards from simple code.
+
+In the situation are addressing, you only need to be able to break monoticity because you are doing 1 = 1, I'd say kvstoreRev.reset() and do something like, here we are ignoring the equals case and calling Monotonic assignment when not equal, which will throw if this assignment tries to move the revision back, and is success when moving the rev forward
+
+  if (other.kvstoreRev == kvstoreRev) {
+    return *this;
+  }
+  kvstoreRev = other.kvStoreRev;
+  return *this;
+
+With that in-place it is now much harder for a future engineer to break the Magma code, e.g.
+
+  *cachedMagmaInfo[vbid.get()] = myNewInfo;
+
+This code compiles, but stops me violating monoticity.
+
+Same comment for move assign
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-03-05 10:10:23.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:67, engines/ep/src/magma-kvstore/magma-kvstore.h -> Agreee. As a follow-up - I think it's fine to have the copy / move constructors to copy the elements, as we are creating a new object and hence there's no monotonicity to break.
+
+As such, if you can structure your code such that you only need to construct objects and not copy them then you can simply remove the assignment operator.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Scott Lashley
+Date: 2020-03-06 17:08:16.000000000
+Message: 
+Abandoned
+----------------------------------------------------------------------------------------------------------------------

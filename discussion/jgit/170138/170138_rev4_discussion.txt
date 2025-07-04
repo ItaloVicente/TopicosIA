@@ -1,0 +1,200 @@
+======================================================================================================================
+DESCRIPTION:
+
+Cache FileStore per FileRepository
+
+Files.getFileStore(Path) has been found to be slow on some platforms.
+
+It was always called when retrieving FileStoreAttributes for
+FileSnapshot and LockFile if the FileAttributes aren't available in the
+FileAttributesCache. This can happen e.g. when creating a large number
+of new loose refs.
+
+Therefore cache the FileStore per repository, assuming a repository is
+always stored in a single FileStore. This helps to avoid a large number
+of calls to Files.getFileStore(Path).
+
+See https://www.eclipse.org/lists/jgit-dev/msg03965.html
+
+Change-Id: I29540071a94983cf61ef9ea3502e088ddc15ae00
+Signed-off-by: Matthias Sohn <matthias.sohn@sap.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Matthias Sohn
+Date: 2020-10-17 17:37:49.000000000
+Message: 
+Uploaded patch set 4.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2020-10-17 17:37:55.000000000
+Message: 
+Patch Set 4:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/3742/
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2020-10-17 17:40:27.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2020-10-17 18:23:17.000000000
+Message: 
+Patch Set 4: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/3742/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Kaushik Lingarkar
+Date: 2020-10-21 22:56:29.000000000
+Message: 
+Patch Set 4: Code-Review+1
+
+Thanks for making this optimization Matthias!
+----------------------------------------------------------------------------------------------------------------------
+Author: Martin Fick
+Date: 2020-10-27 19:36:29.000000000
+Message: 
+Patch Set 4:
+
+I like this change and it likely addresses most use cases well. The code looks good.
+
+One use case that I am concerned with and would like to get performance numbers for is the Gerrit ls-projects command. On large Gerrit installations this command may access over 20K repos sequentially and this caching approach will likely not help that scenario if the scenario triggers this lookup (not sure if it does).
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2020-11-01 23:25:17.000000000
+Message: 
+Patch Set 4:
+
+> Patch Set 4:
+> 
+> I like this change and it likely addresses most use cases well. The code looks good.
+> 
+> One use case that I am concerned with and would like to get performance numbers for is the Gerrit ls-projects command. On large Gerrit installations this command may access over 20K repos sequentially and this caching approach will likely not help that scenario if the scenario triggers this lookup (not sure if it does).
+
+I added logging in jgit and tried on a test site. After starting the site I ran gerrit ls-projects. It loads the FileStore once per repository (also if gerrit.listProjectsFromIndex = true). When repeating the command there is no more access to Files.getFileStore() this shows it's now using the cached FileStore instances.
+----------------------------------------------------------------------------------------------------------------------
+Author: Martin Fick
+Date: 2020-11-02 21:09:44.000000000
+Message: 
+Patch Set 4:
+
+> Patch Set 4:
+> 
+> > Patch Set 4:
+> > 
+> > I like this change and it likely addresses most use cases well. The code looks good.
+> > 
+> > One use case that I am concerned with and would like to get performance numbers for is the Gerrit ls-projects command. On large Gerrit installations this command may access over 20K repos sequentially and this caching approach will likely not help that scenario if the scenario triggers this lookup (not sure if it does).
+> 
+> I added logging in jgit and tried on a test site. After starting the site I ran gerrit ls-projects. It loads the FileStore once per repository (also if gerrit.listProjectsFromIndex = true). When repeating the command there is no more access to Files.getFileStore() this shows it's now using the cached FileStore instances.
+
+This sounds like it can indeed still be a problem for ls-projects commands on large sites. Since the getFileStore() command could take up to 1s on some servers, on such a server with 20K projects, that would work out to 20Ks ~ 5.5hours! 
+
+Might there be some way to make the repositories share the getFileStore(), or is there some way to make use of the bulk getFileStores() lookup (I couldn't fine a way)? I was thinking that it would be nice if we could do the getFileStore() lookup in the background somehow, but I don't think that would really help since we would still need 20K of them, and that would still end up taking 5.5hours, even if those hours aren't inline with user commands. This is a tough problem. :(
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2020-11-03 00:29:47.000000000
+Message: 
+Patch Set 4:
+
+> Patch Set 4:
+> 
+> > Patch Set 4:
+> > 
+> > > Patch Set 4:
+> > > 
+> > > I like this change and it likely addresses most use cases well. The code looks good.
+> > > 
+> > > One use case that I am concerned with and would like to get performance numbers for is the Gerrit ls-projects command. On large Gerrit installations this command may access over 20K repos sequentially and this caching approach will likely not help that scenario if the scenario triggers this lookup (not sure if it does).
+> > 
+> > I added logging in jgit and tried on a test site. After starting the site I ran gerrit ls-projects. It loads the FileStore once per repository (also if gerrit.listProjectsFromIndex = true). When repeating the command there is no more access to Files.getFileStore() this shows it's now using the cached FileStore instances.
+> 
+> This sounds like it can indeed still be a problem for ls-projects commands on large sites. Since the getFileStore() command could take up to 1s on some servers, on such a server with 20K projects, that would work out to 20Ks ~ 5.5hours! 
+
+Any idea why some servers need such a long time to determine which FileStore a file is residing in ?
+If you have a server behaving like that: could you try to profile Files.getFileStore() to find out what might be the root cause for such bad performance ?
+
+> Might there be some way to make the repositories share the getFileStore(), or is there some way to make use of the bulk getFileStores() lookup (I couldn't fine a way)? I was thinking that it would be nice if we could do the getFileStore() lookup in the background somehow, but I don't think that would really help since we would still need 20K of them, and that would still end up taking 5.5hours, even if those hours aren't inline with user commands. This is a tough problem. :(
+
+We could try to teach ls-projects to use multiple threads at least in the first call ?
+
+Can we meanwhile submit this change which is for sure an improvement for many other situations ?
+----------------------------------------------------------------------------------------------------------------------
+Author: Martin Fick
+Date: 2020-11-03 00:43:27.000000000
+Message: 
+Patch Set 4:
+
+> Patch Set 4:
+> 
+> > Patch Set 4:
+> > 
+> > > Patch Set 4:
+> > > 
+> > > > Patch Set 4:
+> > > > 
+> > > > I like this change and it likely addresses most use cases well. The code looks good.
+> > > > 
+
+> Any idea why some servers need such a long time to determine which FileStore a file is residing in ?
+> If you have a server behaving like that: could you try to profile Files.getFileStore() to find out what might be the root cause for such bad performance ?
+
+I don't, but I will try to investigate more.
+
+> > Might there be some way to make the repositories share the getFileStore(), or is there some way to make use of the bulk getFileStores() lookup (I couldn't fine a way)? I was thinking that it would be nice if we could do the getFileStore() lookup in the background somehow, but I don't think that would really help since we would still need 20K of them, and that would still end up taking 5.5hours, even if those hours aren't inline with user commands. This is a tough problem. :(
+> 
+> We could try to teach ls-projects to use multiple threads at least in the first call ?
+
+That's what I was sort of proposing, but I don't think it will really solve the problem well, only for those with super high end machines. It is more and more important for startup to be fast as we enter the auto-scaling cloud age.
+
+> Can we meanwhile submit this change which is for sure an improvement for many other situations ?
+
+My concern is that this introduces new APIs that we will need to support even if this approach ends up being very different than an approach that solves the problem for everything. I am concerned that we fundamentally should not be calling getFileStore() and need to find an alternative. I don't have a great understanding of why we call it and what alternatives would be, but I think we should look for them. Calling getFileStore() doesn't feel very clean, and adding another layer to deal with its performance problem only partially feels not very clean either.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2020-11-03 10:29:08.000000000
+Message: 
+Patch Set 4:
+
+> Patch Set 4:
+> 
+> > Patch Set 4:
+> > 
+> > > Patch Set 4:
+> > > 
+> > > > Patch Set 4:
+> > > > 
+> > > > > Patch Set 4:
+> > > > > 
+> > > > > I like this change and it likely addresses most use cases well. The code looks good.
+> > > > > 
+> 
+> > Any idea why some servers need such a long time to determine which FileStore a file is residing in ?
+> > If you have a server behaving like that: could you try to profile Files.getFileStore() to find out what might be the root cause for such bad performance ?
+> 
+> I don't, but I will try to investigate more.
+> 
+> > > Might there be some way to make the repositories share the getFileStore(), or is there some way to make use of the bulk getFileStores() lookup (I couldn't fine a way)? I was thinking that it would be nice if we could do the getFileStore() lookup in the background somehow, but I don't think that would really help since we would still need 20K of them, and that would still end up taking 5.5hours, even if those hours aren't inline with user commands. This is a tough problem. :(
+> > 
+> > We could try to teach ls-projects to use multiple threads at least in the first call ?
+> 
+> That's what I was sort of proposing, but I don't think it will really solve the problem well, only for those with super high end machines. It is more and more important for startup to be fast as we enter the auto-scaling cloud age.
+> 
+> > Can we meanwhile submit this change which is for sure an improvement for many other situations ?
+> 
+> My concern is that this introduces new APIs that we will need to support even if this approach ends up being very different than an approach that solves the problem for everything. I am concerned that we fundamentally should not be calling getFileStore() and need to find an alternative. I don't have a great understanding of why we call it and what alternatives would be, but I think we should look for them. Calling getFileStore() doesn't feel very clean, and adding another layer to deal with its performance problem only partially feels not very clean either.
+
+Calling getFileStore() was introduced to fix performance issues caused by hard-coded worst-case assumption about the timestamp resolution of file timestamps [1] (previously we assumed timestamp resolution is 2.5sec). Since that patch series JGit measures timestamp resolution per filesystem.
+If more than one filesystem is involved we need to know which one is used for a given repository otherwise we don't know which timestamp resolution must be used.
+In order to find out which filesystem is used we call Files.getFileStore() which is the Java API to get this information. This change reduces the number of calls to this method by assuming that each repository is stored on a single filesystem.
+
+I don't have any system showing slow getFileStore() so I can't dig deeper into finding the root cause of its slowness. We could try to review the source code of the actual Java filesystem provider implementations (at least those which come with Java out of the box).
+
+[1] https://twitter.com/masohn/status/1323302483117092866
+----------------------------------------------------------------------------------------------------------------------

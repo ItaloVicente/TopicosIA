@@ -1,0 +1,167 @@
+======================================================================================================================
+DESCRIPTION:
+
+lttng: Fix null annotation error on Eclipse 4.5.x
+
+getAnalysisModuleOfClass returns a Nullable module, this nullable should
+be kept all the way to the Optional returned by findFirst. In 4.5.x,
+this works correctly and the result of findFirst cannot be assigned to
+an Optional<@NonNull>, hence the error. In 4.6, the @Nullable is lost
+along the way and the result of findFirst can be assigned without error
+to an Optional<@NonNull>.
+
+Change-Id: If544f9372e2132f5796074f197a7ae01679fe1da
+Signed-off-by: Marc-Andre Laperle <marc-andre.laperle@ericsson.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Matthew Khouzam
+Date: 2016-02-25 19:11:13.000000000
+Message: 
+Uploaded patch set 2: Patch Set 1 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthew Khouzam
+Date: 2016-02-25 19:11:57.000000000
+Message: 
+Patch Set 2: Code-Review+2 Verified+1
+
+Sorry, I was so exciting that this patch fixes my eclipse I kept it in my git.
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2016-02-25 19:19:00.000000000
+Message: 
+Patch Set 2:
+
+One sec, I know what the problem is, and I think it's not what you think ;) (comment incoming)
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2016-02-25 19:23:18.000000000
+Message: 
+Patch Set 2:
+
+Build Started https://hudson.eclipse.org/tracecompass/job/tracecompass-gerrit/6488/
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2016-02-25 19:28:02.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:83, lttng/org.eclipse.tracecompass.lttng2.kernel.core/src/org/eclipse/tracecompass/internal/lttng2/kernel/core/analysis/graph/model/LttngWorker.java -> TmfTraceUtils.getAnalysisModuleOfClass() returns a @Nullable module, that's true, but here we take all nulls out. So effectively that should be become a Stream<(non-null) KernelAnalysisModule>.
+
+What was done elsewhere in such cases is to add
+
+  .map(mod -> checkNotNull(mod))
+
+immediately after. That would change the type to Stream<@NonNull KernelAnalysisModule>, since  checkNotNull() returns a @NonNull.
+
+However when I did this patch, doing that didn't work. I didn't pay attention to it, but now that you mention it again, I think it's that that is broken with 4.6.
+
+"that" being: doing map(i -> (something that returns @NonNull)) does not get the @NonNull through the other function call anymore.
+
+I think the same problem is also what causes the Collectors.toList() external annotation to not work anymore:
+
+  .collect(Collectors.toList())
+
+even though we annotated Collectors.toList() to return a @NonNull List, when it goes through collect() it loses the @NonNull.
+
+It really feels like a bug in 4.6's JDT.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2016-02-25 19:33:48.000000000
+Message: 
+Patch Set 2:
+
+I don't have a 4.5 Eclipse handy, but I think if you add the following map() call:
+
+  .filter(mod -> mod != null)
+  .map(mod -> checkNotNull(mod))
+  .findFirst();
+
+it should fix the error you are seeing.
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc-André Laperle
+Date: 2016-02-25 19:35:52.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:83, lttng/org.eclipse.tracecompass.lttng2.kernel.core/src/org/eclipse/tracecompass/internal/lttng2/kernel/core/analysis/graph/model/LttngWorker.java -> Yes, I'm going to report the bug against 4.6 JDT. Whether or not you checkNotNull, the constrains are lost along the way.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc-André Laperle
+Date: 2016-02-25 19:46:40.000000000
+Message: 
+Patch Set 2:
+
+> I don't have a 4.5 Eclipse handy, but I think if you add the
+ > following map() call:
+ > 
+ > .filter(mod -> mod != null)
+ > .map(mod -> checkNotNull(mod))
+ > .findFirst();
+ > 
+ > it should fix the error you are seeing.
+
+It doesn't work. I assume because in the map method it's the same "R" in and out and you can't have different type annotations on them (non-explicitly)?
+
+Null type mismatch (type annotations): required 'Optional<@NonNull KernelAnalysisModule>' but this expression has type 'Optional<@Nullable KernelAnalysisModule>'
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2016-02-25 20:03:03.000000000
+Message: 
+Patch Set 2: Code-Review+1
+
+Build Successful 
+
+https://hudson.eclipse.org/tracecompass/job/tracecompass-gerrit/6488/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc-André Laperle
+Date: 2016-02-25 20:19:41.000000000
+Message: 
+Patch Set 2:
+
+> > I don't have a 4.5 Eclipse handy, but I think if you add the
+ > > following map() call:
+ > >
+ > > .filter(mod -> mod != null)
+ > > .map(mod -> checkNotNull(mod))
+ > > .findFirst();
+ > >
+ > > it should fix the error you are seeing.
+ > 
+ > It doesn't work. I assume because in the map method it's the same
+ > "R" in and out and you can't have different type annotations on
+ > them (non-explicitly)?
+ > 
+ > Null type mismatch (type annotations): required 'Optional<@NonNull
+ > KernelAnalysisModule>' but this expression has type
+ > 'Optional<@Nullable KernelAnalysisModule>'
+
+I'm pretty confused now and I don't really know what it should do anymore. In any case, I opened this bug https://bugs.eclipse.org/bugs/show_bug.cgi?id=488495 and we'll see
+----------------------------------------------------------------------------------------------------------------------
+Author: Patrick Tasse
+Date: 2016-02-25 20:53:02.000000000
+Message: 
+Patch Set 2: Code-Review+2 Verified+1
+
+> I don't really know what it should do anymore.
+
+Regardless, I think your patch is the right way to go (if you insist on using streams...).
+
+Even if it compiled, it would be wasteful in this particular case to add an extra .map() operation on the stream just so that you could temporarily change the null-annotation type that gets lost anyways once you call Optional.get()!
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2016-02-25 20:57:54.000000000
+Message: 
+Patch Set 2:
+
+Yeah patch is fine, I think all we can do now is follow bug 488495.
+----------------------------------------------------------------------------------------------------------------------
+Author: Gerrit Code Review
+Date: 2016-02-25 22:59:54.000000000
+Message: 
+Change has been successfully cherry-picked as b6fb4b5e0a81830a8623c96124bbe4413df7ff11 by Marc-Andre Laperle
+----------------------------------------------------------------------------------------------------------------------

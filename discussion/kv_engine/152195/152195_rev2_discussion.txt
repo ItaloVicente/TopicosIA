@@ -1,0 +1,178 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-45917: Use correct "diskSize" for compaction after an upgrade
+
+The collection diskSize does not exist in 6.5 couchstore files, so
+the code uses dbinfo.space_used (as only the default collection
+exists, this is a reasonable over-estimate).
+
+During 7.0 compaction the collection diskSize stat must be updated
+if tombstones are purged and MB-45917 identified a problem in
+compaction where the collection stats are read from the new file,
+which is generally fine except in the case where an upgrade just
+occurred, because the disk-size is set to the space_used of the
+compacted file.
+
+If compaction has just purged many tombstones the space_used can be
+small and the purged-byte counter large -> underflow.
+
+Fix this by updating couchstore so that both source/target Db& are
+passed to the precommit hook and then read the stats from the source.
+Now we will subtract from a large size and not underflow the disk
+size.
+
+A second fix is included that was found in the added unit-test where
+the on_disk_prepares was accessed but not present. This could be an
+issue with the unit test hooks, but the code is now more robust if a
+path is possible where we get to 7.0 without that field present in
+vbstate.
+
+Change-Id: I7b00f75738c024b91acbefb8b4eb7f739fa185cd
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jim Walker
+Date: 2021-04-27 11:19:53.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-04-27 11:56:52.000000000
+Message: 
+Patch Set 2: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/35295/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/35295/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/8539/ : FAILURE
+
+<p>clang-tidy suggested the following changes:
+<pre>
+
+cat &lt;&lt;&quot;EOF&quot; | patch -p1
+diff --git a/engines/ep/tests/module_tests/couch-kvstore_test.cc b/engines/ep/tests/module_tests/couch-kvstore_test.cc
+index 3ffde2562..39f52f7d5 100644
+--- a/engines/ep/tests/module_tests/couch-kvstore_test.cc
++++ b/engines/ep/tests/module_tests/couch-kvstore_test.cc
+@@ -341,7 +341,7 @@ void CouchKVStoreTest::collectionsOfflineUpgrade(
+ 
+     // Test that the datafile can be compacted.
+     // MB-45917
+-    CompactionConfig config{0, 0, true /*purge all tombstones*/, 0};
++    CompactionConfig config{0, 0, true /*purge all tombstones*/, false};
+     runCompaction(*kvstore2.rw, config);
+ }
+ 
+EOF
+
+</pre> ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/8539/ )
+
+clang-tidy found the following problems:
+
+<pre>
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy/kv_engine/engines/ep/tests/module_tests/couch-kvstore_test.cc:344:66: warning: converting integer literal to bool, use bool literal instead [modernize-use-bool-literals]
+    CompactionConfig config{0, 0, true /*purge all tombstones*/, 0};
+                                                                 ^
+                                                                 false
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy/kv_engine/engines/ep/tests/module_tests/couch-kvstore_test.cc:344:66: note: FIX-IT applied suggested code changes
+clang-tidy suggested the following changes:
+
+cat &lt;&lt;&quot;EOF&quot; | patch -p1
+diff --git a/engines/ep/tests/module_tests/couch-kvstore_test.cc b/engines/ep/tests/module_tests/couch-kvstore_test.cc
+index 3ffde2562..39f52f7d5 100644
+--- a/engines/ep/tests/module_tests/couch-kvstore_test.cc
++++ b/engines/ep/tests/module_tests/couch-kvstore_test.cc
+@@ -341,7 +341,7 @@ void CouchKVStoreTest::collectionsOfflineUpgrade(
+ 
+     // Test that the datafile can be compacted.
+     // MB-45917
+-    CompactionConfig config{0, 0, true /*purge all tombstones*/, 0};
++    CompactionConfig config{0, 0, true /*purge all tombstones*/, false};
+     runCompaction(*kvstore2.rw, config);
+ }
+ 
+EOF
+
+</pre> ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/8539/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/9138/ : FAILURE
+
+Failure of GoogleTest "MagmaKVStoreRollbackTest.Rollback":
+
+<pre>
+[ RUN      ] MagmaKVStoreRollbackTest.Rollback
+[2021-04-27T11:26:21.727Z] [       OK ] MagmaKVStoreRollbackTest.Rollback (89 ms)
+[2021-04-27T11:26:21.727Z] [ RUN      ] MagmaKVStoreRollbackTest.RollbackNoValidCheckpoint
+[2021-04-27T11:26:21.727Z] ../kv_engine/engines/ep/tests/module_tests/magma-kvstore_test.cc:126: Failure
+[2021-04-27T11:26:21.727Z] Value of: rollbackResult.success
+[2021-04-27T11:26:21.727Z]   Actual: true
+[2021-04-27T11:26:21.727Z] Expected: false
+[2021-04-27T11:26:21.727Z] [  FAILED  ] MagmaKVStoreRollbackTest.RollbackNoValidCheckpoint (59 ms)
+MagmaKVStoreRollbackTest.Rollback
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/9138/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/10211/ : FAILURE
+
+Failure of GoogleTest "MagmaKVStoreRollbackTest.Rollback":
+
+<pre>
+[ RUN      ] MagmaKVStoreRollbackTest.Rollback
+[2021-04-27T11:25:45.518Z] [       OK ] MagmaKVStoreRollbackTest.Rollback (61 ms)
+[2021-04-27T11:25:45.518Z] [ RUN      ] MagmaKVStoreRollbackTest.RollbackNoValidCheckpoint
+[2021-04-27T11:25:45.518Z] ../kv_engine/engines/ep/tests/module_tests/magma-kvstore_test.cc:126: Failure
+[2021-04-27T11:25:45.518Z] Value of: rollbackResult.success
+[2021-04-27T11:25:45.518Z]   Actual: true
+[2021-04-27T11:25:45.518Z] Expected: false
+[2021-04-27T11:25:45.518Z] [  FAILED  ] MagmaKVStoreRollbackTest.RollbackNoValidCheckpoint (133 ms)
+MagmaKVStoreRollbackTest.Rollback
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/10211/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/10460/ : FAILURE
+
+Failure of GoogleTest "MagmaKVStoreRollbackTest.Rollback":
+
+<pre>
+[ RUN      ] MagmaKVStoreRollbackTest.Rollback
+[2021-04-27T11:23:54.583Z] [       OK ] MagmaKVStoreRollbackTest.Rollback (154 ms)
+[2021-04-27T11:23:54.583Z] [ RUN      ] MagmaKVStoreRollbackTest.RollbackNoValidCheckpoint
+[2021-04-27T11:23:54.583Z] ../kv_engine/engines/ep/tests/module_tests/magma-kvstore_test.cc:126: Failure
+[2021-04-27T11:23:54.583Z] Value of: rollbackResult.success
+[2021-04-27T11:23:54.583Z]   Actual: true
+[2021-04-27T11:23:54.583Z] Expected: false
+[2021-04-27T11:23:54.583Z] [  FAILED  ] MagmaKVStoreRollbackTest.RollbackNoValidCheckpoint (375 ms)
+MagmaKVStoreRollbackTest.Rollback
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/10460/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/18011/ : FAILURE
+
+Failure of GoogleTest "MagmaKVStoreRollbackTest.Rollback":
+
+<pre>
+[ RUN      ] MagmaKVStoreRollbackTest.Rollback
+[2021-04-27T11:32:11.543Z] [       OK ] MagmaKVStoreRollbackTest.Rollback (77 ms)
+[2021-04-27T11:32:11.543Z] [ RUN      ] MagmaKVStoreRollbackTest.RollbackNoValidCheckpoint
+[2021-04-27T11:32:11.543Z] ../kv_engine/engines/ep/tests/module_tests/magma-kvstore_test.cc:126: Failure
+[2021-04-27T11:32:11.543Z] Value of: rollbackResult.success
+[2021-04-27T11:32:11.543Z]   Actual: true
+[2021-04-27T11:32:11.543Z] Expected: false
+[2021-04-27T11:32:11.543Z] [  FAILED  ] MagmaKVStoreRollbackTest.RollbackNoValidCheckpoint (139 ms)
+MagmaKVStoreRollbackTest.Rollback
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/18011/ )
+
+One of more core files found at the end of the build. Data for post-mortem saved to archived_core_dumps.tar.bz2 under "Build Artifacts". ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/18011/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/30194/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/7089/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/10068/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

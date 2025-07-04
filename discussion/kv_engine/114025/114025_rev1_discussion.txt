@@ -1,0 +1,179 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-35744 [SR]: Complete all resolved SyncWrites on vbState change
+
++Problem+
+
+If a vbucket is changed from active when there are SyncWrites which
+have been resolved (i.e. we have decided to commit / abort) but *not*
+yet completed, then the commit/abort never happens
+(DurabilityCompletionTask ignores non-active VBs).
+
+As a consequence, the vBucket is in an inconsistent state - it will
+still have the prepared SyncWrite in the HashTable, but no matching
+prepare in the DM trackedWrites.
+
+If this vBucket then becomes a replica, an error is seen when
+receiving DCP mutations from the new active - when that sends the
+DCP_COMMIT/ DCP_ABORT for the given prepare, a prepare _is_ found in
+the HashTable, but the call to
+PassiveDurabilityMonitor::completeSyncWrite() will fail as there is no
+item in the trackedWrites:
+
+    ERROR 149: exception occurred in runloop during packet execution.
+    ...
+    PassiveDurabilityMonitor::completeSyncWrite vb:368 No tracked, but received commit for key <ud>cid:0x0:00000000000000001037</ud>
+
+This results in a failed rebalance (as the DCP connection is closed).
+
+This problem was introduced by the asynchronous completion of
+SyncWrites (in f6ed489642) - prior to that patch the resolved items we
+immediately committed so it wasn't possible for there to be any
+outstanding when the vBucket state changed.
+
++Solution+
+
+Address this by ensuring that any resolved (but not completed)
+SyncWrites are completed before we change away from active in
+VBucket::setState_UNLOCKED().
+
+Note that VBucket::setState_UNLOCKED() must have acquired an exclusive
+lock on the vbStateLock, and hence there cannot be an instance of
+DurabilityCompletionTask already procesing the vBuckets' resolved
+SyncWrites.
+
+Change-Id: Ic04ec422a8490f6c53e1fc7ee719383caced3462
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2019-08-29 14:54:31.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-08-29 15:28:49.000000000
+Message: 
+Patch Set 1: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/22983/ : FAILURE
+
+Failure of a CTest test  33/184 Test  #33: ep_testsuite_basic.full_eviction.comp_passive ................................ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/22983/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/19629/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/22018/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/3705/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/20648/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/12929/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/13924/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/6654/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-08-29 20:32:01.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/19629/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/22018/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/3705/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/20648/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/12929/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/13924/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/6654/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/23005/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-08-29 20:51:55.000000000
+Message: 
+Patch Set 1:
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/19629/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/22018/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/3705/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/20648/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/12929/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/13924/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/6654/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/23007/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2019-08-30 09:26:34.000000000
+Message: 
+Patch Set 1: Code-Review+1
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2019-08-30 09:43:30.000000000
+Message: 
+Patch Set 1: Code-Review-1
+
+(3 comments)
+Line:34, /COMMIT_MSG -> were
+
+Line:46, /COMMIT_MSG -> processing
+
+Line:557, engines/ep/src/vbucket.cc -> Is it worth noting somewhere that this might result in a rollback if we are becoming a replica? This would be a new case where the logs will show a rollback during a "routine" rebalance without a failover before.
+
+(If it even does cause a rollback, I may have misremembered what would go on from yesterday)
+
+Actually, (conjecture time!) if it /doesn't/ cause a rollback, could we ever get in a state where:
+ node A commits a prepare, becomes a replica
+ B becomes active and decides to abort the same prepare
+ vbuuid had not changed because there was no failover
+ A opens stream, does not rollback
+ A has a commit at the same seqno B has an abort
+ inconsistency?
+
+Only 1/2 coffees so far so there may be a glaring hole in the conjecture, but thought it was worth mentioning as a point of thought :)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-08-30 10:25:56.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:557, engines/ep/src/vbucket.cc -> It won't result in a rollback, as we are completing the SyncWrites /before/ we actually change the state to dead (and hence we should stream the remaining mutations to the destination replica.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2019-08-30 10:27:57.000000000
+Message: 
+Patch Set 1: Code-Review+1
+
+(1 comment)
+Line:557, engines/ep/src/vbucket.cc -> Ahhh good - I was thinking we were "to late" in the takeover e.g., might be tearing streams down etc. :phew:
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Daniel Owen
+Date: 2019-08-30 10:32:45.000000000
+Message: 
+Patch Set 1: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------

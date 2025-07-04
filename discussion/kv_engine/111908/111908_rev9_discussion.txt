@@ -1,0 +1,85 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-35001: Consumer: Avoid duplicate PREs after disk/mem transition
+
+Summary:
+
+When transitioning to the inMemory phase of an Active DCP stream,
+ensure that the initial in-memory Snapshot has the CKPT flag set, to
+avoid the replica potentially seeing duplicate keys in the same
+Checkpoint.
+
+Details:
+
+Consider the following scenario of items on disk and in memory
+(checkpoint manager):
+
+    Disk:
+    1:PRE(a), 2:CMT(a), 3:SET(b)
+
+    Memory:
+                        3:CKPT_START
+                        3:SET(b),     4:PRE(a), 5:SET(c)
+
+(items 1..2 were in a removed checkpoint and no longer in-memory.)
+
+An ep-engine replica attempting to stream all of this (0..infinity)
+will result in a backfill of items 1..3, with a checkpoint cursor
+being placed at seqno:4. Note this isn't the start of the Checkpoint
+(which is 3) and hence not pointing at a checkpoint_start item.
+
+As such when this is streamed over DCP (up to seqno:4) the consumer
+will see:
+
+    SNAPSHOT_MARKER(start=1, end=3, flags=DISK|CKPT)
+    1:PRE(a)
+    2:CMT(a)
+    3:SET(b)
+    SNAPSHOT_MARKER(start=4, end=5, flags=MEM)
+    4:PRE(a),
+    [[[missing seqno 5]]
+
+If the consumer puts all of these mutations in the same Checkpoint,
+then it will result in duplicate PRE(a) items (which breaks Checkpoint
+invariant).
+
+Address this by adding the CKPT flag to the Snapshot marker when
+transitioning between disk and memory snapshots.
+
+Note there is still an oustanding issue with the calculation of the
+failover table branch point as a consequence of this change; however
+that is being deferred for a second MB - see MB-35003.
+
+Change-Id: Idfb3b676136df0a3a6af7e626d793b6e696d7dfe
+Reviewed-on: http://review.couchbase.org/111908
+Reviewed-by: Jim Walker <jim@couchbase.com>
+Tested-by: Dave Rigby <daver@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2019-07-17 07:08:11.000000000
+Message: 
+Change has been successfully cherry-picked as 13f946ab9faab56a2c673804c281ff3978a910b3 by Dave Rigby
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-07-17 07:08:21.000000000
+Message: 
+Patch Set 9:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/1755/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-07-17 07:33:23.000000000
+Message: 
+Patch Set 9:
+
+Build Unstable 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/1755/ : UNSTABLE
+
+ERROR: rebalance_in_with_ops (rebalance.rebalancein.RebalanceInTests)
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/1755/ )'
+----------------------------------------------------------------------------------------------------------------------

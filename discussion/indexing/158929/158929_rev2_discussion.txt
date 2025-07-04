@@ -1,0 +1,234 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-46883: Rebalance failed with error index already exists
+
+When node is failedover another index with same name as that of index on the failed node can be created, when the failed over node is added back to cluster, cluster now has duplicate index, these may or may not be equivalent indexes but they have same name. This sometimes causes rebalance to fail with error index already exists. The fix addresses the issue by detecting the duplicate indexes and deleting the duplicate index if they are equivalant. In case of duplicate indexes being non-equivalant system behaves as it used to behave earlier which means there is a chance of rebalance failure with index already exists.
+
+Change-Id: Iecade401029d2aafbd05ee2db5cfcd13ddc01dec
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Yogendra Acharya
+Date: 2021-08-10 12:31:00.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2021-08-10 17:42:47.000000000
+Message: 
+Patch Set 2: Code-Review-1
+
+(15 comments)
+
+There are some problems in regalancer.go logic that need to be addressed.
+
+Someone with more Planner knowledge should also review executor.go.
+Line:156, secondary/indexer/rebalancer.go -> Please add a header documenting what this method does.
+
+Line:156, secondary/indexer/rebalancer.go -> This also needs to delete any transfer tokens from r.transferTokens for the indexes it removes, otherwise there will still TTs referring to non-existent indexes and Rebalance will fail.
+
+Line:198, secondary/indexer/rebalancer.go -> This tag does not have the correct method name.
+
+For methods like this one with many log messages, it helps to start the method with:
+    method := "Rebalancer::makeDropIndexRequest" // for logging
+and do every log message like
+    l.Errorf("%v: My message", method)
+to reduce the memory footprint and keep them all easily in sync.
+
+Line:209, secondary/indexer/rebalancer.go -> This tag does not have the correct method name.
+
+Line:214, secondary/indexer/rebalancer.go -> This tag does not have the correct method name.
+
+Line:225, secondary/indexer/rebalancer.go -> This tag does not have the correct method name.
+
+Line:231, secondary/indexer/rebalancer.go -> This tag does not have the correct method name.
+
+Line:234, secondary/indexer/rebalancer.go -> This tag does not have the correct method name.
+
+Line:237, secondary/indexer/rebalancer.go -> Other ones have "host %v" populated by localaddr+url but this one has "url %v" populated by host. Is there a reason for this difference?
+
+Line:237, secondary/indexer/rebalancer.go -> This tag does not have the correct method name.
+
+Line:315, secondary/indexer/rebalancer.go -> This block needs to be enclosed in something like "if len(hostToIndexToRemove) > 0"
+
+Line:922, secondary/planner/executor.go -> returnd --> returned
+
+Line:1112, secondary/planner/executor.go -> O(N^2) can really impact scaling with large number of indexes.
+
+Line:596, secondary/planner/proxy.go -> This is missing "Planner::getIndexStats:" tag and also has two %v formatters but only one argument to populate these.
+
+Line:604, secondary/planner/proxy.go -> This is missing "Planner::getIndexStats:" tag and also has two %v formatters but only one argument to populate these.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Yogendra Acharya
+Date: 2021-08-11 05:04:52.000000000
+Message: 
+Patch Set 2:
+
+(11 comments)
+Line:156, secondary/indexer/rebalancer.go -> Sure will add comment.
+
+Line:156, secondary/indexer/rebalancer.go -> We detect the duplicate indexes before planner.Plan is called also remove these indexes from planner.Solution before planner.Plan is called. Hence transfer tokens are not created for these indexes as they are removed from planner consideration, Though yes someone with better planner understanding can take a look at this aspect.
+
+Line:198, secondary/indexer/rebalancer.go -> Thanks will fix the logs
+
+Line:209, secondary/indexer/rebalancer.go -> Ack
+
+Line:214, secondary/indexer/rebalancer.go -> Ack
+
+Line:225, secondary/indexer/rebalancer.go -> Ack
+
+Line:231, secondary/indexer/rebalancer.go -> Ack
+
+Line:234, secondary/indexer/rebalancer.go -> Ack
+
+Line:237, secondary/indexer/rebalancer.go -> Ack
+
+Line:237, secondary/indexer/rebalancer.go -> Thanks catching it, that is typo and I need to make that as host (not url) will fix it.
+
+Line:315, secondary/indexer/rebalancer.go -> My understanding is that it can be enclosed in if condition though its not needed for correctness; since RemoveDuplicateIndex will return immediately with for loop on empty hostToIndexToRemove map. But yes its good to have the check and we will avoid forking one go routine so i will add it.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Yogendra Acharya
+Date: 2021-08-11 05:12:41.000000000
+Message: 
+Patch Set 2:
+
+(4 comments)
+Line:922, secondary/planner/executor.go -> Ack
+
+Line:1112, secondary/planner/executor.go -> This method is called only on the set of duplicate indexes and not on all indexes, also due to 2d matrix like grouping output that it does e.g [[defn1, defn2][defn3][defn4,defn5,defn6]] where defn1 and defn2 is the first set of equivalent definitions and defn3 is next set and so on.. I could not find an easy way to do better than n^2, hence I have left it for followup patch with understanding that the method is called only on indexes that are duplicates which should be very few.  This is also a reason I left it as function variable inside the caller and have not made it a general purpose function.
+
+Line:596, secondary/planner/proxy.go -> Ack
+
+Line:604, secondary/planner/proxy.go -> Ack
+
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2021-08-11 05:17:47.000000000
+Message: 
+Patch Set 2:
+
+(2 comments)
+Line:929, secondary/planner/executor.go -> Minor: Scheduled state indexes won't show up here.
+
+Line:584, secondary/planner/proxy.go -> In the mixed version cluster (7.0 and 7.1), some indexes will have num_docs_queued in the stats output and some indexes won't have it. 
+
+Is it still okay if we compare these values ? Same can hold true for other new stats in planner filter as well.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2021-08-11 05:38:34.000000000
+Message: 
+Patch Set 2:
+
+(4 comments)
+Line:862, secondary/planner/executor.go -> In general, it is good to check if IndexUsage.Instance is nil or not. In some cases, it can be nil.
+
+Line:958, secondary/planner/executor.go -> In general, it is good to check if IndexUsage.Instance is nil or not. In some cases, it can be nil.
+
+Line:963, secondary/planner/executor.go -> Q: Shouldn't this be replicaMap[replicaId] > indexStateVal ?
+
+Line:980, secondary/planner/executor.go -> Given that there is another complexity involved here, i.e. mixed version cluster, is it useful to have this criterion? 
+
+I think we can remove some complexity by avoiding these stat comparisons in general.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Yogendra Acharya
+Date: 2021-08-11 06:04:58.000000000
+Message: 
+Patch Set 2:
+
+(6 comments)
+
+Thanks Varun, Amit and Kevin, I am addressing most of the comments except the stats comparison comment by Amit. Which I plan to have discussion in team meeting tomorrow. I will upload a new patch by evening with all these comments addressed and any more comments that I get till evening. Thanks for detailed review.
+Line:862, secondary/planner/executor.go -> Ack
+
+Line:929, secondary/planner/executor.go -> Ack
+
+Line:958, secondary/planner/executor.go -> Good catch, i did not realise it can be nil, will find out what should be done if instance is nil.
+
+Line:963, secondary/planner/executor.go -> good catch.
+
+Line:980, secondary/planner/executor.go -> will discuss this in team meeting tomorrow.
+
+Line:584, secondary/planner/proxy.go -> will discuss in team meeting tomorrow.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2021-08-11 23:28:35.000000000
+MISMATCHED INLINE COMMENT
+Line:156, secondary/indexer/rebalancer.go -> Ok, that avoids the problem I was worried about.
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2021-08-11 23:28:35.000000000
+MISMATCHED INLINE COMMENT
+Line:156, secondary/indexer/rebalancer.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2021-08-11 23:28:35.000000000
+MISMATCHED INLINE COMMENT
+Line:198, secondary/indexer/rebalancer.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2021-08-11 23:28:35.000000000
+MISMATCHED INLINE COMMENT
+Line:209, secondary/indexer/rebalancer.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2021-08-11 23:28:35.000000000
+MISMATCHED INLINE COMMENT
+Line:214, secondary/indexer/rebalancer.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2021-08-11 23:28:35.000000000
+MISMATCHED INLINE COMMENT
+Line:225, secondary/indexer/rebalancer.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2021-08-11 23:28:35.000000000
+MISMATCHED INLINE COMMENT
+Line:231, secondary/indexer/rebalancer.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2021-08-11 23:28:35.000000000
+MISMATCHED INLINE COMMENT
+Line:234, secondary/indexer/rebalancer.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2021-08-11 23:28:35.000000000
+MISMATCHED INLINE COMMENT
+Line:237, secondary/indexer/rebalancer.go -> I think you also need to change the argument that populates that field in the message from "host" to "localaddr+url" to match the others.
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2021-08-11 23:28:35.000000000
+MISMATCHED INLINE COMMENT
+Line:237, secondary/indexer/rebalancer.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2021-08-11 23:28:35.000000000
+MISMATCHED INLINE COMMENT
+Line:315, secondary/indexer/rebalancer.go -> As the code was originally written, r.removeDupIndex is always set to true and the goroutine always launched and doRebalance() always waits for duplicate index removal to finish. The code did not make sense to me if removeDupIndex is always set to true -- this seems meant to decide whether to execute the two lines this comment is attached to, and that is what I think it should do.
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2021-08-11 23:28:35.000000000
+MISMATCHED INLINE COMMENT
+Line:922, secondary/planner/executor.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2021-08-11 23:28:35.000000000
+MISMATCHED INLINE COMMENT
+Line:1112, secondary/planner/executor.go -> Ack
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2021-08-11 23:28:35.000000000
+MISMATCHED INLINE COMMENT
+Line:596, secondary/planner/proxy.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2021-08-11 23:28:35.000000000
+MISMATCHED INLINE COMMENT
+Line:604, secondary/planner/proxy.go -> Done
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,165 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-49702: Revert "MB-18426: Reduce compaction_number_of_kv_workers from 4 to 1"
+
+Summary
+-------
+
+As seen during MB-49702, a single compaction task cannot keep up with
+large numbers of Flusher (disk writer) tasks under a high throughput
+workload with a large number of shards / writer threads. Ultimately
+this results in the available disk space being exceeded and disk
+writes failing. Given the issues surrounding an increased number of
+concurrent compactors have been addressed (see details below), revert
+back to 4 concurrent flushers.
+
+Background
+----------
+
+Up until version 4.5.0, multiple vBuckets could be compacted
+concurrently for a given vBucket. However, this caused a number of
+issues with front-end write latency, and as part of MB-18426 (included
+in v4.5.1) this was reduced to 1 vBucket at a time.
+
+While this change did improve the aforementioned issues, it was
+arguably not addressing the root cause of why compaction was
+interfering with front-end writes and reads. The more direct cause of
+those issues was identified via MB-25509, which found that it was the
+large disk writes during compaction being flushed to the underlying
+filesystem / disk which could monopolise the disk bandwidth. Of note -
+this didn't just affect the vBucket file(s) being flushed, but other
+files also as it is the underlying disk which became saturated.
+
+This issue was addressed by having compaction (and the flusher) call
+fsync() every N bytes instead of waiting until the entire file was
+written and performing one fsync at file close - quoting from the
+kv_engine commit (https://review.couchbase.org/c/kv_engine/+/81759):
+
+    MB-25509: Support calling fsync() periodically during compaction
+
+    Add a new config param 'fsync_after_every_n_bytes_written'. When
+    set to a non-null value, configures couchstore to issue a sync()
+    after every N bytes of compaction data is written.
+
+    The default value has been set at 16MB - local testing with 1.5GB
+    vBucket files suggests this is a good tradeoff between bg fetch
+    latency and compaction write throughput:
+
+        avg_bg_wait_time (no compaction):    50-100μs
+        avg_bg_wait_time (compaction, 16MB): 50-200μs
+
+    For comparision, when run with no automatic sync():
+
+        avg_bg_wait_time (compactionB): 100,000-300,000μs
+
+This change was included in v5.5.0. At this point, having only a
+single compactor running didn't appear to be an issue - I'm not aware
+of any issues where compaction couldn't keep up with the flusher. This
+was likely due to the fact that we only split a Bucket into 4 shards,
+and hence there was a maximum of 4 vBuckets which could be flushed
+concurrently - which would drop to 3 concurrent flushers when
+compaction is running (compaction and flushing of a vBucket are
+exclusive).
+
+Problem
+-------
+
+However, as of v6.5.0 we:
+
+1. Changed the default number of shards from 4 to
+   number_of_logical_CPU_cores, and
+
+2. Exposed settings in the UI to increase the number of Writer threads
+   from 4 to number_of_logical_CPU_cores by selecting "Disk I/O
+   Optimised" Writers, or even greater numbers if manually selected.
+
+These changes we made to improve SyncWrite persistence latencies, so
+we could exploit more of the underlying IO concurrency on larger
+capacity machines - 4 concurrent writer was typically insufficient.
+
+However, this changed the flusher / compaction "balance of power" - on
+large machines (for example the 72 core machine used in MB-49702),
+with Writer Threads set to "Disk IO Optimised" we can have up to 72
+vBuckets being flushed concurrently, while we still only have 1
+compactor task. One compactor is insufficient to keep up with the
+write throughput (and hence fragmentation increase) of 72 writer
+threads, assuming there is sufficient front-end load performing
+mutations.
+
+The result is that compaction is running constantly - compacting 1
+vBucket after another sequentially but once it has compacted the last
+vBucket the overall fragmentation has already grown greater than it
+was when compaction started. Fragmentation does not have a net
+reduction (to below the compaction threshold), and as such disk space
+usage grows and eventually fills the disk.
+
+I believe this issue has been present since 6.5.0, however a couple of
+factors have highlighted it in newer releases (7.0.0 / Neo):
+
+1. We are now more aggressively testing larger volumes of data, at
+   lower residency ratios.
+
+   a) As a consequence, less of the vBucket file data is in OS buffer
+   cache (as there's much smaller percentage of buffer cache relative
+   to file size), and hence compaction is relatively speaking slower
+   (reading the existing valid data to then write back the compacted
+   file will be hitting the actual disk medium a higher percentage of
+   the time).
+
+   b) Additionally, the machines used for larger volumes of data are
+   being configured with more writer threads (to more quickly flush
+   that data to disk) - for example while a 72 core machine will only
+   have 4 writer threads by default, changing to "Disk IO Optimised"
+   will create 72 and hence up to 72 vBuckets can be flushed
+   concurrently.
+
+2. As of 7.0.0 we allow concurrent flushing and compaction for
+   couchstore (MB-38428). That means that while compaction has a much
+   lower impact on flush latency (we only block the flusher at the
+   very end of compaction to "catch up" with any mutations made since
+   the last compaction iteration started), it means that one more
+   flusher can be running concurrently with compaction compared to
+   previously.
+
+I don't know how much each of these two factors contributes to higher
+fragmentation in the above scenario - it would be reasonable to assume
+(1) is the larger issue, however (2) could also be significant, given
+that compaction has to do more work now (as it's playing catch-up with
+the flusher) and hence can take a bit longer to compact a vBucket.
+
+Solution
+--------
+
+Revert back to allowing 4 concurrent flushers instead of 1. This may
+not be sufficient to keep up entirely with very high throughput IO
+subsystems (e.g. 72 flushers), but it's an initial, conservative step
+to return to where we used to be.
+
+Having a more "intelligent" setting - say related to number of flusher
+threads / shards - would probably be an improvement on just chaing to
+'4', that is complex as ns_server doesn't directly "know" how many
+shards or flusher threads exist. As such, a simple change like this
+seems good idea in the short-term.
+
+Further changes on the KV-Engine side may be needed to make best use
+of this new concurrency - for example there's evidence we have
+increased lock contention (exact source not yet determined) with the
+higher compactor count.
+
+This reverts commit 36f707463d86472485f94d0745c946fe002c4221.
+
+Change-Id: Ic248a2358d150477f7ef5d2adcfc0df3d94ed441
+Reviewed-on: https://review.couchbase.org/c/ns_server/+/167485
+Well-Formed: Build Bot <build@couchbase.com>
+Tested-by: Build Bot <build@couchbase.com>
+Reviewed-by: Steve Watanabe <steve.watanabe@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Steve Watanabe
+Date: 2021-12-14 21:45:43.000000000
+Message: 
+Change has been successfully cherry-picked as 4b297da3ab62c91627dc27905f5f99c0cf11ba9c by Steve Watanabe
+----------------------------------------------------------------------------------------------------------------------

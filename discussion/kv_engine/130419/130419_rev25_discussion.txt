@@ -1,0 +1,176 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-39815: Add event-driven SyncWrite timeout handling
+
++Summary+
+
+Adds a new event-driven mode for aborting SyncWrites which have
+exceeded their durability timeout. This has a much lower idle overhead
+compared to the current polling method.
+
+The default mode remains "polling", subsequent patch will change the
+default to "event-driven".
+
++Background+
+
+When SyncWrites were introduced in 6.5.0, each SyncWrite requst has a
+timeout associated with it - if the SyncWrite cannot be completed
+(Committed or Aborted) within that time, then abort it and inform the
+client that it was not successful.
+
+This was implemented in simple (naive?) polling - have a per-Bucket
+NonIO task which is scheduled to run every 25ms (by default), and when it
+runs check every vBucket for any pending SyncWrites which have now
+exceeded their timeout.
+
+Functionally this works fine, however it is relatively expensive -
+every 25ms we must iterate across every vBucket on every Bucket, and
+call into the DurabiltyMonitor to check for SyncWrites which should be
+timed out. This is the case irrespective of if there are any
+SyncWrites which are overdue; or even if there are any SyncWrites at
+all.
+
+For example, an idle node with 10 Buckets shows 35% CPU utilization -
+the vast majority of which is in NonIO threads running the
+DurabilityTimeoutTask.
+
+This is obviously undesirable - and the issue scales with even larger
+bucket counts.
+
++Solution+
+
+To reduce the idle CPU usage, change from a polling to an event-driven
+model - have a per-vBucket task which is scheduled to run only when
+the next SyncWrite for that vBucket is due to timeout. We only need 1
+task per vBucket (and not 1 per SyncWrite) because SyncWrites (within
+a vBucket) must always complete in-order; therefore we only need to
+consider the timeout of the oldest SyncWrite in the
+ActiveDurabiltyMonitor for a given vBucket.
+
+This task will only be executed _if_ the next SyncWrite isn't
+otherwise Committed before the timeout - when the SyncWrite is
+Commited the task will be re-scheduled to run when the _next_
+SyncWrite is due - or cancelled if there are no more SyncWrites in
+progress (for the vBucket).
+
+As such, the CPU cost for SyncWrite timeout handling when the Bucket
+is idle goes to zero - nothing is executed.
+
+There are some additional costs with the event-driven approach:
+
+1. Additional CPU cost whenever the ActiveDM::trackedWrites container
+   changes (specifically when the head changes), as we must reschedule
+   or cancel the new per-vBucket task. However that is less than 1
+   microsecond with the default FollyExecutorPool; so likely dwarfed
+   by the other activity around adding / Committing SyncWrites.
+
+2. Additional memory footprint for 1024 Tasks instead of 1 (per
+   Bucket). Note that this is relatively insignificant - each
+   ExpiredSWCallback task is 96 Bytes, so we have only increased each
+   Bucket by at-most 96KB (only active vBuckets have a
+   ExpiredSWCallback).
+
+Change-Id: Ia70a68f4d1551a3407c8bdbb56e91eb5f5f995e2
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2021-10-13 11:34:15.000000000
+Message: 
+Uploaded patch set 25: Patch Set 24 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2021-10-13 13:43:08.000000000
+Message: 
+Patch Set 25: Code-Review-1
+
+(5 comments)
+
+partially reviewed
+Line:107, engines/ep/src/durability/active_durability_monitor.h -> maybe add @params
+
+Line:123, engines/ep/src/durability/active_durability_monitor.h -> missed new @param, here and below
+
+Line:80, engines/ep/src/durability_timeout_task.cc -> nit
+
+Line:85, engines/ep/src/durability_timeout_task.cc -> nit: By reading this I would think that the class is related to the doc-expiry thing, don't we have any better option without the "expiry" word? And why "callback" and not "task" ?
+
+Line:88, engines/ep/src/durability_timeout_task.cc -> I guess that we soundn't be mixing task ids ?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-10-13 13:52:36.000000000
+Message: 
+Patch Set 25:
+
+(9 comments)
+Line:107, engines/ep/src/durability/active_durability_monitor.h -> Ack
+
+Line:123, engines/ep/src/durability/active_durability_monitor.h -> Ack
+
+Line:80, engines/ep/src/durability_timeout_task.cc -> This reads ok to me - what issue do you see?
+
+Line:85, engines/ep/src/durability_timeout_task.cc -> Ack
+
+Line:88, engines/ep/src/durability_timeout_task.cc -> There's only going to be one the two tasks in existence for any given bucket (based on config param); I think it's fine to use the same enum given it's essentially the same "task", just implemented differently.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2021-10-13 13:53:25.000000000
+Message: 
+Patch Set 25:
+
+(2 comments)
+Line:866, engines/ep/src/durability/active_durability_monitor.cc -> Would be nice to add a comment on why we need to re-schedule only when 'removingFirstElement' (and not when removing any element).
+
+Line:510, engines/ep/src/durability/durability_monitor_impl.h -> We can add a small comment, eg "the function schedules the next run at the timeout-time of the first SW currently tracked in DM"
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2021-10-13 13:54:58.000000000
+Message: 
+Patch Set 25:
+
+(1 comment)
+Line:80, engines/ep/src/durability_timeout_task.cc -> Nothing, I was just reading the "run" in the active form 😊
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2021-10-13 14:20:33.000000000
+Message: 
+Patch Set 25:
+
+(1 comment)
+Line:2479, engines/ep/src/vbucket.h -> Why a factory? I see that this pattern is used many times in the code but in most cases the type could by just the object itself (ie a std::function of any required kind) that can be re-set depending on configuration or test-setup when needed.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-10-13 14:27:43.000000000
+Message: 
+Patch Set 25:
+
+(3 comments)
+Line:866, engines/ep/src/durability/active_durability_monitor.cc -> Ack
+
+Line:510, engines/ep/src/durability/durability_monitor_impl.h -> Ack
+
+Line:2479, engines/ep/src/vbucket.h -> Do you mean why I name it a factory? Because it creates objects when you call it.
+
+Or, if you mean why do we _need_ a factory (instead of just passing the VBucket the concrete object to use directly) - because as the VBucket changes from active -> replica, we need to delete the old SyncWriteTimeout object (replica/dead doesn't have them); then if we return to active then we need to create a new one. 
+
+(Note that the ActiveDM owns the SyncWriteTimeout handler object.)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2021-10-13 14:30:12.000000000
+Message: 
+Patch Set 25:
+
+(1 comment)
+Line:2479, engines/ep/src/vbucket.h -> > Or, if you mean why do we _need_ a factory
+
+That one :)
+
+----------------------------------------------------------------------------------------------------------------------

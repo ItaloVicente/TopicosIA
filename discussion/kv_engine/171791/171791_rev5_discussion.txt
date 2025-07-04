@@ -1,0 +1,123 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-35297: Distinguish KVStore::scan failure vs abort
+
+KVStore::scan currently returns 3 status codes.
+
+* scan_success
+* scan_again
+* scan_failed
+
+With these 3 status codes there's no way for a scan to signal it cannot
+continue for some state change (non fatal), e.g. vbucket or stream
+closing. This limitation leads to an inefficiency that means a scan
+keeps on scanning the index, even though it is doing so pointlessly.
+For example when the vbucket goes away the callback sets status to
+engine_errc::success and returns from the callback, yet KVStore::scan
+will just keep invoking the callback for all items in the index.
+A better solution is to return an appropriate status and allow
+that to get KVStore::scan to stop without triggering critical logging or
+increment failover stats.
+
+This commit makes use of a linked couchstore change and refactors scan
+so that the following 4 codes can now be returned.
+
+* ScanStatus::Success
+    - The scan successfully scanned all items
+
+* ScanStatus::Yield
+    - The scan has been requested to yield due to a temporary issue,
+      currently this means DCP is out of buffer space
+
+* ScanStatus::Aborted
+    - The scan cannot continue, e.g. the vbucket or stream has gone away
+
+* ScanStatus::Failed
+    - The scan failed, this is used for when couchstore hits an error,
+      e.g. some system call error or data integrity issue.
+
+With these changes, the scan can be brought to a halt as soon as one of
+the scan callbacks detects the vbucket state change, setting an
+appropriate couchstore code which then triggers the use of Aborted.
+
+magma and rocks have similar changes to return Aborted but don't require
+changes in the library code due to the way a scan is structured entirely inside
+kv-engine code
+
+Change-Id: I40bcde6c70a11fea4a1ec9fe2b5d2d828cc55c90
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jim Walker
+Date: 2022-03-07 14:35:31.000000000
+Message: 
+Patch Set 5: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-03-08 20:56:19.000000000
+Message: 
+Patch Set 5: Code-Review-1
+
+(6 comments)
+Line:36, /COMMIT_MSG -> What do you think to "Cancelled" or "Halted" instead? "Aborted" implies a failure of some form - e.g. from the OED:
+
+> abort: 
+> bring to a premature end because of a problem or fault.
+> "the flight crew aborted the take-off"
+
+"Cancelled" (or some other synonym which implies a normal, non-error situation) I think feels more natural to not log as an error condition.
+
+Line:157, engines/ep/src/dcp/backfill_by_id_disk.cc -> To my previous comment :) - I note that we use "cancelled" here to refer to a "completed" backfill which did not send all the items originally expected.
+
+Line:1849, engines/ep/src/ep_bucket.cc -> Is this a behaviour change, or just a refactor in line with the new status codes and their handling?
+
+Line:2365, engines/ep/src/kvstore/couch-kvstore/couch-kvstore.cc -> Similary here - is this a behaviour change? If so I think it's worth pulling into its own change (also with the previous one I commented if that is also behaviour changing) so it's easier to reason about this patch as purely a refactoring which shouldn't change externally-visible behaviour.
+
+Line:67, engines/ep/src/kvstore/kvstore_iface.h -> Style: If you add a trailing comma to "Failed" (which is valid in ~C++11) then we probably won't have to touch the "Failed" line if/when we add any more enum values to this.
+
+Line:581, engines/ep/src/warmup.cc -> Note - if you add an operator<< for ScanStatus instead of / in addition to to_string(), then fmtlib can pretty-print it without the explicit to_string() call around it.
+
+Similary you also get pretty-printed values in GTest EXPECT macros.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2022-03-09 17:11:38.000000000
+Message: 
+Patch Set 5:
+
+(7 comments)
+Line:36, /COMMIT_MSG -> Ack
+
+File Comment: /PATCHSET_LEVEL -> Will update soon
+Line:157, engines/ep/src/dcp/backfill_by_id_disk.cc -> Ack
+
+Line:1849, engines/ep/src/ep_bucket.cc -> Previous code didn't care for the !success status but when we set no_such_key in the new code it triggered the abort (aka cancelled) path and stopped the rollback - unit tests flagged this.
+
+Line:2365, engines/ep/src/kvstore/couch-kvstore/couch-kvstore.cc -> Yes this is, I noted by-id scan had the increment and synced them - will separate.
+
+Line:67, engines/ep/src/kvstore/kvstore_iface.h -> Ack
+
+Line:581, engines/ep/src/warmup.cc -> Ack
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2022-03-10 09:51:39.000000000
+Message: 
+Patch Set 5:
+
+(1 comment)
+Line:36, /COMMIT_MSG -> I'll tweak the couchstore change too which added an ABORTED code
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2022-03-10 13:17:48.000000000
+MISMATCHED INLINE COMMENT
+Line:1849, engines/ep/src/ep_bucket.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2022-03-10 13:17:48.000000000
+MISMATCHED INLINE COMMENT
+Line:2365, engines/ep/src/kvstore/couch-kvstore/couch-kvstore.cc -> Done
+----------------------------------------------------------------------------------------------------------------------

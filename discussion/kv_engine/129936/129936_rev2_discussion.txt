@@ -1,0 +1,74 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-39618: Use coarse clock for CappedDurationVBucketVisitor
+
+CappedDurationVBucketVisitor::pauseVisitor() determines if it should
+pause by calling steady_clock::now() and comparing it to the start
+time, to see if the visitor has run for too long.
+
+For tasks which either (a) run frequently or (b) spend little time per
+VBucket, the number of calls to steady_clock::now() can be
+significant. In the case of DurabilityTimeoutTask, it runs every 25ms,
+and on a cluster with zero SyncWrites currently in progress it will
+have little work to do when visiting a VBucket. As such, both (a) and
+(b) are true for it.
+
+steady_clock::now() is implemented on Linux using
+clock_gettime(CLOCK_MONOTONIC). This is _normally_ a very fast call,
+using the VDSO to return a result without having a make a syscall in
+the common case. As such, the large number of steady_clock::now()
+calls are not an issue.
+
+However, under certain environments clock_gettime(CLOCK_MONOTONIC) is
+*not* fast - for example if the 'HPET' clocksource is in use - a full
+syscall is required. This is the case in the original MB linked, where
+Docker for Mac was using HPET in it's embedded Linux VM. However HPET
+could also be used in other environments - it has been seen in the
+past on cloud-based virtualization platforms
+
+This results in a significant increase in the idle CPU of memcached
+(specifically the NonIO threads servicing the DurabilityTimeoutTask) -
+ the OP's environment 3 idle, empty Buckets went from ~15% CPU to
+150% CPU.
+
+To address this, change the clock used by CappedDurationVBucketVisitor
+to one backed by clock_gettime(CLOCK_MONOTONIC_COARSE) (on
+Linux). This is an altenative clock which only gives 1 millisecond
+resolution, *but* crucually can always be handled in userspace[1]
+without having to make a syscall (even when HPET is in use).
+
+This reduces the CPU overhead back to the original 15%.
+
+[1]: https://elixir.bootlin.com/linux/v4.19.76/source/arch/x86/entry/vdso/vclock_gettime.c#L282
+
+Change-Id: I111cd5f0703b0b2dd6902c4ab0584da4477e94ac
+Reviewed-on: http://review.couchbase.org/c/kv_engine/+/129936
+Tested-by: Build Bot <build@couchbase.com>
+Well-Formed: Build Bot <build@couchbase.com>
+Reviewed-by: Trond Norbye <trond.norbye@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2020-06-09 08:39:26.000000000
+Message: 
+Change has been successfully cherry-picked as 7a0ce25580cbe4dcebc1955bf90ad2ca8f6700b5 by Dave Rigby
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-06-09 08:39:35.000000000
+Message: 
+Patch Set 2:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-madhatter-post-commit/723/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-06-09 09:09:17.000000000
+Message: 
+Patch Set 2:
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-madhatter-post-commit/723/ : SUCCESS'
+----------------------------------------------------------------------------------------------------------------------

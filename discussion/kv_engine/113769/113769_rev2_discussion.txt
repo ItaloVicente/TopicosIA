@@ -1,0 +1,187 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-35649: Fix lost (delayed) wakeups in ep background tasks
+
++Summary+
+
+The ExecutorPool scheduler which manages all the background tasks
+suffers from a race conditon in task wakeup which results in lost
+task wakeups - i.e. tasks which should be woken immediately are not
+waken until the next ExecutorThread polling interval (default 2s).
+
+Amongst the tasks which suffer from this bug are
+ActiveStreamCheckpointProcessorTask - recall this is the task
+responsible for preparing outbound DCP messages to send to
+replicas. As such, this bug results in intermittent 2s "pauses" in
+SyncWrites completing (for #replicas > 0), as the DCP_PREPARE messages
+are delayed in being sent out by 2s.
+
+By fixing this bug we *significantly* improve the tail scheduler
+wakeup latencies (i.e. how 'late' tasks are run compared to when the
+task wanted to run), by up to 1000x (3 orders of magnitude).  +
+
++Problem+
+
+The bug is related to how an ExecutorThread's sleep time is
+calculated, in the presence of an external caller waking up the task
+after it has completed.
+
+Consider a task like ActiveStreamCheckpointProcessorTask (others
+behave the same).
+
+* In an idle bucket it will be set to sleep forever as there will be
+  no DCP mutations to prepare - the Task will be in the AuxIO
+  futureQueue with a waketime of <FOREVER>.
+
+* When new mutations occur in the frontend, the Task will be woken up
+  (via TaskQueue::_wake()) which:
+
+  a) Updates the Tasks' waketime to <NOW>.
+
+  b) Re-sorts the futureQueue if necessary, ensuring the soonest task
+     (either ActiveStreamCheckpointProcessorTask or another task just
+     woken) is at the front of the queue.
+
+  c) If any threads of the given type (AuxIO) are currently sleeping,
+     then wakes up threads equal to the number of tasks ready to
+     execute.
+
+  d) Those sleeping thread(s) will then check the futureQueue and pick
+     the next task to run.
+
+This works correctly assuming that at least 1 AuxIO thread is sleeping
+(in fact for simplicity it's sufficient to assume there's only 1 AuxIO
+thread) - at (d) the sleeping thread is woken, and the Task is run().
+
+However, consider what happens if the Task has /just/ finished a
+previous run() iteration just before the wake() call occurs - there is
+a race which results in a lost (delayed) wakeup:
+
+<<<AuxIO Thread>>>
+
+1) Assume Task::run() has just returned to ExecutorThread::run().
+
+2) Task is reschedule()'d back in the futureQueue with a waketime of
+   <FOREVER>. Assume no other tasks are in the futureQueue.
+
+3) setWaketime() is called with futureQueue min waketime - <FOREVER>.
+
+4) TaskQueue::_nextTask() called. There are no tasks ready to run, so
+   it is about to call TaskQueue::_sleepThenFetchNextTask()...
+
+                 <<<Waking thread>>>
+
+                 5) TaskQueue::_wake() called, which acquires
+                    TaskQueue::mutex, and performs operations
+                    described above, crucially moving Task to the
+                    front of the futureQueue. FutureQueue min waketime
+                    = <NOW>.  Releases TaskQueue::mutex.
+
+<<<AuxIO Thread>>
+
+6) ... calls TaskQueue::_sleepThenFetchNextTask(), acquires
+   TaskQueue::mutex and calls _doSleep. This reads the threads
+   waketime (as set at 3) which is <FORVER>, then calculates the
+   Thread's sleep time as min(2, minWaketime) - i.e. min(2, FOREVER)
+   or 2 seconds.
+
+7) Thread goes to sleep for 2 seconds, even though there's a task in
+   futureQueue expecting to be run <NOW>.
+
+<END>
+
+While this is a complex scheduling system, arguably the crux of the
+problem is the use of an independent member variable
+(ExecutorThread::waketime) to determine when to wake the thread, which
+is set independently of when the futureQueue is modifed (the
+futureQueue contents ultimately dictate when a thread should be
+woken).
+
++Solution+
+
+Instead of pre-calculating a Thread's waketime and then applying it
+later on, simply calculate the waketime directly from the contents of
+the futureQueue just before we sleep - and crucially with the
+TaskQueue::mutex held (which guards the futureQueue), preventing any
+other threads racing to update it.
+
+(A follow-up patch will remove ExecutorThread::waketime as it is now
+unused).
+
++Alternative Solutions+
+
+- We _could_ possibly extend the scope of the TaskQueue::mutex to also
+  guard ExecutorThread::waketime, however this feels complex and
+  breaks encapsulation - one objects' mutex is guarding state from
+  another. As such this approach wasn't seriously considered.
+
++Results+
+
+Scheduler wait time histograms (i.e. how long a task waited to run after
+it expected to start), ~100,000 samples for each:
+
+Before:
+
+     ActiveStreamCheckpointProcessorTask[auxIO] (101277 total)
+        ...
+          12us -   14us : ( 52.2389%)  7852 ███████████████████▏
+        ...
+          82us -   86us : ( 99.0166%)   142 ▎
+        ...
+         494us -  510us : ( 99.9832%)     1
+         510us - 2031ms : (100.0000%)    17
+        Avg             : (  315us)
+
+    * p50 = 14us, p99 = 86us, p99.99 = 2,031,000us, p100= 2,031,000us
+
+After:
+
+     ActiveStreamCheckpointProcessorTask[auxIO] (100820 total)
+        ...
+          17us -   20us : ( 54.7897%) 13725 █████████████████████████████████▊
+        ...
+         110us -  118us : ( 99.1232%)   218 ▌
+        ...
+         830us -  862us : ( 99.9901%)     1
+        ...
+        1854us - 2302us : (100.0000%)     1
+        Avg             : (   26us)
+
+    * p50 = 20us, p99 = 118us, p99.99 = 862us, p100= 2302us
+
+Note that p99.99 is ~1000x better (862 microseconds vs 2031
+/milli/seconds).
+
+Additionally the op/s observed with SyncWrites(level=majority) are
+much smoother - we no longer see the op/s rate drop to zero for ~2s at
+a time; they are ~constant.
+
++Further Work+
+
+Arguably the only reason this problem has gone unnoticed for so long
+is the 2s "fallback" upper bound applied to an ExecutorThread's
+sleep time - while the wakeup is lost, the problem will self-correct
+itself after 2s. If we hadn't had that "feature" then we would have
+spotted this problem long ago (would have manifested as DCP streams
+stopping forever and never recovering).
+
+In the interests of creating a targetted, minimal fix, and given we've
+have this fallback in place for a long time I'm not removing it in
+this patch, however it _should_ be done in a follow-up.
+
+Change-Id: Ie8569589f521c326b4f357bed1ad27c0790e7e88
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2019-08-27 10:08:09.000000000
+Message: 
+Patch Set 2: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2019-08-27 10:10:13.000000000
+Message: 
+Patch Set 2: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------

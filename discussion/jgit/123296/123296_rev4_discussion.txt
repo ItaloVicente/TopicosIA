@@ -1,0 +1,905 @@
+======================================================================================================================
+DESCRIPTION:
+
+ObjectDirectory: Work around NFS caching
+
+Use a new FS.createFile() method to create NFSFile objects which use a
+new refreshFolderStat config to help ensure exists() and lastModified() calls
+are correct when NFS is caching file attributes and existence.
+
+Change-Id: Id8e2ef4cdee1f5dc18d9ddef9eb22d1011f82edb
+Signed-off-by: Nasser Grainawi <nasser@codeaurora.org>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Nasser Grainawi
+Date: 2018-06-04 22:38:47.000000000
+Message: 
+Uploaded patch set 4.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-06-04 22:38:56.000000000
+Message: 
+Patch Set 4:
+
+Build Started https://ci.eclipse.org/jgit/job/jgit-stable.gerrit/45/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-06-04 22:57:23.000000000
+Message: 
+Patch Set 4: Verified-1
+
+Build Failed 
+
+https://ci.eclipse.org/jgit/job/jgit-stable.gerrit/45/ : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-06-05 09:44:43.000000000
+Message: 
+Patch Set 4: -Verified
+
+Build Started https://ci.eclipse.org/jgit/job/jgit-stable.gerrit/47/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-06-05 10:22:55.000000000
+Message: 
+Patch Set 4: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/jgit-stable.gerrit/47/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Hector Oswaldo Caballero
+Date: 2018-06-05 17:15:23.000000000
+Message: 
+Patch Set 4:
+
+I'll be cherry-picking these changes in our 4.7 branch and deploying it to dev environment in order to run some load-tests and evaluate the possible impact on performance. I'll also instrument the code a bit to try to measure how big the performance impact can be (if any) and I'll be commenting on such results as soon as they are available.
+----------------------------------------------------------------------------------------------------------------------
+Author: Nasser Grainawi
+Date: 2018-06-05 21:55:59.000000000
+Message: 
+Patch Set 4:
+
+> I'll be cherry-picking these changes in our 4.7 branch and
+ > deploying it to dev environment in order to run some load-tests and
+ > evaluate the possible impact on performance. I'll also instrument
+ > the code a bit to try to measure how big the performance impact can
+ > be (if any) and I'll be commenting on such results as soon as they
+ > are available.
+
+Thank you Hector! That would be very helpful.
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Halstrick
+Date: 2018-06-06 07:04:11.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:410, org.eclipse.jgit/src/org/eclipse/jgit/util/FS_POSIX.java -> Everybody running on POSIX filesystems will now under the hood use this class named NFSFile even if there is no NFS in his environment. Since this class adds quite a few additional filesystem calls (e.g.  config.getBoolean has to check wether repo or global or system config has changed) I would like to give users not using NFS the chance not to use this class. 
+
+This change forces non-NFS users to do instead of  
+
+- File.exists() 
+
+the following
+
+- potentially check 3 config files whether they have changed
+- check the merged configuration whether it contains CONFIG_KEY_REFRESHFOLDERSTAT 
+- if not call "File.exists()"
+
+A config option like "EnableNFSSupport" could do this trick. That could be a config option read once and stored in a static field. Only if that field is true we instantiate NFSFile. Otherwise we simply use the super() implementations of createFile().
+
+----------------------------------------------------------------------------------------------------------------------
+Author: David Ostrovsky
+Date: 2018-06-06 08:40:00.000000000
+Message: 
+Patch Set 4: Code-Review-1
+
+(1 comment)
+Line:410, org.eclipse.jgit/src/org/eclipse/jgit/util/FS_POSIX.java -> +1. I have the same concerns about performance impact. I do not use NFS, and must not suffer from any performance degradation in such a central place on JGit/Gerrit stack.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2018-06-07 13:05:45.000000000
+Message: 
+Patch Set 4: Code-Review-1
+
+(1 comment)
+Line:410, org.eclipse.jgit/src/org/eclipse/jgit/util/FS_POSIX.java -> We are using NFS but I am still concerned about using such a global hack for all files accesses.
+We can't accept a global performance degradation on all nodes only to fix a single scenario: in-memory cache invalidation.
+
+Is there a way to instead control this from the external? Something like Repository.refreshRefs().
+
+Just to clarify: the data is visible but only the files attributes are cached for files that have been modified. All Git files are immutable, with the exception of refs.
+
+If we introduce a "refreshRefs()" to be called by Gerrit (or whoever uses JGit) only when needed, we won't have anymore a global performance impact on all the JGit calls and we will still achieve the goal of being able to invalidate the cache.
+
+How does it sound?
+
+Luca.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2018-06-07 13:35:12.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:410, org.eclipse.jgit/src/org/eclipse/jgit/util/FS_POSIX.java -> This class is not used for all file access but for access to pack files and for access to refs. 
+
+If the NFS cached view of the pack directory is incomplete we may miss new packfiles in multi-node setup if a new packfile arrived on another node, for refs we may miss new refs, updates or deletes.
+
+Another issue is visibility of file locks implemented by FileLock between processes running on different nodes.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2018-06-07 13:42:24.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:410, org.eclipse.jgit/src/org/eclipse/jgit/util/FS_POSIX.java -> > This class is not used for all file access but for access to pack files and for access to refs. 
+
+refs are still read a lot of times ... do we have numbers of the performance degradation?
+
+> If the NFS cached view of the pack directory is incomplete we may miss new packfiles in multi-node setup if a new packfile arrived on another node
+
+Yes, saw that and the trustfolderstats flag addresses that, correct? It is then a non-problem anymore.
+
+> for refs we may miss new refs, updates or deletes.
+
+Yes, we saw that as well. For packed refs a fix has been merged already. For loose refs the problem is outstanding.
+
+> Another issue is visibility of file locks implemented by FileLock between processes running on different nodes.
+
+Is this addressing FileLock as well?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Halstrick
+Date: 2018-06-07 14:25:49.000000000
+Message: 
+Patch Set 4:
+
+I was concerned about the performance also and tested a little bit our NFS based servers. To be honest: I could not 
+see in real world a big performance penalty due to this change and the follow up change. I think access to NFS is
+so slow that the extra filesystem calls we do here don't effect the runtime substantially.
+
+So I wrote a small test program which tests how expensive it is to instantiate a File object and check existence of the
+file with and without the NFSFile abstraction. On non NFS machine we see that this is 40% to 50% slower with the NFSFile abstraction.
+But on NFS instantiating a File object and checking existence is 100 times slower (in our environment) than with a local
+FS and the extra checks introduced by NFSFile don't influence performance measurable.
+
+My proposal for this: for NFS environments this change makes sense, but for local environments we have to make sure
+not to use NFSFile.
+
+Test Code: https://gist.github.com/chalstrick/1407328309efdbe4f1e258e6bc02470a
+
+Results when executing the Tests against a JGIT based on change 123297 (commit 082767048274ac69459895c132c827f760aa8a52)
+
+> ###### NFS filesystem
+> java -jar /tmp/PerfTest_NFSFile.jar
+Repo created in /mnt/perm_storage/persistent/git_web/git/tmp_1528379190155
+Instantiated 100000 File objects for existing files and checked explicitly for existence (found 100000 files) in 29905 ms.
+Instantiated 100000 NFSFile objects for existing files and checked explicitly for existence (found 100000 files) in 31227 ms.
+Instantiated in a repo with CONFIG_KEY_REFRESHFOLDERSTAT set to true 100000 NFSFile objects for existing files and checked explicitly for existence (found 100000 files) in 32294 ms.
+> cd
+> ###### Local EXT3
+> java -jar /tmp/PerfTest_NFSFile.jar
+Repo created in /usr/sap/ljs/home/tmp_1528379463416
+Instantiated 100000 File objects for existing files and checked explicitly for existence (found 100000 files) in 504 ms.
+Instantiated 100000 NFSFile objects for existing files and checked explicitly for existence (found 100000 files) in 928 ms.
+Instantiated in a repo with CONFIG_KEY_REFRESHFOLDERSTAT set to true 100000 NFSFile objects for existing files and checked explicitly for existence (found 100000 files) in 697 ms.
+
+If you wonder why the performance (at least in this test programm) is better when you explicitly turn on the checks: I thinks thats because if no config files contain CONFIG_KEY_REFRESHFOLDERSTAT we have to inspect all possible three config files (repo,system,global) to come to this conclusion. If the repo config file already contains CONFIG_KEY_REFRESHFOLDERSTAT we don't have to look at there.
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2018-06-07 15:10:17.000000000
+Message: 
+Patch Set 4:
+
+> Patch Set 4:
+> 
+> I was concerned about the performance also and tested a little bit our NFS based servers. To be honest: I could not 
+> see in real world a big performance penalty due to this change and the follow up change. I think access to NFS is
+> so slow that the extra filesystem calls we do here don't effect the runtime substantially.
+> 
+> So I wrote a small test program which tests how expensive it is to instantiate a File object and check existence of the
+> file with and without the NFSFile abstraction. On non NFS machine we see that this is 40% to 50% slower with the NFSFile abstraction.
+> But on NFS instantiating a File object and checking existence is 100 times slower (in our environment) than with a local
+> FS and the extra checks introduced by NFSFile don't influence performance measurable.
+> 
+> My proposal for this: for NFS environments this change makes sense, but for local environments we have to make sure
+> not to use NFSFile.
+> 
+> Test Code: https://gist.github.com/chalstrick/1407328309efdbe4f1e258e6bc02470a
+> 
+> Results when executing the Tests against a JGIT based on change 123297 (commit 082767048274ac69459895c132c827f760aa8a52)
+> 
+> > ###### NFS filesystem
+> > java -jar /tmp/PerfTest_NFSFile.jar
+> Repo created in /mnt/perm_storage/persistent/git_web/git/tmp_1528379190155
+> Instantiated 100000 File objects for existing files and checked explicitly for existence (found 100000 files) in 29905 ms.
+> Instantiated 100000 NFSFile objects for existing files and checked explicitly for existence (found 100000 files) in 31227 ms.
+> Instantiated in a repo with CONFIG_KEY_REFRESHFOLDERSTAT set to true 100000 NFSFile objects for existing files and checked explicitly for existence (found 100000 files) in 32294 ms.
+> > cd
+> > ###### Local EXT3
+> > java -jar /tmp/PerfTest_NFSFile.jar
+> Repo created in /usr/sap/ljs/home/tmp_1528379463416
+> Instantiated 100000 File objects for existing files and checked explicitly for existence (found 100000 files) in 504 ms.
+> Instantiated 100000 NFSFile objects for existing files and checked explicitly for existence (found 100000 files) in 928 ms.
+> Instantiated in a repo with CONFIG_KEY_REFRESHFOLDERSTAT set to true 100000 NFSFile objects for existing files and checked explicitly for existence (found 100000 files) in 697 ms.
+> 
+> If you wonder why the performance (at least in this test programm) is better when you explicitly turn on the checks: I thinks thats because if no config files contain CONFIG_KEY_REFRESHFOLDERSTAT we have to inspect all possible three config files (repo,system,global) to come to this conclusion. If the repo config file already contains CONFIG_KEY_REFRESHFOLDERSTAT we don't have to look at there.
+
+Thanks for sharing the stats. I am super-shocked on the degradation on your NFS mounts :-O
+
+Can you run a simple ioping on it and share the results?
+What are your NFS mount options?
+----------------------------------------------------------------------------------------------------------------------
+Author: Sasa Zivkov
+Date: 2018-06-07 15:14:20.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:396, org.eclipse.jgit/src/org/eclipse/jgit/util/FS_POSIX.java -> This hardcodes reading from $HOME/.gitconfig. When running inside
+Gerrit this would be the home folder of the user owning Gerrit process.
+This is not how we usually pass configuration options from Gerrit to
+JGit.
+Do you plan to make this configurable from $GERRIT/etc/gerrit.config, [core] section?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2018-06-07 15:43:41.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:396, org.eclipse.jgit/src/org/eclipse/jgit/util/FS_POSIX.java -> good catch, I didn't spot this
+
+I think we should use the repository level configuration like we do for core.trustfolderstat
+
+we could pass that as another parameter of the createFile method
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2018-06-07 16:02:12.000000000
+Message: 
+Patch Set 4:
+
+> > Patch Set 4:
+ > >
+ > > I was concerned about the performance also and tested a little
+ > bit our NFS based servers. To be honest: I could not
+ > > see in real world a big performance penalty due to this change
+ > and the follow up change. I think access to NFS is
+ > > so slow that the extra filesystem calls we do here don't effect
+ > the runtime substantially.
+ > >
+ > > So I wrote a small test program which tests how expensive it is
+ > to instantiate a File object and check existence of the
+ > > file with and without the NFSFile abstraction. On non NFS machine
+ > we see that this is 40% to 50% slower with the NFSFile abstraction.
+ > > But on NFS instantiating a File object and checking existence is
+ > 100 times slower (in our environment) than with a local
+ > > FS and the extra checks introduced by NFSFile don't influence
+ > performance measurable.
+ > >
+ > > My proposal for this: for NFS environments this change makes
+ > sense, but for local environments we have to make sure
+ > > not to use NFSFile.
+ > >
+ > > Test Code: https://gist.github.com/chalstrick/1407328309efdbe4f1e258e6bc02470a
+ > >
+ > > Results when executing the Tests against a JGIT based on change
+ > 123297 (commit 082767048274ac69459895c132c827f760aa8a52)
+ > >
+ > > > ###### NFS filesystem
+ > > > java -jar /tmp/PerfTest_NFSFile.jar
+ > > Repo created in /mnt/perm_storage/persistent/git_web/git/tmp_1528379190155
+ > > Instantiated 100000 File objects for existing files and checked
+ > explicitly for existence (found 100000 files) in 29905 ms.
+ > > Instantiated 100000 NFSFile objects for existing files and
+ > checked explicitly for existence (found 100000 files) in 31227 ms.
+ > > Instantiated in a repo with CONFIG_KEY_REFRESHFOLDERSTAT set to
+ > true 100000 NFSFile objects for existing files and checked
+ > explicitly for existence (found 100000 files) in 32294 ms.
+ > > > cd
+ > > > ###### Local EXT3
+ > > > java -jar /tmp/PerfTest_NFSFile.jar
+ > > Repo created in /usr/sap/ljs/home/tmp_1528379463416
+ > > Instantiated 100000 File objects for existing files and checked
+ > explicitly for existence (found 100000 files) in 504 ms.
+ > > Instantiated 100000 NFSFile objects for existing files and
+ > checked explicitly for existence (found 100000 files) in 928 ms.
+ > > Instantiated in a repo with CONFIG_KEY_REFRESHFOLDERSTAT set to
+ > true 100000 NFSFile objects for existing files and checked
+ > explicitly for existence (found 100000 files) in 697 ms.
+ > >
+ > > If you wonder why the performance (at least in this test
+ > programm) is better when you explicitly turn on the checks: I
+ > thinks thats because if no config files contain CONFIG_KEY_REFRESHFOLDERSTAT
+ > we have to inspect all possible three config files
+ > (repo,system,global) to come to this conclusion. If the repo config
+ > file already contains CONFIG_KEY_REFRESHFOLDERSTAT we don't have to
+ > look at there.
+ > 
+ > Thanks for sharing the stats. I am super-shocked on the degradation
+ > on your NFS mounts :-O
+ > 
+ > Can you run a simple ioping on it and share the results?
+ > What are your NFS mount options?
+
+maybe you can also run the same test on your NFS ?
+----------------------------------------------------------------------------------------------------------------------
+Author: Martin Fick
+Date: 2018-06-07 16:09:38.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:410, org.eclipse.jgit/src/org/eclipse/jgit/util/FS_POSIX.java -> > > If the NFS cached view of the pack directory is incomplete we may miss new packfiles in multi-node setup if a new packfile arrived on another node
+>
+> Yes, saw that and the trustfolderstats flag addresses that, correct? It is then a non-problem anymore.
+...
+> Yes, we saw that as well. For packed refs a fix has been merged already. For loose refs the problem is outstanding.
+
+According to Hugo, the trustfolderstats solution causes too much of a degradation to be used in practice, they have disabled it.  Instead, they have implemented a hack in Gerrit that basically does something close to what this change does for the specific packed-refs case.  
+
+I can explain the difference between the two solutions.  The current approach of turning off trustfolderstats causes the packedrefs file to be re-read and re-parsed everytime it is accessed.  When the file is large, this is very significant.  The solution proposed in this change is not to reread the packedrefs file everytime, but instead to refresh the directory containing the packedrefs file so as to make the folder stats trustworthy!  In theory, this change now reduces the overhead from reading the entire packedrefs file everytime to a directory open/close.  As far as I can tell, both solutions incur the cost of reading the config file(s) for each packedrefs lookup, so for this specific use case this should not be additional overhead.
+
+As for the file.exists() use cases, I believe they are generally only in slow paths.  So while these will be significantly longer with this change, I don't think you should find any degradations in real world use cases that matter.  Of course, real world benchmarking is what really matters, because theory is just theory.  To be specific, here are the uses cases I think are being hit by changes to exists();
+
+1) packfile a) lookup failures, and b) after new file packfile detection
+2) loose object existence lookups ("has" object lookups)
+3) loose ref existence during modification lookups
+
+in the case of #1, packfiles, there are some exists() lookups a) after IOExceptions (failure paths), and also b) after detecting new packfiles and reloading them.  The failure "a" paths are slow and unusual, it likely does not matter how slow.  As for the "b" reloading, this is a not a bulk operation that happens regularly during every git operation, and the overhead is likely minimal compared to actually loading the new pack index.
+
+In the case of #2, loose objects, generally these are looked up in a cache first, if that fails, then the packed objects are looked up, and if that fails, then the loose object is looked up.  This last lookup is not a failure path, but it is generally the slow path.  That is the case the would concern me the most.  I believe that once the loose object is looked up once, it will make it into the cache though, so it should be faster thereafter.  If this case is too slow in the real world, this could potentially be improved by only refreshing when exists() returns a false.  I suspect that this doesn't matter in the real world, on Gerrit servers there are generally very few loose objects that are not in packfiles, and this is when it would hit.
+
+Lastly in the case of #3, I don't think this is a common jgit case, at least not in any bulk operations.  Most accesses to refs are ref-advertisements that will not use exists().  Generally the exists() is only used when modifying the ref, and that tends to be a slow path already.
+
+I hope this clarifies most things, I may have missed some cases?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2018-06-07 16:42:38.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+
+> Patch Set 4:
+> 
+> (1 comment)
+Line:410, org.eclipse.jgit/src/org/eclipse/jgit/util/FS_POSIX.java -> > > > If the NFS cached view of the pack directory is incomplete we may miss new packfiles in multi-node setup if a new packfile arrived on another node
+> >
+> > Yes, saw that and the trustfolderstats flag addresses that, correct? It is then a non-problem anymore.
+> ...
+> > Yes, we saw that as well. For packed refs a fix has been merged already. For loose refs the problem is outstanding.
+> 
+> According to Hugo, the trustfolderstats solution causes too much of a degradation to be used in practice, they have disabled it.  Instead, they have implemented a hack in Gerrit that basically does something close to what this change does for the specific packed-refs case.  
+> 
+> I can explain the difference between the two solutions.  The current approach of turning off trustfolderstats causes the packedrefs file to be re-read and re-parsed everytime it is accessed.  When the file is large, this is very significant.  The solution proposed in this change is not to reread the packedrefs file everytime, but instead to refresh the directory containing the packedrefs file so as to make the folder stats trustworthy!  In theory, this change now reduces the overhead from reading the entire packedrefs file everytime to a directory open/close.  As far as I can tell, both solutions incur the cost of reading the config file(s) for each packedrefs lookup, so for this specific use case this should not be additional overhead.
+
+Should then the revert of  I2b65cfa a predecessor of this change?
+If we refresh folder stats, we always trust them afterwards.
+
+> As for the file.exists() use cases, I believe they are generally only in slow paths.  So while these will be significantly longer with this change, I don't think you should find any degradations in real world use cases that matter.  Of course, real world benchmarking is what really matters, because theory is just theory.  To be specific, here are the uses cases I think are being hit by changes to exists();
+
+Yes, cannot test *this* patch specifically: I am on Gerrit 2.15.2 which is based on JGit 4.9.2.
+However, I applied the same hack to a local stable-4.9 and I am testing it on GerritHub.io. Will come back with results on a real heavily loaded production system. Maybe not as much as Hugo's, but close ;-)
+
+> 1) packfile a) lookup failures, and b) after new file packfile detection
+> 2) loose object existence lookups ("has" object lookups)
+> 3) loose ref existence during modification lookups
+
+4) loose ref snapshot conditional refresh as well. This is specifically our case. A ref gets updated but the other nodes do not flush the in-memory cache in real time. It takes a few seconds to realise the new value and invalidate the in-memory cache.
+
+> in the case of #1, packfiles, there are some exists() lookups a) after IOExceptions (failure paths), and also b) after detecting new packfiles and reloading them.  The failure "a" paths are slow and unusual, it likely does not matter how slow.  As for the "b" reloading, this is a not a bulk operation that happens regularly during every git operation, and the overhead is likely minimal compared to actually loading the new pack index.
+> 
+> In the case of #2, loose objects, generally these are looked up in a cache first, if that fails, then the packed objects are looked up, and if that fails, then the loose object is looked up.  This last lookup is not a failure path, but it is generally the slow path.  That is the case the would concern me the most.  I believe that once the loose object is looked up once, it will make it into the cache though, so it should be faster thereafter.  If this case is too slow in the real world, this could potentially be improved by only refreshing when exists() returns a false.  I suspect that this doesn't matter in the real world, on Gerrit servers there are generally very few loose objects that are not in packfiles, and this is when it would hit.
+> 
+> Lastly in the case of #3, I don't think this is a common jgit case, at least not in any bulk operations.  Most accesses to refs are ref-advertisements that will not use exists().  Generally the exists() is only used when modifying the ref, and that tends to be a slow path already.
+
+case of #4 is done every time that someone does a ref lookup: running on our production (failover node) and will try to redirect a bit of load and will come back with some numbers.
+
+The Gerrit startup phase and project cache warm-up is a lot slower though: it generates millions of calls to the hack :-(
+
+> 
+> I hope this clarifies most things, I may have missed some cases?
+
+Yes, it does. Thanks.
+
+See the 4) I mentioned, it is exactly our interest in this patch.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2018-06-07 17:13:49.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:410, org.eclipse.jgit/src/org/eclipse/jgit/util/FS_POSIX.java -> It has been live for 10 mins => 1.7M calls
+I have to say that we have 15k active users and over 40k repositories.
+
+The project cache warm-up consumed 1M of those calls. Let's say then that the average number of calls per minute was 70k /minute.
+
+See below my ioping stats:
+4 KiB <<< /var/gerrit/git (nfs4 10.0.20.2:/var/gerrit/git): request=2 time=499.9 us
+
+Whilst on the local FS the ioping stats are:
+4 KiB <<< /var/gerrit (ext4 /dev/root): request=3 time=258.2 us
+
+Even though the number of calls is significant (1100 TPS of calls to the refresh stats) the end user performance are still good. I suspect that I am generating however quite a bit of network I/O. Will leave it running on the failover node for 2-3h and give the final results as feedback to this change.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Martin Fick
+Date: 2018-06-07 17:42:45.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:410, org.eclipse.jgit/src/org/eclipse/jgit/util/FS_POSIX.java -> Yes, I think you are right about #4, I didn't realize those were even being cached!  For #4 the lastModified() is being used.  A difficult, but potential improvement could be to only refresh the dir once per ref directory, but I don't think the code layout would make that very doable.  I would be concerned about this use case if it is a "bulk" operation that is used during ref advertisement?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2018-06-07 20:46:30.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:410, org.eclipse.jgit/src/org/eclipse/jgit/util/FS_POSIX.java -> > Yes, I think you are right about #4, I didn't realize those were even being cached!  For #4 the lastModified() is being used.  A difficult, but potential improvement could be to only refresh the dir once per ref directory,
+
+Exactly, and I wanted to expose it upstream as an API to be used by Gerrit.
+Gerrit *knows* when the ref directory needs to be checked with a refreshed set of access data:
+- When a index sync is received
+- When a replication needs to be triggered
+- Before and after a GC cycle
+
+By having the tool available (Repository.refreshRefs()) upstream, we could get all the benefits without any overload in terms of CPU or I/O to the NFS share.
+
+> but I don't think the code layout would make that very doable. 
+
+Let me try a patch on top of stable-4.9 (the one used in Gerrit 2.15)
+
+> I would be concerned about this use case if it is a "bulk" operation that is used during ref advertisement?
+
+See below the stats of 2h of production load with this hack:
+- 7.3M calls to refresh stats over 9.5k repositories, an average of 768 calls per repo
+- The most active repo (spdk/spdk - 30k refs) had 3.4M calls
+
+Bear in mind that if we expose the API upstream, we DO NOT need to call it all the times for all operations.
+
+Example:
+It is absolutely acceptable that a regular from a failover node gets a not 100% up-to-date ref value. However, when you push, you always want to make sure to have the latest version.
+
+That would allow to massively reduce the number of calls to the API.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2018-06-07 21:07:14.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+
+Confirming my -1 based on the performance figures obtained on GerritHub.io after 2h of production traffic with this hack at File-level.
+Line:410, org.eclipse.jgit/src/org/eclipse/jgit/util/FS_POSIX.java -> More stats about %CPU usage and system load:
+- Avg Baseline: CPU = 2%, System Load = 1.3
+- Avg w/ refresh stats: CPU = 30%, System Load = 3
+
+Because we have plenty of over-capacity on GerritHub.io on both NFS bandwidth, CPU and cores, the additional load did not generate any significant delay anywhere.
+
+However, if you are applying this patch to a more overloaded server that is running at 50% of the available capacity, the performance penalties would be noticeable.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Nasser Grainawi
+Date: 2018-06-07 21:57:37.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:410, org.eclipse.jgit/src/org/eclipse/jgit/util/FS_POSIX.java -> Martin and I are wondering if using FileSnapshots for the config files (to skip re-reading them if unmodified) would be enough of an improvement that this becomes unnoticeable. I'm off for a vacation today and back on the 19th. If no one else tries out that approach before then, I'll try it when I'm back.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2018-06-07 22:15:04.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:410, org.eclipse.jgit/src/org/eclipse/jgit/util/FS_POSIX.java -> > Martin and I are wondering if using FileSnapshots for the config files (to skip re-reading them if unmodified) would be enough of an improvement that this becomes unnoticeable. I'm off for a vacation today and back on the 19th. If no one else tries out that approach before then, I'll try it when I'm back.
+
+See below the breakdown of calls per type:
+#1: 2.4M refs/changes/NN/NNN/meta
+#1: 350k objects/pack
+#2: 52k config
+
+This is *specific* to Gerrit 2.5 use-case with NoteDb, where the Git repository used *all the times* for reading change data. Every time that a ChangeNote is used, JGit needs to de-reference the ref to a SHA1 and, because the RefDatabase has a cached set of values, checks if the underlying loose refs have changed.
+
+With this hack, every time than anyone touches anything on the GUI, we call this refresh hack. That's the reason behind those astronomic numbers :-(
+
+The situation with Gerrit < 2.15 could be *very different*. Maybe Hugo could run some tests in production on v2.14.x and share the results.
+
+However, sooner or later, we will end up with Gerrit v2.15 and we will hit this problem :-(
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Hector Oswaldo Caballero
+Date: 2018-06-07 22:22:38.000000000
+Message: 
+Patch Set 4:
+
+We're running some tests in dev and staging environments right now. So far, in 2.14 the situation does not see as dramatic but (preliminary data), on average there is a 25% hit in Gerrit operations.
+
+As soon as we have more (and more precise) data, we'll be posting it here.
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2018-06-07 22:34:22.000000000
+Message: 
+Patch Set 4:
+
+> Patch Set 4:
+> 
+> We're running some tests in dev and staging environments right now. So far, in 2.14 the situation does not see as dramatic but (preliminary data), on average there is a 25% hit in Gerrit operations.
+> 
+> As soon as we have more (and more precise) data, we'll be posting it here.
+
+Thanks, Hector for sharing this initial feedback.
+Can you run as well an 'ioping' from staging to the NFS volume and then to a local volume?
+
+That would give us an indication of the performance of your NFS server.
+
+If NFS is very slow, the %CPU increase is not dramatic, because you are constantly waiting for I/O. However, the end-user response times may be impacted.
+
+In our case, the NFS volume is very fast (only 50% slower than the local one) and that's why the %CPU went up but the overall end-user response times remained flat.
+
+Additionally, we are on v2.15 and NoteDb accesses are ~ 90% of the API calls to loose refs. You guys have packed refs and that's why you don't have so many calls.
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2018-06-07 22:39:11.000000000
+Message: 
+Patch Set 4:
+
+Ie9a3adac on stable-4.9 a different type of patch, more specific to the needs of Gerrit v2.15 and NoteDb.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2018-06-07 22:58:50.000000000
+Message: 
+Patch Set 4:
+
+> (1 comment)
+
+FileBasedConfig is using FileSnapshot already
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Halstrick
+Date: 2018-06-08 09:18:10.000000000
+Message: 
+Patch Set 4:
+
+> Thanks for sharing the stats. I am super-shocked on the degradation
+ > on your NFS mounts :-O
+ > 
+ > Can you run a simple ioping on it and share the results?
+ > What are your NFS mount options?
+
+I attached ioping results. They are not so dramatically different. And I attach
+also my mount options. 
+Problem is (and I guess there are users having this problem): we are deploying
+into a cloud environment and we can express that we need a shared filesystems
+(NFS) but we may not be able to control things like mount options. 
+
+$ grep ec2 /etc/fstab
+nsa0246sd:/vol/yyyvolumexxxxx /mnt/perm_storage/ nfs        rw,proto=tcp,rsize=32768,wsize=32768 0 0
+
+$ #### ioping on NFS: 5.31ms
+$ ioping -c20 .
+4 KiB <<< . (nfs nsa0246sd:/vol/yyyvolumexxxxx): request=1 time=313.3 us (warmup)
+...
+4 KiB <<< . (nfs nsa0246sd:/vol/yyyvolumexxxxx): request=20 time=16.7 ms (slow)
+
+--- . (nfs nsa0246sd:/vol/yyyvolumexxxxx) ioping statistics ---
+19 requests completed in 100.9 ms, 76 KiB read, 188 iops, 753.1 KiB/s
+generated 20 requests in 19.0 s, 80 KiB, 1 iops, 4.21 KiB/s
+min/avg/max/mdev = 365.4 us / 5.31 ms / 16.7 ms / 5.16 ms
+...
+$ #### ioping on local: 4.28ms
+$ >ioping -c20 .
+4 KiB <<< . (ext3 /dev/xvda): request=1 time=994.3 us (warmup)
+...
+4 KiB <<< . (ext3 /dev/xvda): request=20 time=2.70 ms
+
+--- . (ext3 /dev/xvda) ioping statistics ---
+19 requests completed in 81.3 ms, 76 KiB read, 233 iops, 934.7 KiB/s
+generated 20 requests in 19.0 s, 80 KiB, 1 iops, 4.21 KiB/s
+min/avg/max/mdev = 338.8 us / 4.28 ms / 20.7 ms / 6.01 ms
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2018-06-08 09:34:21.000000000
+Message: 
+Patch Set 4:
+
+> Patch Set 4:
+> 
+> > Thanks for sharing the stats. I am super-shocked on the degradation
+>  > on your NFS mounts :-O
+>  > 
+>  > Can you run a simple ioping on it and share the results?
+>  > What are your NFS mount options?
+> 
+> I attached ioping results. They are not so dramatically different. And I attach
+> also my mount options. 
+> Problem is (and I guess there are users having this problem): we are deploying
+> into a cloud environment and we can express that we need a shared filesystems
+> (NFS) but we may not be able to control things like mount options. 
+> 
+> $ grep ec2 /etc/fstab
+> nsa0246sd:/vol/yyyvolumexxxxx /mnt/perm_storage/ nfs        rw,proto=tcp,rsize=32768,wsize=32768 0 0
+> 
+> $ #### ioping on NFS: 5.31ms
+> $ ioping -c20 .
+> 4 KiB <<< . (nfs nsa0246sd:/vol/yyyvolumexxxxx): request=1 time=313.3 us (warmup)
+> ...
+> 4 KiB <<< . (nfs nsa0246sd:/vol/yyyvolumexxxxx): request=20 time=16.7 ms (slow)
+> 
+> --- . (nfs nsa0246sd:/vol/yyyvolumexxxxx) ioping statistics ---
+> 19 requests completed in 100.9 ms, 76 KiB read, 188 iops, 753.1 KiB/s
+> generated 20 requests in 19.0 s, 80 KiB, 1 iops, 4.21 KiB/s
+> min/avg/max/mdev = 365.4 us / 5.31 ms / 16.7 ms / 5.16 ms
+> ...
+> $ #### ioping on local: 4.28ms
+> $ >ioping -c20 .
+> 4 KiB <<< . (ext3 /dev/xvda): request=1 time=994.3 us (warmup)
+> ...
+> 4 KiB <<< . (ext3 /dev/xvda): request=20 time=2.70 ms
+> 
+> --- . (ext3 /dev/xvda) ioping statistics ---
+> 19 requests completed in 81.3 ms, 76 KiB read, 233 iops, 934.7 KiB/s
+> generated 20 requests in 19.0 s, 80 KiB, 1 iops, 4.21 KiB/s
+> min/avg/max/mdev = 338.8 us / 4.28 ms / 20.7 ms / 6.01 ms
+
+It is quite strange because it seems that the local vs. NFS figures are exactly the same!
+
+min ~ 300 us
+avg ~ 4/5 msec
+
+I believe your cloud provider does not really provide real local storage but all the machines are using a shared remote disk.
+
+4 msec for a local access if *too slow* IMHO
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Halstrick
+Date: 2018-06-08 09:42:25.000000000
+Message: 
+Patch Set 4:
+
+> It is quite strange because it seems that the local vs. NFS figures
+ > are exactly the same!
+ > 
+ > min ~ 300 us
+ > avg ~ 4/5 msec
+ > 
+ > I believe your cloud provider does not really provide real local
+ > storage but all the machines are using a shared remote disk.
+ > 
+ > 4 msec for a local access if *too slow* IMHO
+
+I retried on a different machine. Values do not seem to be very stable:
+
+##NFS
+min/avg/max/mdev = 833.1 us / 3.39 ms / 9.65 ms / 3.18 ms
+##local
+min/avg/max/mdev = 432.9 us / 849.9 us / 2.94 ms / 579.5 us
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2018-06-08 09:47:39.000000000
+Message: 
+Patch Set 4:
+
+> Patch Set 4:
+> 
+> > It is quite strange because it seems that the local vs. NFS figures
+>  > are exactly the same!
+>  > 
+>  > min ~ 300 us
+>  > avg ~ 4/5 msec
+>  > 
+>  > I believe your cloud provider does not really provide real local
+>  > storage but all the machines are using a shared remote disk.
+>  > 
+>  > 4 msec for a local access if *too slow* IMHO
+> 
+> I retried on a different machine. Values do not seem to be very stable:
+> 
+> ##NFS
+> min/avg/max/mdev = 833.1 us / 3.39 ms / 9.65 ms / 3.18 ms
+> ##local
+> min/avg/max/mdev = 432.9 us / 849.9 us / 2.94 ms / 579.5 us
+
+Yes, more reasonable now. Your NFS storage is on average 4x slower than your local access, which now makes sense.
+
+Can you repeat your benchmarks with your Java test app on this host as well?
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Halstrick
+Date: 2018-06-08 12:48:00.000000000
+Message: 
+Patch Set 4:
+
+> Can you repeat your benchmarks with your Java test app on this host
+ > as well?
+
+I run ioping and my test programm against NFS and local fs again. Same picture: ioping doesn't show big difference but creating and checking 100000 files locally vs. NFS shows a big difference
+
+$ ##### NFS
+$ java -jar /tmp/PerfTest_NFSFile.jar
+Repo created in /mnt/perm_storage/persistent/git_web/tmp_1528461240548
+Instantiated 100000 File objects for existing files and checked explicitly for existence (found 100000 files) in 38263 ms.
+Instantiated 100000 NFSFile objects for existing files and checked explicitly for existence (found 100000 files) in 38158 ms.
+Instantiated inf a repo with CONFIG_KEY_REFRESHFOLDERSTAT set to true 100000 NFSFile objects for existing files and checked explicitly for existence (found 100000 files) in 47662 ms.
+$ ~/ioping-master/ioping -c5 .
+4 KiB <<< . (nfs nsa0246sd:/vol/xxxvolumeyyy): request=1 time=366.1 us (warmup)
+4 KiB <<< . (nfs nsa0246sd:/vol/xxxvolumeyyy): request=2 time=972.4 us
+4 KiB <<< . (nfs nsa0246sd:/vol/xxxvolumeyyy): request=3 time=405.9 us
+4 KiB <<< . (nfs nsa0246sd:/vol/xxxvolumeyyy): request=4 time=12.1 ms
+4 KiB <<< . (nfs nsa0246sd:/vol/xxxvolumeyyy): request=5 time=1.17 ms
+
+--- . (nfs nsa0246sd:/vol/xxxvolumeyyy) ioping statistics ---
+4 requests completed in 14.6 ms, 16 KiB read, 273 iops, 1.07 MiB/s
+generated 5 requests in 4.00 s, 20 KiB, 1 iops, 5.00 KiB/s
+min/avg/max/mdev = 405.9 us / 3.66 ms / 12.1 ms / 4.87 ms
+
+
+$ ##### local
+$ cd
+$ java -jar /tmp/PerfTest_NFSFile.jar
+Repo created in /usr/sap/ljs/home/tmp_1528461622240
+Instantiated 100000 File objects for existing files and checked explicitly for existence (found 100000 files) in 609 ms.
+Instantiated 100000 NFSFile objects for existing files and checked explicitly for existence (found 100000 files) in 793 ms.
+Instantiated inf a repo with CONFIG_KEY_REFRESHFOLDERSTAT set to true 100000 NFSFile objects for existing files and checked explicitly for existence (found 100000 files) in 880 ms.
+ljs@vsa3766470:~> ~/ioping-master/ioping -c5 .
+4 KiB <<< . (ext3 /dev/xvda): request=1 time=795.1 us (warmup)
+4 KiB <<< . (ext3 /dev/xvda): request=2 time=1.77 ms
+4 KiB <<< . (ext3 /dev/xvda): request=3 time=1.35 ms
+4 KiB <<< . (ext3 /dev/xvda): request=4 time=1.82 ms
+4 KiB <<< . (ext3 /dev/xvda): request=5 time=900.4 us
+
+--- . (ext3 /dev/xvda) ioping statistics ---
+4 requests completed in 5.84 ms, 16 KiB read, 685 iops, 2.68 MiB/s
+generated 5 requests in 4.00 s, 20 KiB, 1 iops, 5.00 KiB/s
+min/avg/max/mdev = 900.4 us / 1.46 ms / 1.82 ms / 369.8 us
+----------------------------------------------------------------------------------------------------------------------
+Author: Hector Oswaldo Caballero
+Date: 2018-06-08 17:38:36.000000000
+Message: 
+Patch Set 4:
+
+Running same tests as you in our dev environment:
+
+Dev local:
+----------
+user@dev/opt/gerrit$ ioping/ioping/ioping -c5 .
+4 KiB <<< . (xfs /dev/dm-5): request=1 time=49.0 us (warmup)
+4 KiB <<< . (xfs /dev/dm-5): request=2 time=49.5 us
+4 KiB <<< . (xfs /dev/dm-5): request=3 time=50.2 us
+4 KiB <<< . (xfs /dev/dm-5): request=4 time=59.5 us
+4 KiB <<< . (xfs /dev/dm-5): request=5 time=48.8 us
+
+Repo created in /opt/gerrit/tmp_1528395877045
+Instantiated 100000 File objects files and checked explicitly for existence: found 100000 files in 259 ms.
+Instantiated 100000 NFSFile objects files and checked explicitly for existence: found 100000 files in 316 ms.
+config key REFRESHFOLDERSTAT set to true
+Instantiated 100000 NFSFile objects files and checked explicitly for existence: found 100000 files in 273 ms.
+
+--- . (xfs /dev/dm-5) ioping statistics ---
+4 requests completed in 208.0 us, 16 KiB read, 19.2 k iops, 75.1 MiB/s
+generated 5 requests in 4.00 s, 20 KiB, 1 iops, 5.00 KiB/s
+min/avg/max/mdev = 48.8 us / 52.0 us / 59.5 us / 4.37 us
+
+Dev NFS mount:
+--------------
+user@dev/opt/gerrit$ ioping/ioping/ioping -c5 /apps/gerritcentral-develop/repos
+4 KiB <<< /apps/gerritcentral-develop/repos (nfs *mount*:/gerritcentral-develop): request=1 time=285.2 us (warmup)
+4 KiB <<< /apps/gerritcentral-develop/repos (nfs *mount*:/gerritcentral-develop): request=2 time=355.9 us
+4 KiB <<< /apps/gerritcentral-develop/repos (nfs *mount*:/gerritcentral-develop): request=3 time=265.1 us
+4 KiB <<< /apps/gerritcentral-develop/repos (nfs *mount*:/gerritcentral-develop): request=4 time=389.2 us
+4 KiB <<< /apps/gerritcentral-develop/repos (nfs *mount*:/gerritcentral-develop): request=5 time=294.0 us
+
+--- /apps/gerritcentral-develop/repos (nfs *mount*:/gerritcentral-develop) ioping statistics ---
+4 requests completed in 1.30 ms, 16 KiB read, 3.07 k iops, 12.0 MiB/s
+generated 5 requests in 4.00 s, 20 KiB, 1 iops, 5.00 KiB/s
+min/avg/max/mdev = 265.1 us / 326.1 us / 389.2 us / 49.1 us
+
+Repo created in /apps/master/repos/tmp_1528396552939
+Instantiated 100000 File objects files and checked explicitly for existence: found 100000 files in 39351 ms.
+Instantiated 100000 NFSFile objects files and checked explicitly for existence: found 100000 files in 38115 ms.
+config key REFRESHFOLDERSTAT set to true
+Instantiated 100000 NFSFile objects files and checked explicitly for existence: found 100000 files in 37477 ms.
+
+Running the load tests on dev environment, only slight increase in response times (around 2% in average).
+
+Some operations are more affected in big repositories:
+
+ * Listing branches: ~11% slower
+ * Listing tags: ~10% slower
+ * Listing self-groups: ~10% slower
+ * Listing parents of a project: ~8% slower
+
+In summary: As many have pointed out, the difference ioping show is not that big but running Christian's test shows a big gap between local FS (xfs in our case) and NFS.
+The performance impact of this change is not that big in Gerrit 2.14, at least in our environment.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2018-06-08 20:42:25.000000000
+Message: 
+Patch Set 4:
+
+> > Patch Set 4:
+ > >
+ > > We're running some tests in dev and staging environments right
+ > now. So far, in 2.14 the situation does not see as dramatic but
+ > (preliminary data), on average there is a 25% hit in Gerrit
+ > operations.
+ > >
+ > > As soon as we have more (and more precise) data, we'll be posting
+ > it here.
+ > 
+ > Thanks, Hector for sharing this initial feedback.
+ > Can you run as well an 'ioping' from staging to the NFS volume and
+ > then to a local volume?
+ > 
+ > That would give us an indication of the performance of your NFS
+ > server.
+ > 
+ > If NFS is very slow, the %CPU increase is not dramatic, because you
+ > are constantly waiting for I/O. However, the end-user response
+ > times may be impacted.
+ > 
+ > In our case, the NFS volume is very fast (only 50% slower than the
+ > local one) and that's why the %CPU went up but the overall end-user
+ > response times remained flat.
+ > 
+ > Additionally, we are on v2.15 and NoteDb accesses are ~ 90% of the
+ > API calls to loose refs. You guys have packed refs and that's why
+ > you don't have so many calls.
+
+how about packing refs more frequently when using noteDB ?
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2018-06-09 08:53:17.000000000
+Message: 
+Patch Set 4: -Code-Review
+
+I did some further tests on our GerritHub.io production to see if refreshing the stats before reindexing would have helped to have a consistent last update TS on the refs loose objects (NOT this fix specifically but the same refresh hack on the parent dir of the loose ref): the result is that *sometimes* triggers the NFS cache refresh but most of the times it doesn't, at least on our system.
+
+Having instead the hack called *all the times*, even if was giving more trouble to the server, was more effective.
+
+Removing then my -1, because the performance penalty on Gerrit v2.14 is not significant. For Gerrit v2.15 (aka JGit >= 4.9) we would need a completely different solution. I am investigating the idea from Martin to read the loose ref all the times unconditionally.
+----------------------------------------------------------------------------------------------------------------------
+Author: Hector Oswaldo Caballero
+Date: 2018-06-15 10:38:21.000000000
+Message: 
+Patch Set 4:
+
+(4 comments)
+Line:396, org.eclipse.jgit/src/org/eclipse/jgit/util/FS_POSIX.java -> If we go this way, shouldn't we need some kind of API to set this configuration? I mean, similar with what is done with, for example, the window cache or ReceivePack, we would need a way to pass this from Gerrit to JGit, no?
+
+Line:396, org.eclipse.jgit/src/org/eclipse/jgit/util/FS_POSIX.java -> I've done just that in this change:
+
+  https://git.eclipse.org/r/#/c/124593/
+
+BTW, could you, please, or any of the other maintainers to push that change as a new patch set of this one?
+
+Same for this one:
+  
+  https://git.eclipse.org/r/#/c/124594/
+
+as a new patch set of the follow-up change by Nasser.
+
+Thanks
+
+Line:410, org.eclipse.jgit/src/org/eclipse/jgit/util/FS_POSIX.java -> Done
+
+Line:410, org.eclipse.jgit/src/org/eclipse/jgit/util/FS_POSIX.java -> I proposed just to read it once and "cache" the value in a static variable.
+
+----------------------------------------------------------------------------------------------------------------------

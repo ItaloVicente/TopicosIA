@@ -1,0 +1,127 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-55464: Update multiple tasks in one chronicle transaction
+
+When terminating a gen_server, we wish to mark all currently running
+tasks as failed. To do this efficiently, we should allow updating
+multiple tasks in one call, i.e. with global_tasks:update_tasks/1
+which takes a list of tasks. The reason that this is more efficient is
+that we can update the tasks list just once with one chronicle
+transaction, whereas originally we would perform multiple chronicle
+transactions unnecessarily. This change makes use of the new function
+for samples_loader_tasks:terminate/2
+
+This function makes the most sense using a #global_task_update record,
+rather than a tuple which risks run-time errors from the usages not all
+being modified when the tuple changes (for instance changing length).
+
+Change-Id: Iba83fcbb52dc374b8b50f492e0f362c427cd9a54
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Peter Searby
+Date: 2023-03-15 10:25:11.000000000
+Message: 
+Uploaded patch set 8.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2023-03-15 10:25:20.000000000
+Message: 
+Patch Set 8:
+
+Build Started https://cv.jenkins.couchbase.com/job/ns-server-test/35363/ (1/3)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2023-03-15 10:25:24.000000000
+Message: 
+Patch Set 8:
+
+Build Started https://cv.jenkins.couchbase.com/job/ns-server-ns-test/2709/ (2/3)
+----------------------------------------------------------------------------------------------------------------------
+Author: Peter Searby
+Date: 2023-03-15 10:26:03.000000000
+Message: 
+Patch Set 8: Verified+1
+
+(1 comment)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2023-03-15 10:28:08.000000000
+Message: 
+Patch Set 8:
+
+Build Started https://cv.jenkins.couchbase.com/job/ns-server-api-test/374/ (3/3)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2023-03-15 10:58:49.000000000
+Message: 
+Patch Set 8: Well-Formed+1
+
+Build Successful 
+
+https://cv.jenkins.couchbase.com/job/ns-server-test/35363/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/ns-server-ns-test/2709/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/ns-server-api-test/374/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2023-03-16 00:13:08.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:23, include/global_tasks.hrl -> This approach assumes somebody who wants to update a task has to hold to all the task params if they wish to update.
+
+I feel there should be validations for updating a task in the main update function in global_tasks and anyone having a reference to a taskId should be able to update the task (the ones that we deem are allowed to be modified) without specifying all the task props.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Peter Searby
+Date: 2023-03-16 15:28:27.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:23, include/global_tasks.hrl -> If I understand correctly, that's a concern with the original implementation, not just this change?
+
+I agree that we may sometimes wish to do that, and in fact it would allow us to more strictly enforce assumptions for task updates.
+I personally think that we should not allow modifying task_id or type (currently it is impossible to modify task_id anyway). Which just leaves status, bucket, and extras as modifiable.
+
+We could split this up, with a #global_task_create and #global_task_update:
+ -record(global_task_create, {task_id :: binary(),
+                              type :: task_type(),
+                              status :: status(),
+                              bucket = undefined :: undefined | list(),
+                              extras = [] :: extras()}).
+ -record(global_task_update, {task_id :: binary(),
+                              status = undefined :: undefined | status(),
+                              bucket = undefined :: undefined | list(),
+                              extras = undefined :: undefined | extras()}).
+
+This allows us to enforce that task_id and type cannot be modified, but status, bucket, and extras can be modified by giving a non-undefined value.
+
+One issue with this is that we may want to dissociate a task from a bucket, which would do nothing as it would be undefined. To resolve that I think it makes sense to add a 'none' value to bucket, which would replace undefined in #global_task_create, and be an additional non-default option for #global_task_update.
+
+Another issue with this is that by allowing partial updates, we have to deal with the situation where we try to update a task which has been cleaned up already. In this case we would have to give an error. The most obvious solution is to allow partial updates, but require a value for task_type and status, since we need to have values for these. If the original task is gone, then we may just lose the bucket and extras values. This isn't really a proper partial update though, and may cause useful information to be lost silently.
+
+I think we might just want to stick to full task updates, since failed partial updates is not desirable behaviour.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Peter Searby
+Date: 2023-03-28 16:59:27.000000000
+MISMATCHED INLINE COMMENT
+Line:23, include/global_tasks.hrl -> Continuing/summarising the discussion from https://review.couchbase.org/c/ns_server/+/188290/comments
+/27508503_7929d73e
+Sticking to full task updates would mean tasks may disappear then re-appear when they get cleaned then updated, which may confuse consumers of the task.
+One solution is to have a worker process which monitors the task's process and cleans up the task when it received 'DOWN'.
+A simpler solution is for partial updates to fail when the task is cleaned up. We can later add a worker process to monitor tasks to allow long running tasks, when it becomes necessary.
+
+For this patch, I'll implement partial updates, with an error given when a partial update is attempted on a missing task
+----------------------------------------------------------------------------------------------------------------------
+Author: Peter Searby
+Date: 2023-04-05 14:34:09.000000000
+MISMATCHED INLINE COMMENT
+Line:23, include/global_tasks.hrl -> Done
+----------------------------------------------------------------------------------------------------------------------

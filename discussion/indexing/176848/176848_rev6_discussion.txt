@@ -1,0 +1,148 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-52109 Tenant aware planner for index placement
+
+Index placement during create index will follow the following rules:
+
+1. All indexer nodes will be grouped into sub-clusters of 2 nodes each.
+2. Each node in a sub-cluster must belong to a different server group.
+3. All indexes will be created with 1 replica.
+4. Index(and its replica) follow symmetrical distribution in a sub-cluster.
+5. Indexes belonging to a tenant(bucket) will be mapped to a single sub-cluster.
+6. Index of a new tenant can be placed on a sub-cluster with usage
+   lower than LWM(Low Watermark Threshold).
+7. Index of an existing tenant can be placed on a sub-cluster with usage
+   lower than HWM(High Watermark Threshold).
+8. No Index can be placed on a node above HWM(High Watermark Threshold).
+
+Change-Id: I26f65a0e48e410c70c5949a89a034e94b64785f3
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Deepkaran Salooja
+Date: 2022-07-05 23:45:09.000000000
+Message: 
+Uploaded patch set 6: Patch Set 5 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2022-07-06 08:00:16.000000000
+Message: 
+Patch Set 6: Code-Review+1
+
+PASS sanity,unit,functional,integration with storage fdb. See http://ci2i-unstable.northscale.in/gsi-06.07.2022-09.30.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2022-07-06 13:14:48.000000000
+Message: 
+Patch Set 6:
+
+PASS sanity,unit,functional,integration with storage plasma. See http://ci2i-unstable.northscale.in/gsi-06.07.2022-13.41.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2022-07-06 17:23:21.000000000
+Message: 
+Patch Set 6:
+
+PASS sanity,unit,functional,integration with storage memdb. See http://ci2i-unstable.northscale.in/gsi-06.07.2022-18.56.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2022-07-06 19:43:36.000000000
+Message: 
+Patch Set 6:
+
+(7 comments)
+Line:1704, secondary/planner/executor.go -> "Found Result" log statement should be inside an else{} of prior if{}.
+
+Line:1741, secondary/planner/executor.go -> Are the subcluster pairings stable across Planner runs, or can different runs define different pairings? Since Tenant-Aware Planner can also run when there are failed over nodes, it is not clear that it preserves the notion that nodes come in pairs and they are always twins. How does this work when there are currently an odd number of nodes in the cluster?
+
+Even if there are say always four nodes, can multiple plan runs produce layouts like:
+
+Tenant 1 on nodes [1, 2]
+Tenant 2 on nodes [3, 4]
+Tenant 3 on nodes [2, 3]
+
+?
+
+Line:1860, secondary/planner/executor.go -> This nested loop does not look right. The inner loop never iterates due to the break on line 1858. What this actually finds is the subcluster with the lowest-loaded first node.
+
+It looks like the original intent is that inner loop should find the average load across indexers in the subcluster and outer loop should find the subcluster with the lowest average load.
+
+Line:1867, secondary/planner/executor.go -> Extraneous "//"
+
+Line:1885, secondary/planner/executor.go -> Function name incorrect in comment ("High" instead of "Low").
+
+Line:1902, secondary/planner/executor.go -> This code is a little confusing as it can set both found = true and found = false in the inner loop, then continue iterating, making it look at first glance like it can change its mind several times even though it can only change its mind once. I think it would be clearer as
+
+for _, subCluster := range subClusters {
+	//all nodes in the sub-cluster need to satisfy the condition
+	found = true
+	for _, indexNode := range subCluster {
+		if float64(indexNode.ActualRSS) >=
+			usageThreshold.MemLowThreshold*float64(quota) {
+
+			found = false
+			break
+		}
+	}
+}
+
+Line:1935, secondary/planner/executor.go -> This function is identical to the prior one except for which threshold it is comparing to. It would be better to have only one function and pass in the threshold to evaluate as an argument.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Deepkaran Salooja
+Date: 2022-07-06 22:25:43.000000000
+Message: 
+Patch Set 6:
+
+(7 comments)
+Line:1704, secondary/planner/executor.go -> Done
+
+Line:1741, secondary/planner/executor.go -> For nodes with indexes, pairings will be stable as a single tenant's indexes can only go to one sub-cluster and pairing is done based on that. For empty nodes, pairings can change across planner runs as long as they follow server group rules. 
+
+Failed over nodes/nodes during rebalance are TODOs as noted in the sub functions of this function.
+
+Line:1860, secondary/planner/executor.go -> Sub-cluster has 2 identical loaded nodes. So this code only checks one node. This will need to change once index movement during rebalance is accounted. I'll add a comment.
+
+Line:1867, secondary/planner/executor.go -> Done
+
+Line:1885, secondary/planner/executor.go -> Done
+
+Line:1902, secondary/planner/executor.go -> The code will only continue iterating if found=true to evaluate other nodes in the subcluster. Once set to false, it will not iterate anymore.
+
+Line:1935, secondary/planner/executor.go -> The code is still evolving. I'll refactor once it is in more stable state.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2022-07-06 23:15:32.000000000
+Message: 
+Patch Set 6:
+
+(3 comments)
+Line:1741, secondary/planner/executor.go -> Done
+
+Line:1902, secondary/planner/executor.go -> Yes, I agree the code is correct, but IMO it is confusing, as it is unusual to have if-else logic in this kind of check. (I'm not sure I've ever seen it done this way before.) Usually one inits to true and breaks if disproven to false, or inits to false and breaks if disproven to true, so there would not be two cases inside the inner loop. (It's also a performance consideration if the loop could iterate many times.)
+
+You can leave it as is if you want, but the unexpected pattern here did require me to spend longer than usual looking at this block to figure out whether it was correct or not.
+
+Line:1935, secondary/planner/executor.go -> Done
+
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2022-07-07 01:12:46.000000000
+Message: 
+Patch Set 6: -Code-Review
+
+MAYBE FAIL sanity,unit,functional,integration with storage fdb. See http://ci2i-unstable.northscale.in/gsi-07.07.2022-02.36.fail.html
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2022-07-07 04:23:21.000000000
+MISMATCHED INLINE COMMENT
+Line:1860, secondary/planner/executor.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Deepkaran Salooja
+Date: 2022-07-07 00:05:24.000000000
+MISMATCHED INLINE COMMENT
+Line:1902, secondary/planner/executor.go -> Updated the code.
+----------------------------------------------------------------------------------------------------------------------

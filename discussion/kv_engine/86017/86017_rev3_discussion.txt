@@ -1,0 +1,149 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-26998 [RocksDB] Allow to enable the Write Rate Limiter
+
+This change introduces the new configuration parameter
+'rocksdb_write_rate_limit', which enables a write rate limit on Flush
+and Compaction.
+
+Change-Id: I7c98daa3918b8abdcb9d60c85603a516bb330c01
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2017-11-28 09:15:15.000000000
+Message: 
+Uploaded patch set 3.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2017-11-28 09:40:05.000000000
+Message: 
+Patch Set 3: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/4714/ : FAILURE
+
+Failure of a CTest test  1/83 MemCheck #49: memcached-bucket-tests ......................... ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/4714/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/3029/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/4093/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master/4287/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/4494/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/4445/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2017-11-28 10:48:27.000000000
+Message: 
+Patch Set 3:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/4715/ : FAILURE
+
+Failure of a CTest test 12/83 MemCheck #61: memcached-legacy-plain-tests ................... ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/4715/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/3029/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/4093/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master/4287/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/4494/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/4445/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2017-11-28 14:43:12.000000000
+Message: 
+Patch Set 3: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/3029/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/4093/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master/4287/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/4494/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/4445/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/4722/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2017-11-29 16:37:18.000000000
+Message: 
+Patch Set 3: Code-Review+1
+
+(1 comment)
+Line:249, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> Is this per DB or per Env?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2017-11-30 12:02:54.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:249, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> This is per DB and per Env, as 'dbOptions.env' is set to Env::Default(), so all DBOptions use the same static object Env::Default().
+It seems that there is no way to set EnvOptions directly, it is set from DBOptions in DBImpl::DBImpl().
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2017-11-30 12:40:05.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:249, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> Not sure I follow. My basic question is - if there's 4 DBs, do they have their own limit (each is limited to say 100MB each, so 400MB total), or do they share the same global limit (in total they are limited to 100MB)?
+
+I would expect / hope for the latter; so we can just set a single global limit for all DBs (and all buckets).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2017-11-30 13:26:14.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:249, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> Sorry I did not explain well and I also said something wrong.
+We have a unique DBOptions instance per-Shard, which we use to open all the DBs under the same Shard.
+In your example, the response is total-limit=400MB if we consider 4 DBs, 4 Shards, each DB on a different Shard), so my code is wrong. 
+The only way to set a Global RateLimiter is through DBOptions, so we can fix the code doing:
+
+dbOptions.rate_limiter.reset(rocksdb::NewGenericRateLimiter(
+                configuration.getRocksdbWriteRateLimit())  /
+                                     configuration.getMaxShards());
+
+About 
+> so we can set a single global limit for all buckets
+
+I assume you meant "for all VBuckets".
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2017-11-30 13:31:57.000000000
+Message: 
+Patch Set 3: Code-Review-1
+
+(1 comment)
+Line:249, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> I meant "all buckets" ;)
+
+If we are to use this, we will probably select a global rate (for the machine we are running on - i.e. a single Env) and then we will want all Buckets (and the VBuckets under them) to use the same limit.
+
+TBH at the moment we probably get most of the benefit from enabling bytes_per_sync (to prevent writes blocking reads), so we can put this change to one side for now if there's issues with making it global.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Mike Wiederhold
+Date: 2017-12-30 19:32:01.000000000
+Message: 
+Removed reviewer Mike Wiederhold.
+----------------------------------------------------------------------------------------------------------------------

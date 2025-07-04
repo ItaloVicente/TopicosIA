@@ -1,0 +1,76 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-33463: Add support for magma memory quota
+
+Memory is maintained across 3 magma components; Bloom filters, Block
+cache and Write cache. The least important of these is the write cache.
+If there is insufficient memory for the write cache, the write cache
+will grow to the size of the batch and then be immediately flushed and
+freed. If there is available memory, the write cache is limited to 20%
+of the available memory (after bloom filter and block cache get their
+memory up to magma_max_write_cache (128MB). Bloom filters are the most
+important and are never paged out. Bloom filter memory can cause magma
+to go above the memory quota. To alleviate this, the bottom layer where
+the majority of bloom filter memory is, won't use bloom filters when
+OptimizeBloomFilterForMisses is on (which it is by default). The block
+cache grows each time the index sizes change. But its growth is bounded
+by the available memory or what's left over after the bloom filter
+memory is subtracted.
+
+Change-Id: I2c900736cc119dc1a19f42ae60ff5b73d2d2b265
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Scott Lashley
+Date: 2019-10-22 15:48:20.000000000
+Message: 
+Patch Set 10: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-10-24 11:22:54.000000000
+Message: 
+Patch Set 10: Code-Review-1
+
+(6 comments)
+Line:91, engines/ep/src/kv_bucket.cc -> This probably isn't the correct way to handle this. Any actor which needs to know about memory quota changing should register a ValueChangedListener on the `max_size` property.
+
+Line:418, engines/ep/src/kv_bucket.h -> Please document this method.
+
+Line:420, engines/ep/src/kv_bucket.h -> Given KVShard objects don't necessarily know how many shards exist in total, shouldn't the bucketQuota be divided by the number of shards before calling KVStore::updateMemoryQuota() ?
+
+Line:422, engines/ep/src/kv_bucket.h -> Memory changing is rare (and likely to cause a bunch of work on the backend anyways), so no need for this to be inline - please de-inline.
+
+Line:927, engines/ep/src/kvstore.h -> Nothing to to with magma in the base kvstore class.
+
+Line:463, engines/ep/src/magma-kvstore/magma-kvstore.h -> Why is this public? Seems odd that we should expose a public method to access Magma's internal config type.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Scott Lashley
+Date: 2019-10-24 18:21:16.000000000
+Message: 
+Patch Set 10:
+
+(6 comments)
+Line:91, engines/ep/src/kv_bucket.cc -> I don't understand. Isn't this an actor on max_size? Why do we need multiple actors for the same thing?
+This was the location pointed out to me.
+
+Line:418, engines/ep/src/kv_bucket.h -> Done
+
+Line:420, engines/ep/src/kv_bucket.h -> The calculation is taken care of in magma-kvstore.cc::updateMemoryQuota where both the # of shards and the Ratio of the amount of the bucket quota the storage engine can use is taken into consideration.
+
+Line:422, engines/ep/src/kv_bucket.h -> Done
+
+Line:927, engines/ep/src/kvstore.h -> Done
+
+Line:463, engines/ep/src/magma-kvstore/magma-kvstore.h -> configuration is stored in kvstore.h. MagmaKVStoreConfig is a union on top of configuration. In order to get to the magma specifics of configuration we need a way to cast configuration as MagmaKVStoreConfig. Unless we store a pointer to MagmaKVStoreConfig as part of MagmaKVStore class, its the way to get at the magma specific configuration parameters outside of the MagmaKVStore constructor.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-10-25 15:36:08.000000000
+MISMATCHED INLINE COMMENT
+Line:91, engines/ep/src/kv_bucket.cc -> So the Configuration has a listening interface so the particular actors in the system which care about memory quota (or any other config setting) can listen to be notified about changes in it.
+
+Note that KVStoreConfig already has listeners for storage-related config options, hence it makes sense to add something similar (say in the MagmaKVStore) where a particular subclass cares about a config option. That avoids adding adding `updateMemoryQuota` to the base class though only one subclass cares about it.
+----------------------------------------------------------------------------------------------------------------------

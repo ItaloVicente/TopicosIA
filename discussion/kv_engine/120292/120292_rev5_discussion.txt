@@ -1,0 +1,141 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-37468: Force notification of stream completing backfill
+
+A stream completing a backfill may race with a stepping producer.
+The stream may have just completed the backfill (scanned all items
+but not yet completed execution of the completeBackfill function)
+whilst the producer steps finds nothing in the readyQueue (already
+processed all items). If the completing backfill does not notify the
+stream as the itemsReady flag has not yet been reset (by the stepping
+producer) then the producer will remove the stream from it's
+VBReadyQueue and not process it again. Nothing else would notify
+the stream causing us to fail to process the final StreamEnd item.
+
+Change-Id: Ib430ef78261b910616576572bf76cd97c1cf47be
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Ben Huddleston
+Date: 2020-01-10 13:00:39.000000000
+Message: 
+Uploaded patch set 5.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-01-10 13:00:49.000000000
+Message: 
+Patch Set 5:
+
+Branch restricted. PLEASE READ this URL: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/163387/artifact/restricted.html : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-01-10 13:28:33.000000000
+Message: 
+Patch Set 5: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-alice/230/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-alice/230/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-alice/144/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-undefinedsanitizer-alice/153/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-alice/154/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-alice/197/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-alice/161/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/23618/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-01-10 15:15:06.000000000
+Message: 
+Patch Set 5: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-alice/144/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-undefinedsanitizer-alice/153/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-alice/154/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-alice/197/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-alice/161/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/23618/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-alice/231/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-01-10 15:28:07.000000000
+Message: 
+Patch Set 5: Code-Review-1
+
+(6 comments)
+Line:15, /COMMIT_MSG -> nit its
+
+Line:379, engines/ep/src/dcp/stream.cc -> In some other cases the hook is initalised with an empty lambda 
+
+nextHook = []{};
+
+then called unconditionally.
+
+Though really it's only in one place so its not like it affects readability to do the if(), and I don't know what level of perf impact the other way has.
+
+Just mentioning :)
+
+Line:575, engines/ep/src/dcp/stream.cc -> does the racing next() not clear the flag _after_ the next line - this call here fails to notify because it is still true, then it is quickly cleared after?
+
+That is, isn't it:
+
+backfillPhase() finds isBackfillTaskRunning is true, but nothing in readyQueue, returns nullptr to the caller which is next()
+
+this unlocked section here runs, clearing isBackfillTaskRunning, _tries_ to notify, but _does not_ because itemsReady is already true (the CES in notifyStreamReady returns false because itemsReady is not in the expected state false, so it did not update it)
+
+next() sees it got a nullptr, clears itemsReady, returns the nullptr to the producer which believes the stream has no more work, so doesn't call it again.
+
+I agree with the fix, just wanted to check the sequence of events in the comment :P
+
+Line:164, engines/ep/tests/mock/mock_stream.h -> I would say new method without comment, but it is trivial to see what it does :P
+
+Line:4276, engines/ep/tests/module_tests/dcp_test.cc -> Just to be suuuupper certain, can ephemeral *definitely* not get in the same situation?
+
+Line:4326, engines/ep/tests/module_tests/dcp_test.cc -> ...? The test exits early if ephemeral
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2020-01-10 15:52:57.000000000
+Message: 
+Patch Set 5:
+
+(6 comments)
+
+additional ephemeral test incoming, but feel free to review again
+Line:15, /COMMIT_MSG -> Done
+
+Line:379, engines/ep/src/dcp/stream.cc -> Gonna leave as is, just for the sake of not worrying about any potential perf impact
+
+Line:575, engines/ep/src/dcp/stream.cc -> yeah think it was wrong before.
+
+Line:164, engines/ep/tests/mock/mock_stream.h -> which is why I didn't add a comment :) I would normally comment then separate declaration and definition but alice doesn't have a mock_stream.cc and the merge is gonna suck as is.
+
+Line:4276, engines/ep/tests/module_tests/dcp_test.cc -> I thought it couldn't but I think it is possible in theory so will have a play with testing that
+
+Line:4326, engines/ep/tests/module_tests/dcp_test.cc -> oops, old comment
+
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-01-10 16:05:45.000000000
+MISMATCHED INLINE COMMENT
+Line:379, engines/ep/src/dcp/stream.cc -> Sounds good :thumbsup:
+----------------------------------------------------------------------------------------------------------------------

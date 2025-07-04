@@ -1,0 +1,152 @@
+======================================================================================================================
+DESCRIPTION:
+
+Add Executor benchmarks
+
+Add benchmarks for the existing ep-engine ExecutorPool, and Folly's CPUThreaPoolPoolExecutor.
+
+Initially consists of two implementations of a one-shot Task benchmark:
+
+Benchmark a one-shot task (runs once then completed). Measure how long
+it takes to:
+- schedule the Task to run on a background thread (to run asap),
+- then run that Task and notify back to the main thread.
+
+This is the pattern of KVBucket::visitAsync() - it creates a
+VBCBAdapter Task wrapping the given VBucket visitor object, then runs
+that task immediately.
+
+This is a multithreaded benchmark - N sets of benchmark and NonIO
+threads are created. The benchmark threads repeatedly schedule a Task
+to be run to perform some work asynchronously, then waits on the
+result. The background NonIO threads pickup the Task and run it, then
+notifies the requesting thread via a condition variable.
+
+By creating multiple benchmark threads we can measure the performance
+of the ExecutorPool's scheduling implementation.  By creating multiple
+background NonIO threads we can measure the performance of the actual
+dispatch of Tasks on a ThreadPool.
+
+The two implemenations of this are:
+
+1. Existing ep-engine ExecutorPool.
+
+2. Folly, using CPUThreadPoolExecutor::add(). This is the "low-level"
+   API in folly - the consumer passes a Callable object to add(), and
+   then are responsible for how the Task produces it's result back to
+   thce consumer, and how the consumer waits. This is a similar API to
+   what ep-engine ExecutorPool provides.
+
+Results:
+
+a) MacBookPro 2018, 12 logical cores, macOS 10.15.2:
+
+    Run on (12 X 2900 MHz CPU s)
+    2020-06-11 14:53:18
+    --------------------------------------------------------------------------------------------------
+    Benchmark                                                           Time           CPU Iterations
+    --------------------------------------------------------------------------------------------------
+    ExecutorBench/OneShotScheduleRun/real_time/threads:1             8172 ns       6654 ns      70565   119.498k items/s
+    ExecutorBench/OneShotScheduleRun/real_time/threads:2             8795 ns      10801 ns      79804   111.034k items/s
+    ExecutorBench/OneShotScheduleRun/real_time/threads:4             9969 ns      13773 ns      67512   97.9577k items/s
+    ExecutorBench/OneShotScheduleRun/real_time/threads:8            10404 ns      13767 ns      71136   93.8646k items/s
+    ExecutorBench/OneShotScheduleRun/real_time/threads:16            9830 ns      13048 ns      68544   99.3437k items/s
+    FollyExecutorBench/OneShotScheduleRun/real_time/threads:1         716 ns        664 ns     842282    1.3319M items/s
+    FollyExecutorBench/OneShotScheduleRun/real_time/threads:2         498 ns        929 ns    1289586    1.9154M items/s
+    FollyExecutorBench/OneShotScheduleRun/real_time/threads:4         324 ns       1222 ns    1715224   2.94279M items/s
+    FollyExecutorBench/OneShotScheduleRun/real_time/threads:8         400 ns       2467 ns    2102320   2.38661M items/s
+    FollyExecutorBench/OneShotScheduleRun/real_time/threads:16       2058 ns      12903 ns     391168   474.505k items/s
+
+    "items/s": count of Task schedule -> run -> return result iterations.
+
+Observations:
+
+* ep-engine ExecutorBench/OneShotScheduleRun is stuck around ~100k
+  runs per second, increasing thread count doesn't improve
+  things. This is somewhat expected given that the underlying NonIO
+  TaskQueue has a single mutex guarding the queue.
+
+* FollyExecutorBench/OneShotScheduleRun is ~10x faster then ep-engine
+  for a single thread, and up to ~30x faster on the multi-thread
+  tests. It also _does_ scale as thread counts increase, up to 4
+  threads - which note is actually 4x frontend threads and 4x
+  background threads. Note this machine only has a total of 12 logical
+  cores so one would expect that more than threadds:4 (actually 8
+  threads total) _would_ start to slow down here.
+
+b) Mancouch, 24 logical cores, Ubuntu 18.04:
+
+    Run on (24 X 2400 MHz CPU s)
+    2020-06-11 15:32:35
+    ***WARNING*** CPU scaling is enabled, the benchmark real time measurements may be noisy and will incur extra overhead.
+    --------------------------------------------------------------------------------------------------
+    Benchmark                                                           Time           CPU Iterations
+    --------------------------------------------------------------------------------------------------
+    ExecutorBench/OneShotScheduleRun/real_time/threads:1            12739 ns      10236 ns      54958   76.6576k items/s
+    ExecutorBench/OneShotScheduleRun/real_time/threads:2             9202 ns      12367 ns      72806   106.127k items/s
+    ExecutorBench/OneShotScheduleRun/real_time/threads:4            13395 ns      21674 ns      51480   72.9075k items/s
+    ExecutorBench/OneShotScheduleRun/real_time/threads:8            18868 ns      30302 ns      36032   51.7584k items/s
+    ExecutorBench/OneShotScheduleRun/real_time/threads:16           19650 ns      31808 ns      35280   49.6974k items/s
+    FollyExecutorBench/OneShotScheduleRun/real_time/threads:1        6110 ns       4343 ns     559960   159.836k items/s
+    FollyExecutorBench/OneShotScheduleRun/real_time/threads:2        1005 ns       1869 ns     787032   971.948k items/s
+    FollyExecutorBench/OneShotScheduleRun/real_time/threads:4         785 ns       3005 ns     948224    1.2148M items/s
+    FollyExecutorBench/OneShotScheduleRun/real_time/threads:8         738 ns       5181 ns     976264   1.29247M items/s
+    FollyExecutorBench/OneShotScheduleRun/real_time/threads:16        821 ns       8447 ns     838832   1.16204M items/s
+
+Observations:
+
+* ep-engine ExecutorBench/OneShotScheduleRun is again stuck at 100k or
+  fewer runs per second, however this time performance actually
+  degrades as thread count increases, dropping down to ~50k items per
+  second at threads:8 and threads:16.
+
+* FollyExecutorBench/OneShotScheduleRun is faster than
+  ExecutorBench/OneShotScheduleRun at every thread count, however
+  difference isn't as significant compared to the macOS
+  environment. Again performance seems to somewhat scale with thread
+  count, but not as well as macOS. However it still achieves over 1.2M
+  task runs per second up to threads:8 (recall that's 8 frontend + 8
+  backend NonIO = 16 threads total). At threads:16 we have more
+  threads than logical cores (32 vs 24) and hence performance flattens
+  - but is _still_ over 1.1M task runs per second.
+
+Change-Id: Ied74c6aff4fa75668e36bb680750a58a7eb7af84
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2020-06-11 14:43:39.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-06-11 15:24:19.000000000
+Message: 
+Patch Set 2: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/1198/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/24518/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/28499/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/2694/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/3172/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/4198/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/4111/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/4066/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/11942/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2020-06-12 08:54:16.000000000
+Message: 
+Patch Set 2: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------

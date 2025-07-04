@@ -1,0 +1,163 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-45853 Handle retry of write_cfg rename
+
+If the rename of the configuration file being written is unsuccessful
+then we retry a number of times. If all retries fail we'll exit.
+
+Change-Id: Ib642c63611e1aa82f8bdf44a375af2c89c846209
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Steve Watanabe
+Date: 2021-05-11 23:06:37.000000000
+Message: 
+Uploaded patch set 8.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-05-11 23:06:45.000000000
+Message: 
+Patch Set 8:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-test/23796/
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-05-11 23:08:55.000000000
+Message: 
+Patch Set 8:
+
+make simple-test
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-05-11 23:09:01.000000000
+Message: 
+Patch Set 8:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-simple-test/2302/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-05-11 23:11:21.000000000
+Message: 
+Patch Set 8: Well-Formed+1
+
+Permission granted to commit to restricted branch
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-05-12 02:17:47.000000000
+Message: 
+Patch Set 8: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/ns-server-simple-test/2302/ : ABORTED
+
+ERROR: rebalance_in_with_ops (rebalance.rebalancein.RebalanceInTests)
+ ( http://cv.jenkins.couchbase.com/job/ns-server-simple-test/2302/ )
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Finlay
+Date: 2021-05-12 04:00:51.000000000
+Message: 
+Patch Set 8:
+
+(6 comments)
+Line:118, src/memcached_cfg.erl -> I'd probably write this to just take the TimerRef and do the cancel. Then in initiate_write() set the retry_timer to undefined if the write succeeds.
+
+Line:121, src/memcached_cfg.erl -> The flush for a message seems like it should be in the handler that deals with the same message I think.
+
+Line:130, src/memcached_cfg.erl -> State2 is unnecessary. The final expression can just be the case statement.
+
+Line:148, src/memcached_cfg.erl -> As Aliaskey noted, we don't fail if the file isn't written correctly. I think we should assert here.
+
+Line:158, src/memcached_cfg.erl -> One thing I'm concerned about is that we may fail quite a number of times when memcached is starting up. I think I'd just fold this into the the general retry case.
+
+Line:180, src/memcached_cfg.erl -> I would probably return {ok, TimerRef} here instead of just the plain reference. But it's probably just a matter of taste. I like the exponential backoff.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-05-12 16:42:55.000000000
+Message: 
+Patch Set 8:
+
+(6 comments)
+Line:118, src/memcached_cfg.erl -> Ok, will do it the suggested way.
+
+Line:121, src/memcached_cfg.erl -> This handles the race between cancelling the message and receiving it. e.g. if the message is received right before the cancel.
+
+Line:130, src/memcached_cfg.erl -> Will do.
+
+Line:148, src/memcached_cfg.erl -> Will add an error and assert.
+
+Line:158, src/memcached_cfg.erl -> This ends up doing a gen_server:cast to memcached_permissions or memcached_password so it won't fail here if memcached is not running.
+
+Line:180, src/memcached_cfg.erl -> erlang:send_after returns just a reference...I could then take it and return (ok, Reference) but I prefer to just return the reference.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Finlay
+Date: 2021-05-12 17:45:48.000000000
+Message: 
+Patch Set 8:
+
+(4 comments)
+Line:121, src/memcached_cfg.erl -> I don't think it matters too much if you cancel the timer first or flush the message queue first. Flushing the message queue is a small optimization - but I'm ok if you leave it here.
+
+Line:150, src/memcached_cfg.erl -> Do you want to set as 51, since you multiply by 2?
+
+Line:158, src/memcached_cfg.erl -> Good point. It feels like it might be a bit unreliable, but I don't see a bug, so I think it works.
+
+Line:180, src/memcached_cfg.erl -> Sounds good.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-05-12 18:09:01.000000000
+Message: 
+Patch Set 8:
+
+(3 comments)
+Line:121, src/memcached_cfg.erl -> I am under the impression that flushing the message must be after the cancel to avoid:
+
+when TRef =/= undefined ->
+    misc:flush(retry_rename_and_refresh),
+    %% what happens if retry_name_and_refresh is received here?
+    erlang:cancel_timer
+
+Is there something that prevents this?
+
+Line:150, src/memcached_cfg.erl -> I kept the same value that was originally there as I didn't see a reason to change it.
+
+Line:158, src/memcached_cfg.erl -> The is the crux of the issue...having this being asynchronous (with no failures but having this race with memcached) vs the original synchronous call. I believe the discussion with Trond will lead to us sending the configuration with the "refresh" message eliminating the need for them to read from disk (other than at startup).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-05-12 18:10:13.000000000
+Message: 
+Removed Verified-1 by Build Bot <build@couchbase.com>
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Finlay
+Date: 2021-05-12 18:16:43.000000000
+Message: 
+Patch Set 8:
+
+(3 comments)
+Line:121, src/memcached_cfg.erl -> Oh yes, I think you're right. Thanks Steve.
+
+Line:150, src/memcached_cfg.erl -> I was thinking that we want the first retry to be 100 ms after the failed attempt. With your patch it'll be 200 ms, no?
+
+Line:158, src/memcached_cfg.erl -> I think it works. If memcached_refresh is up, it will receive the message and then it's its responsibility to make sure the refresh gets to memcached. If memcached_refresh is down then the refresh will happen when it starts up again, unless memcached itself is down at that point. However, when memcached restarts up, it will clearly read from the disk files and so the refresh is implicit. I think it works.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-05-12 18:25:23.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:150, src/memcached_cfg.erl -> The first retry will be after 101 ms (SleepTime), the second will be after 202 (SleepTime * 2):
+
+                    erlang:send_after(SleepTime, self(),
+                                      {retry_rename_and_refresh, Tries - 1,
+                                       SleepTime * 2})
+
+----------------------------------------------------------------------------------------------------------------------

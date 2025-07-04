@@ -1,0 +1,106 @@
+======================================================================================================================
+DESCRIPTION:
+
+[494611] Avoid CNFE storms on startup
+
+Avoid static access to Messages classes (which require the bundle to be
+activated to initialized properly) from the activator classes
+themselves.
+
+This caused a situation where to initialize some Sirius class (for
+example one registered on a platform extension point):
+
+1. OSGi instanciates the corresponding Sirius activator class (for
+   example DslCommonPlugin$Implementation). To do this it needs to
+   initialize its static fields/execute its static blocks.
+
+2. If such a static initialization accesses the bundle's Messages class,
+   Messages itself needs to be loaded and initialized first.
+
+3. The (static) initialization of the Messages class ends-up calling
+   EMF's DelegatingResourceLocator.getString(). getString() calls
+   getPrimaryResourceLocator(), which calls getPluginResourceLocator(),
+   which returns the value of the "plugin" static field. It is null at
+   this point because we are still in the process of creating the
+   instance of DslCommonPlugin$Implementation (step 1 above) that will
+   be its value later.
+
+4. Seeing no ResourceLocator, EMF's DelegatingResourceLocator assumes
+   we're in a non-OSGi context and falls back to a costly strategy of
+   invoking Java's ResourceResourceBundle.getBundle(packageName +
+   ".plugin"), which will ask all the accessible ClasLoaders for the
+   named resource.
+
+5. Of course they will all fail, throwing a MissingResourceException.
+   DelegatingResourceLocator tries a last-chance method of looking for a
+   "plugin.properties" file at the base URL of the plug-in. As it
+   happens, this matches the location of our properties, so in the end
+   we get the correct value. Note that here EMF hard-codes the name and
+   path of the properties file. If we had put them somewhere else (and
+   mentioned it in the MANIFEST.MF's Bundle-Localization header), this
+   heuristic would not find them (but OSGi/Equinox would).
+
+After analyzing all our activators, two actual problematic cases have
+been identified, both mentioned in http://eclip.se/494611#c3, and both
+treated in this patch:
+
+- SiriusPlugin.INTER_REGISTRY: was a private static final field, is now
+  non-static and non-final, initialized only in the activator's start()
+  method.
+
+- DslCommonPlugin.PROFILER: creates an instance of TimeProfiler2 which
+  ends-up accessing Messages to get some of its strings. This one is
+  public, so instead of breaking the API this late, we simply inline the
+  strings's default values for the few messages concerned. This means
+  they are no longer translatable, but has very little impact in
+  practice for the names of columns or error messages related to the
+  Sirius profiler.
+
+Also change AcceleoMTLInterpreterPlugin to create the
+AcceleoRegistryListener instance only on startup instead of early in the
+instanciation. This is only tangentially related to this particular
+issue, but still in the same area of "don't execute code before the
+activator is fully initialized if it can be avoided".
+
+Bug: 494611
+Change-Id: I68ee2c2a8b6e3daa7c9339aa41df483fd83f2ae5
+Signed-off-by: Pierre-Charles David <pierre-charles.david@obeo.fr>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Pierre-Charles David
+Date: 2016-05-30 08:02:40.000000000
+Message: 
+Change has been successfully pushed.
+----------------------------------------------------------------------------------------------------------------------
+Author: Pierre-Charles David
+Date: 2016-05-30 08:02:40.000000000
+Message: 
+Uploaded patch set 3.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2016-05-30 08:02:46.000000000
+Message: 
+Patch Set 3:
+
+Build Started https://hudson.eclipse.org/sirius/job/sirius.gerrit.tests-mars/3982/ (2/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2016-05-30 08:02:46.000000000
+Message: 
+Patch Set 3:
+
+Build Started https://hudson.eclipse.org/sirius/job/sirius.gerrit.build-neon/1001/ (1/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2016-05-30 08:39:54.000000000
+Message: 
+Patch Set 3:
+
+Build Successful 
+
+https://hudson.eclipse.org/sirius/job/sirius.gerrit.build-neon/1001/ : SUCCESS
+
+https://hudson.eclipse.org/sirius/job/sirius.gerrit.tests-mars/3982/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

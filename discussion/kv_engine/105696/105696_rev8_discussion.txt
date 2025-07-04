@@ -1,0 +1,167 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-33167 [SR]: At abort, enqueue an abort_sync_write item into the CM
+
+In this patch:
+1) we introduce the new queue_op::abort_sync_write
+2) at VBucket::abort, we enqueue a abort_sync_write into the
+   CheckpointManager
+
+At this point an abort_sync_write is ready for being processed by
+Checkpoint Cursors (both persistence and replication, implemented in
+follow-up patches).
+
+Change-Id: I8eb674a5285f86d221e617017e6c0e32066dc4e5
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2019-03-07 15:50:52.000000000
+Message: 
+Uploaded patch set 8.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-03-07 16:22:13.000000000
+Message: 
+Patch Set 8: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/9266/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/8866/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/16056/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/15514/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/17471/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/18122/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/1953/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-03-11 15:42:06.000000000
+Message: 
+Patch Set 8: Code-Review-1
+
+(6 comments)
+Line:230, engines/ep/src/stored-value.cc -> as
+
+Line:828, engines/ep/src/stored-value.h -> Why do we need this? The toItemImpl() below has an optional durability::Requirements so I don't see why we need it?
+
+Line:1002, engines/ep/src/vbucket.cc -> Can this be const?
+
+Line:1640, engines/ep/src/vbucket.h -> is this true? don't we change CAS / seqno etc?
+
+(Is this /is/ true then we should change `item` to be const.)
+
+Line:1650, engines/ep/src/vbucket.h -> Should this be protected?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-03-12 08:45:09.000000000
+Message: 
+Patch Set 8:
+
+(4 comments)
+Line:1002, engines/ep/src/vbucket.cc -> It can, fixing.
+
+Line:1640, engines/ep/src/vbucket.h -> Legacy from some previous version of this change, that was referred to a StoredValue input, and here there's no StoredValue at all.
+Removing, thanks.
+
+Line:1650, engines/ep/src/vbucket.h -> It is, like queueDirty and queueAbort (not easy to see that as the protected section starts many lines above :) )
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-03-13 17:18:26.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:828, engines/ep/src/stored-value.h -> The one below (with optional Requirements) sets the Item::op depending on the this->getCommitted() state.
+
+As we said, there s no CommittedState::aborted in StoredValue (at abort, the prepare is just removed from the HT).
+
+So I moved the common steps (ie, not the logic where we step Item::op) in this new toItemImpl().
+
+Other functions call it + they set the Item::op as they need. E.g., toItemAbort() does:
+
+    auto item = toItemImpl(false /*lockCas*/, vbucket, true /*keyOnly*/);
+    item->setAbortSyncWrite();
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-03-14 09:14:52.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:828, engines/ep/src/stored-value.h -> I don't think that's worthy of complicating the API - and indeed it would be nicer if we didn't need the extra item->setbortSyncWrite(). Just add an additional case for pending state == abort; and then handle it all in the single function.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-03-19 12:15:31.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:828, engines/ep/src/stored-value.h -> So, this is a StoredValue -> Item conversion, in input we have the SV's CommittedState that has no entry for "aborted" writes.
+I'll try to simplify this code in a different way.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-03-19 13:26:32.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:828, engines/ep/src/stored-value.h -> Unfortunately, here we have the same problem discussed for VBucket::queueDirty/queueAbort: we don't have any CommittedState::abort (or similar) in StoredValue, so we need to pass down the "abort" information in some other way when we make the Item.
+
+I could do (a) extra arg in input or (b) dedicated conversion function for "abort".
+
+I go with (b) (i.e., keeping what we have) as the approach is consistent with the addition of VBucket::queueAbort.
+Happy to reconsider that if any issue arises though.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-03-21 17:48:28.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:828, engines/ep/src/stored-value.h -> I actually managed to simplify this API a bit, thanks to the fact that toItemKeyOnly() doesn't really need to take any DurReqs in input.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-03-22 08:36:25.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:828, engines/ep/src/stored-value.h -> > toItemKeyOnly() doesn't need any DurReqs
+
+That's true for now, but I'm not sure it will be true in the future.
+So for now keeping the current behaviour (we can pass DurReqs when we generate an item with no-value).
+
+Given that the common case is that we include the value (apart from a single case in VBucket::getInternal), I've removed the toItemKeyOnly() function (used only once) and added a defaulted args 'bool includeValue = true' to toItem().
+
+So now we have:
+
+public:
+    toItem()
+    toItemAbort()
+protected:
+    toItemBase()
+
+The public functions call down to toItemBase() and do their extra (specific) work.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-03-20 11:30:23.000000000
+MISMATCHED INLINE COMMENT
+Line:828, engines/ep/src/stored-value.h -> I think you should at least give these two functions different names, as once is really the "inner" function of the other; they arn't simply overloads of each other.
+----------------------------------------------------------------------------------------------------------------------

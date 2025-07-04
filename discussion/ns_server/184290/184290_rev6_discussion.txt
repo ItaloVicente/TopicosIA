@@ -1,0 +1,144 @@
+======================================================================================================================
+DESCRIPTION:
+
+api_tests: remove cluster dirs after killing nodes
+
+Otherwise the directory removal can sometimes fail.
+We now instead sleep for a second to let any errors finish being
+logged, then kill the nodes, then remove the directories.
+
+Change-Id: Ifa2f47add19c9a90d074c7555f37d4775a9903c8
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Peter Searby
+Date: 2023-02-22 14:26:50.000000000
+Message: 
+Uploaded patch set 6: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2023-02-22 14:27:03.000000000
+Message: 
+Patch Set 6:
+
+Build Started https://cv.jenkins.couchbase.com/job/ns-server-test/34614/
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2023-02-22 14:37:00.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+Line:201, api_tests/run.py -> logged by what, the node/cluster?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2023-02-22 14:38:03.000000000
+Message: 
+Patch Set 6: Well-Formed+1
+
+Build Successful 
+
+https://cv.jenkins.couchbase.com/job/ns-server-test/34614/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Peter Searby
+Date: 2023-02-22 17:48:51.000000000
+Message: 
+Patch Set 6: Verified+1
+
+(1 comment)
+Line:201, api_tests/run.py -> Yes, the node/cluster. If we don't wait then the full errors may not end up in the cluster logs, making it hard to determine what went wrong in a test
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2023-02-22 19:39:03.000000000
+Message: 
+Patch Set 6:
+
+(2 comments)
+Line:201, api_tests/run.py -> So you have registered an asynchronous callback that is called when the process exits (atexit.register) but you say the timer.sleep is to let errors from the cluster flush..? It's just not something you can actually know how long it will take so I guess the real question is how are we deciding on '1' as the correct waiting time? If there's no other way to signal that those process' have exited completely you could lift some of the logic into the callback itself. Also, generally when people use these atexit hooks, you should do it early in the process because they are good for use as finalizers/destructors. But this just adds it after everything is done. You either need to put this hook registration earlier so that we don't accidentally forget to kill the dirs or nodes. Doing it right at the end here is useless, IMO. You would actually be better off just calling everything in this kill_nodes function synchronously at the end than registering as a hook. At least that way you wouldn't need this imprecise timer.sleep(1)..
+
+Line:309, api_tests/run.py -> This sleep feels much more unavoidable.. But how did we determine 1? just curious
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2023-02-22 20:09:58.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+Line:201, api_tests/run.py -> After some thought -- I suppose if you are explicitly not wanting to wait to shut down the nodes before ending, this is probably fine. Only question would be why '1'? I would still put the kill nodes hook registration much earlier (ideally right after creation, so you don't miss registering it).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2023-02-22 21:04:04.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+Line:201, api_tests/run.py -> > If we don't wait then the full errors may not end up in the cluster logs, making it hard to determine what went wrong in a test
+
+Sleeping in tests is generally a bad sign. If it's not racey now (and it probably is, a heavily swapped machine could fairly easily see some second+ fsync latencies) then it often will end up being racey in the future when something gets changed and this is forgotten about.
+
+Perhaps you could solve this in a more creative way. I believe you could solve this by connecting to each node with eshell and calling ale:sync_all_sinks(). That should flush everything to disk. It might not be fun to run eshell programmatically, I haven't tried, but it would be a powerful tool if you could implement it in some of these python tests.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2023-02-22 21:06:06.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+Line:201, api_tests/run.py -> The other option would be to ensure that everything is logged when the processes get terminated. If you terminate the cluster processes gracefully rather than forcefully then I'd expect that to happen.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2023-02-22 21:46:54.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+Line:201, api_tests/run.py -> I have experience running eshell programmatically (specifically in elisp/erlang) if someone goes down that road -- just FYI. There's a pretty easy process to connect to a node but it can require entering meta characters to switch shells(or sessions? whatever they are called). You are probably better off calling that over the diag/eval, though -- right?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2023-02-23 08:14:34.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+Line:201, api_tests/run.py -> diag/eval is probably easier actually, I had completely forgotten about it when I wrote that comment :)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2023-02-24 01:37:18.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+Line:201, api_tests/run.py -> JFYI: we already use diag/eval in tests in testlib.py:
+
+post_succ(cluster, '/diag/eval', data=f'ns_config:delete({key})')
+
+It has a downside though: if server is remote, diag/eval will not work (if it is not explicitly enabled), but I personally think that is ok. I think we can assume that we have diag/eval enabled.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Peter Searby
+Date: 2023-02-24 17:29:58.000000000
+MISMATCHED INLINE COMMENT
+Line:201, api_tests/run.py -> I've added a diag/eval to replace the sleep.
+I was able to confirm that it ensured a long message was fully logged in a case where without the diag/eval we kill the server before the message is completely logged
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2023-02-24 18:10:27.000000000
+MISMATCHED INLINE COMMENT
+Line:309, api_tests/run.py -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Peter Searby
+Date: 2023-02-24 17:29:58.000000000
+MISMATCHED INLINE COMMENT
+Line:309, api_tests/run.py -> Can't really say any thought went in to deciding on 1s.
+We probably won't encounter an issue here too often, so it wouldn't be unreasonable to increase the sleep manually if a local test fails here and has missing logs.
+If an issue occurs here in a jenkins test, then I hope our other tests would be passing anyway, so we'd be able to debug using their output instead
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,73 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-26849 [RocksDB] Avoid data races caused by 'delVBucket'
+
+As we cannot create multiple RocksDB instances on the same DB,
+RocksDBKVStore keeps a vector of handles for the opened DBs. Previously,
+an handle was a unique_ptr. That allowed 'delVBucket' to release the
+handle of a live DB (e.g., a DB used in a 'commit' execution).
+With this change we model DB handles as shared_ptr, and we release a DB
+handle in 'delVBucket' only when the reference count of the shared_ptr
+is equal 1.
+
+Change-Id: Id9847083038ad7bae3796ede545710f03048229e
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2017-11-17 09:13:20.000000000
+Message: 
+Patch Set 7: Patch Set 6 was rebased
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2017-11-17 09:33:17.000000000
+Message: 
+Patch Set 7: Code-Review-1
+
+(5 comments)
+
+It would also be ideal if you could create a unit test which demonstrates the problem (call open / delvBucket in one thread, call stats in the other thread).
+Line:544, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> Worth expanding this - explain *why* we spin waiting until we are the exclusive owner here (because this is an expensive operation and we want it to happen in this thread).
+
+I would also suggest adding a comment to the function prototype, explaining this is a blocking call which waits until other threads have finished with a vb before it completes.
+
+Line:549, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> This is probably too long to wait - that's 1/10 of a second. Better to reduce it to say 100 microseconds.
+
+Line:623, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> Incorrect naming style.
+
+Line:299, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.h -> A const shared_ptr is probably not what you want - see http://isocpp.github.io/CppCoreGuidelines/CppCoreGuidelines#Rr-sharedptrparam-owner (and the following rules) for when you should use the different variants of a shared_ptr.
+
+In this instance (and similar other protected/private methods in this class) you should just pass a reference to KVRocksDB, as there's already a parent caller function which owns or "holds onto" the lifetime of the stared_ptr - see http://isocpp.github.io/CppCoreGuidelines/CppCoreGuidelines#Rr-smartptrparam
+
+This is a good presentation on this area in general which I recommend reading / watching the YouTube video:
+
+https://github.com/CppCon/CppCon2016/blob/master/Presentations/Lifetime%20Safety%20By%20Default%20-%20Making%20Code%20Leak-Free%20by%20Construction/Lifetime%20Safety%20By%20Default%20-%20Making%20Code%20Leak-Free%20by%20Construction%20-%20Herb%20Sutter%20-%20CppCon%202016.pdf
+
+https://www.youtube.com/watch?v=JfmTagWcqoE
+
+Line:308, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.h -> Might be worth clarifying the usage of this now. I believe one only needs to hold the mutex while they take a copy of the shared_ptr from the vector (i.e in openDB), or if an element is added or removed. Once a thread has it's own copy of the shared_ptr the mutex can be unlocked.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2017-11-17 09:56:38.000000000
+Message: 
+Patch Set 7: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/4165/ : FAILURE
+
+Timeout of a CTest test 107/107 Test  #42: ep_perfsuite.ephemeral ...........................} ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/4165/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/2710/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/4217/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/3828/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master/4018/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/4377/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

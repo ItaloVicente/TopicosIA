@@ -1,0 +1,221 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 579687: Reduce concurrent commands to 1 for GDB 9/10/11
+
+Since the fault in GDB is triggered when there is more than one MI
+command sent before the response for the prior one is processed, limit
+the number of concurrent commands to 1 for the affected versions.
+
+Contributed by STMicroelectronics
+
+Change-Id: I5b47fc64d90eefdc44c1d2ead0da99b35aadfa39
+Signed-off-by: Torbjörn Svensson <torbjorn.svensson@st.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Torbjörn Svensson
+Date: 2022-04-14 15:25:33.000000000
+Message: 
+Uploaded patch set 4.
+----------------------------------------------------------------------------------------------------------------------
+Author: Torbjörn Svensson
+Date: 2022-04-14 15:42:25.000000000
+Message: 
+Patch Set 4: Verified+1
+
+(9 comments)
+File Comment: /PATCHSET_LEVEL -> Finally been able to reproduce this.
+For some reason, the issue does not appear on an updated Gentoo system, but it does happen on a Ubuntu 20.04 system. I've verified that the PS4 works on a Ubuntu 20.04 system with a faulty arm-none-eabi-gdb binary by overriding the string returned by "--version" in a wrapper shell script with this content:
+
+```
+#!/bin/bash
+if [ "x$1" = "x--version" ]; then
+    #echo "GNU gdb (GNU Arm Embedded Toolchain 10.3-2021.10) 10.2.90.20210621-git"
+    echo "GNU gdb (GNU Arm Embedded Toolchain 10.3-2021.10) 12.1"
+    exit 0
+fi
+exec arm-none-eabi-gdb "$@"
+```
+
+Please review and see if there is anything that can be implemented in a better way.
+Line:443, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/command/AbstractMIControl.java -> Here is one command that can be queued.
+
+Line:453, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/command/AbstractMIControl.java -> And here is another one for the same command that got queued.
+
+Line:464, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/command/AbstractMIControl.java -> And finally, we add the requested command.
+
+Worst case scenario us that there are at least 3 commands queued at the same time.
+I'm not sure if there can be more or it's only these 3, but 3 is enough for the concurrency problem!
+
+The only way to protect against this is to handle every attempt to queue in the fTxCommands or where we take from the queue. I think it's cleaner to do it where the items are taken from the queue and that's what's implemented in TxThread#run().
+
+Line:758, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/command/AbstractMIControl.java -> Are there any better way to achieve the delay here?
+
+Line:1293, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/command/AbstractMIControl.java -> I've put this as a separate private method as it might be useful in sub-classes in the future to identify the GDB version for similar workarounds. Feels like the heavy artillery to do a sub-class for these types of issues.
+
+Line:1317, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/command/AbstractMIControl.java -> Somewhere between the 8.3.x and the 8.4/9.0 version, the breaking change was introduced. To avoid incorrectly mark 8.3.x (stable releases) as broken, I decided to go with 8.3.50 (the development version for the increment).
+
+Line:1318, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/command/AbstractMIControl.java -> Am using 12.0.51 here as there is no way to identify the commit within the 12.0.50 version (all have the same version number).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Torbjörn Svensson
+Date: 2022-04-14 15:44:19.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:1293, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/command/AbstractMIControl.java -> protected, not private!
+
+----------------------------------------------------------------------------------------------------------------------
+Author: CDT Bot
+Date: 2022-04-14 16:18:36.000000000
+Message: 
+Patch Set 4: Verified-1 Code-Review-1
+
+Build Failed 
+
+https://ci.eclipse.org/cdt/job/cdt-verify-code-cleanliness-pipeline/3693/ : FAILURE. The code base is not clean. This means one or more of formatting, whitespace, version numbers or other checks appears to have failed. Please see the console output for details and https://github.com/eclipse-cdt/cdt-infra/tree/master/jenkins/pipelines/cdt/verify#cdt-verify-code-cleanliness for documentation on what is checked.
+
+https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-ui-only-pipeline/3874/ : SUCCESS
+
+https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-other-pipeline/4111/ : SUCCESS. p2 repository available on https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-other-pipeline/4111/artifact/releng/org.eclipse.cdt.repo/target/repository/ - please mark build as "Keep this build forever" if the p2 repo is needed for testing. Otherwise it will be deleted shortly.
+
+https://ci.eclipse.org/cdt/job/cdt-verify-test-dsf-gdb-only-pipeline/674/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Torbjörn Svensson
+Date: 2022-04-14 16:34:34.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> > Build Failed 
+> 
+> https://ci.eclipse.org/cdt/job/cdt-verify-code-cleanliness-pipeline/3693/ : FAILURE.
+
+@Jonah: Have you also been getting these kind of errors on and off for the past few weeks? Is there anything wrong with our Jenkins jobs?
+I've retriggered the job to get the correct verdict.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: CDT Bot
+Date: 2022-04-14 16:45:16.000000000
+Message: 
+Patch Set 4: Verified+1 -Code-Review
+
+Build Successful 
+
+https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-ui-only-pipeline/3874/ : SUCCESS
+
+https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-other-pipeline/4111/ : SUCCESS. p2 repository available on https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-other-pipeline/4111/artifact/releng/org.eclipse.cdt.repo/target/repository/ - please mark build as "Keep this build forever" if the p2 repo is needed for testing. Otherwise it will be deleted shortly.
+
+https://ci.eclipse.org/cdt/job/cdt-verify-test-dsf-gdb-only-pipeline/674/ : SUCCESS
+
+https://ci.eclipse.org/cdt/job/cdt-verify-code-cleanliness-pipeline/3694/ : SUCCESS. Formatting, whitespace, version numbers and other checks appear to be correct. See https://github.com/eclipse-cdt/cdt-infra/tree/master/jenkins/pipelines/cdt/verify#cdt-verify-code-cleanliness for documentation on what is checked.
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonah Graham
+Date: 2022-04-14 17:23:22.000000000
+Message: 
+Patch Set 4:
+
+(5 comments)
+Line:420, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/command/AbstractMIControl.java -> This if statements is almost always false. fUseThreadAndFrameOptions == true for GDB >= 7 and only the CLI commands and Raw Commands has supportsThreadAndFrameOptions == false.
+
+As a result for almost all command there isn't a problem. Further, even if CLI or Raw command is used, they would have to have a specific thread/frame other than the current one for the select commands to be sent.
+
+Line:758, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/command/AbstractMIControl.java -> I don't think this is actually needed because of comment on line 420.
+
+Line:1293, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/command/AbstractMIControl.java -> If we release this for 10.6.1 then these protected methods need to become private.
+
+Line:1318, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/command/AbstractMIControl.java -> This is fine - 12.0.50 is a dev only version number anyway. The release will be 12.1.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Torbjörn Svensson
+Date: 2022-04-14 18:57:36.000000000
+Message: 
+Patch Set 4:
+
+(4 comments)
+Line:397, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/command/AbstractMIControl.java -> I don't know if it makes much sense to keep this as it can take a long time before the DsfRunnable instance is executed. The check needs to be done after too!
+See my comment on line 758.
+
+Line:758, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/command/AbstractMIControl.java -> I took another look and if we ignore the fact that sometime, even if rare, there can be 3 commands in the pipe without waiting for response (just old debuggers?) then there is still a possibility to have more than one command sent.
+
+The method processNextQueuedCommand() can be executed from 2 call paths:
+1. From the RxThread.processMIOutput method as the last step to feed anything new to the GDB client.
+2. From queueCommand() method to signal that there are new commands in the queue.
+
+If the call path to queueCommand() is fast enough, then there could be several instances of the inline DsfRunnable class waiting to be executed by the DsfExecutor instance. As each of these runables would see that there is at least one new command in the fCommandQueue, they would all push one of these commands to fTxCommands and that would generate too many GDB commands to be sent at once by the TxThread.
+
+
+One possible solution is to have the while-sleep block in the TxThread.run() method to catch it or the check for the concurrent commands need to be placed inside processNextQueuedCommand() method. If the check in queueCommand() should be left there or removed (as it doesn't do what is expected at the current placement) is another story.
+If we go for the move of the concurrency check, then we could still send too many commands in the case as per your comment on line 420. I suppose it's a matter of how strict we want the concurrency check to be. :)
+
+Let me know what you think!
+
+Line:1293, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/command/AbstractMIControl.java -> I suppose we could have them private in the 10.6.1 and protected in 10.7? Or would it be better to keep them as private regardless?
+
+Line:1318, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/command/AbstractMIControl.java -> Okay. I was uncertain as the Arm provided GDB is claiming to be "10.2.90.20210621-git" for the 10.3-2021.10 Arm delivery.
+I'm not aware of what version scheme that GDB is using, so I don't know what 10.2.90 means here.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonah Graham
+Date: 2022-04-14 20:27:57.000000000
+Message: 
+Patch Set 4:
+
+(3 comments)
+Line:758, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/command/AbstractMIControl.java -> Yes - you are correct in your analysis. The original code did not do a good job of limiting to 3 outstanding commands.
+
+> If the call path to queueCommand() is fast enough
+
+Your conclusion is correct - if multiple queueCommands are done in the same dispatch cycle then the check "if (fRxCommands.size() < fNumberOfConcurrentCommands) {" will not be done at a usefule time. I think that can be easily resolved by moving it into the DsfRunnable. 
+
+> RxThread.processMIOutput
+
+Actually how this call is done all the pending command can be added, much more than 3 even IIUC - That is because its call to processNextQueuedCommand is unconditional. Many operations to GDB causes multiple lines of reply. Even the "(gdb)" prompt after each normal response will cause an extra processNextQueuedCommand to be run. 
+
+So yes as we need to limit it more strictly then having it at another time is important.
+
+
+---- 
+
+Therefore with the understanding that something else needs to be done besides reducing fNumberOfConcurrentCommands to 1 this is my comment on this bit of code.
+
+It would be best to not busy-wait, but ignoring that... We shouldn't have org.eclipse.cdt.dsf.mi.service.command.AbstractMIControl.TxThread.run() block on anything other than fTxCommands.take otherwise the thread can hang and the fTerminatorHandle will never be read (see comment on line 746). Perhaps not a problem if fStoppedCommandProcessing is also checked here - make it volatile if you do that as it will be accessed from multiple threads with such a change.
+
+So we should try to block fTxCommands from getting more than 1 item in it at once (apart from case on line 420 which I really don't think there are many if any cases in practice of).
+
+Something like https://git.eclipse.org/r/c/cdt/org.eclipse.cdt/+/192763 is sort of ok - it leaves a small race condition in TxThread.run between the fTxCommands.take and the fRxCommands.put.
+
+Line:1293, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/command/AbstractMIControl.java -> private in 10.6.1 and protected in 10.7.
+
+Line:1318, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/command/AbstractMIControl.java -> The 10.2.90 is pre-release of 10.3 - that particular one is from 20210621. So it is from the GDB 10 branch, after the most recent release. Probably has ARM specific commits on it too.
+
+With a little nudge ARM may backport the GDB fix and release another 10.2.90 release with it fixed, then it becomes even harder to test for in CDT, see this line for a past example:
+
+		if (compareVersionWith(GDB_7_2_VERSION) >= 0 || "6.8.50.20090414".equals(fVersion)) { //$NON-NLS-1$
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Torbjörn Svensson
+Date: 2022-04-14 21:13:08.000000000
+Message: 
+Patch Set 4: -Verified
+
+(3 comments)
+Line:758, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/command/AbstractMIControl.java -> I suppose the best way is what I will push in PS5 in a few sec then. This was my first thought, but then I say the 3 puts inside the processNextQueuedCommand() method and thought it was not good enough.
+
+Line:1293, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/command/AbstractMIControl.java -> ACK
+
+Line:1318, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/command/AbstractMIControl.java -> Hm. I think the "20090414" in your 6.8.50 example is the BFD version. (see gdbsupport/create-version.sh in the GDB source tree)
+If it's the BFD version, then there is nothing that differentiate 2 version of GDB during the development cycle...
+If you think it's okay, lets just ignore all the 12.0.x versions and just set 12.1 as the boundary.
+
+Btw, I think Arm is well into the GCC11 track now and I do not expect to see another 10.x delivery. They will likely want to take a look at fixing GDB 11.x (whatever version they decide to use).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonah Graham
+Date: 2022-04-14 21:22:57.000000000
+MISMATCHED INLINE COMMENT
+Line:758, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/command/AbstractMIControl.java -> This version is good. My simplified one that I pushed to make sure the tests ran with it got a +1 as well.
+----------------------------------------------------------------------------------------------------------------------

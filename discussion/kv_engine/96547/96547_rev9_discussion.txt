@@ -1,0 +1,126 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-30518: Collections by-ID conversion
+
+Change collections from a key-prefix (by-name) implementation
+to a ID based implementation. With by-name clients had to encode
+keys in a way that included the collection name "users:01aa" with
+by-ID the client encodes the ID of the collection a key belongs
+to and the protocol command now says "set key=01aa collection=22".
+A collection 22 maps to a name e.g. "users".
+
+To achieve the switch we first update DocNamespace to be a uint32_t,
+no longer a byte sized enum, we also introduce CollectionID as the
+formal name for identifying keys as part of the DocKey abstraction.
+DocNamespace remains to reduce the patch size, but can be removed fully
+soon. CollectionID names two values, 0 for the DefaultCollection and 1
+for internal use (where we will write 'collection-create' events).
+
+The Collection manifest has always assigned uid's to collections
+
+  Collection-Entry {"name" : "name", "uid" : "uid-value"}
+
+This existing UID is the identifier of the collection.
+
+The Collections::Manifest is the only object to store the uid/name
+mapping, once a Manifest is applied to a vbucket only the id is
+propagated through the system - e.g. the "create-collection" system
+marker item will only say the ID of the created collection and DCP only
+sends the ID of created/deleted collections.
+
+KV now assumes that if a client has enabled collections using HELLO that
+the collection ID is encoded as a network-byte-order uint32 as the first
+4-bytes of the key bytes.
+
+Some KV objects now increase in size as the old DocNamespace was 1 byte
+and now CollectionID stores uint32, however clients can reduce their
+key sizes as there will no longer be a need to prefix keys with types.
+
+With this commit all unit-tests pass, however
+
+* DCP is broken, no clustering with collections enabled (MB-30397)
+* unknown_command (setWithMeta etc...) with collections enabled won't
+  work as the key/cid decoding must occur in KV (MB-30402)
+* Further tidying is required, but will be done separately to reduce
+  the size of this commit (MB-30521)
+
+Change-Id: I583dd0e12b4b17057d325939a2da60ef16ff78b2
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jim Walker
+Date: 2018-07-17 10:54:53.000000000
+Message: 
+Uploaded patch set 9.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-07-17 11:17:58.000000000
+Message: 
+Patch Set 9: Code-Review-1
+
+(2 comments)
+
+Mostly looks good - couple of minor things; the main one was the byte-order ambiguity:
+Line:59, engines/ep/src/collections/filter.h -> Are these decimal or hex? If hex should we prefix with 0x to make explicit?
+
+Line:79, include/memcached/dockey.h -> I think this could get confusing; as the type itself essentially could be in either byte-order.
+
+Suggest you choose a canonical byte-order which CollectionID is in; and then only provide one of these methods. In terms of constructing from say a network-order buffer; you could provide a tagged constructor or similar:
+
+ struct CollectionID {
+     struct network_order_tag {};
+    
+     CollectionID(uint32_t value; network_order_tag tag)
+       : CollectionID(ntohl(value)) {}
+  ...
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-07-17 11:34:10.000000000
+Message: 
+Patch Set 9: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/10417/ : FAILURE
+
+The warnings threshold for this job was exceeded - <a href="warningsResult">1 warnings</a> found. ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/10417/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/2271/ : FAILURE
+
+Timeout of a CTest test 172/173 Test #103: memcached_testapp.default.TransportProtocols/BucketTest ......................} ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/2271/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/10535/ : FAILURE
+
+Failure of a CTest test  26/175 Test  #25: ep_testsuite.value_eviction.comp_passive ..................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/10535/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/130/ : FAILURE
+
+The warnings threshold for this job was exceeded - <a href="warningsResult">1 warnings</a> found. ( http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/130/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/9385/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/9264/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2018-07-17 14:01:09.000000000
+Message: 
+Patch Set 9:
+
+(3 comments)
+Line:59, engines/ep/src/collections/filter.h -> I'd originally chose to drop the 0x prefix from the json docs https://docs.google.com/document/d/1X-v8GWQjplrMMaYwwWOzEuP4AUoDNIAvS39NmEjQ3_E/edit#heading=h.6z3g788j2gfc
+
+Line:79, include/memcached/dockey.h -> Good call, I had considered an explicit type to be returned from a hton() - as it would be nice to know when I have a host or net order
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-07-17 14:02:48.000000000
+Message: 
+Patch Set 9:
+
+(1 comment)
+Line:59, engines/ep/src/collections/filter.h -> Ok. It's (mostly) machine read so that's probably fine; but if we end up printing collection IDs in stats, etc I'd suggest including 0x or similar to disambiguate when being read by a human.
+
+----------------------------------------------------------------------------------------------------------------------

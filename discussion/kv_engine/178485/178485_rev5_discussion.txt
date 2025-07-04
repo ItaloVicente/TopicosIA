@@ -1,0 +1,139 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-53100: Don't register checkpoint cursors in meta only checkpoints
+
+Problem:
+In MB-53100 it was observed that the ActiveStream::curChkSeqno throws
+due to a it's value becoming non weakly monotonic, while it's processing
+times from the checkpoint manager. Just after vbucket became active due
+to a takeover stream.
+
+Cause:
+The reason for this is due an issue in how we register cursors when the
+checkpoint manager contains an checkpoint that only contains meta items.
+A meta only checkpoint can occur during a takeover stream, as the
+initial active node sens a snapshot with just one meta item which is a
+setVbucketState to pending.
+
+This meta only checkpoint is problematic for
+CheckpointManager::registerCursorBySeqno() as it will walk thought the
+meta checkpoint trying to find the seqno X requested for. However, if
+the requested seqno X was the same seqno as setVbucketState, we would
+end up talking though the checkpoint ever finding an item with a seqno
+greater than X. Thus, getting to the checkpoint_end item, who's seqno is
+X. We would then return the registration seqno as X + 1. This would then
+set the value of ActiveStream::curChkSeqno to X + 1 from X.
+
+When the active stream wants to process items using the cursor it will
+then receive the items from the point where the cursor currently sits,
+including the vbucket item but also importantly it will see a non-meta
+item with seqno X. This then caused curChkSeqno to from (X + 1) to X
+which a violation and thus we throw.
+
+Fix:
+When walking though the checkpoint, if we come to the end of the
+checkpoint set the result.seqno to the seqno of the last item in the
+checkpoint. If the last item isn't a meta item then we will increment
+the value as the next item that will be seen will have a seqno n + 1
+greater than the current item's seqno.
+
+Change-Id: I2fb89a81f506be71991b2a58a9f9a9144d75cad3
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Richard de Mellow
+Date: 2022-08-18 15:16:50.000000000
+Message: 
+Uploaded patch set 5: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-08-18 15:17:36.000000000
+Message: 
+Patch Set 5:
+
+(1 comment)
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2022-08-22 10:32:52.000000000
+Message: 
+Patch Set 5: Code-Review+1
+
+(1 comment)
+Line:379, engines/ep/src/checkpoint_manager.cc -> Could you remind what's the case where we break please?
+
+[e:1 cs:1 m:1) -> seqno=2 -> OK
+
+This one?
+[e:1 cs:1 m:1 vbs:2) -> seqno=3 -> X       <-- !!
+
+Right, so we end up telling the caller that the next seqno available is 3, while it will be 2.
+
+It might be worth to add that kind of simple example in the commit message.
+Plus good to specify that the side effect of that behaviour is that we might go through an unneeded backfill (as essentially CM is telling the caller that it has less than what it actually stores)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-08-22 10:59:59.000000000
+Message: 
+Patch Set 5:
+
+(1 comment)
+Line:379, engines/ep/src/checkpoint_manager.cc -> The case in which we break is when we have the following situation:
+
+id:2 [e:5, cs:5, vbs:5, ce:5]
+id:3 [e:5, cs:5, vbs:5, m:5, m:6: ce:7]
+
+Before this patch if we registered at seqno:5, we would get seqno returned at 6. But the cusor would be placed at the end of chkpt id:2 on the ce. This would then throw as the curCkptSeqno would be set to 6, the process items would return item m:5. Making curCkptSeqno go backwards.
+
+
+I don't think we'll end up doing any unneeded backfills as this function informs the caller if it needs to backfill or not. We're still placing in the cursor in the same spot as before, but now we're not returning the incorrect seqno of n + 1.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2022-08-23 08:45:18.000000000
+Message: 
+Patch Set 5:
+
+(1 comment)
+Line:379, engines/ep/src/checkpoint_manager.cc -> You're right, quantity not used directly for determining whether to force a backfill or not.
+
+But (as you say) quantity used for updating ActiveStream::curChkSeqno. Which is read in turn in multiple logic areas.
+
+Could we check out the impact of this in the main places where curChkSeqno is used?
+Maybe you have already done that?
+Eg, we do things like
+
+          // if we've processed past the stream's end seqno then transition to the
+        // stream to the dead state and add a stream end to the ready queue
+        if (curChkSeqno >= getEndSeqno()) {
+            endStream(cb::mcbp::DcpStreamEndStatus::Ok);
+        }
+        
+Is it possible to hit a off-by-one is situations like that?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-08-23 15:43:44.000000000
+Message: 
+Patch Set 5:
+
+(1 comment)
+Line:379, engines/ep/src/checkpoint_manager.cc -> So after some investigation this change doesn't cause use to close the stream early however as I had thought, we can end up reading the same seqno that the client has already told us it has, when performing a stream request.
+
+For instance, say we receive a stream request with startSeqno:1 & endSeqno:2. 
+With the following checkpoint state:
+id:1 [e:1, cs:1, vbs:1, ce:1]
+id:2 [e:1, cs:1, m:1, m:2, ce:3]
+
+I this situation before this patch we'll register the cursor at vbs:1, returning seqno:2 (with this patch we would return seqno:1). However, when we go to process items we'll end up getting the mutation at seqno:1 in checkpointID 2. Breaking the monotonic of what the client sees. If this happens in the master branch we'll see lastSentSeqno throw as it gets seeded with the value of the startSeqno in the streamRequest, and is Monotonic. 
+
+I'm currently working on a fix for this in this patch given this change exposes this issue.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-08-24 13:55:20.000000000
+MISMATCHED INLINE COMMENT
+Line:379, engines/ep/src/checkpoint_manager.cc -> Done
+----------------------------------------------------------------------------------------------------------------------

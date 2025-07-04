@@ -1,0 +1,168 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 507148. Fixed opening/switching to editor.
+
+Reuse the TU from the open editor if present, otherwise
+load it from workspace.
+
+Change-Id: I725b7b8e462ffba39dd6c9a828ab72dd58f86b1f
+Signed-off-by: Dominic Scharfe <dominic.scharfe@coseda-tech.com>
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jonah Graham
+Date: 2016-11-08 09:27:43.000000000
+Message: 
+Patch Set 3: Published edit on patch set 2
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2016-11-08 09:27:49.000000000
+Message: 
+Patch Set 3:
+
+Build Started https://hudson.eclipse.org/cdt/job/cdt-verify/6549/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2016-11-08 09:36:41.000000000
+Message: 
+Patch Set 3: Code-Review-1 Verified-1
+
+Build Failed 
+
+https://hudson.eclipse.org/cdt/job/cdt-verify/6549/ : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonah Graham
+Date: 2016-11-08 21:33:03.000000000
+Message: 
+Patch Set 3: Verified+1
+
+I have reproduced the original problem report and can confirm this change does indeed fix the problem and the quick fix still works from the editor and the problems view.
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonah Graham
+Date: 2016-11-08 22:21:16.000000000
+Message: 
+Patch Set 3: Code-Review-2 Verified-1
+
+(3 comments)
+
+This looks good to me, barring a couple of comments below.
+Line:66, codan/org.eclipse.cdt.codan.checkers.ui/src/org/eclipse/cdt/codan/internal/checkers/ui/quickfix/QuickFixCreateNewClass.java -> This is a useful operation and should be pulled up to AbstractCodanCMarkerResolution.
+It would also make sense to move the finding open editors part
+to CodanEditorUtil.
+
+Line:71, codan/org.eclipse.cdt.codan.checkers.ui/src/org/eclipse/cdt/codan/internal/checkers/ui/quickfix/QuickFixCreateNewClass.java -> This check won't find the editor if it is open in another window, meaning you will get the
+the TU for the file on disk instead of the file in the editor.
+All windows would need to be searched (note there is only ever one page per window).
+
+Line:76, codan/org.eclipse.cdt.codan.checkers.ui/src/org/eclipse/cdt/codan/internal/checkers/ui/quickfix/QuickFixCreateNewClass.java -> This can return null, for example if file is open in text editor instead of ceditor. 
+This problem affects other quickfixes and I have raised Bug 507252 for that.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonah Graham
+Date: 2016-11-08 22:23:46.000000000
+Message: 
+Patch Set 3:
+
+My final comment for now is the choice of name for getTranslationUnitViaEditorOrWorkspace. I see it is based on the existing names, but I think this bug has highlighted that the orignal name getTranslationUnitViaEditor hid a very important part of the behaviour (i.e. opening the editor). I don't have a concrete example of what I recommend, so ideas welcome. But if you move it up to the abstract class it becomes API, so harder to change later.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dominic Scharfe
+Date: 2016-11-09 08:15:12.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+
+AFAIU renaming getTranslationUnitViaEditor would break the API, so it is not an option for this patch? Therefore I propose to leave getTranslationUnitViaEditorOrWorkspace in QuickFixCreateNewClass and maybe create another bug report for changing the API.
+
+I also think some additional refactoring of AbstractCodanCMarkerResolution would make sense, because it contains multiple static method calls, which makes it hard to write unit tests (there are none ATM, right?).
+Line:71, codan/org.eclipse.cdt.codan.checkers.ui/src/org/eclipse/cdt/codan/internal/checkers/ui/quickfix/QuickFixCreateNewClass.java -> My patch originally included searching through all windows. However, this can lead to situations where a file is open in multiple editors, so we have different TUs to choose from. I wasn't exactly sure if this can be a problem, so I chose to just use the active window.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonah Graham
+Date: 2016-11-09 13:40:01.000000000
+Message: 
+Patch Set 3:
+
+(2 comments)
+Line:71, codan/org.eclipse.cdt.codan.checkers.ui/src/org/eclipse/cdt/codan/internal/checkers/ui/quickfix/QuickFixCreateNewClass.java -> AFAIK You might get different editors, but they all point to the same model. That is if they are all C Editors. In fact, what you should be doing is using IWorkbenchPage.findEditors(IEditorInput, String, int) and the first one that has an ITranslationUnit should be chosen on the next line. This should be instead of ResourceUtilas the extra feature provided by ResourceUtil is not relevant as you only need editors that are open with FileEditorInput.
+
+What surprises me is that there is not already an utility method to do what you need, i.e. "get me the model", having to implement this stuff locally to QuickFixes does not seem right at all. Let me look something up...
+
+Line:76, codan/org.eclipse.cdt.codan.checkers.ui/src/org/eclipse/cdt/codan/internal/checkers/ui/quickfix/QuickFixCreateNewClass.java -> This NPE needs to be resolved here, it is more important here than the other cases because as you have diagnosed this code is run all the time, not just when applying the quick-fix. I would suggest that if CDTUITools.getEditorInputCElement() returns null, you should fall back to getTranslationUnitViaWorkspace() in this case (which can also return null).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dominic Scharfe
+Date: 2016-11-09 13:50:46.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:71, codan/org.eclipse.cdt.codan.checkers.ui/src/org/eclipse/cdt/codan/internal/checkers/ui/quickfix/QuickFixCreateNewClass.java -> The editors point to different TranslationUnits (according to the testing I did before contributing the patch) and I was assuming that the TUs are the models of the CDT editors.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonah Graham
+Date: 2016-11-09 13:51:12.000000000
+Message: 
+Patch Set 3:
+
+OK, I found what I was looking for. I think the whole method body getTranslationUnitViaEditorOrWorkspace() should actually be replaced with something like this:
+
+    tu = getTranslationUnitViaWorkspace(...)
+    tu = CModelUtil.toWorkingCopy(tu)
+
+then you don't need to add any windows searching or editors, no worry of dealing with invalid type of editor, etc. (you still may have NPE if tu is null, but reasons are less).
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonah Graham
+Date: 2016-11-09 13:56:10.000000000
+Message: 
+Patch Set 3:
+
+Elena, I have added you to review for your insights here. Let me know if you want final approval on this change too. Thanks, Jonah
+----------------------------------------------------------------------------------------------------------------------
+Author: Dominic Scharfe
+Date: 2016-11-10 09:41:49.000000000
+Message: 
+Patch Set 3:
+
+CModelUtil.toWorkingCopy(tu) is not API. Is this a problem or is it okay for CDT plugins to depend on non-API methods of other CDT plugins?
+Also, this will be a little performance overhead (which might be okay), because the implementation will always read the TU from the file as first step.
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonah Graham
+Date: 2016-11-10 11:12:42.000000000
+Message: 
+Patch Set 3:
+
+> CModelUtil.toWorkingCopy(tu) is not API. Is this a problem or is it
+ > okay for CDT plugins to depend on non-API methods of other CDT
+ > plugins?
+ > Also, this will be a little performance overhead (which might be
+ > okay), because the implementation will always read the TU from the
+ > file as first step.
+
+It is ok, add this bundles as a friend. Note that org.eclipse.cdt.codan.ui is already a friend:
+
+from /org.eclipse.cdt.ui/META-INF/MANIFEST.MF:
+
+   org.eclipse.cdt.internal.corext.util;x-friends:="org.eclipse.cdt.codan.ui",
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonah Graham
+Date: 2016-11-10 11:20:46.000000000
+Message: 
+Patch Set 3:
+
+> CModelUtil.toWorkingCopy(tu) is not API. Is this a problem or is it
+ > okay for CDT plugins to depend on non-API methods of other CDT
+ > plugins?
+last comment dealt with this only.
+
+ > Also, this will be a little performance overhead (which might be
+ > okay), because the implementation will always read the TU from the
+ > file as first step.
+I think it is ok because it is not running in the UI thread.
+----------------------------------------------------------------------------------------------------------------------
+Author: Gerrit Code Review
+Date: 2016-11-11 11:18:57.000000000
+Message: 
+Change has been successfully merged into the git repository by Jonah Graham
+----------------------------------------------------------------------------------------------------------------------

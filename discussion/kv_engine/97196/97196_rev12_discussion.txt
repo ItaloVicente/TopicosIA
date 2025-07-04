@@ -1,0 +1,137 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-30532: Add the new 'DCP Consumer snap-end mutation latency' perftest
+
+I introduce a new test in ep_perfsuite to measure the latency of
+DcpIface::mutation in EPEngine.
+
+The performance issue in MB-30019 / MB-30234 is the main reason
+behind this test.
+Essentially, if the Consumer is slow in processing incoming DCP
+mutations, then the mc:worker thread that manages the DCP connection
+slows down and delays in processing other managed connections, which
+could be front-end MCBP connections.
+Thus, a slow DCP Consumer may degrade the throughput of front-end
+operations.
+
+In the case of MB-30234, the throughput degradation is caused by slow
+runtimes of PassiveStream::processMutation.
+It would be important to spot performance regressions quickly, so here I
+introduce a perf-test to measure the runtime of that execution path.
+
+The interesting part of the call stack is:
+
+    DcpConsumer::mutation
+        PassiveStream::messageReceived
+            PassiveStream::processMutation
+                PassiveStream::handleSnapshotEnd
+                    CheckpointManager::checkAndAddNewCheckpoint
+
+If the Producer sends many tiny snapshots to the Consumer, then the
+PassiveStream::handleSnapshotEnd function is executed very often.
+E.g., if the Producer sends many 1-item snapshots, the function is
+executed at every incoming mutation.
+
+Note that the main purpose of PassiveStream::handleSnapshotEnd is to
+close the open checkpoint (call to
+CheckpointManager::checkAndAddNewCheckpoint) if certain conditions
+apply.
+
+In the case of memory-snapshots, the current condition is
+(mem_used>high_wat), which makes the execution to skip the call most
+times. That may result in huge open checkpoints consuming most of the
+BucketQuota, which is the issue in MB-30019 (where we execute a bulk
+load of 1 Billion items, + 1 replica).
+
+In fact, my first attempt to fix MB-30019 is the cause of MB-30234.
+I removed the (mem_used>high_wat) condition mentioned above, which led
+the code to execute CheckpointManager::checkAndAddNewCheckpoint
+unconditionally and very often (in MB-30019 the Producer sends many
+small snapshots).
+That had 2 effects:
+    1) the expected positive one:
+        we had a constant (low_wat < mem_used < high_wat)
+    2) a negative one:
+        I spotted that CheckpointManager::checkAndAddNewCheckpoint is
+        suboptimal, and in particular very slow when the number of
+        checkpoints is high, which is the case if we constantly close
+        the open checkpoint at every incoming mutation.
+        That caused the throughput degradation in MB-30234.
+
+Note that my first attempt to fix MB-30019 has been reverted for
+MB-30234, so currently we are skipping the call to
+CheckpointManager::checkAndAddNewCheckpoint (most times in real
+executions, always in this test), so here I show an example of output if
+I re-introduce the regression on my local environment:
+
+[Before the regression]
+=== DCP Consumer snapshot-end mutation - 10000 items === Latency (ns) =======================
+
+                                Percentile
+                         Median     95th     99th  Std Dev  Histogram of samples
+
+Datatype::Raw            11.791   22.655   46.383    7.941  ▁▁▁▁▁▁▁▁▁▁▇█▄▂▂▁▁▁▁▁
+                                                            10             ns             22
+
+[After the regression]
+=== DCP Consumer snapshot-end mutation - 10000 items === Latency (ns) =======================
+
+                                Percentile
+                         Median     95th     99th  Std Dev  Histogram of samples
+
+Datatype::Raw            21.790   35.972   98.661   16.419  ▁▁▁▁▁▁▁▁▁▁▁▁█▅▃▂▁▁▁▁
+                                                            20             ns             35
+
+Change-Id: Icc0d3c15b8b2d45dae33c9a62be99d522642fb37
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2018-07-30 12:44:54.000000000
+Message: 
+Patch Set 12: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-07-30 13:28:21.000000000
+Message: 
+Patch Set 12: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/2547/ : FAILURE
+
+ThreadSanitizer issue: data race (/usr/local/lib64/libtsan.so.0+0x6a7b4) in operator delete(void*)  ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/2547/ )
+
+Failure of a CTest test  39/158 Test  #38: ep_testsuite_dcp.value_eviction.comp_active .................................. ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/2547/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/10670/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/9504/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/10809/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/385/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/9658/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-07-30 14:32:54.000000000
+Message: 
+Patch Set 12: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/10670/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/9504/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/10809/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/385/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/9658/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/2554/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

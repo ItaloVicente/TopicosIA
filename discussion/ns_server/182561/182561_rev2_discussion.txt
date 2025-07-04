@@ -1,0 +1,135 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-52261, MB-52262 error out if one of the services rebalance is
+
+...requested for is not hosted
+
+Change-Id: I9e932af08fb17a445b316b781b6e1fca6c66c1e1
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Artem Stemkovski
+Date: 2022-11-10 00:29:43.000000000
+Message: 
+Uploaded patch set 2: Patch Set 1 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-11-10 00:29:55.000000000
+Message: 
+Patch Set 2: -Well-Formed
+
+Build Started https://cv.jenkins.couchbase.com/job/ns-server-test/32265/ (1/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-11-10 00:30:01.000000000
+Message: 
+Patch Set 2:
+
+Build Started https://cv.jenkins.couchbase.com/job/ns-server-ns-test/346/ (2/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2022-11-10 00:31:51.000000000
+Message: 
+Patch Set 2: Verified+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-11-10 00:48:27.000000000
+Message: 
+Patch Set 2: Well-Formed+1
+
+Build Successful 
+
+https://cv.jenkins.couchbase.com/job/ns-server-test/32265/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/ns-server-ns-test/346/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2022-11-11 20:29:54.000000000
+Message: 
+Patch Set 2:
+
+(3 comments)
+Line:1647, src/ns_orchestrator.erl -> I feel we should change the logic in this function to something similar to what we have get_unejected_services/3, Artem - i.e we check all services on inactiveAdded Nodes in the KeepNodes list must be included in the 'Services' list; and evaluate any missing Service is uninitialized. 
+
+Seperately, a service that is not present on any nodes (via the {node, nodeX, services} keys) and included in the 'Services' list are unhosted Services.
+
+That would help with cases like the one below:
+
+1. One node cluster: {node, node1, services} -> [kv, fts].
+2. service_janitor for fts hasn't run.
+2. Add a second node. {node, node2, services} -> [kv]. 
+3. Rebalance [kv, fts] will not fail. 
+
+With the current hosted_services/1 logic we'll deduce fts is unhosted when it is actually hosted, but just that it's service_map hasn't been updated yet.
+
+Line:1647, src/ns_orchestrator.erl -> I feel we should change the logic in this function to something similar to what we have get_unejected_services/3, Artem - i.e we check all services on inactiveAdded Nodes in the KeepNodes list must be included in the 'Services' list; any missing Service is Uninitialized. 
+
+Seperately, a service that is not present on any nodes (via the {node, nodeX, services} keys) and included in the 'Services' list is an unhosted Service.
+
+That would help with cases like the one below:
+
+1. One node cluster: {node, node1, services} -> [kv, fts].
+2. service_janitor for fts hasn't run.
+2. Add a second node. {node, node2, services} -> [kv]. 
+3. Rebalance [kv, fts] will not fail. 
+
+With the current hosted_services/1 logic we'll deduce fts is unhosted when it is actually hosted, but just that it's service_map hasn't been updated yet.
+
+Line:1652, src/ns_orchestrator.erl -> Unrelated to this patch - I think we might miss re-balancing KV in this scenario Artem: 
+
+To a single node cluster, add a new node n2:
+
+New snapshot:
+
+#{{node, n1 ,services} => {[index, kv], rev},
+  {node, n2 ,services} => {[index, kv, n1ql], rev},
+  {service_map, index} => {[n1], rev}},
+
+With our current code, we'll accept a rebalance with Services=[query, n1ql] and we'll miss rebalancing kv.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2022-11-11 20:30:47.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:1647, src/ns_orchestrator.erl -> not sure how 2 duplicate comments got added - this one is same as the one below.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2022-12-02 18:13:15.000000000
+MISMATCHED INLINE COMMENT
+Line:1647, src/ns_orchestrator.erl -> Ack
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2022-11-30 01:21:05.000000000
+MISMATCHED INLINE COMMENT
+Line:1647, src/ns_orchestrator.erl -> No. I'm wrong here. We do execute service_janitor:cleanup() at the beginning of the rebalance before we actually add new nodes to the cluster. This should take care of the problem I described. So I changed the logic to account only for services that reside on newly added nodes: https://review.couchbase.org/c/ns_server/+/183406
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2022-12-02 18:13:15.000000000
+MISMATCHED INLINE COMMENT
+Line:1647, src/ns_orchestrator.erl -> Ack
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2022-11-29 01:28:17.000000000
+MISMATCHED INLINE COMMENT
+Line:1647, src/ns_orchestrator.erl -> I thought about it and came to the conclusion that the behavior implemented is a correct one. Basically it requires rebalancing of all uninitialized services at node addition rebalance, even if those services are not on the nodes being added. Though it can look somewhat strange to the customer in that rare case when the node is added to quickly (before the service was initialized).
+
+Let's say we do change this behavior to require rebalance only for services that reside on the new nodes. In your example we will get into the situation when we have 2 nodes cluster with fts not initialized. So current service_janitor will never try to initialize it, because it's not a one node cluster anymore and if we keep doing just [kv] rebalances the fts will stay uninitialized until the rebalance for fts is specifically requested. I don't think that this is what we want to happen.
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2022-12-02 18:13:15.000000000
+MISMATCHED INLINE COMMENT
+Line:1652, src/ns_orchestrator.erl -> Ah - makes sense. Thanks.
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2022-11-29 01:28:17.000000000
+MISMATCHED INLINE COMMENT
+Line:1652, src/ns_orchestrator.erl -> This is an intended behavior. Since buckets are not placed on newly added node automatically anymore (bucket placer does it), the kv rebalance after the kv node is added is effectively a no op (unless the defragmentation is requested). So we easily can just skip it.
+
+There's one caveat though that I didn't think about: to be consistent we need to allow the services list to be empty, so we can add kv only node without rebalancing anything. I'll do this in the separate commit.
+----------------------------------------------------------------------------------------------------------------------

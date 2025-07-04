@@ -1,0 +1,121 @@
+======================================================================================================================
+DESCRIPTION:
+
+Do not scan all refs when filtering for HEAD
+
+The retrieval of refs by prefix from the refDatabase
+should also consider HEAD as a valid prefix so to avoid
+the full scanning all refs, which could be very expensive.
+
+A common use-case is the implementation of Git protocol v2
+where the Git client may request only the HEAD of a large
+mono-repo, where the full scan of all refs must be avoided as
+much as possible.
+
+Example of a git client call that should have NOT triggered
+the fetch of all refs:
+$ git fetch origin HEAD
+
+By tracing what the 'git fetch origin HEAD' client call triggers
+on the JGit backend, it is clear that the associated invocation of
+RefDatabase.getRefsByPrefix("HEAD") is the one responsible for
+fetching in memory all refs, due to the following condition:
+
+public List<Ref> getRefsByPrefix(String prefix) throws IOException {
+ Map<String, Ref> coarseRefs;
+ int lastSlash = prefix.lastIndexOf('/');
+ if (lastSlash == -1) {
+  coarseRefs = getRefs(ALL); <<= This is where the 'HEAD' would go
+ } else {
+  coarseRefs = getRefs(prefix.substring(0, lastSlash + 1));
+ }
+}
+
+Rely on the fetching of HEAD directly as exact ref and returning
+it as a single element list, avoiding the allocation of the full
+refs maps and lists in memory.
+
+Introduce also a WrappedRefDirectory for making sure in tests
+that fetching a single HEAD would not trigger anymore the loading
+of all refs in memory by the underlying RefDirectory.
+
+NOTE: Because the solution relies on existing methods that are
+already supported by all ref-db backends (DfsRefDatabase,
+FileReftableDatabase and RefDirectory), it works out of the box with
+all of them.
+
+Bug: 578550
+Signed-off-by: Luca Milanesio <luca.milanesio@gmail.com>
+Change-Id: Ib340ff0ff065df6b1ee718100ad779b996b82ea5
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Luca Milanesio
+Date: 2022-02-06 20:04:02.000000000
+Message: 
+Uploaded patch set 19.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2022-02-06 20:04:11.000000000
+Message: 
+Patch Set 19:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline.java11/878/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2022-02-06 20:15:09.000000000
+Message: 
+Patch Set 19: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline.java11/878/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2022-02-06 21:03:51.000000000
+Message: 
+Patch Set 19:
+
+> Patch Set 18:
+> 
+> (1 comment)
+> 
+> > Patch Set 18:
+> > 
+> > > Patch Set 17: Code-Review-1
+> > > 
+> > > Actually, this solution was way too invasive on assuming that all the underlying RefDatabase implementations were able to understand that fetching with prefix "HEAD" means returning just "HEAD". Going to provide a less invasive solution that would avoid the full scanning of refs but would work out-of-the-box with all existing RefDatabases without impact.
+> > 
+> > - it seems PS 18 should have been pushed as another change, PS 17 and 18 look completely different
+> 
+> Those are two variations of the same change: I believe it is best to keep them as two patch-sets on the same change with associated comments rather than starting a brand-new one. WDYT?
+> 
+> > - I will try to reproduce the problem before looking at your change again.
+> 
+> Sure, no problem.
+> 
+> > - did you verify the problem exists with RefTable ?
+> 
+> Yes, because RefTable does not override getRefsByPrefix.
+> 
+> > - did you observe this problem in production ? How often does it occur ? I can't remember having seen anybody fetching HEAD explicitly.
+> 
+> Yes, it happens all the times HEAD is fetched. It is pretty clear from the code.
+> Let me know if you need any further info.
+
+Can you provide some stack traces showing the call sites using getRefsByPrefix with prefix "HEAD" ?
+Calling getRefsByPrefix with prefix HEAD seems odd.
+I would only expect prefixes starting with refs/, like refs/heads/, refs/tags/ etc.
+
+AFAIK symbolic refs are the only refs living outside the refs/ namespace.
+Interestingly git allows to create non-standard and also hierarchical symbolic refs:
+
+ $ git symbolic-ref FOO/xyz refs/heads/master
+ $ git symbolic-ref FOO/xyz
+ refs/heads/master
+
+According to https://git-scm.com/docs/git-symbolic-ref#_notes in the old times HEAD was a symbolic link to the current branch. Symbolic refs were introduced since symlinks aren't entirely portable.
+
+The current implementation of RefDatabase#getRefsByPrefix returns all refs if there is no '/' in the prefix. This means passing a non-hierarchical symbolic ref like HEAD triggers that. It seems that this method was never intended to be called with a prefix outside the refs/ namespace, except "" as a placeholder for all refs.
+----------------------------------------------------------------------------------------------------------------------

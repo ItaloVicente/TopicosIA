@@ -1,0 +1,336 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 461629: [CSS] Diagram refresh undo/redo problems
+https://bugs.eclipse.org/bugs/show_bug.cgi?id=461629
+
+Implement new DiagramHelper refresh APIs to fix a few problems:
+
+- encapsulate synchronous (forced) and asynchronous refresh in new API methods.
+  Deprecate the old methods that required clients to follow several steps. Update
+  various client call sites to use the new API instead of the deprecated API
+
+- add corresponding APIs for refresh of individual DiagramEditParts, with similar
+  heuristic for dropping redundant refresh requests
+
+- re-implement asynchronous refresh to use a new TransactionalEditingDomain executor
+  that runs tasks as pre-commit trigger commands, to capture any undo/redo information
+  for model changes
+
+- implement a new transaction option in the Papyrus editing domain that prevents
+  runExclusive calls creating read-only transactions nested within a write transaction,
+  so that canonical changes ensuing from edit-part refresh during refresh tasks can
+  be properly recorded (without unprotected writes nested in the read-only context)
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Christian Damus
+Date: 2015-03-07 01:39:04.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2015-03-07 01:39:10.000000000
+Message: 
+Patch Set 1:
+
+Build Started https://hudson.eclipse.org/papyrus/job/Papyrus-Gerrit/2187/
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Damus
+Date: 2015-03-07 01:45:09.000000000
+Message: 
+Patch Set 1:
+
+As discussed on the mailing list, this is a change primarily to implement a new scheme for asynchronous (and non-redundant) refreshing of diagrams in response to CSS changes.  The new scheme is centred on an Executor that runs posted Runnable tasks as pre-commit "trigger" commands when the root read/write transaction (if there is one) commits.  This ensures the heuristic delay as before but also capturing of any relevant undo information.
+
+Combined with this is a slightly finer-grained refreshing of just the affected diagram and an upgrade of the DiagramHelper API to be a bit more abstract for clients.  The diagram-specific refresh does require new tracking of edit parts for diagrams because the CSS engine has visibility only of the notation model, not the GEF edit-part layer.
+
+Finally, a new transaction option is implemented to support the recording of all changes made by canonical edit policies during diagram refresh, where previously the recursive refreshing of edit parts would be buried under nested read-only transactions that then necessitated further nesting of unprotected writes that don't record undo information.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2015-03-07 02:10:38.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+https://hudson.eclipse.org/papyrus/job/Papyrus-Gerrit/2187/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Camille Letavernier
+Date: 2015-03-09 12:53:57.000000000
+Message: 
+Patch Set 1:
+
+I think there are several issues with this approach:
+
+- It is really hard to scope a refresh based on the elements displayed in a Diagram. Somes semantic elements have an impact in a Diagram, without being explicitly displayed in this diagram. For example, a Property type with a Class: display the property in the diagram, but don't display the class. If the name of the class is changed, the property still needs to be refreshed.
+
+Scoped refresh can only work if it tries to "understand" the stylesheet. For example, this selector:
+
+Property[type=ClassA]
+
+means that we need to listen on all Property#type references, as well as the name of the type (Because references to named elements are interpreted on their name: self.ref.name)
+
+If you only listen to elements displayed in the diagram, you will miss some cases. Such scoped refresh operations are tracked in Bug 455195, which will not be covered in Mars. Full diagram refresh operations are currently considered "acceptable" in terms of performances, although we know this may not scale for huge diagrams.
+
+(Hmm.. I just checked the current behavior and this scoping bug already exists in Mars... We already only refresh elements if they are displayed on the diagram. So... Not a regression :) And it may even be the responsibility of the Property edit part to refresh itself, since it already listens on the type's name (The label is properly refreshed; not the color))
+
+Additionally, stylesheets can change outside a transaction, so these cases will not be covered:
+
+- Change the CSS Theme from the preferences
+- Change the contents of a stylesheet on the filesystem, referenced via StylesheetReference
+
+So, in general, Stylesheets are not (and shouln't be) transactional
+
+In my opinion, in an edit policy adds some elements during a non-transactional "refresh" operation, then it should be able to remove them in the next "refresh" operation if this is relevant (Of course, changes caught during a transaction can still be undone properly). So I see two options for this:
+
+- If the refresh() method is called outside a transaction, use a command to add the elements to the diagram, so that "Undo" behaves properly. I'm not sure this can cover all use cases (e.g. what happens if we change the theme, refresh, then undo? I guess the command will be undone, then the changes will trigger a refresh which will recreate the same command... Not good)
+- The CanonicalEditPolicy is able to clean up invalid views in synchronized compartments, when its "isCanonical" property changes from "true" to "false". It seems the best and most consistent option: if, after an "undo" operation, some synchronized elements become invalid, then they will be removed from the compartment. Otherwise, they will still be displayed.
+
+In both cases, changes occurring during a transaction (e.g. changing an EmbeddedStyleSheet, adding a new stylesheet) will still be properly undoable; the "refresh cleanup" will only occur to revert non-transactional style changes.
+
+Note that I only tested this contribution in the master branch, i.e. excluding the actual synchronization use cases. So maybe the synchronization issues are already solved separately
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Damus
+Date: 2015-03-09 13:17:10.000000000
+Message: 
+Patch Set 1:
+
+Thanks for the review, Camille.
+
+ 
+> I think there are several issues with this approach:
+ > 
+ > - It is really hard to scope a refresh based on the elements
+ > displayed in a Diagram. Somes semantic elements have an impact in a
+ > Diagram, without being explicitly displayed in this diagram. For
+ > example, a Property type with a Class: display the property in the
+ > diagram, but don't display the class. If the name of the class is
+ > changed, the property still needs to be refreshed.
+
+But, the scope of the effect of the stylesheet is at most the diagram to which it is applied, right?  Changes to a stylesheet applied at the model or project level still refresh the world.
+
+ 
+ > Scoped refresh can only work if it tries to "understand" the
+ > stylesheet. For example, this selector:
+ > 
+ > Property[type=ClassA]
+ > 
+ > means that we need to listen on all Property#type references, as
+ > well as the name of the type (Because references to named elements
+ > are interpreted on their name: self.ref.name)
+
+Does the stylesheet engine actually listen to the model and trigger refreshes in all diagrams when some property's type changes?  If so, then yes, diagram-scoped refresh doesn't work.
+
+
+ > If you only listen to elements displayed in the diagram, you will
+ > miss some cases. Such scoped refresh operations are tracked in Bug
+ > 455195, which will not be covered in Mars. Full diagram refresh
+ > operations are currently considered "acceptable" in terms of
+ > performances, although we know this may not scale for huge
+ > diagrams.
+
+I certainly don't mind reverting the changes to refresh the world; that works at least as well for my use case.  :-)
+
+ 
+ > (Hmm.. I just checked the current behavior and this scoping bug
+ > already exists in Mars... We already only refresh elements if they
+ > are displayed on the diagram. So... Not a regression :) And it may
+
+Ah, my suspicion was right, then?  Sorry about that.  ;-)
+
+
+ > even be the responsibility of the Property edit part to refresh
+ > itself, since it already listens on the type's name (The label is
+ > properly refreshed; not the color))
+
+Indeed, the name label should do that part.
+
+ 
+ > Additionally, stylesheets can change outside a transaction, so
+ > these cases will not be covered:
+ > 
+ > - Change the CSS Theme from the preferences
+
+I think my patch leaves that as a refresh-the-world operation.  Or am I misunderstanding?  That operation still just does an async-exec on the Display.  It is only the diagram-scoped refresh that uses the editing domain if a transaction happens to be active, otherwise that also falls back to Display::asyncExec.
+
+
+ > - Change the contents of a stylesheet on the filesystem, referenced
+ > via StylesheetReference
+
+If it's a stylesheet referenced only by the diagram and not by the model/project, then a diagram-scoped refresh is appropriate, no?
+
+ 
+ > So, in general, Stylesheets are not (and shouln't be) transactional
+
+I don't think this patch requires that they be.  What it does is to let them be transactional if they happen to be triggered in the scope of a transaction.  Is there some other undo/redo-related side-effect that you think could be harmful?
+ 
+
+ > In my opinion, in an edit policy adds some elements during a
+ > non-transactional "refresh" operation, then it should be able to
+ > remove them in the next "refresh" operation if this is relevant (Of
+ > course, changes caught during a transaction can still be undone
+ > properly). So I see two options for this:
+
+But that requires that the edit policy remember what it did in previous refreshes.  How can that work  And an edit policy can only do such work if it is active.  The problem I'm trying to solve is that when undo causes CanonicalEditPolicy to become deactivated and views that it had created still exist, then further undos can corrupt the diagram.
+
+
+ > - If the refresh() method is called outside a transaction, use a
+ > command to add the elements to the diagram, so that "Undo" behaves
+ > properly. I'm not sure this can cover all use cases (e.g. what
+ > happens if we change the theme, refresh, then undo? I guess the
+ > command will be undone, then the changes will trigger a refresh
+ > which will recreate the same command... Not good)
+
+Do you mean to add another command to the stack that the user didn't request by menu/keystroke?  Undo twice to undo the user action?  That doesn't sound great.
+
+I need to think more about the themes, because obviously they cannot be transactional operations, but they can trigger creation of views.  So they present the same problem as what I'm trying to fix, only there isn't any transaction context in which to fix it.
+
+Perhaps an expedient is to flush the command stack in such cases.  But that's not a nice user experience.
+
+
+ > - The CanonicalEditPolicy is able to clean up invalid views in
+ > synchronized compartments, when its "isCanonical" property changes
+ > from "true" to "false". It seems the best and most consistent
+ > option: if, after an "undo" operation, some synchronized elements
+ > become invalid, then they will be removed from the compartment.
+ > Otherwise, they will still be displayed.
+
+That's just the problem:  when undo deactivates CanonicalEditPolicy, the views that it had created are still consistent with the model.  It is only further undos that continue to un-edit the model while CanonicalEditPolicy is now inactive that cause trouble.
+
+Note that if the change that activated CanonicalEditPolicy resulted in new views being created by its activation, then those would be captured and properly undone (this case is already handled).  The problem use case is when views are created later because of CSS changes, not changes in the model or the diagram.
+
+ 
+ > In both cases, changes occurring during a transaction (e.g.
+ > changing an EmbeddedStyleSheet, adding a new stylesheet) will still
+ > be properly undoable; the "refresh cleanup" will only occur to
+ > revert non-transactional style changes.
+ > 
+ > Note that I only tested this contribution in the master branch,
+ > i.e. excluding the actual synchronization use cases. So maybe the
+ > synchronization issues are already solved separately
+
+Yeah, sorry about that.  I didn't know how best to present this for review.  This patch is actually a pre-requisite for changes in the canonical edit-policy to fix the CSS undo use case.
+
+In any case, it seems that I need to follow up some theme scenarios (I hadn't looked into "themes" in Papyrus, so that's new to me) and I'll await your clarification on the diagram-scoped refresh.  As I indicated in-line, I'm not sure that there are any scoping problems, but maybe this patch further entrenches a problem that we already have, which is not good.  I don't mind returning to full-scale refresh if necessary.
+----------------------------------------------------------------------------------------------------------------------
+Author: Camille Letavernier
+Date: 2015-03-09 14:21:56.000000000
+Message: 
+Patch Set 1: Code-Review+1
+
+Hi,
+
+Some of my comments (related to Scoped Refresh) were mostly warnings about use cases which may not be properly supported. But I noticed (afterwards) that the bug already existed. I didn't remove the comment entirely, because I think it is good to keep that in mind, but there are indeed no new issue. I also misunderstood the patch. I thought that the semantic changes previously refreshed all active diagrams, and that the patch changed that to refresh only the active diagram. But the patch actually only affects Diagram Stylesheet changes, so that's fine. Sorry for the confusion :)
+
+So, the scoping part of the patch is OK. It can be improved later with Bug 455195, but it's already a step in the right direction, and it is not a regression.
+
+Regarding the transactional part, it's indeed more complex than I thought. Maybe the CanonicalEditPolicy needs to remain active all the time, or maybe we need a cleanup edit policy which is active, even when the CanonicalEditPolicy is not active? The CanonicalEditPolicy adds views (In a transactional or non-transactional context), and the Cleanup edit policy removes them during undo-operations, if the CanonicalEditPolicy added the views in a non-transactional operation? To avoid side-effects, we need to keep track of such views, but maybe it's not possible in the context of the DiagramEditPart (What if we create new elements, synchronize the diagram, close the diagram, open the diagram, and undo stuff until the semantic elements disappear from the model?)
+
+This means we'd need a generic clean up edit policy (Not tied to the Canonical one), but then it would clean any invalid element... Including elements which "could" be repaired with e.g. a Switch Library refactoring. Not good either... Automatic cleanup is dangerous...
+
+And erasing the Command Stack to ensure consistency is probably even worse. Maybe a manual clean up operation, for these few corner cases where we're not able to cleanup automatically without risk?
+
+Anyway, I think this patch set is OK. It can be improved, but I'm not sure that's in the scope of this task. Most issues are really specific to the CanonicalEP, not CSS Refresh issues. So, +1 for me
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Damus
+Date: 2015-03-09 15:10:53.000000000
+Message: 
+Patch Set 1:
+
+> Hi,
+ > 
+ > Some of my comments (related to Scoped Refresh) were mostly
+ > warnings about use cases which may not be properly supported. But I
+ > noticed (afterwards) that the bug already existed. I didn't remove
+
+OK, but I don't want to make an existing bug worse. :-)  I think this patch doesn't ...
+
+
+ > the comment entirely, because I think it is good to keep that in
+
+Absolutely.  455195 is still important.
+
+
+ > mind, but there are indeed no new issue. I also misunderstood the
+ > patch. I thought that the semantic changes previously refreshed all
+ > active diagrams, and that the patch changed that to refresh only
+ > the active diagram. But the patch actually only affects Diagram
+ > Stylesheet changes, so that's fine. Sorry for the confusion :)
+
+Not at all.  Perhaps that indicates a deficiency in the design of the patch or the API documentation?
+
+
+ > So, the scoping part of the patch is OK. It can be improved later
+ > with Bug 455195, but it's already a step in the right direction,
+ > and it is not a regression.
+
+OK, thanks.  It helps to have independent confirmation.  It's my first time poking around in this code.
+
+
+ > Regarding the transactional part, it's indeed more complex than I
+ > thought. Maybe the CanonicalEditPolicy needs to remain active all
+ > the time,
+
+That was where I started originally, but the GMF run-time assumes that when CanonicalEditPolicy is active, then the edit part is canonically synchronized.  That causes all kinds of problems, especially with connections.  So, I actually have a half-active state in the PapyrusCanonicalEditPolicy that I'm not entirely happy with, but I don't see how else it could be done (for now).
+
+
+ > or maybe we need a cleanup edit policy which is active,
+ > even when the CanonicalEditPolicy is not active? The
+ > CanonicalEditPolicy adds views (In a transactional or
+ > non-transactional context), and the Cleanup edit policy removes
+ > them during undo-operations, if the CanonicalEditPolicy added the
+ > views in a non-transactional operation? To avoid side-effects, we
+
+That's an idea worth pursuing.  I'd be concerned about the book-keeping that's required, though:  we would have two edit-policies cooperating in way that (I think) hasn't been done before and the CleanUpEditPolicy has to track views created canonically, but only if they were created outside of any transaction, and it would have to delete them if and only if the CanonicalEditPolicy is deactivated by undo (not be explicit user action).  I'll have to think the use cases through ...
+
+
+ > need to keep track of such views, but maybe it's not possible in
+ > the context of the DiagramEditPart (What if we create new elements,
+ > synchronize the diagram, close the diagram, open the diagram, and
+ > undo stuff until the semantic elements disappear from the model?)
+
+Indeed, that is very like the CSS use case of non-transactional changes triggering canonical view creation.
+
+My brain is starting to hurt.
+ 
+
+ > This means we'd need a generic clean up edit policy (Not tied to
+ > the Canonical one), but then it would clean any invalid element...
+ > Including elements which "could" be repaired with e.g. a Switch
+ > Library refactoring. Not good either... Automatic cleanup is
+ > dangerous...
+
+Yes and no.  I suppose it depends on the reason for the clean-up.  These uses cases are looking at undo removing elements from the model, which we can distinguish as a definitive deletion of elements, a different scenario from broken references.  Automatic clean-up up broken views on opening a diagram is dangerous and not something to pursue in this context.
+
+
+ > And erasing the Command Stack to ensure consistency is probably
+ > even worse. Maybe a manual clean up operation, for these few corner
+ > cases where we're not able to cleanup automatically without risk?
+
+Yes, the "nuclear option" of flushing the stack is not something I want to consider.  I would rather retain the bug of invalid views remaining in the diagram because at least the user can delete them or just redo until the diagram looks sane again and try something else than undo to achieve what she's trying to do.
+
+ 
+ > Anyway, I think this patch set is OK. It can be improved, but I'm
+ > not sure that's in the scope of this task. Most issues are really
+ > specific to the CanonicalEP, not CSS Refresh issues. So, +1 for me
+
+OK, thanks.  I think it's probably best not to submit this to master but to leave it in my feature branch, especially because it is really geared towards canonical use cases that aren't implemented in master, unless you think the "soak" would be valuable to flush out potential problems?  I'm hoping that we may actually get the synchronization feature (canonical views, not the UML-RT diagram-to-diagram synchronization part) ready to integrate in Mars soon, but I don't know when the deadline is.
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Damus
+Date: 2015-03-10 22:21:42.000000000
+Message: 
+Patch Set 1:
+
+I'm working on a "semi-active" state for the PapyrusCanonicalEditPolicy which isn't fully active, and so isn't recognized by GMF Run-time as active, but which nonetheless listens to the model for changes and will delete any child views for elements that are no longer semantic children.  Thus, whenever the edit policy isn't active but the diagram is still open (the edit policy isn't actually deactivated, yet), canonical view deletion will happen.  It is only canonical view creation that doesn't happen in the semi-active state.
+
+In any case, as discussed already, I think I'll abandon this change on the master branch.  It has served its purpose for review and discussion.
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Damus
+Date: 2015-03-10 22:21:58.000000000
+Message: 
+Abandoned
+
+Not intending to merge to master branch.
+----------------------------------------------------------------------------------------------------------------------

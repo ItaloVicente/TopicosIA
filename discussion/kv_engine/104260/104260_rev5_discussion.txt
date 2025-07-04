@@ -1,0 +1,118 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-32862: Correctly encode DCP SnapMarker if last item processed is chk_start
+
+ActiveStream::processItems() can fail to correctly mark a snapshot as
+a Checkpoint boundary, if a checkpoint_start item is the last one it
+processes.
+
++Details+
+
+DCP Snapshot represents an ordered sequence of mutations /
+deletions. It doesn't necessarily map 1:1: to a checkpoint, because
+the ActiveStream may fetch items from the CheckpointManager before the
+Checkpoint has been closed. For example, consider an open Checkpoint
+which currently contains seqnos 1..2 (but can still have items added);
+and a DCP client with a cursor point at the beginning of it:
+
+    Start(1), Mutation("keyA", 1), Mutation("keyB", 2), ...
+      ^
+      |
+    DCP cursor
+
+If an ActiveStream is ready to process data, it will call
+getAllItemsForCursor which will advance the cursor to the current end
+of the Checkpoint, and return 3 queued_items:
+
+- checkpoint_start(1)
+- mutation(1)
+- mutation(2)
+
+These are handled by processItems and result in the following DCP
+mutations being added to the readyQ:
+
+- SnapshotMarker(1,2)
+- Mutation(1)
+- Mutation(2)
+
+At this point the cursor is pointing after the current Checkpoint contents:
+
+    Start(1), Mutation("keyA", 1), Mutation("keyB", 2),
+                                                      ^
+                                                      |
+                                                   DCP cursor
+
+Now, consider some more items are added to the checkpoint manager and
+a new Checkpoint added:
+
+    Start(1), Mutation("keyA", 1), Mutation("keyB", 2), End(2), Start(3),
+                                                      ^
+                                                      |
+                                                  DCP cursor
+
+ActiveStream wants to process more data, calls getAllItemsForCursor
+and receives the following queued_items:
+
+- checkpoint_end(2)
+- checkpoint_start(3)
+
+These are again handled by processItems; and should result in the next
+SnapshotMarker having the MARKER_FLAG_CHK flag set - to indicate this
+is the start of a new Checkpoint. However, it cannot yet add a
+SnapshotMarker to the readyQ because SnapshotMarkers must define a
+non-empty seqno range - i.e. we cannot create one until at least one
+Mutation is also ready to process.
+
+The bug is in this handling - ActiveStream::processItems fails to
+account for this "pending" SnapshotMarker and ignores it. When
+ActiveStream::processItems is next called (with one more more
+mutations) the created Snapshot marker does not have MARKER_FLAG_CHK
+flag set.
+
+In the context of normal mutations (non-SyncWrites) this doesn't
+really matter - while the replica won't create a Checkpoint when it
+should, there's no significant consequence to this, other than the
+replica may end up with larger (and more costly to maintain)
+checkpoints. However for SyncWrites this breaks the model, as we
+cannot de-duplicate SyncWrite related items (prepare_sync_write /
+commit_sync_write).
+
+Solution is to record the pending MARKER_FLAG_CHK as part of the
+ActiveStream's state (in nextSnapshotIsCheckpoint). When we
+subsequently receive at least one more mutation (and hence can enqueue
+a SnapshotMarker), we can use nextSnapshotIsCheckpoint to snapshot it
+correctly.
+
+Change-Id: I57481780aa9604d2711aee34bb1b63a89bf0e960
+Reviewed-on: http://review.couchbase.org/104260
+Tested-by: Build Bot <build@couchbase.com>
+Reviewed-by: Daniel Owen <owend@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2019-02-05 17:30:51.000000000
+Message: 
+Change has been successfully cherry-picked as 79dfc5570876e4ecb4fbd983ea8050d9be111873 by Dave Rigby
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-02-05 17:53:30.000000000
+Message: 
+Patch Set 5:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/166/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-02-05 18:39:24.000000000
+Message: 
+Patch Set 5:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/166/ : FAILURE
+
+ERROR: load_with_ops (xdcr.uniXDCR.unidirectional)
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/166/ )'
+----------------------------------------------------------------------------------------------------------------------

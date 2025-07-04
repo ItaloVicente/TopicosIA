@@ -1,0 +1,86 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 537030. Add implementation for "$cquery/setInactiveRegions" notification message
+
+Change-Id: Ieda3a95d0ea427425a6c7c08047e05e211cd74fd
+Signed-off-by: Manish Khurana <mkmanishkhurana98@gmail.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Manish Khurana
+Date: 2018-07-16 15:59:54.000000000
+Message: 
+Uploaded patch set 5.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-07-16 16:00:03.000000000
+Message: 
+Patch Set 5:
+
+Build Started https://ci.eclipse.org/cdt/job/cdt-verify-test-lsp4e-cpp/44/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-07-16 16:07:57.000000000
+Message: 
+Patch Set 5: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/cdt/job/cdt-verify-test-lsp4e-cpp/44/ : SUCCESS. p2 repository available on https://ci.eclipse.org/cdt/job/cdt-verify-test-lsp4e-cpp/44/artifact/lsp4e-cpp/org.eclipse.lsp4e.cpp.site/target/repository/ for approximately 7 days.
+----------------------------------------------------------------------------------------------------------------------
+Author: Nathan Ridge
+Date: 2018-07-17 06:49:01.000000000
+Message: 
+Patch Set 5:
+
+(8 comments)
+
+Thanks, this is looking much better!
+
+I notice that we never remove mappings from fileInactiveRegionsMap. I thought about where we could do this, but didn't have any good ideas. (Removing the mapping corresponding to the old document in inputDocumentChanged() almost works, but if the file is open in multiple windows, the same document object is shared by both editors, and we don't want to remove the mapping if only one of them is closed.)
+
+However, now that the value type of the map is a List<Region>, leaking some mappings is not a big deal. (Previously, when the value type was the line background listener, leaking it could cause the entire editor part to stay alive.) So I think this is fine. Perhaps we could add a TODO comment above the declaration of the map, in case we think of something later.
+Line:41, lsp4e-cpp/org.eclipse.lsp4e.cpp.language/src/org/eclipse/lsp4e/cpp/language/Activator.java -> Please mark these methods as @noreference like the CUIPlugin methods.
+
+(This triggers a compiler warning if code in another plugin calls these functions. Other plugins should use their own logging functions.)
+
+Line:31, lsp4e-cpp/org.eclipse.lsp4e.cpp.language/src/org/eclipse/lsp4e/cpp/language/CqueryLineBackgroundListener.java -> Lookups in this map will be performed from the UI thread (which queries and paints the line backgrounds), while adding entries to the map will happen from another thread which listens for and processes LSP messages from the server.
+
+To make this concurrent access safe, we should use a ConcurrentHashMap instead of a plain HashMap.
+
+Since there will only be one thread making changes to the map (the UI thread only does lookups), we should use the third constructor parameter of ConcurrentHashMap [1] to specify a concurrencyLevel of 1. (We can pass the default values for the first two parameters, which are documented here [2].)
+
+[1] https://docs.oracle.com/javase/7/docs/api/java/util/concurrent/ConcurrentHashMap.html#ConcurrentHashMap(int,%20float,%20int)
+[2] https://docs.oracle.com/javase/7/docs/api/java/util/concurrent/ConcurrentHashMap.html#ConcurrentHashMap()
+
+Line:39, lsp4e-cpp/org.eclipse.lsp4e.cpp.language/src/org/eclipse/lsp4e/cpp/language/CqueryLineBackgroundListener.java -> Let's use the same color that the C++ editor uses. This way, the user can change the color.
+
+We can get this color using:
+
+  PreferenceConverter.getColor(CUIPlugin.getDefault().getPreferenceStore(), CEditor.INACTIVE_CODE_COLOR)
+
+Line:40, lsp4e-cpp/org.eclipse.lsp4e.cpp.language/src/org/eclipse/lsp4e/cpp/language/CqueryLineBackgroundListener.java -> currentDocument might be null if this gets called before it is set, and LSPEclipseUtils.getFile() requires that its argument is not null, so we need a null check.
+
+Likewise, LSPEclipseUtils.getFile() might return null and toUri() requires a non-null argument, so we need a null check there too.
+
+Line:44, lsp4e-cpp/org.eclipse.lsp4e.cpp.language/src/org/eclipse/lsp4e/cpp/language/CqueryLineBackgroundListener.java -> This check can be moved outside the try block.
+
+Line:235, lsp4e-cpp/org.eclipse.lsp4e.cpp.language/src/org/eclipse/lsp4e/cpp/language/PresentationReconcilerCPP.java -> It is sufficient to write:
+
+  setupDocument(newInput);
+
+Line:256, lsp4e-cpp/org.eclipse.lsp4e.cpp.language/src/org/eclipse/lsp4e/cpp/language/PresentationReconcilerCPP.java -> PresentationReconciler.install() does this:
+
+  IDocument document= viewer.getDocument();
+  if (document != null)
+    fInternalListener.inputDocumentChanged(null, document);
+
+since, if there is already a document, we won't get a "document changed" message for the existing document.
+
+We should probably do the same thing with our textInputListener.
+
+Line:262, lsp4e-cpp/org.eclipse.lsp4e.cpp.language/src/org/eclipse/lsp4e/cpp/language/PresentationReconcilerCPP.java -> We should remove the textInputListener as well (which means we'll need to store it as a field).
+
+----------------------------------------------------------------------------------------------------------------------

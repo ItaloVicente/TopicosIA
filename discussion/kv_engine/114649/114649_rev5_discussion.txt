@@ -1,0 +1,158 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-33463: Add support for persisted deletes in magma
+
+Change-Id: I09f989c82a08c4073aade9015c05e5e331596144
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Scott Lashley
+Date: 2019-10-17 00:44:56.000000000
+Message: 
+Patch Set 5: Patch Set 4 was rebased
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-10-17 01:18:38.000000000
+Message: 
+Patch Set 5: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/24163/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/15110/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/23117/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/20610/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/4767/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/13864/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/21751/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/7779/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-10-17 08:34:36.000000000
+Message: 
+Patch Set 5: Code-Review-1
+
+(1 comment)
+Line:1415, engines/ep/src/magma-kvstore/magma-kvstore.cc -> I don't believe this is correct - it's possible to "re-delete" an item which is already deleted, which will result in the delete count not changing.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Scott Lashley
+Date: 2019-10-26 01:03:17.000000000
+Message: 
+Patch Set 5:
+
+(1 comment)
+Line:1415, engines/ep/src/magma-kvstore/magma-kvstore.cc -> I believe it is correct.
+ep_testsuite.cc/test_takeover_stats_num_persisted_deletes inserts 1 deleted item and then validates that the item is counted as a persisted delete. Therefore, any item which is marked as deleted is counted as a persisted delete.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-10-28 10:07:41.000000000
+Message: 
+Patch Set 5:
+
+(1 comment)
+Line:1415, engines/ep/src/magma-kvstore/magma-kvstore.cc -> So for couchstore, persistedDeletes is simply the number of elements in the B-Tree which are marked as deleted - so if a single key is:
+
+1) Created.
+2) Deleted.
+3) Re-deleted (with say a different value associated with it).
+
+Then the deleteCount after 3 should be 1.
+
+From your code above it looks like in Magma it will be 2.
+
+I suggest you look for a unit test which re-deletes a document (likely some related to XATTRs and deleted bodies) and confirm what Magma's behaviour in that situation is.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Scott Lashley
+Date: 2019-10-28 16:02:58.000000000
+Message: 
+Patch Set 5:
+
+Could you point me to a test which does a re-delete and checks persisted deletes? I have no test failures so no clue as to where to look.
+----------------------------------------------------------------------------------------------------------------------
+Author: Scott Lashley
+Date: 2019-10-28 16:39:20.000000000
+Message: 
+Patch Set 5:
+
+Also, this method of tracking persisted deletes seems a bit dubious.
+Why does a delete of a non existent item count as a persisted delete but a delete of a delete does not?
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-10-28 17:03:01.000000000
+Message: 
+Patch Set 5:
+
+> Also, this method of tracking persisted deletes seems a bit
+ > dubious.
+ > Why does a delete of a non existent item count as a persisted
+ > delete but a delete of a delete does not?
+
+Because it's a count of elements which currently have the property deleted==true; not a count of of how many delete operations have happened over the life of the vBucket.
+----------------------------------------------------------------------------------------------------------------------
+Author: Scott Lashley
+Date: 2019-10-28 17:10:54.000000000
+Message: 
+Patch Set 5:
+
+If its a count of a the # of items which have the property deleted=true, how is that defined? How can a non existent item have a property of deleted and an item that is deleted twice only count for 1 delete? That seems inconsistent.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-10-28 17:18:49.000000000
+Message: 
+Patch Set 5:
+
+> If its a count of a the # of items which have the property
+ > deleted=true, how is that defined? 
+
+Because deleted (aka tombstoned) documents are kept in couchstore until the metadata purge interval (default 3 days).
+----------------------------------------------------------------------------------------------------------------------
+Author: Scott Lashley
+Date: 2019-10-28 17:27:26.000000000
+Message: 
+Patch Set 5:
+
+Great... why isn't a delete of a delete also tracked? Especially if its for a different value? Why does it seem inconsistent on which delete's are tracked and which are not? We don't remove the delete of a delete during compaction (at least as far as I can tell in time_purge_hook) so it stays in storage until expired.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-10-28 17:39:23.000000000
+Message: 
+Patch Set 5:
+
+> Great... why isn't a delete of a delete also tracked? Especially if
+ > its for a different value? Why does it seem inconsistent on which
+ > delete's are tracked and which are not? We don't remove the delete
+ > of a delete during compaction (at least as far as I can tell in
+ > time_purge_hook) so it stays in storage until expired.
+
+I think you're mis-understanding how deletes work.
+
+Couchstore is (in how KV-Engine uses it) a single-key, single value store - a Map (not multi-map) if you will.
+
+As such, a single key can either be one of 3 classes:
+
+a) Non-Existent - no data is stored for it, it is literally the absence of an entry in the B-tree which defines this class.
+b) Alive - it has a key, a single value (plus some metadata), and the deleted field in the metadata is false.
+c) Deleted - it has a key, _possibly_ a value (for system XATTRs), and the deleted field in the metadata is true.
+
+Documents in state Deleted stay in that state until they are either re-created (change to Alive), or the metadata purge interval (default 3 days) passes since they were last deleted, at which point they become Non-Existent.
+
+The getNumPersistedDeletes() method returns the number of documents in the vBucket which are in state Deleted.
+
+As such, it doesn't make any sense care about how many times a document has been deleted (or what the state transition is), all that is relevant is how many documents are currently in that state.
+
+There _are_ other counters (in ep-engine) which give a _cumulative_ number of delete operations against the vbucket, but that's different to the number provided by the storage engine.
+
+In terms of tests, take a look at test_delete_with_value - that might be a suitable test to check the result of getNumPersistedDeletes() between each call.
+----------------------------------------------------------------------------------------------------------------------

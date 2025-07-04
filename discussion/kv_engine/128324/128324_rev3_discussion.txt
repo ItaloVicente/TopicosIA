@@ -1,0 +1,189 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-39422: WIP: Simplify memoryCondition()
+
+As observed when testing data load / rebalance workloads under high
+DGM, when KV-Engine hits the high watermark, a large amount of work is
+done on the front-end thread.
+
+Specifically, we see that 60% of each active front-end thread is spent
+inside memoryCondition(), which just decides if memory recovery should
+be attempted or not (it doesn't actually recover any memory).
+
+There looks to be a range of problems here:
+
+1. Excessive time spent in VBucketCountVisitor::visitBucket. 98% of
+   all time in memoryCondition is spent in
+   VBucketCountVisitor::visitBucket. This is called to calculate the
+   number of resident items, and if non-zero them the ItemPager is
+   woken up. However VBucketCountVisitor::visitBucket actually
+   accumulates ~50 or so stats, many of which are more expensive than
+   the item counts, and so there's ~48 stats which are calculated and
+   them simply ignored.
+
+2. Excessive calls to memoryCondition(). Every time a client operation
+   fails due to not enough memory being available (i.e. at/above high
+   watermark), memoryCondition is called, and perform the above
+   expensive checks.
+   This is very wasteful because:
+
+   a) The ItemPager could already be running, and it cannot be
+      re-scheduled again until it's finished anyway.
+
+   b) Another client thread could already be running memoryCondition,
+      so threads are repeating the same work.
+
+3. memoryCondition is arguably over-complex in what it's trying to do.
+
+   a) It's essentially doing two things at the same time - determine
+      if we should return ETMPFAIL or NOMEM to the user, and secondly
+      attempt to recover memory if possible.
+
+   b) The memory recovery logic is complex / brittle - we attempt to
+      predict if memory could be recovered ahead of time, with two
+      possible approaches - paging out items, or closing unreferenced
+      Checkpoints. However, I suspect the prediction isn't always
+      correct in deterring if any more memory can be freed, as it
+      relies on indirect metrics like number of items resident), which
+      could already be zero, and memory is in use elsewhere.
+
+Attempt to address all the above issues by simplifying what
+memoryCondition does - replace the decision on when to wake the
+ItemPager with a much simpler, cheaper, direct policy - base the
+memory freeing policy on memory watermarks:
+
+- If bucket mem_used between mutation_mem_threshold and bucket_quota
+  (i.e. 93% and 100% of bucket) then attempt to wake ItemPager and
+  return ETMPFAIL
+
+- If bucket mem_used over bucket_quota then attempt to wake ItemPager
+  and return ENOMEM.
+
+The rationale here is that to get to mutation_mem_threshold (93% of
+memory bucket quota) then the bucket must already be under some duress
+- either a rapid burst of mutations taking memory significantly over
+the high watermark (85%), or one or more slow Checkpoint Cursors
+(Flusher, DCP) causing memory usage to be very high. Either way, we
+should attempt to trigger all memory freeing tasks to bring usage
+down.
+
+Change-Id: I80e2e6be0323edb2e51c08da021155705cbb8e38
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2020-07-02 14:00:39.000000000
+Message: 
+Patch Set 3: Patch Set 2 was rebased
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-07-02 15:49:49.000000000
+Message: 
+Patch Set 3: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/28983/ : FAILURE
+
+Failure of GoogleTest "FullAndvalueEviction/EPBucketTest.memOverheadMemoryCondition/persistent_full_eviction":
+
+<pre>
+[ RUN      ] FullAndvalueEviction/EPBucketTest.memOverheadMemoryCondition/persistent_full_eviction
+..\kv_engine\engines\ep\tests\module_tests\evp_store_test.cc(1128): error: Expected equality of these values:
+  ENGINE_TMPFAIL
+    Which is: 13
+  result
+    Which is: 3
+[  FAILED  ] FullAndvalueEviction/EPBucketTest.memOverheadMemoryCondition/persistent_full_eviction, where GetParam() = ("persistent", "full_eviction") (5 ms)
+FullAndvalueEviction/EPBucketTest.memOverheadMemoryCondition/persistent_full_eviction
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/28983/ )
+
+Failure of a CTest test 174/393 Test #177: ep-engine_ep_unit_tests.FullAndvalueEviction/EPBucketTest ..................................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/28983/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/4532/ : FAILURE
+
+Failure of GoogleTest "FullAndvalueEviction/EPBucketTest.memOverheadMemoryCondition/persistent_full_eviction":
+
+<pre>
+[ RUN      ] FullAndvalueEviction/EPBucketTest.memOverheadMemoryCondition/persistent_full_eviction
+[2020-07-02T15:02:41.982Z] ../kv_engine/engines/ep/tests/module_tests/evp_store_test.cc:1128: Failure
+[2020-07-02T15:02:41.982Z] Expected equality of these values:
+[2020-07-02T15:02:41.982Z]   ENGINE_TMPFAIL
+[2020-07-02T15:02:41.982Z]     Which is: 13
+[2020-07-02T15:02:41.982Z]   result
+[2020-07-02T15:02:41.982Z]     Which is: 3
+[2020-07-02T15:02:41.982Z] [  FAILED  ] FullAndvalueEviction/EPBucketTest.memOverheadMemoryCondition/persistent_full_eviction, where GetParam() = ("persistent", "full_eviction") (2 ms)
+FullAndvalueEviction/EPBucketTest.memOverheadMemoryCondition/persistent_full_eviction
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/4532/ )
+
+Failure of a CTest test [2020-07-02T15:02:41.981Z]  38/398 Test #180: ep-engine_ep_unit_tests.FullAndvalueEviction/EPBucketTest ................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/4532/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/4603/ : FAILURE
+
+Failure of GoogleTest "FullAndvalueEviction/EPBucketTest.memOverheadMemoryCondition/persistent_full_eviction":
+
+<pre>
+[ RUN      ] FullAndvalueEviction/EPBucketTest.memOverheadMemoryCondition/persistent_full_eviction
+[2020-07-02T15:02:19.709Z] ../kv_engine/engines/ep/tests/module_tests/evp_store_test.cc:1128: Failure
+[2020-07-02T15:02:19.709Z] Expected equality of these values:
+[2020-07-02T15:02:19.709Z]   ENGINE_TMPFAIL
+[2020-07-02T15:02:19.709Z]     Which is: 13
+[2020-07-02T15:02:19.709Z]   result
+[2020-07-02T15:02:19.709Z]     Which is: 3
+[2020-07-02T15:02:19.709Z] [  FAILED  ] FullAndvalueEviction/EPBucketTest.memOverheadMemoryCondition/persistent_full_eviction, where GetParam() = ("persistent", "full_eviction") (2 ms)
+FullAndvalueEviction/EPBucketTest.memOverheadMemoryCondition/persistent_full_eviction
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/4603/ )
+
+Failure of a CTest test [2020-07-02T15:02:19.707Z]  68/410 Test #181: ep-engine_ep_unit_tests.FullAndvalueEviction/EPBucketTest ................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/4603/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/4701/ : FAILURE
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/12426/ : FAILURE
+
+Failure of GoogleTest "FullAndvalueEviction/EPBucketTest.memOverheadMemoryCondition/persistent_full_eviction":
+
+<pre>
+[ RUN      ] FullAndvalueEviction/EPBucketTest.memOverheadMemoryCondition/persistent_full_eviction
+[2020-07-02T15:05:42.142Z] ../kv_engine/engines/ep/tests/module_tests/evp_store_test.cc:1128: Failure
+[2020-07-02T15:05:42.142Z] Expected equality of these values:
+[2020-07-02T15:05:42.142Z]   ENGINE_TMPFAIL
+[2020-07-02T15:05:42.142Z]     Which is: 13
+[2020-07-02T15:05:42.142Z]   result
+[2020-07-02T15:05:42.142Z]     Which is: 3
+[2020-07-02T15:05:42.142Z] [  FAILED  ] FullAndvalueEviction/EPBucketTest.memOverheadMemoryCondition/persistent_full_eviction, where GetParam() = ("persistent", "full_eviction") (3 ms)
+FullAndvalueEviction/EPBucketTest.memOverheadMemoryCondition/persistent_full_eviction
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/12426/ )
+
+Failure of a CTest test [2020-07-02T15:05:42.140Z]   5/393 Test #180: ep-engine_ep_unit_tests.FullAndvalueEviction/EPBucketTest ................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/12426/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/3638/ : FAILURE
+
+Failure of GoogleTest "FullAndvalueEviction/EPBucketTest.memOverheadMemoryCondition/persistent_full_eviction":
+
+<pre>
+[ RUN      ] FullAndvalueEviction/EPBucketTest.memOverheadMemoryCondition/persistent_full_eviction
+[2020-07-02T14:24:08.776Z] ../kv_engine/engines/ep/tests/module_tests/evp_store_test.cc:1128: Failure
+[2020-07-02T14:24:08.776Z] Expected equality of these values:
+[2020-07-02T14:24:08.776Z]   ENGINE_TMPFAIL
+[2020-07-02T14:24:08.776Z]     Which is: 13
+[2020-07-02T14:24:08.776Z]   result
+[2020-07-02T14:24:08.776Z]     Which is: 3
+[2020-07-02T14:24:08.776Z] [  FAILED  ] FullAndvalueEviction/EPBucketTest.memOverheadMemoryCondition/persistent_full_eviction, where GetParam() = ("persistent", "full_eviction") (4 ms)
+FullAndvalueEviction/EPBucketTest.memOverheadMemoryCondition/persistent_full_eviction
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/3638/ )
+
+Failure of a CTest test [2020-07-02T14:24:08.775Z]  70/407 Test #178: ep-engine_ep_unit_tests.FullAndvalueEviction/EPBucketTest ................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/3638/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/1675/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/24992/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/3168/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

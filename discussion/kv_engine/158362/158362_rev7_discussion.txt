@@ -1,0 +1,178 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-47267: Make backfill during warmup a PauseResume task
+
+MB-47267 demonstrated that during warmup of a node in a cluster which
+has multiple buckets of different sizes, smaller buckets could become
+stuck behind larger buckets causing their warmup time to be much longer
+than it need be. This can causes problems during delta node recovery as
+NS_Server starts requesting vbucket stats to check vbucket state and
+if this is not responded to promptly this will cause the rebalance to
+timeout. Which may happen as EP-Engine does not service any vbucket
+stats requests till we've completed 'PopulateVBucketMap' state of
+warmup, which requires  one + five x the number of shards reader tasks
+to have been run and completed. Though these tasks are relatively quick
+to run, they can become stuck behind other bucket's warmup backfilling
+tasks which can take upwards of minutes to run depending on the size of
+the bucket. As they share the same reader thread task pool.
+
+To fix this, this patch modifies the backfilling functionality during
+warmup so that backfill may now be paused after a time deadline has
+been met and store the seqno we've reached so that we can start
+backfilling again when the tasks is rescheduled. Which in turn allows
+the faster initial phases of warmup to have a chance of being run
+between each run of backfill. We've also dropped the priority of these
+tasks to help the scheduler pick up the faster initial tasks first if
+the FollyExecutorPool is update to take priorities into consideration
+when scheduling. This patch has unifies the functionality of the
+backfilling stages of warmup so that the same code is used for
+'KeyDump', 'LoadingKVPairs' and 'LoadingData' stages of warmup.
+
+This patch also adds a test to ensure that, if we create a larger
+bucket, and start warmup it up before a smaller one. With only one
+reader thread that the smaller bucket is able to warmup before that
+the larger one has finished warming up.
+
+Change-Id: If983145100e8f871d2c49caa5da9f744c6134b4b
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Richard de Mellow
+Date: 2021-08-02 16:08:43.000000000
+Message: 
+Uploaded patch set 7.
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2021-08-02 16:08:58.000000000
+Message: 
+Patch Set 7:
+
+(20 comments)
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-08-02 16:13:08.000000000
+Message: 
+Patch Set 7:
+
+(1 comment)
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2021-08-02 16:21:45.000000000
+Message: 
+Patch Set 7:
+
+(1 comment)
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-08-02 16:22:52.000000000
+Message: 
+Patch Set 7: Code-Review-1
+
+(6 comments)
+Line:2259, engines/ep/src/kv_bucket.cc -> This seems broken - why should we be constructing an empty filter?
+
+Line:108, engines/ep/src/warmup.cc -> Can this be const?
+
+Line:1523, engines/ep/src/warmup.cc -> So for example here, just let the subclass handle how it wants to so cache lookup - create a virtual method named something like makeCacheLookupCb, and then delegate the behaviour there.
+
+(In a class hierarchy with polymorphism, if() statements which affect behaviour can often be code-smell that the behaviour should be abstracted into a virtual method).
+
+You can handle the differences in kvLookup above in a similar way - add a makeKvLookupCb method - I think that removes the need for the settings member entirely).
+
+Line:415, engines/ep/src/warmup.h -> I think the nextState should be owned by the particular warmup task.
+
+Broadly speaking, we should keep the same structure of Warmup tasks as we already have essentially an FSM where one task (or set of tasks) represents each state. Each task itself decides when to change to the next state.
+
+While it makes sense to implement Tasks which are similar in terms of a common parent class, I don't think we should be adding fields etc to this common class (i.e. WarmupVBucketVisitor::BackfillSettings) - each class should have appropriate members / virtual methods to handle the differences.
+
+Line:8302, engines/ep/tests/ep_testsuite.cc -> 45ms seems a bit magical - can you document why this value was chosen?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-08-02 16:24:08.000000000
+Message: 
+Patch Set 7:
+
+(1 comment)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-08-02 16:32:36.000000000
+Message: 
+Patch Set 7: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-cheshire-cat/125/ : FAILURE
+
+clang-tidy found the following problems:
+
+<pre>
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy-cheshire-cat/kv_engine/engines/ep/src/tasks.def.h:25:1: error: C++ requires a type specifier for all declarations [clang-diagnostic-error]
+TASK(MultiBGFetcherTask, READER_TASK_IDX, 0)
+^
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy-cheshire-cat/kv_engine/engines/ep/src/tasks.def.h:25:6: error: use of undeclared identifier "MultiBGFetcherTask" [clang-diagnostic-error]
+TASK(MultiBGFetcherTask, READER_TASK_IDX, 0)
+     ^
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy-cheshire-cat/kv_engine/engines/ep/src/tasks.def.h:25:26: error: use of undeclared identifier "READER_TASK_IDX" [clang-diagnostic-error]
+TASK(MultiBGFetcherTask, READER_TASK_IDX, 0)
+                         ^
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy-cheshire-cat/kv_engine/engines/ep/src/tasks.def.h:25:45: error: expected ";" after top level declarator [clang-diagnostic-error]
+TASK(MultiBGFetcherTask, READER_TASK_IDX, 0)
+                                            ^
+                                            ;
+
+</pre> ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-cheshire-cat/125/ )
+
+Compile error at /home/couchbase/jenkins/workspace/kv_engine-clang_tidy-cheshire-cat/kv_engine/engines/ep/src/tasks.def.h:25:1:
+error: C++ requires a type specifier for all declarations [clang-diagnostic-error]
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-cheshire-cat/125/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/cheshire-cat/131/ : FAILURE
+
+ThreadSanitizer issue: data race ../kv_engine/engines/ep/src/vbucket.cc:3069 in VBucket::setMutationMemoryThreshold(unsigned long)  ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/cheshire-cat/131/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/cheshire-cat/132/ : FAILURE
+
+The warnings threshold for this job was exceeded - <a href="warningsResult">1 warnings</a> found. ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/cheshire-cat/132/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/9690/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-cheshire-cat/201/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-cheshire-cat/134/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/cheshire-cat/135/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/cheshire-cat/133/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/cheshire-cat/131/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/cheshire-cat/40/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2021-08-03 13:04:14.000000000
+MISMATCHED INLINE COMMENT
+Line:2259, engines/ep/src/kv_bucket.cc -> There are some situations in our test that create shards which have no vbuckets assigned to them. This case helps to skip past them. But point taken its not really the concern of this method
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2021-08-03 13:04:14.000000000
+MISMATCHED INLINE COMMENT
+Line:108, engines/ep/src/warmup.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2021-08-03 13:04:14.000000000
+MISMATCHED INLINE COMMENT
+Line:1523, engines/ep/src/warmup.cc -> Ack
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2021-08-03 13:04:14.000000000
+MISMATCHED INLINE COMMENT
+Line:415, engines/ep/src/warmup.h -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2021-08-03 13:04:14.000000000
+MISMATCHED INLINE COMMENT
+Line:8302, engines/ep/tests/ep_testsuite.cc -> Will add a comment
+----------------------------------------------------------------------------------------------------------------------

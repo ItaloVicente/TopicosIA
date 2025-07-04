@@ -1,0 +1,134 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-31753: Correct vBucket doc counts after rollback
+
+Currently during rollback we do not track the number of
+documents correctly. We decrement if the rollback item is deleted
+and was deleted before/did not exist (where we should do nothing).
+We do not increment the count at all.
+
+Change-Id: I52a991aee1d949bafcd3091cdc0ec36c37393ab2
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Ben Huddleston
+Date: 2018-10-26 08:11:06.000000000
+Message: 
+Uploaded patch set 2: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-10-26 08:48:58.000000000
+Message: 
+Patch Set 2: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/4706/ : FAILURE
+
+Failure of a CTest test  51/161 Test  #53: ep_testsuite_xdcr.value_eviction.comp_passive ................................ ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/4706/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/11498/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/11829/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/12772/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/5024/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/2468/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/13161/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-10-26 09:33:38.000000000
+Message: 
+Patch Set 2: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/11498/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/11829/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/12772/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/5024/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/2468/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/13161/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/4708/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2018-10-26 10:43:40.000000000
+Message: 
+Patch Set 2: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2018-10-26 16:35:44.000000000
+Message: 
+Patch Set 2:
+
+I think working out how MUCH of an issue this is requires a bit more thought. I definitely think the current logic is incorrect, but I can't quite justify why we crash the collection document counter and not the vBucket counter. Perhaps the test QE ran is new to 6.5, or they are using multiple collections, or my understanding of the persistence callback/post rollback flushing is not correct
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2018-10-30 12:28:24.000000000
+Message: 
+Patch Set 2:
+
+Looked into this some more this morning. Currently we do not crash when we end up with an incorrect vBucket document counter as the underflow policy is never set to throw (it just ignores clamps value to 0 when the count is already at 0).
+
+vBucket counter:
+    cb::NonNegativeCounter<size_t> onDiskTotalItems;
+Collection counter:
+   mutable cb::NonNegativeCounter<uint64_t, cb::ThrowExceptionUnderflowPolicy> diskCount;
+
+Should the vBucket counter also throw on underflow so we can catch any correctness issues?
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-10-30 12:46:10.000000000
+Message: 
+Patch Set 2: Code-Review-1
+
+> Looked into this some more this morning. Currently we do not crash
+ > when we end up with an incorrect vBucket document counter as the
+ > underflow policy is never set to throw (it just ignores clamps
+ > value to 0 when the count is already at 0).
+ > 
+ > vBucket counter:
+ > cb::NonNegativeCounter<size_t> onDiskTotalItems;
+ > Collection counter:
+ > mutable cb::NonNegativeCounter<uint64_t, cb::ThrowExceptionUnderflowPolicy>
+ > diskCount;
+ > 
+ > Should the vBucket counter also throw on underflow so we can catch
+ > any correctness issues?
+
+Good question ;) So the rationale for having the two modes was there's a couple of use-cases for NonNegativeCounter:
+
+1) Variables which are fundamental to the operation of the system, and if they went negative then Bad Things would happen - and it's better to crash the whole production system (and loose availability) than continue.
+
+2) Things which are informational; and while they /should/ be non-negative, the consequences of them being negative are not that severe - or more specially we'd rather keep a wrong value than crash the system.
+
+(1) covers things like highSeqno; and other ordering properties (see all the Monotonic<> class which has similar rules).
+
+(2) covers things which are purely statistical counters - for example number of JSON docs in the bucket. 
+
+Note that I mentioned "production" in the use-case above - what the consideration should be for production. In development the cost/benefit is different - we *want* to see potential issues sooner so we should probably be keener to crash the system to highlight them.
+
+In the case of collections (and collection item counts); given it came in recently (and isn't in production yet) the cost/benefit of the different counter modes *currently* biases towards using ThrowExceptionUnderflowPolicy. However I'd say that should change once we ship.
+
+There is a mechanism to control the already - see CB_DEVELOPMENT_ASSERTS - which is used to select the default underflow policy for NonNegativeCounter - see platform/non_negative_counter.h. That is currently set in tlm/CMakeLists.txt to Off by default - which we should probably change sooner rather than later (and flip back to Off when we branch).
+
+Can you raise an MB targetted at Mad-Hatter (with Critical priority) to set CB_DEVELOPMENT_ASSERTS to false before we ship (as a reminder for us); and then you can change CB_DEVELOPMENT_ASSERTS to On by default now?
+
+That will cause unspecified NonnegativeCounter instantiations to throw by default - you can also consider if you want to remove the explicit UnderflowPolicy from diskCount and just rely on the default.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-11-05 11:51:04.000000000
+Message: 
+Patch Set 2: -Code-Review
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,146 @@
+======================================================================================================================
+DESCRIPTION:
+
+os.linux: Correctly model each CPU's run queue
+
+Add a new attribute to the kernel state system:
+
+THREADS
+ +--1000
+     +--Current_cpu_rq
+
+Which will track on which CPU's run queue this thread
+is currently located. Unlike the cpu -> Current_thread
+attribute, several threads can be present on the same
+CPU's run queue at the same time.
+
+This will allow for example tracking on which CPU a
+thread is expecting to go when it is in the WAIT_FOR_CPU
+state.
+
+This requires tweaks to the sched_switch, sched_wakeup
+and process_fork handlers, as well as adding a new handler
+for the sched_migrate_task event (which simply moves a
+non-running thread from one run queue to another).
+
+Change-Id: I6e0386214df195eb6389cec87f2e6a42fdc0691d
+Signed-off-by: Alexandre Montplaisir <alexmonthy@efficios.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Alexandre Montplaisir
+Date: 2016-11-25 21:59:43.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2016-11-25 22:50:30.000000000
+Message: 
+Patch Set 1:
+
+Build Started https://hudson.eclipse.org/tracecompass/job/tracecompass-gerrit/11640/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2016-11-25 23:14:40.000000000
+Message: 
+Patch Set 1: Verified-1
+
+Build Failed 
+
+https://hudson.eclipse.org/tracecompass/job/tracecompass-gerrit/11640/ : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthew Khouzam
+Date: 2016-11-28 03:28:05.000000000
+Message: 
+Patch Set 1:
+
+Alex, I am adding Loic on this, I want to make sure we are not adding more attributes unlss it is absolutely necessary especially to the thread tree. This is something that will slow down ALL the kernel analyses.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthew Khouzam
+Date: 2016-11-28 03:42:38.000000000
+Message: 
+Patch Set 1:
+
+A small request: could you try running Django_http and trace2 and posting the different ht sizes before and after this patch?
+----------------------------------------------------------------------------------------------------------------------
+Author: Loic Prieur-Drevon
+Date: 2016-11-28 05:21:30.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+
+This is a "good" use of the attributes reclaimed from this AttributeTree, as they will not hold a null interval from the start to the end of the SHT, therefore they don't make the old SHT degenerate.
+Moreover, having this attribute reduces the number of queries for the cfvHoverTip, so in the end, things should be slightly sped up.
+
+I
+Line:80, analysis/org.eclipse.tracecompass.analysis.os.linux.core/src/org/eclipse/tracecompass/internal/analysis/os/linux/core/kernel/handlers/ProcessForkHandler.java -> why not opt?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Genevieve Bastien
+Date: 2016-11-28 20:21:13.000000000
+Message: 
+Patch Set 1:
+
+(2 comments)
+
+It would be interesting to know the impact on the size of the history tree of such a change. And if it has impact on the number of nodes that need to be read, with cache hit/miss. You can do that with JUL analyses!
+Line:80, analysis/org.eclipse.tracecompass.analysis.os.linux.core/src/org/eclipse/tracecompass/internal/analysis/os/linux/core/kernel/handlers/ProcessForkHandler.java -> No need for opt with the AndAdd
+
+But when querying he should use optQuarkRelative
+
+Line:28, lttng/org.eclipse.tracecompass.lttng2.kernel.core.tests/src/org/eclipse/tracecompass/lttng2/kernel/core/tests/analysis/kernel/statesystem/TestValues.java -> Did I ever say how much I hate unit tests like this, as opposed to XML traces that test the necessary and sufficient of a given use case? Yes I did... oh well...
+
+But bringing in new concepts like sched_migration is a good opportunity to start fine-tuned unit tests with fake data...
+
+just saying...
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Loic Prieur-Drevon
+Date: 2016-11-28 20:31:37.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:80, analysis/org.eclipse.tracecompass.analysis.os.linux.core/src/org/eclipse/tracecompass/internal/analysis/os/linux/core/kernel/handlers/ProcessForkHandler.java -> Yes but this isn't an AndAdd like the others in kernel/handlers, it is used to read information from the current state whereas others are used to ensure an attribute exists before writing to it.
+
+To reword my question: what is the expected behavior when the parent does not have the attribute? (however rare the case, as the cpu is almost always known in the event)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2016-11-29 03:23:56.000000000
+Message: 
+Patch Set 1:
+
+(2 comments)
+
+Thanks for the comments!
+
+I'm not sure why we are so worried about state system size though... The goal here is to make the *model* right. We should worry about being right first, then fast.
+
+If the state system is slow with a high number of attributes, that should be solved within the state system. If we want to split the CPU/Threads sub-trees (which sounds like a good idea already), that would be a separate endeavour.
+
+I don't see why the run-queue data should go in a separate SS any more than Exec_name or System_call.
+Line:80, analysis/org.eclipse.tracecompass.analysis.os.linux.core/src/org/eclipse/tracecompass/internal/analysis/os/linux/core/kernel/handlers/ProcessForkHandler.java -> Oh good point, this here is for a query, not for writing a new state. We could do get/opt instead, and if it is not present we just skip the block below. In the end it's the same as inserting a null value, except we don't add the attribute if it's not written anywhere else.
+
+Line:28, lttng/org.eclipse.tracecompass.lttng2.kernel.core.tests/src/org/eclipse/tracecompass/lttng2/kernel/core/tests/analysis/kernel/statesystem/TestValues.java -> Good points, but on the other hand XML traces need some maintenance. If we add sched migration modeling, we have to add a sched migration XML trace... Whereas if using a real trace that already has those events, we just have to run the script and update this.
+
+At some point we'll model EVERYTHING so we won't need to add things here ;)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Genevieve Bastien
+Date: 2016-11-29 15:28:12.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:28, lttng/org.eclipse.tracecompass.lttng2.kernel.core.tests/src/org/eclipse/tracecompass/lttng2/kernel/core/tests/analysis/kernel/statesystem/TestValues.java -> > If we add sched migration modeling, we have to add a sched migration XML trace... 
+
+Yes, that or update another trace with the sched migration events. But you ensure complete code coverage and correctness.
+
+> Whereas if using a real trace that already has those events, we just have to run the script and update this.
+
+This is integration testing. It makes sure that the results that were generated on the trace by the code you wrote are always the same when the test is re-run. It does not verify that you wrote correct code.
+
+----------------------------------------------------------------------------------------------------------------------

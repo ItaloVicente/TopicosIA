@@ -1,0 +1,74 @@
+======================================================================================================================
+DESCRIPTION:
+
+upgrade certain keys from ns_config to chronicle
+
+Change-Id: Ib116d5001297aaedc4b0a56fcf85f727e78897af
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Artem Stemkovski
+Date: 2020-12-11 20:49:59.000000000
+Message: 
+Uploaded patch set 23: Patch Set 22 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-12-11 20:50:17.000000000
+Message: 
+Patch Set 23: -Well-Formed
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-test/20648/
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2020-12-11 20:53:24.000000000
+Message: 
+Patch Set 23: Verified+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-12-11 20:57:11.000000000
+Message: 
+Patch Set 23: Well-Formed+1
+
+Permission granted to commit to restricted branch
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Artamonau
+Date: 2020-12-15 21:57:21.000000000
+Message: 
+Patch Set 23:
+
+(1 comment)
+Line:68, src/ns_online_config_upgrader.erl -> I think we need to do better than this. Since any particular node will observe changes to chronicle and changes to ns_config in arbitrary order, all sort of unpleasant situations are possible.
+
+A couple of examples:
+
+1. Node receives the new compat version and the corresponding deletions in ns_config first. It attempts to read from chronicle since the compat version is telling it to, and crashes because chronicle is still empty (due to the default read_consistency being 'local').
+
+2. Node receives chronicle updates first. Wakes up, decides to read any of the upgraded keys. Gets the compat version, which tells it to read from ns_config. By the time it gets to reading, the corresponding keys are deleted from ns_config.
+
+And I'm afraid since we're modifying all the upgraded keys and there are a bunch of processes subscribed to those updates, such crashes will be quite likely.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Artamonau
+Date: 2020-12-16 21:53:59.000000000
+Message: 
+Patch Set 23:
+
+Here are my thoughts on what we can do about the issue I pointed out. While not perfect, I hope it'll do.
+
+1. Don't delete any keys from ns_config for now. This helps with situations where we check the compat version, decide to read from ns_config but fail because by the time we do read the value got deleted from ns_config.
+
+2. After writing to chronicle explicitly make sure that all nodes have seen the changes by syncing chronicle on them. This more or less guarantees that chronicle is ready when nodes realize that the compat version changed.
+
+3. Processes that subscribe to changes to chronicle and ns_config may never assume that the announced value can safely be used. That's because the value depends implicitly on the compat version. So such processes must always treat events as simply a signal to refresh.
+
+4. Processes from (3) must also refresh when compat version changes. Because they could have ignored some of the notifications from chronicle before this point.
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2020-12-18 02:10:56.000000000
+MISMATCHED INLINE COMMENT
+Line:68, src/ns_online_config_upgrader.erl -> 1. I do not delete ns_config keys anymore. This is fixes in this commit.
+2. Not using the values bound to the events is addressed here: http://review.couchbase.org/c/ns_server/+/137376
+3. Pushing upgraded keys to other nodes before compat version changes is addressed here: http://review.couchbase.org/c/ns_server/+/142406
+4. I'm still thinking about automatically triggering refresh when compat version changes, but I think for the first drop we can do without it.
+----------------------------------------------------------------------------------------------------------------------

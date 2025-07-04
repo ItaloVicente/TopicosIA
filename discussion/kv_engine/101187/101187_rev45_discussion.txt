@@ -1,0 +1,184 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-31869: Provide ability for consumer to not buffer DCP messages
+
+First, let's sum up how FlowControl currently works. That is related to
+Replication Throttling and DCP buffering at Consumer.
+
+1) Producer and Consumer negotiates a max DCP buffer size when the DCP
+connection is initialized. This buffer size becomes the size of the
+BufferLog at Producer, see below.
+
+2) The Producer starts sending messages to the Consumer. The Producer
+adds the number of bytes sent to its BufferLog. The Consumer receives
+messages and acks back the bytes received to the Producer via BufferAck.
+
+3) The Producer receives BufferAcks and removes bytes from its
+BufferLog.
+
+4) The Producer pause if the BufferLog is full. That happens when (for
+any reason) the Consumer delays in ingesting the inbound DCP traffic.
+
+As (4) suggests, OOM at Consumer is only one reason why the Consumer may
+delay in processing incoming DCP messages and acking bytes back to the
+Producer.
+
+And now on Replication Throttling.
+Replication Throttling guards the Consumer for OOM. We have a
+Replication Throttling Threshold (defaulted to 99% of the bucket quota)
+which is where the Consumer stops processing the received DCP messages.
+
+The Consumer acks back to the Producer only bytes of messages processed.
+So again, if Throttling kicks is then the Consumer stops acking bytes back
+to the Producer. This time for an OOM condition.
+
+Now on the DCP buffering at Consumer, which is the core of this patch.
+How does that fit in what I have described above?
+When the Consumer hits OOM, it stops processing messages by adding them
+into each PassiveStream::buffer. Bytes for buffered messages are *not*
+acked, which means that at some point the BufferLog at Producer becomes
+full and replication pauses.
+
+This patch just provides an alternative to buffering at Consumer. Rather
+than buffering messages we just pause the Consumer when we hit OOM.
+That means not draining the inbound socket buffer at Consumer and not
+acking bytes back to the Producer. As soon as we recover from the OOM
+condition, we unpause the Consumer and everyting proceed as usual. Which
+leaves the throttling mechanism logically unchanged.
+
+First of all, that simplifies the logic considerably at Consumer in an
+area that has already caused issues (eg, MB-31547).
+Plus, doing extra buffering on a node that has already hit OOM doesn't
+really help.
+
+A configuration parameter is provided to allow easy switching between
+using the buffer or not. Once we have gained confidence in not using
+the buffer the switch and associated buffering code will be removed.
+
+Change-Id: I1e87caeddd3f520c7eb1ee7ccf77043461df9d0b
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2020-09-11 14:22:33.000000000
+Message: 
+Uploaded patch set 45.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-09-11 15:28:18.000000000
+Message: 
+Patch Set 45: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/30330/ : FAILURE
+
+Timeout of a CTest test 252/392 Test #210: ep-engine_ep_unit_tests.EphemeralOrPersistent/STItemPagerTest .................................................................} ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/30330/ )
+
+Failure of a CTest test  ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/30330/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/4799/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [0077/0158]: disk>RAM delete paged-out...../kv_engine/engines/ep/tests/ep_testsuite.cc:4365 Test failed: `" (Expected `0", got `1" - Unexpected bg_fetched after del/get)
+[2020-09-11T14:33:25.896Z] (27 ms) FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/4799/ )
+
+Failure of a CTest test [2020-09-11T14:33:25.895Z]  19/406 Test #236: ep_testsuite.full_eviction.comp_active ...................................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/4799/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/5921/ : FAILURE
+
+Failure of GoogleTest "FullAndValueEvictionOnReplicaAndPending/RollbackTest.RollbackAfterMutation/magma_value_only_replica":
+
+<pre>
+[ RUN      ] FullAndValueEvictionOnReplicaAndPending/RollbackTest.RollbackAfterMutation/magma_value_only_replica
+[2020-09-11T14:42:55.725Z] ../kv_engine/engines/ep/tests/module_tests/evp_store_rollback_test.cc:225: Failure
+[2020-09-11T14:42:55.725Z] Expected equality of these values:
+[2020-09-11T14:42:55.725Z]   FlushResult(MoreAvailable::No, 1, WakeCkptRemover::No)
+[2020-09-11T14:42:55.725Z]     Which is: moreAvailable:{false} numFlushed:{1} wakeupCkptRemover:{false}
+[2020-09-11T14:42:55.725Z]   getEPBucket().flushVBucket(vbid)
+[2020-09-11T14:42:55.725Z]     Which is: moreAvailable:{false} numFlushed:{1} wakeupCkptRemover:{true}
+[2020-09-11T14:42:55.725Z] [  FAILED  ] FullAndValueEvictionOnReplicaAndPending/RollbackTest.RollbackAfterMutation/magma_value_only_replica, where GetParam() = ("magma", "value_only", "replica") (14089 ms)
+FullAndValueEvictionOnReplicaAndPending/RollbackTest.RollbackAfterMutation/magma_value_only_replica
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/5921/ )
+
+ThreadSanitizer issue: heap-use-after-free ../kv_engine/programs/engine_testapp/mock_cookie.cc:34 in MockCookie::validate() const  ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/5921/ )
+
+Failure of a CTest test [2020-09-11T14:42:40.456Z]   2/387 Test #146: ep-engine_ep_unit_tests.AllBucketTypes/DurabilityPassiveStreamTest .......................................... ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/5921/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/5691/ : FAILURE
+
+Failure of GoogleTest "SingleThreadedEPBucketTest.MB18452_yield_dcp_processor":
+
+<pre>
+[ RUN      ] SingleThreadedEPBucketTest.MB18452_yield_dcp_processor
+[2020-09-11T14:28:11.810Z] ../kv_engine/engines/ep/tests/module_tests/evp_store_single_threaded_test.cc:2156: Failure
+[2020-09-11T14:28:11.810Z] Expected equality of these values:
+[2020-09-11T14:28:11.810Z]   more_to_process
+[2020-09-11T14:28:11.810Z]     Which is: 1
+[2020-09-11T14:28:11.810Z]   consumer->processBufferedItems()
+[2020-09-11T14:28:11.810Z]     Which is: 0
+[2020-09-11T14:28:11.810Z] ../kv_engine/engines/ep/tests/module_tests/evp_store_single_threaded_test.cc:2156: Failure
+[2020-09-11T14:28:11.810Z] Expected equality of these values:
+[2020-09-11T14:28:11.810Z]   more_to_process
+[2020-09-11T14:28:11.810Z]     Which is: 1
+[2020-09-11T14:28:11.810Z]   consumer->processBufferedItems()
+[2020-09-11T14:28:11.810Z]     Which is: 0
+[2020-09-11T14:28:11.810Z] ../kv_engine/engines/ep/tests/module_tests/evp_store_single_threaded_test.cc:2156: Failure
+[2020-09-11T14:28:11.810Z] Expected equality of these values:
+[2020-09-11T14:28:11.810Z]   more_to_process
+[2020-09-11T14:28:11.810Z]     Which is: 1
+[2020-09-11T14:28:11.810Z]   consumer->processBufferedItems()
+[2020-09-11T14:28:11.810Z]     Which is: 0
+[2020-09-11T14:28:11.810Z] [  FAILED  ] SingleThreadedEPBucketTest.MB18452_yield_dcp_processor (5 ms)
+SingleThreadedEPBucketTest.MB18452_yield_dcp_processor
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/5691/ )
+
+Failure of a CTest test [2020-09-11T14:28:11.809Z] 100/396 Test  #71: ep-engine_ep_unit_tests.SingleThreadedEPBucketTest .......................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/5691/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/5790/ : FAILURE
+
+Failure of GoogleTest "SingleThreadedEPBucketTest.MB18452_yield_dcp_processor":
+
+<pre>
+[ RUN      ] SingleThreadedEPBucketTest.MB18452_yield_dcp_processor
+[2020-09-11T14:45:30.165Z] ../kv_engine/engines/ep/tests/module_tests/evp_store_single_threaded_test.cc:2156: Failure
+[2020-09-11T14:45:30.165Z] Expected equality of these values:
+[2020-09-11T14:45:30.165Z]   more_to_process
+[2020-09-11T14:45:30.165Z]     Which is: 1
+[2020-09-11T14:45:30.165Z]   consumer->processBufferedItems()
+[2020-09-11T14:45:30.165Z]     Which is: 0
+[2020-09-11T14:45:30.165Z] ../kv_engine/engines/ep/tests/module_tests/evp_store_single_threaded_test.cc:2156: Failure
+[2020-09-11T14:45:30.165Z] Expected equality of these values:
+[2020-09-11T14:45:30.165Z]   more_to_process
+[2020-09-11T14:45:30.165Z]     Which is: 1
+[2020-09-11T14:45:30.165Z]   consumer->processBufferedItems()
+[2020-09-11T14:45:30.165Z]     Which is: 0
+[2020-09-11T14:45:30.165Z] ../kv_engine/engines/ep/tests/module_tests/evp_store_single_threaded_test.cc:2156: Failure
+[2020-09-11T14:45:30.165Z] Expected equality of these values:
+[2020-09-11T14:45:30.165Z]   more_to_process
+[2020-09-11T14:45:30.165Z]     Which is: 1
+[2020-09-11T14:45:30.165Z]   consumer->processBufferedItems()
+[2020-09-11T14:45:30.165Z]     Which is: 0
+[2020-09-11T14:45:30.165Z] [  FAILED  ] SingleThreadedEPBucketTest.MB18452_yield_dcp_processor (2 ms)
+SingleThreadedEPBucketTest.MB18452_yield_dcp_processor
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/5790/ )
+
+Failure of a CTest test [2020-09-11T14:45:30.165Z] 216/409 Test  #71: ep-engine_ep_unit_tests.SingleThreadedEPBucketTest .......................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/5790/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/13606/ : FAILURE
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/2978/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/4453/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/26252/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

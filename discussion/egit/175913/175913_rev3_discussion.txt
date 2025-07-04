@@ -1,0 +1,168 @@
+======================================================================================================================
+DESCRIPTION:
+
+Use an OSGi declarative service to manage some EGit components
+
+Add a StartEventListener OSGi declarative service to start things
+that require the workbench to have been created. If the workbench
+is already running when the service is activated, it initializes
+the EGit components right away. Otherwise, the handler is notified
+on the APP_STARTUP_COMPLETED event and initializes the EGit components
+then.
+
+This change uses this mechanism for the SelectionRepositoryStateCache
+only, but it might be used to manage other EGit internal components
+in the future.
+
+Maybe some parts of EGit might themselves become OSGi declarative
+services and deal with their own activation as they need. The single
+StartEventListener is a useful bridge facilitating the move to OSGi
+declarative services while minimizing code changes, though.
+
+Change-Id: Ic12507ef24dc940a25028ff2e1a1b77f64276078
+Signed-off-by: Thomas Wolf <thomas.wolf@paranor.ch>
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Thomas Wolf
+Date: 2021-02-06 13:28:02.000000000
+Message: 
+Uploaded patch set 3.
+----------------------------------------------------------------------------------------------------------------------
+Author: EGit Bot
+Date: 2021-02-06 13:28:12.000000000
+Message: 
+Patch Set 3:
+
+Build Started https://ci.eclipse.org/egit/job/egit.gerrit/1848/
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2021-02-06 13:44:12.000000000
+Message: 
+Patch Set 3:
+
+> I think we can investigate moving other componentns to this at a later stage; for example, the FocusListener ...
+
+Yes, I was also thinking about that FocusListener. Thanks for pointing out being careful about dependencies; Activator.start() runs before DS are activated, and they are deactivated before Activator.stop() runs.
+
+I was also thinking about making the DebugOptionsListener a separate DS, but that would require hard-coding the bundle id somewhere. Probably not worth the trouble. (But Activator.stop() should unregister that DebugOptionsListener? Or does that happen automatically for services registered via the BundleContext?)
+
+If we end up with multiple services having dependencies amongst each other, I presume injecting one service in another tells the framework in which order to activate/deactivate them?
+
+Is there a way to restrict the visibility of a service? Or can anyone get the service via the service registry?
+----------------------------------------------------------------------------------------------------------------------
+Author: EGit Bot
+Date: 2021-02-06 13:50:09.000000000
+Message: 
+Patch Set 3: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/egit/job/egit.gerrit/1848/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Alex Blewitt
+Date: 2021-02-06 16:04:49.000000000
+Message: 
+Patch Set 3:
+
+> Patch Set 3:
+> 
+> I was also thinking about making the DebugOptionsListener a separate DS, but that would require hard-coding the bundle id somewhere. Probably not worth the trouble. (But Activator.stop() should unregister that DebugOptionsListener? Or does that happen automatically for services registered via the BundleContext?)
+
+The purpose of the unregistration in the activator.stop is to prevent keeping a reference from the listener to the class after the bundle stops; however, when a bundle stops all of its DS components are stopped as well. So there's no need to do it twice; and with luck, we won't have the listener referenced anyway, so we can remove it from the Activator in its entirety.
+
+I had a go at moving some things to Jobs a while ago; I've marked a change as WIP because I think it might be better to use this approach, and merely move the startup into this one component instead of having multiple. But you can see how you could use this to have a service which depends on the resources rather than using static Platform methods:
+
+https://git.eclipse.org/r/c/egit/egit/+/175920
+ 
+> If we end up with multiple services having dependencies amongst each other, I presume injecting one 
+service in another tells the framework in which order to activate/deactivate them?
+
+If you have a service A which depends on another B (and it's marked as mandatory), then A won't start until B is present. (You could solve the 'is the workbench available' by depending on the org.eclipse.ui.IWorkbench service as well, but that might be ready before the E4 startup is, so your approach here is better.) If B goes away, then A will automatically shut down.
+ 
+> Is there a way to restrict the visibility of a service? Or can anyone get the service via the service registry?
+
+Anyone can get the service from the registry, but that's sort of the point. The publication of the DebugListener will allow any bundle to publish debug options to EGit -- but this will then allow (for example) a dynamic debug plugin to send in debug opts instead of using a command line interface. The thing is that the EGit just needs to know how to receive debug opts, rather than where they come from.
+
+By the way, if you want to find out the bundle name, you can use FrameworkUtil.getBundle(class) to get the Bundle object, and from there, the getSymbolicName() will give you the answer -- you don't need to hard-code it. See e.g.:
+
+https://github.com/eclipse/eclipse.platform.ui/blob/07db713f17dd4b233f734ef7b902c70908078c67/bundles/org.eclipse.e4.ui.workbench/src/org/eclipse/e4/ui/internal/workbench/DefaultLoggerProvider.java#L34
+----------------------------------------------------------------------------------------------------------------------
+Author: Alex Blewitt
+Date: 2021-02-06 16:23:25.000000000
+Message: 
+Patch Set 3:
+
+By the way, if you want to look at a DebugOptionsListener you might want to look at this change:
+
+https://github.com/eclipse/epp.mpc/commit/8ebbf4ec0de34b45187e634f136bbfd50818a410
+
+I moved the DebugOptions out from the activator into a (static) inner class so that when it's used for the first time it will assign the entries in there. There was some changes to move from `Activator.debug` to `DebugOptions.debug` but ultimately it allowed to get rid of the Activator (or in this case, PluginUI) in its entirety.
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2021-02-06 20:09:06.000000000
+Message: 
+Patch Set 3:
+
+Thanks for the info, Alex. That's helpful. About the bundle ID hard-coded: yes, I can get the bundle ID at run-time. What I had in mind was this: if I wanted to make the DebugOptionsListener a separate declarative service, I'd end up with something like
+
+  @Component(properties = DebugOptions.LISTENER_SYMBOLICNAME + '=' + "org.eclipse.egit.ui")
+
+and there (and in the XML) I think I would need to hard-code it. So I think leaving that debug registration in the Activator might actually be better.
+----------------------------------------------------------------------------------------------------------------------
+Author: Alex Blewitt
+Date: 2021-02-06 20:40:24.000000000
+Message: 
+Patch Set 3:
+
+> Patch Set 3:
+> 
+> Thanks for the info, Alex. That's helpful. About the bundle ID hard-coded: yes, I can get the bundle ID at run-time. What I had in mind was this: if I wanted to make the DebugOptionsListener a separate declarative service, I'd end up with something like
+> 
+>   @Component(properties = DebugOptions.LISTENER_SYMBOLICNAME + '=' + "org.eclipse.egit.ui")
+> 
+> and there (and in the XML) I think I would need to hard-code it. So I think leaving that debug registration in the Activator might actually be better.
+
+That's true, but then if you're doing a refactoring of the bundle name in future (highly unlikely!) then you'll do a refactor which includes hard-coded lines in this project anyway, which will pick it up in the component itself. So hard-coding it is actually the better way.
+
+https://github.com/eclipse/epp.mpc/blob/master/org.eclipse.epp.mpc.ui/OSGI-INF/services/org.eclipse.epp.mpc.ui.debug.options.xml#L3-L5
+
+The ultimate goal would be to try and get rid of the Activator completely :)
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2021-02-07 19:30:33.000000000
+Message: 
+Patch Set 3: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2021-02-07 19:30:42.000000000
+Message: 
+Change has been successfully merged by Thomas Wolf
+----------------------------------------------------------------------------------------------------------------------
+Author: EGit Bot
+Date: 2021-02-07 19:55:56.000000000
+Message: 
+Patch Set 3:
+
+Build Successful 
+
+https://ci.eclipse.org/egit/job/egit/546/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Lars Vogel
+Date: 2021-02-08 08:48:19.000000000
+Message: 
+Patch Set 3:
+
+Thanks for this work, Thomas. In case you move the Debug registration please cc me in the Gerrit, we have multiple activators in platform which could be removed / simplified with the use of a OSGI debug service, and I could copy your work.
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2021-02-08 09:17:01.000000000
+Message: 
+Patch Set 3:
+
+> In case you move the Debug registration...
+
+The DebugOptionsListener is moved in https://git.eclipse.org/r/c/egit/egit/+/175941 for EGit UI and in https://git.eclipse.org/r/c/egit/egit/+/175942 for EGit core. Note the comment in the commit message about using a static inner class; it seems that this should work at least on newer Eclipses, but since EGit also needs to work on Neon.3, we can't use the approach from MPC: [1]. Or maybe it didn't work for me because the outer class in EGit was an enum...
+
+[1] https://github.com/eclipse/epp.mpc/commit/f99217c40d0d662d9074619719d4127c7de09e09#diff-93829b4296bd3d00334a260756eec2a9c4348c726028717b4834c265223f5cbaR126
+----------------------------------------------------------------------------------------------------------------------

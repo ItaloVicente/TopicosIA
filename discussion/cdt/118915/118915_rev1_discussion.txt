@@ -1,0 +1,114 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 525250: "Create local variable" offered outside of local scopes
+
+The original implementation of 'isApplicable' always returned 'true'
+since 'isCodanProblem' will always be false during execution of
+'isApplicable'. The new implementation checks to see if we are being
+called from a local context, and prevents the QuickFix from being
+suggested otherwise.
+
+Change-Id: I7c53fd26afefa37ff086559acea75a7a33ecd5d7
+Signed-off-by: Felix Morgner <fmorgner@hsr.ch>
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Felix Morgner
+Date: 2018-03-07 16:51:19.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-03-07 16:51:27.000000000
+Message: 
+Patch Set 1:
+
+Build Started https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-other/1043/ (1/3)
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-03-07 16:51:27.000000000
+Message: 
+Patch Set 1:
+
+Build Started https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-ui-only/1030/ (2/3)
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-03-07 16:51:27.000000000
+Message: 
+Patch Set 1:
+
+Build Started https://ci.eclipse.org/cdt/job/cdt-verify-test-dsf-gdb-only/1038/ (3/3)
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-03-07 17:16:51.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-other/1043/ : SUCCESS
+
+https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-ui-only/1030/ : SUCCESS
+
+https://ci.eclipse.org/cdt/job/cdt-verify-test-dsf-gdb-only/1038/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Nathan Ridge
+Date: 2018-03-09 02:40:25.000000000
+Message: 
+Patch Set 1: Code-Review-1
+
+Thank you for looking at this, Felix!
+
+However, this is not the right fix. To explain why, I'll start with some background information on what isCodanProblem() is for.
+
+We support quick fixes for two different kinds of markers: (1) markers created by codan checkers, and (2) markers created for compiler errors by parsing the compiler's output. Sometimes, the same quick fix is applicable to both kinds of markers, and this is the case for the "Create local variable" quick fix.
+
+isCodanProblem() is intended to distinguish between these two kinds of markers: it's supposed to return true for type (1), and false for type (2).
+
+The problem of checking whether a variable resolution error detected by codan is in a local context, is already solved: it's done by ProblemBindingChecker annotating the marker with the argument ":func", and isApplicable() checking for that argument.
+
+So the real bug is that isCodanProblem() is returning false when it should be returning true. The reason for this is that isCodanProblem() is returning a value which is only initialized in AbtractCodanCMarkerResolution.run(). That's fine when isCodanProblem() is called from apply() / modifyAst(), but it's a problem when it's called from isApplicable(), because run() hasn't been called by then.
+
+A simple solution to this problem would be to have isCodanProblem() take the IMarker as an argument, and compute the answer (which is just "getProblemId(marker) != null") each time it's called, instead of looking up a cached value. This computation is not expensive, so I don't expect any performance impact.
+
+We should also add a test case to CreateLocalVariableQuickFixTest for this. I note that the test harness for quick fixes (QuickFixTestCase base class) does not currently call isApplicable() at all, it just invokes the quick fix unconditionally. We should probably modify it to call isApplicable(), and to record its result, so we can make assertions about it.
+
+(Finally, it's worth noting that this bug also exists, independently, for markers of type (2), for which isApplicable() always returns true. That can be solved using an approach similar to your current patch, possibly with some modifications (for example, I'm not sure whether getASTNameFromMarker() works for compiler error markers). I would suggest dealing with that in a separate bug, though.)
+----------------------------------------------------------------------------------------------------------------------
+Author: Felix Morgner
+Date: 2018-03-09 08:57:36.000000000
+Message: 
+Patch Set 1:
+
+Thanks for the feedback!
+
+With the background information you supplied, I can see how my fix is indeed not the right thing to do. I foolishly, without even checking further, assumed that, for some enigmatic reason, isCodanProblem() was not supposed to be called in isApplicable(IMarker) since its implementation did not fit in.
+
+I believe that adjusting the API of isCodanProblem() to accept an IMarker would be the right thing to do, however, I fear that we would break a number of Codan plugins, some of which are possibly not even maintained anymore. As far as I can tell, the adjustments that would be required by CDT's own QuickFixes are minimal. I will try to catch Thomas later today, to see what he thinks about the issue.
+
+With respect to the processing of IMarkers originating from compiler output, I will open an issue for that.
+
+Finally, regarding the test harness in general, would you prefer If I were to open a separate issue to adjust it to check for isApplicable(IMarker) before executing each test case, or should bundle that change in with this patch?
+----------------------------------------------------------------------------------------------------------------------
+Author: Nathan Ridge
+Date: 2018-03-10 05:26:18.000000000
+Message: 
+Patch Set 1:
+
+> I believe that adjusting the API of isCodanProblem() to accept an
+ > IMarker would be the right thing to do, however, I fear that we
+ > would break a number of Codan plugins, some of which are possibly
+ > not even maintained anymore. 
+
+Good point; I didn't realize AbstractCodanCMarkerResolution was public API.
+
+What we can do in this case is keep around the zero-argument isCodanProblem(), marked as deprecated (with the current implementation in place), but also add a one-argument overload isCodanProblem(IMarker), and switch our internal usages (including the one at issue here) to the new overload.
+
+ > Finally, regarding the test harness in general, would you prefer If
+ > I were to open a separate issue to adjust it to check for
+ > isApplicable(IMarker) before executing each test case, or should
+ > bundle that change in with this patch?
+
+We can do that in this patch.
+----------------------------------------------------------------------------------------------------------------------

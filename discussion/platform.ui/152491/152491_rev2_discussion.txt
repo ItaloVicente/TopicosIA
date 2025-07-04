@@ -1,0 +1,105 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 552952 - [Progress] KEEPONE_PROPERTY can keep more than one element
+
+When multiple (belonging) jobs with KEEPONE_PROPERTY finish at almost
+the same instant it could happen that more than one item was kept in
+progress view.
+Fix is to synchronize kept job updates with other normal job updates and
+to ensure kept job finished is notified before kept job removed for same
+element.
+
+Change-Id: I093c2fb2effc6285bb481d3845800b80b89ef243
+Signed-off-by: Paul Pazderski <paul-eclipse@ppazderski.de>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paul Pazderski
+Date: 2019-11-13 10:44:04.000000000
+Message: 
+Change has been successfully rebased and submitted as cdfc431b54fa87a152b73bcd5625a7815dd39868 by Paul Pazderski
+----------------------------------------------------------------------------------------------------------------------
+Author: Simeon Andreev
+Date: 2019-12-24 12:11:28.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:107, bundles/org.eclipse.ui.workbench/Eclipse UI/org/eclipse/ui/internal/progress/ProgressViewerContentProvider.java -> I'm not sure the new code is equivalent to the old code here Paul?
+
++	class FinishedJobsListener implements KeptJobsListener {
++		@Override
++		public void finished(JobTreeElement jte) {
++			currentInfo.keptFinished(jte);
++			throttledUpdate.throttledExec();
++		}
++
++		@Override
++		public void removed(JobTreeElement jte) {
++			if (jte == null) {
++				currentInfo.updateAll = true;
++			} else {
++				currentInfo.keptRemoved(jte);
++			}
++			throttledUpdate.throttledExec();
++		}
++	}
+
+Previously the code used to trigger a refresh, now it "only" does element based updates (or so I think).
+
+In particular please see this comment:
+
+https://bugs.eclipse.org/bugs/show_bug.cgi?id=553430#c5
+
+We see the auto-build job remain in the Progress view sporadically after its done.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Simeon Andreev
+Date: 2019-12-24 12:27:44.000000000
+Message: 
+Patch Set 2:
+
+> (1 comment)
+
+Any problem with restoring the old code in the listener? We see a "left-over" job in the Progress view only very rarely. I have no idea what race condition causes it (it should be some sort of a race condition), I think find out will take a while.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paul Pazderski
+Date: 2019-12-24 12:45:52.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+
+> > (1 comment)
+ > 
+ > Any problem with restoring the old code in the listener? We see a
+ > "left-over" job in the Progress view only very rarely. I have no
+ > idea what race condition causes it (it should be some sort of a
+ > race condition), I think find out will take a while.
+
+Reverting the listener is equivalent to reverting the whole change and will bring even more race conditions back.
+Line:107, bundles/org.eclipse.ui.workbench/Eclipse UI/org/eclipse/ui/internal/progress/ProgressViewerContentProvider.java -> I'm more sure it is equivalent and here is why:
+For finished, old code called refresh for the finished element. New code queues the finished element and a bit later calls refresh for this element. Should be the same.
+
+For removed, if element is not null old code called remove for this element and like finished new code does the same but a bit later. For the other case that element is null old code called refresh() while new code set updateAll which will later invoke the same refresh().
+
+If I missed something you must clarify the 'only does element based updates'.
+
+
+What has changed (intentionally to fix this bug) is the order between regular and 'kept' updates. Previously the synchronized and throttled(!) regular updates did a race against this scheduled 'kept' updates. So while the regular updates are executed in refresh, add, remove order. The order of kept finished and kept removed could vary and if regular or kept updates are run first could also vary.
+
+Those updates should all now be more synchronized in refresh, add, remove, kept-refresh, kept-removed order.
+
+
+I'm also not sure why it should happen with build jobs. I doubt they are configured to be kept and shouldn't even trigger this listener. (see also my comment in bug)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Simeon Andreev
+Date: 2019-12-24 13:59:12.000000000
+Message: 
+Patch Set 2:
+
+Ah sorry, I saw the refresh in the old code and thought its for all elelements (and not just the listener notification element). The build job is not meant to be kept, some bug prevents it from being refreshed/removed. I'll keep trying to reproduce in that case, hopefully I'll arive at something.
+----------------------------------------------------------------------------------------------------------------------

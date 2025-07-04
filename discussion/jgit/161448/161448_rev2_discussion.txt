@@ -1,0 +1,126 @@
+======================================================================================================================
+DESCRIPTION:
+
+Builder API to configure SshdSessionFactories
+
+A builder API provides a more convenient way to define a customized
+SshdSessionFactory by hiding the subclassing.
+
+Also provide a new interface SshConfigStore to abstract away the
+specifics of reading a ssh config file, and provide a way to customize
+the concrete ssh config implementation to be used. This facilitates
+using an alternate ssh config implementation that may or may not be
+based on files.
+
+Change-Id: Ib9038e8ff2a4eb3a9ce7b3554d1450befec8e1e1
+Signed-off-by: Thomas Wolf <thomas.wolf@paranor.ch>
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Thomas Wolf
+Date: 2020-04-25 11:24:37.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2020-04-25 11:24:45.000000000
+Message: 
+Patch Set 2:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/2970/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2020-04-25 11:44:50.000000000
+Message: 
+Patch Set 2: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/2970/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: David Ostrovsky
+Date: 2020-04-26 10:43:40.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+
+Thanks for doing that. I will try to use this change in my effort to switch to using MINA ssh client in Gerrit acceptance framework.
+Line:108, org.eclipse.jgit.ssh.apache.test/tst/org/eclipse/jgit/transport/sshd/NoFilesSshBuilderTest.java -> Where is this user key coming from?
+
+Am I understand correctly, it was created by JSch and then written to file, and then loaded?
+
+So the question is remaining how can keep the whole process from creating to using the keys as a pure memory operation?
+
+What Gerrit acceptance test framework is currently doing using JSch ssh client is generating key pair:
+
+  JSch jsch = new JSch();
+  com.jcraft.jsch.KeyPair keypair = KeyPair.genKeyPair(jsch, KeyPair.ECDSA, 256);
+
+and using it with:
+
+  JSch jsch = getJSch(hc, FS.DETECTED);
+  jsch.addIdentity(
+      "KeyPair", TestSshKeys.privateKey(keyPair), keyPair.getPublicKeyBlob(), null);
+
+All this is pure memory operation. I think part of that problem is missing tool chain in MINA SSHD to generate public/key pair and also conversion from com.jcraft.jsch.KeyPair to java.security.KeyPair.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2020-04-26 13:06:05.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:108, org.eclipse.jgit.ssh.apache.test/tst/org/eclipse/jgit/transport/sshd/NoFilesSshBuilderTest.java -> Exactly. When I originally wrote the ssh test harness I didn't find anything in sshd to create a key, so I decided to use jsch for creating test keys and just load the key.
+
+Maybe we should look again; perhaps something got added in sshd since sshd 2.0.0. If we have a way to generate a KeyPair in memory with sshd, we could ge rid of jsch in the test harness and wouldn't need a conversion either.
+
+Also, I didn't look too hard. Perhaps it's doable with some effort without jsch using lower-level sshd classes. My focus at the time was not on this but on getting a test server up and running, and testing both ssh implementations. We had no tests at all in this area before I started implementing the MINA sshd client. And we didn't have bouncy castle either (and that is about to go away as a hard dependency again). But for tests it might perhaps be possible to use BC to generate keys in memory.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2020-04-26 13:44:48.000000000
+Message: 
+Patch Set 2:
+
+Creating a key is as easy as
+
+  KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
+  generator.initialize(2048);
+  KeyPair key = keyGen.generateKeyPair();
+
+But the test server currently needs the public key in a file, and some tests also need it in a file in ~/.ssh. So the real problem for these tests was not generating the key but how to write it in a file.
+----------------------------------------------------------------------------------------------------------------------
+Author: David Ostrovsky
+Date: 2020-04-26 13:50:25.000000000
+Message: 
+Patch Set 2:
+
+> Creating a key is as easy as
+ > 
+ > KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
+ > generator.initialize(2048);
+ > KeyPair key = keyGen.generateKeyPair();
+ > 
+ > But the test server currently needs the public key in a file, and
+ > some tests also need it in a file in ~/.ssh. So the real problem
+ > for these tests was not generating the key but how to write it in a
+ > file.
+
+Should we open issue to MINA SSHD project to ask them to provide some means to persist generated keys to files?
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2020-04-26 14:29:38.000000000
+Message: 
+Patch Set 2:
+
+> Should we open issue to MINA SSHD project to ask them to provide
+ > some means to persist generated keys to files?
+
+We could. Don't know how much time Lyor has... It would certainly help Eclipse if Eclipse ever gets around to removing JSch (bug 540727), since the Eclipse UI has functionality to create private key files. For the JGit tests it may be interesting if we really want to drop JSch completely, but we could also live with a dependency on JSch just in tests. For Gerrit I don't know if it's important. How does Gerrit write its host keys? Last time I looked they were just byte arrays dumped to files; not any of the standard formats.
+
+Sshd does have an implementation of the OpenBSD bcrypt algorithm used by modern OpenSSH to encrypt private keys, but there is so far no implementation for actually encrypting a key. I only did the decryption part in https://github.com/tomaswolf/mina-sshd/commit/1c4624825 (which Lyor then took over and merged after some refactoring; the central code eneded up in class BCryptKdfOptions).
+
+Or is there some other library that would already support writing KeyPairs or PublicKeys in standard formats; including the OpenSSH format?
+----------------------------------------------------------------------------------------------------------------------

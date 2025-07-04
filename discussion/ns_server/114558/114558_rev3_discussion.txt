@@ -1,0 +1,104 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-35560 do not count buckets that were never warmed up on the node
+
+...when deciding to trigger autofailover
+
+This is needed because rebalance first sets 'server' property of the
+bucket and only later marks bucket as warmed up and estabishes
+replications. So if the time between these 2 events is more than
+5 sec, it can cause autofailover of the node and therefore rebalance
+failure.
+
+The remedy is to introduce new property of the bucket configuration:
+'once_warmed_servers' which contains the list of servers on which
+bucket was marked as warmed up at list once. Autofailover will use
+this property to figure out which buckets health should be checked
+on the local node.
+
+So when the 'servers' are set in the beginning of the rebalance,
+the node will not be included into 'once_warmed_servers' and therefore
+not eligible for autofailover until pre rebalance janitor run will
+mark the bucket as warmed on this node and include the node into
+'once_warmed_servers'
+
+Care is also taken of cleaning up 'once_warmed_servers' when the
+node is excluded from 'servers'
+
+Change-Id: Icd586749d8a8f6490bea393396f4fb9c5f44a0c6
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Artem Stemkovski
+Date: 2019-09-18 21:32:33.000000000
+Message: 
+Uploaded patch set 3: Patch Set 2 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-09-18 21:32:42.000000000
+Message: 
+Patch Set 3: -Well-Formed
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-test/14734/
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2019-09-18 21:33:51.000000000
+Message: 
+Patch Set 3: Verified+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-09-18 21:42:11.000000000
+Message: 
+Patch Set 3: Well-Formed+1
+
+Permission granted to commit to restricted branch
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Artamonau
+Date: 2019-09-20 19:42:45.000000000
+Message: 
+Patch Set 3:
+
+(3 comments)
+
+I still can't quite make up my mind about these changes. My gut tells me that its the nodes themselves that need to track this information. And more generally, it's the nodes themselves that need to track which buckets have to be active on them. And then auto-failover logic should only consider the node down with respect to some bucket if that node itself knows that the bucket must be up. As opposed to the master node using its own idea of which buckets should exist on each node. This is due to fundamental asynchrony in how metadata propagates through a cluster. Essentially, I think slow metadata propagation should not lead to auto-failover: after all, this particular aspect of auto-failover was meant as a proxy for "a subset of user's data is unavailable".
+
+But meanwhile I have some comments on the patch itself.
+
+1. I would like us not to update any metadata before the cluster is fully mad-hatter. Otherwise, in situations where a madhatter is added to an old cluster and then removed for whatever reason, the metadata the madhatter node would have added will go inconsistent, since old nodes don't know anything about it. This might be ok, but I don't want to think about it trying to convince myself that it'll always be ok.
+
+2. See some comments inline.
+Line:261, src/kv_monitor.erl -> Probably better to report all buckets here. To hide the latency in propagation of once_warmed_servers, at least in some of the cases.
+
+Line:652, src/ns_bucket.erl -> You can use misc:update_proplist here. It will probably be a bit more readable.
+
+Line:282, src/ns_janitor.erl -> This function can be called with Servers that are a subset of the bucket nodes where. See ns_rebalancer:apply_delta_recovery_buckets(). That's a recent change, and we might be able to find an alternative that doesn't do this.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2019-09-23 21:30:36.000000000
+Message: 
+Patch Set 3:
+
+I do not quite see how with this patch slow metadata propagation can result in autofailover. Slow metadata propagation can just cause the following: at the very first warmup the traffic might be already enabled on the bucket, but node still doesn't know that the bucket was once warmed up. So the kv_monitor will ignore this bucket for a while, which can result in autofailover not happening if the bucket becomes unhealthy during the period of time before the config gets propagated.
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Artamonau
+Date: 2019-09-23 22:06:33.000000000
+Message: 
+Patch Set 3:
+
+get_not_ready_buckets() considers a bucket unhealthy if the master node knows about it, but it's missing from the node status(es). Am I missing something?
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2019-09-23 22:21:31.000000000
+Message: 
+Patch Set 3:
+
+yes, I see now
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2019-09-25 17:14:47.000000000
+Message: 
+Abandoned
+----------------------------------------------------------------------------------------------------------------------

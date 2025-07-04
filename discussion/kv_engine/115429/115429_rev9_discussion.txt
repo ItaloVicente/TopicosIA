@@ -1,0 +1,123 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-36146 Fix a race condition in CheckpointManager
+
+Fix a race condition in the CheckpointManager when the following
+sequence of events occur:
+
+T1-1. An active stream needs to be moved to the dead state so we can
+call the destructor ActiveStream::~ActiveStream()
+
+T1-2. This then in turn calls ActiveStream::removeCheckpointCursor()
+which gets a shared pointer to the checkpoint cursor
+
+T1-3. The removeCheckpointCursor() method then gets a lock on the
+queueLock
+
+    T2-a. ActiveStream::getItemsRemaining() is called and gets hold of
+    a shared pointer to the same cursor as removeCheckpointCursor()
+    has
+
+    T2-b. CheckpointManager::getNumItemsForCursor() is then called
+    with the raw pointer to the cursor but has to wait till
+    removeCheckpointCursor() has finished executing as queueLock is
+    locked
+
+T1-4. removeCursor_UNLOCKED() is called by removeCheckpointCursor()
+which decrements the number of cursors on checkpoint
+
+        T3-I. The checkpoint remover task then runs removing the
+        checkpoint that the cursor points to as its cursor count is
+        now 0 and its closed.
+
+T1-5. removeCheckpointCursor() then frees the queueLock so
+getNumItemsForCursor() can call getNumItemsForCursor_UNLOCKED()
+
+    T2-c. getNumItemsForCursor_UNLOCKED() then tries to access the
+    member CheckpointList::iterator currentCheckpoint which points
+    to the freed Checkpoint and then when trying to access it we crash.
+
+The fix for this is to set CheckpointCursor::currentCheckpoint to the
+checkpointList.end() when we are deleting the current courser. Then
+check before we dereference a given currentCheckpoint that we make sure
+its not null and is not equal to checkpointList.end().
+
+Change-Id: I4e9ed18188fe4b182e87d1a8d5320a094df64e8d
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Richard de Mellow
+Date: 2019-10-03 11:08:20.000000000
+Message: 
+Uploaded patch set 9.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-10-03 12:56:56.000000000
+Message: 
+Patch Set 9: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/23795/ : FAILURE
+
+CMake error: magma/CMakeLists.txt:214 (INSTALL) ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/23795/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/14762/ : FAILURE
+
+Failure of a CTest test  54/192 Test  #48: ep_testsuite_dcp.full_eviction.magma .........................................Child aborted ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/14762/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/22788/ : FAILURE
+
+One of more core files found at the end of the build. Data for post-mortem saved to archived_core_dumps.tar.bz2 under "Build Artifacts". ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/22788/ )
+
+Failure of a GoogleTest test:
+
+TransportProtocols/DurabilityTest.SetMaybeSupported/Mcbp, where GetParam() = Mcbp (30 ms) ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/22788/ )
+
+Failure of a CTest test 173/213 Test #175: memcached_testapp.ep.TransportProtocols/DurabilityTest .......................Child aborted ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/22788/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/20321/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/21405/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/13590/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/4463/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/7429/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-10-03 15:49:42.000000000
+Message: 
+Patch Set 9:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/23804/ : FAILURE
+
+Failure of a CTest test  41/197 Test  #41: ep_testsuite_dcp.value_eviction.comp_passive ................................. ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/23804/ )
+
+Timeout of a CTest test 102/197 Test  #63: ep_testsuite_xdcr.value_eviction.magma .......................................} ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/23804/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/14772/ : FAILURE
+
+Failure of a CTest test  65/192 Test  #65: ep_testsuite_xdcr.value_eviction.magma ....................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/14772/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/22795/ : FAILURE
+
+One of more core files found at the end of the build. Data for post-mortem saved to archived_core_dumps.tar.bz2 under "Build Artifacts". ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/22795/ )
+
+Failure of a CTest test  49/213 Test  #45: ep_testsuite_basic.full_eviction.rocksdb .....................................Child aborted ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/22795/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/20321/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/21405/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/13590/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/4463/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/7429/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

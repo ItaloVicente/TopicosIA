@@ -1,0 +1,114 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-53513 cb_dist tls key logging
+
+Enabled alongside dcp_proxy key logging with the following command:
+curl -v -s -X POST -u Administrator:asdasd localhost:9000/diag/eval
+-d 'ns_cluster:set_tls_key_log(true).'
+
+Change-Id: Ife1d4460ae54aa58a59950fbf97c54a48968816d
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Peter Searby
+Date: 2022-10-28 16:51:33.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-10-28 16:51:47.000000000
+Message: 
+Patch Set 1:
+
+Build Started https://cv.jenkins.couchbase.com/job/ns-server-test/32127/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-10-28 16:58:22.000000000
+Message: 
+Patch Set 1: Well-Formed-1
+
+Build Failed 
+
+https://cv.jenkins.couchbase.com/job/ns-server-test/32127/ : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2022-10-28 19:00:17.000000000
+Message: 
+Patch Set 1:
+
+(2 comments)
+Line:74, src/cb_dist.erl -> If I remember correctly we need client_passphrase_updated only to make sure that we don't call external script that extracts the pkey password on every connection attempt.
+For keep_secret there is nothing to call and we can set it in ets on every connection attempt and on every acceptor start because it's almost free operation (see how we set verify peer option: maybe_update_client_cert_verification).
+
+What I am trying to say is that we probably don't need server_keep_secrets_updated. You can just set it every time the connection is made. It will make it simpler.
+
+Line:147, src/cb_dist.erl -> if this function uses logger (and I think it will eventually), it may crash because logger might not be yet started hypothetically by this moment (cb_dist can start before any ns_server code is started if node is started with -node option).
+
+Not sure what we can do about it but at least we need to make sure cb_dist is not crashing here (the simplest solution would be to wrap this call in "catch ...")
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Peter Searby
+Date: 2022-10-31 17:07:26.000000000
+Message: 
+Patch Set 1:
+
+(2 comments)
+Line:74, src/cb_dist.erl -> I think my reason for adding it was some kind of error I was getting when it would try to update it before it was able to. I'll move the update to the connection attempt instead since that looks simpler.
+
+What is the difference between connection attempt and acceptor start? As far as I can tell, adding the logging to cb_dist:accept_connection is sufficient, is there a situation where a connection may be made without going through accept_connection?
+
+Line:147, src/cb_dist.erl -> Not to imply that it can't cause a crash, but so far in my testing I'm not seeing any crashes from the logger not being started yet, even when I added a delay in ns_server:init_logging. I guess this might mean I'm somehow missing connections that are made at the start perhaps.
+
+For now I've wrapped the call in a catch
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Peter Searby
+Date: 2022-11-01 15:47:20.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:74, src/cb_dist.erl -> I think I understand why I need it on acceptor start. I noticed that the first connection was being missed, as it would update the ssl_dist_opts with keep_secrets too late for it to actually be used. This means that updating keep_secrets in accept connection seems pointless.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2022-11-01 20:50:32.000000000
+MISMATCHED INLINE COMMENT
+Line:74, src/cb_dist.erl -> cb_dist can accept dist connections as a "server" and it can create connections to other nodes as a "client".
+
+> What is the difference between connection attempt and acceptor start?
+
+by "connection attempt" I meant the scenario when cb_dist initiates a connection to another node (when we create a "client" connection).
+While acceptor is started to accept connections from other cb_dists (from other nodes). We are accepting connections as a "server" in this case.
+
+I think we need to write key log for both types of connections (client and server connections). Reason is simple: we don't really know what kind of connection will be established between any two nodes (A->B or A<-B) because this is concurrent process. So if we want to enable key log on say node A we would need to enable it for both types of connections.
+
+Please let me know if you think it doesn't make sense.
+----------------------------------------------------------------------------------------------------------------------
+Author: Peter Searby
+Date: 2022-11-17 17:38:51.000000000
+MISMATCHED INLINE COMMENT
+Line:74, src/cb_dist.erl -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Peter Searby
+Date: 2022-11-02 16:08:27.000000000
+MISMATCHED INLINE COMMENT
+Line:74, src/cb_dist.erl -> That makes sense, thanks. I had left out the initiating connections as they would end up in the key log for the other node, but it definitely makes more sense to log both connection attempts and accepts.
+Looking into connection attempts, it doesn't seem that there is any way for us to get the SSLSocket (which we need for the keylog) from the server side.
+For the accept_connection, I was able to use tls_sender:dist_tls_socket, but this is not possible in setup or anywhere else related to setting up connections, as far as I could tell.
+Any ideas?
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2022-11-01 20:50:32.000000000
+MISMATCHED INLINE COMMENT
+Line:147, src/cb_dist.erl -> Thanks, could you also mention it in a comment (that hypothetically cb_dist can be started before logger)?
+This threat is a bit hypothetical because tls dist connections can currently exist in ns_server only (babysitter and couchdb nodes never create tls connections - but they may start doing this in future), and ns_server always starts distribution "manually" (in dist_manager) when logger is already running.
+But technically cb_dist is something that can be started by erlang directly (when -name option is supplied), so we have to keep it in mind.
+----------------------------------------------------------------------------------------------------------------------
+Author: Peter Searby
+Date: 2022-11-02 16:08:27.000000000
+MISMATCHED INLINE COMMENT
+Line:147, src/cb_dist.erl -> Done
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,92 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-29675: Move ObjectRegistry stats to CoreLocalStats
+
+ObjectRegistry updates stats on the number and size of various object
+classes whenever those classes are constructed/destructed. Currently
+it updates a single set of stats per Bucket. However, these statistics
+are highly contended by all the frontend worker threads; as such the
+various functions to update the stats show high in profiling.
+
+For example during 20/80 R/W pillowfight run, a representative worker
+thread shows the following:
+
+    Samples: 205K of event 'cycles:ppp', Event count (approx.): 110332199760, Thread: mc:worker_16
+    Overhead  Command       Shared Object                 Symbol
+       1.52%  mc:worker_16  ep.so                         [.] ObjectRegistry::onCreateBlob
+       1.43%  mc:worker_16  ep.so                         [.] ObjectRegistry::onCreateItem
+       1.04%  mc:worker_16  ep.so                         [.] ObjectRegistry::onDeleteItem
+       0.59%  mc:worker_16  ep.so                         [.] ObjectRegistry::onDeleteBlob
+
+Approx ~4.5% of the thread's runtime is spent in stats
+updating. Examining the asm-level, a significant number of the cycles
+is spent on the atomic updates to those counters; which appears to be
+due to cacheline contention.
+
+Given these stats are frequerntly updated but rarely read, we can
+reduce this cost by moving these hotly-contended counters into the new
+CoreLocalStats class, so each core has it's own instance to write to.
+
+In microbenchmarks this reduces the cost to create/delete a
+StoredValue by ~20%:
+
+Before:
+
+    Run on (8 X 2300 MHz CPU s)
+    2018-05-29 17:00:45
+    ---------------------------------------------------------------------------------------
+    Benchmark                                                Time           CPU Iterations
+    ---------------------------------------------------------------------------------------
+    VBucketBench/CreateDeleteStoredValue/threads:16        229 ns       1954 ns     368128
+
+After:
+
+    Run on (8 X 2300 MHz CPU s)
+    2018-05-29 17:02:54
+    ---------------------------------------------------------------------------------------
+    Benchmark                                                Time           CPU Iterations
+    ---------------------------------------------------------------------------------------
+    VBucketBench/CreateDeleteStoredValue/threads:16        209 ns       1559 ns     461152
+
+Change-Id: I668b4fb54997e32e9cd9229fcfaf5d411b11305d
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2018-05-30 12:11:28.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-05-30 13:22:17.000000000
+Message: 
+Patch Set 2: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-vulcan/536/ : FAILURE
+
+Timeout of a CTest test 141/141 Test  #43: ep_perfsuite.ephemeral .......................................................} ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-vulcan/536/ )
+
+Failure of a CTest test  34/141 Test  #34: ep_testsuite_dcp.full_eviction ............................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-vulcan/536/ )
+
+ThreadSanitizer issue: data race (/usr/local/lib64/libtsan.so.0+0x6a7b4) in operator delete(void*)  ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-vulcan/536/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-vulcan/597/ : FAILURE
+
+Failure of a GoogleTest  ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-vulcan/597/ )
+
+Failure of a CTest test 143/145 Test #122: memcached_testapp.ep.TransportProtocols/GetSetTest ........................... ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-vulcan/597/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/8283/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-vulcan/479/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-vulcan/443/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-vulcan/430/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-undefinedsanitizer-vulcan/470/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

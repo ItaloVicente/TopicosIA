@@ -1,0 +1,174 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 578158 fix NPE in BundleLauncherHelper.addPlugin
+
+Change-Id: I7736554b74c7095e3b41eeb14b59cf5d72147e57
+Signed-off-by: Christoph Läubrich <laeubi@laeubi-soft.de>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Christoph Laeubrich
+Date: 2022-01-11 11:42:58.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: PDE Bot
+Date: 2022-01-11 11:43:10.000000000
+Message: 
+Patch Set 1:
+
+Build Started https://ci.eclipse.org/pde/job/eclipse.pde.ui-Gerrit/3991/
+----------------------------------------------------------------------------------------------------------------------
+Author: Platform Bot
+Date: 2022-01-11 11:43:16.000000000
+Message: 
+Patch Set 1:
+
+Build Started https://ci.eclipse.org/platform/job/Report-freeze-dates-to-Gerrit/7719/ 
+
+Checking whether Eclipse project is currently in stabilitzation/code-freeze period...
+----------------------------------------------------------------------------------------------------------------------
+Author: Platform Bot
+Date: 2022-01-11 11:43:17.000000000
+Message: 
+Patch Set 1:
+
+Build Successful 
+
+https://ci.eclipse.org/platform/job/Report-freeze-dates-to-Gerrit/7719/ : Eclipse project is currently not in a code-freeze period. You can merge today if the change meets all other merge criteria.
+----------------------------------------------------------------------------------------------------------------------
+Author: Christoph Laeubrich
+Date: 2022-01-11 11:44:13.000000000
+Message: 
+Patch Set 1:
+
+This currently prevents me from starting a Runtime Workspace from IDE to test SDK code ...
+----------------------------------------------------------------------------------------------------------------------
+Author: Christoph Laeubrich
+Date: 2022-01-11 11:45:50.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:391, ui/org.eclipse.pde.launching/src/org/eclipse/pde/internal/launching/launcher/BundleLauncherHelper.java -> I wonder why not use model.getPluginBase().getVersion() instead of the BundleDescription?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: PDE Bot
+Date: 2022-01-11 12:06:35.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/pde/job/eclipse.pde.ui-Gerrit/3991/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Hannes Wellmann
+Date: 2022-01-11 12:19:58.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:391, ui/org.eclipse.pde.launching/src/org/eclipse/pde/internal/launching/launcher/BundleLauncherHelper.java -> Because BundleDescription.getVersion() returns a Version object while model.getPluginBase().getVersion() returns a String that would have to be parsed every-time.
+
+Obviously I assumed that the BundleDescription is never null, what seems to be wrong.
+The called method addBundleToMap() considers that getBundleDescription() could return null.
+However at other places (like Comparator<IPluginModelBase> VERSION) the same assumption like above was done.
+
+So PluginModels with a null BundleDescription should be filtered earlier (in getSelectedModels() and getWorkspaceBundleMap() after PluginRegistry.getWorkspaceModels() is called) or the mentioned Comparator also would have to use model.getPluginBase().getVersion().
+
+If we could entirely ignore IPluginModelBase objects whose BundleDescription is null then the first would be the way to go, but a.t.m. I'm not 100% certain about the consequences.
+Does anybody know when a IPluginModelBase does not have a BundleDescription?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Christoph Laeubrich
+Date: 2022-01-11 12:34:30.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:391, ui/org.eclipse.pde.launching/src/org/eclipse/pde/internal/launching/launcher/BundleLauncherHelper.java -> The API states that getBundleDescription could return null, so I think it must be checked on each call-site.
+
+If its just the parsing of the version, why not let Pluginbase return a parsed version instead? Anyways I think think these are just some hint to maybe look at in the meanwhile the null check should suffice...
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Hannes Wellmann
+Date: 2022-01-11 23:36:00.000000000
+Message: 
+Patch Set 1:
+
+(4 comments)
+
+I think we have two options to solve this:
+Option 1: Filter out PluginModels whose BundleDescription is null and entirely ignore them for launches.
+Option 2: Parse the Version from the PluginModel's PluginBase and continue to include models with null-BundleDescription in launches.
+
+From looking at the code I actually would expect NPEs in subsequently called code, like P2Utils.createProfile() which is for example called by LaunchConfigurationHelper.createConfigIniFile()  from the EclipseApplicationLaunchConfiguration.
+But the History says that models with null-BundleDescription were included before I started my work in this area. So it's hard to say which is the right one.
+
+Therefore some reproducing steps would be great to have some context.
+Furthermore I wonder how the BundleDescription happened to be null? Was it an unresolved Bundle in the TP or one that was actually/intended for removal?
+Line:329, ui/org.eclipse.pde.launching/src/org/eclipse/pde/internal/launching/launcher/BundleLauncherHelper.java -> If Models whose BundleDescriptor is null are filtered out, it should be done here:
+if (model.getPluginBase().getId() != null && model.getBundleDescription() != null && ...
+
+Line:367, ui/org.eclipse.pde.launching/src/org/eclipse/pde/internal/launching/launcher/BundleLauncherHelper.java -> If Models whose BundleDescriptor is null are still considered, this Comparator should parse the Version from the model to guard against NPEs:
+VERSION = Comparator.comparing((IPluginModelBase m) -> Version.parseVersion(m.getPluginBase().getVersion()));
+
+Line:374, ui/org.eclipse.pde.launching/src/org/eclipse/pde/internal/launching/launcher/BundleLauncherHelper.java -> If Models whose BundleDescriptor is null are filtered out, it should be done here:
+Stream<IPluginModelBase> selectedModels = Arrays.stream(models) //
+	.filter(IPluginModelBase::isEnabled) // workspace models are always enabled, external might be disabled
+	.filter(m -> m.getBundleDescription() != null);
+
+Line:391, ui/org.eclipse.pde.launching/src/org/eclipse/pde/internal/launching/launcher/BundleLauncherHelper.java -> > The API states that getBundleDescription could return null, so I think it must be checked on each call-site.
+
+That's right. I either forgot it or assumed it would not be null in this case.
+
+> If its just the parsing of the version, why not let Pluginbase return a parsed version instead?
+That would be one solution to fix the problem 'locally' here, just like the null check.
+If models with null-bundleDescriptor are not filtered out before it should be better parsed from the model:
+Version version = Version.parseVersion(model.getPluginBase().getVersion());
+
+This proposed change excludes the given Plug-in model from the launch. I'm not yet sure if this is right or wrong. Nevertheless if plug-in models with null-bundleDescriptor are discarded, it should be done before at the places I have marked accordingly.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Christoph Laeubrich
+Date: 2022-01-12 04:57:49.000000000
+Message: 
+Patch Set 1: Code-Review+1
+
+The problem is that this actually does occur and I'm unable to develop any SDK code with the current Eclipse I-Builds anymore.
+
+So I think we should fix this ASAP and later on can decide how to do it better. A NPE is always a bad choice and you might consider to fallback to parsing the version from the Model for now if the description is null as an intermediate solution.
+----------------------------------------------------------------------------------------------------------------------
+Author: Hannes Wellmann
+Date: 2022-01-12 09:57:16.000000000
+Message: 
+Patch Set 1:
+
+(2 comments)
+
+> Patch Set 1: Code-Review+1
+> 
+> The problem is that this actually does occur and I'm unable to develop any SDK code with the current Eclipse I-Builds anymore.
+> 
+> So I think we should fix this ASAP and later on can decide how to do it better. A NPE is always a bad choice and you might consider to fallback to parsing the version from the Model for now if the description is null as an intermediate solution.
+
+I fully understand your need for a quick fix and yes of course, the NPE is not an option here.
+
+For now falling back to parsing the version from the model seems the right choice for a quick-fix. Especially because it does not alter the behavior compared to the previous state.
+Can you please apply the suggested changes for
+1. static final Comparator<IPluginModelBase> VERSION
+2. addPlugin()
+I have added another comment to those locations.
+
+I can then investigate later if models with null BundleDescriptors should be filtered instead and apply those changes in a subsequent change.
+
+Because my Committer Eclipse for PDE concluded just today, the Committer rights were not yet granted to me for PDE. Lars or Julian, could you please be so kind and review and (if you agree) submit this change after the suggested changes were applied, so Christoph is not further hold back.
+Line:367, ui/org.eclipse.pde.launching/src/org/eclipse/pde/internal/launching/launcher/BundleLauncherHelper.java -> For a quick fix please fall back to parsing the version and apply the change suggested above.
+
+Line:391, ui/org.eclipse.pde.launching/src/org/eclipse/pde/internal/launching/launcher/BundleLauncherHelper.java -> For a quick fix please fall back to parsing the version and change this to:
+
+Version version = Version.parseVersion(model.getPluginBase().getVersion());
+
+----------------------------------------------------------------------------------------------------------------------

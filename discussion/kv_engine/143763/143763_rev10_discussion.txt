@@ -1,0 +1,144 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-43550 Get specific stats in bulk from KVBucket, KVStore
+
+Currently we gather kvstore stats for engine stats reporting by calling
+KVStore individually for each stat. This is inefficient for MagmaKVStore
+since for every such call, it fetches all its stats and only returns the
+one asked for. It has to do this because Magma only supports getting all
+stats at once and has no provision to get individual stats.
+
+To help with such cases, this change adds a method to KVBucket and
+KVStore to get specific stats in bulk.
+
+Change-Id: I1c17f672bbf1ac45959354cb1e970cce65953f61
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Rohan Suri
+Date: 2021-01-26 20:21:13.000000000
+Message: 
+Uploaded patch set 10.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-01-26 21:08:01.000000000
+Message: 
+Patch Set 10: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/33161/ : FAILURE
+
+Failure of GoogleTest "PersistentAndEphemeral/DcpStreamSyncReplTest.BackfillMajorityPrepareWriteCommit/persistentMagma":
+
+<pre>
+[ RUN      ] PersistentAndEphemeral/DcpStreamSyncReplTest.BackfillMajorityPrepareWriteCommit/persistentMagma
+unknown file: error: C++ exception with description "MagmaKVStore Magma open failed. Status:IOError: Unable to open file :ep_engine_ep_unit_tests.db/test.183901/magma.0/config.json.tmp" thrown in SetUp().
+unknown file: error: C++ exception with description "cb::io::rmrf: stat of ep_engine_ep_unit_tests.db/test.183901 failed: The system cannot find the file specified." thrown in TearDown().
+[  FAILED  ] PersistentAndEphemeral/DcpStreamSyncReplTest.BackfillMajorityPrepareWriteCommit/persistentMagma, where GetParam() = "persistentMagma" (66 ms)
+PersistentAndEphemeral/DcpStreamSyncReplTest.BackfillMajorityPrepareWriteCommit/persistentMagma
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/33161/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/8401/ : FAILURE
+
+Compile error at [2021-01-26T20:23:06.589Z] ../kv_engine/engines/ep/src/ep_engine.cc:2903:53:
+error: missing braces around initializer for ?std::__array_traits<const char*, 32>::_Type {aka const char* [32]}? [-Werror=missing-braces]
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/8401/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/8273/ : FAILURE
+
+Compile error at [2021-01-26T20:24:41.799Z] ../kv_engine/engines/ep/src/ep_engine.cc:2903:53:
+error: missing braces around initializer for ?std::__array_traits<const char*, 32>::_Type {aka const char* [32]}? [-Werror=missing-braces]
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/8273/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/5275/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/6739/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/28536/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/7359/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/8656/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/16204/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2021-01-26 21:51:16.000000000
+Message: 
+Patch Set 10: Code-Review-1
+
+(5 comments)
+Line:2872, engines/ep/src/ep_engine.cc -> Looking at the code from this end (i've reviewed inside out), could the API not just be simplified down to getKVStoreStats takes a const reference to the "list" of keys and returns a GetStatsMap with the keys and values it could get? That would avoid some of the map building and the need for the std::optional value.
+
+e.g.
+
+using GetStatsMap = std::unordered_map<std::string_view, size_t>;
+GetStatsMap getKVStoreStats(const std::array<std::string>& keys);
+
+In the depths of the code where you aggregate shards, use of code like the following will update the map and then aggregate without the need for std::optional in the value
+
+auto [emplaced, itr] map.try_emplace(key, value);
+if (!emplaced) {
+   itr->second += value;
+}
+
+The final part of this function becomes simpler, only keys in the map have a value. Rather than keys with an optional value.
+
+Line:2456, engines/ep/src/kv_bucket.cc -> Avoid default capture https://isocpp.github.io/CppCoreGuidelines/CppCoreGuidelines#f54-if-you-capture-this-capture-all-variables-explicitly-no-default-capture
+
+Line:2458, engines/ep/src/kv_bucket.cc -> could write as:
+
+for (const auto&[key, value] : stats) {
+   shardStats.emplace(key, {});
+}
+
+Line:2465, engines/ep/src/kv_bucket.cc -> Wondering if the function could be reduced abit, and lose the statsInitDone
+
+You could probably just have one loop and make use of value_or
+
+       for (auto& [name, valueOpt] : stats) {
+            auto stat = shardStats.at(name);
+            if (stat && valueOpt) {
+                valueOpt.value() = stat.value() + valueOpt.value_or(0);
+            }
+        }
+
+
+That should remove the statsInitDone logic and keep this lambda more compact
+
+Line:666, engines/ep/src/kvstore.h -> Looks like this should be const (I'm going to presume getStat has no reason not to be const too)
+
+May also be worth defining the function body in the .cc you may then be able to just forward declare GetStatsMap without the kvstore_fwd.h ?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Rohan Suri
+Date: 2021-01-27 13:06:07.000000000
+Message: 
+Patch Set 10:
+
+(5 comments)
+Line:2872, engines/ep/src/ep_engine.cc -> sure let me take a list and return a map.
+
+
+The try_emplace method looks neat. Just note that we'll be changing the semantic of the API. Currently getStat returns true for a stat only if it is supported across all shards. However, with the above snippet, we will return a value as long as the stat was supported by at least one shard. This new semantic seems fair since all shard implementations will be the same (either all Magma or all Couchstore) and hence a stat would be either supported by all or by none. Let me refactor.
+
+Line:2456, engines/ep/src/kv_bucket.cc -> good suggestion. But I think it is not needed here since we're not capturing "this" here?
+
+Line:2458, engines/ep/src/kv_bucket.cc -> emplacing done. Cannot use [key, value] form since GCC will complaint about unused variable "value". Unfortunately std::ignore doesn't work here.
+
+Line:2465, engines/ep/src/kv_bucket.cc -> Nice idea! Note again, this changes the semantic from "return a value only if supported by all shards" to "return a value as long as at least one shard supports it". But should be fine, will refactor.
+
+Line:666, engines/ep/src/kvstore.h -> Made getStats, getStat const. Also moved the body into kvstore.cc.
+
+I think kvstore_fwd.h will still be needed since we cannot forward declare type aliases.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Rohan Suri
+Date: 2021-01-27 16:13:19.000000000
+MISMATCHED INLINE COMMENT
+Line:2872, engines/ep/src/ep_engine.cc -> How about taking a std::vector<std::string> instead of std::array<std::string> ? The former is more flexible.
+----------------------------------------------------------------------------------------------------------------------

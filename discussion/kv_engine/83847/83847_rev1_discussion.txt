@@ -1,0 +1,125 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-25920: Implement pause-resume capability in ephemeral tombstone purger
+
+EphTombstoneStaleItemDeleter task can have very long runtimes at both
+on average and at tail end. The issue with that is not necessarily the
+duration of the task itself; but it will block the other tasks in the
+same class (NonIO) from running.
+
+The biggest chunk of work performed by the task is iterating through
+the entire sequence list and deleting stale items. This commit
+pauses the task if iterating through the list takes more than 5s,
+and next time the task runs it can be resumed from the paused point.
+
+And since purger tasks and snapshotted range read tasks are exclusive,
+the snapshotted range reads should not have a problem.
+
+Change-Id: I07e44b081348b568b2ec644f14966c3dc4bc095a
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Manu Dhundi
+Date: 2017-09-29 00:00:39.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Manu Dhundi
+Date: 2017-09-29 00:04:09.000000000
+Message: 
+Patch Set 1:
+
+(2 comments)
+Line:260, engines/ep/src/linked_list.h -> Do we keep this internal or make it configurable ?
+And is 5s default ok ?
+
+Line:274, engines/ep/src/linked_list.h -> As I understand iterators (including ::end()) do not get invalidated even with list writes, hence using iterators.
+(https://stackoverflow.com/questions/13080013/does-the-value-of-stdlisttend-change-after-modifying-list).
+DaveR can you please confirm if this is ok ?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2017-09-29 00:25:33.000000000
+Message: 
+Patch Set 1: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/2842/ : FAILURE
+
+Failure of a CTest test  26/109 Test  #25: ep_testsuite.full_eviction ....................... ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/2842/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master/2726/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/2563/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/1403/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/2838/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/2859/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2017-09-29 02:25:15.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master/2726/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/2563/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/1403/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/2838/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/2859/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/2850/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2017-09-29 11:16:05.000000000
+Message: 
+Patch Set 1: Code-Review-1
+
+(7 comments)
+
+Suggest you also add some benchmarks for the pause/resume mode (see similar ones for defragmenter (defragmenterd_bench.cc).
+Line:81, engines/ep/src/linked_list.cc -> This comment isn't totally clear to me - maybe expand - something like "... update the pausedPurgePoint to the element following the updated item." ?
+
+Line:86, engines/ep/src/linked_list.cc -> Style: Don't repeat the code here (`seqList.erase(it)`) - just do it once and conditionally assign the result to pausablePurgeCtx.
+
+Line:259, engines/ep/src/linked_list.h -> Nit: You don't really need `Itr` in the variable name; that's implied by the type.
+
+Line:260, engines/ep/src/linked_list.h -> Suggest you make it configurable - see for example how it's done for defragmenter.
+
+I think 5s is far too long - that means we can still block other tasks for up to 5s. When I selected the default for the defragmenter (20ms) I considered what was a typical timeslice from an OS thread - IIRC on Linux that is 25ms.
+
+I'd consider a similar value (20ms) here.
+
+Line:271, engines/ep/src/linked_list.h -> You might want to benchmark this - when I did the defragmenter I found that checking time on each iteration was expensive. 
+
+Take a look at ProgressTracker which can amortise the cost of reading time.
+
+Line:274, engines/ep/src/linked_list.h -> You should check the documentation for boost::intrusive_list as that will say if iterators are invalidated on list updates.
+
+However, I *think* that this isn't safe; as a boost::instrusive_list is essentially part of each object. As such, if you deleted (and removed from the list) an element which the iterator pointed to, you'd segfault if you later tried to read it. This is essentially why you need to hold the appropriate writer lock while a user has any iterators "open" on the list.
+
+Therefore I think it's necessary for this object to hold the list write lock (and hence you won't be able to remove anything from the still-active OrderedLL range) while this object exists.
+
+Line:278, engines/ep/src/linked_list.h -> Can be const. Probably also wants to be a finer resolution than seconds.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Manu Dhundi
+Date: 2017-09-30 00:22:47.000000000
+MISMATCHED INLINE COMMENT
+Line:259, engines/ep/src/linked_list.h -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Manu Dhundi
+Date: 2017-09-30 00:22:47.000000000
+MISMATCHED INLINE COMMENT
+Line:278, engines/ep/src/linked_list.h -> Want it non const for easy testing (want to set it to 0 while testing). WIll go to milliseconds resolution
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,45 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-27963: Interlock compaction and initScanContext
+
+Changes in MB-24292 made the file rev monotonic, it also removed some
+speculative recovery code which basically when open failed just tried
+to open any matching VBucket couch file.
+
+In the new MB a first problem occurs in that compactDB and initScan
+can race with each other, normally compactDB and say the flusher never
+run concurrently because a higher level lock (vb_mutex) ensures only
+compaction or flushing can run. However DCP backfill for example
+issues a scan without that lock, it can interleave with compaction
+allowing the scan code to read a file-rev from the dbFileRevMap then
+by the time it hits sys_open compaction has removed the file and
+changed the revision.
+
+A second problem occurs when initScanContext fails openDB in that it
+resets the dbFileRevMap entry to 1 (breaking the monoticity). This
+results in further scan failures because the code tries for x.couch.1
+rather than x.couch.20.
+
+Fixes:
+
+1. Make the dbFileRevMap an AtomicMonotonic so we can catch other
+issues violating our monotonic requirement.
+
+2. Interlock compaction and initScan using a read-write lock. The
+change actually interlocks all openDB calls ensuring that compaction
+cannot move the file in-between a read of the file-map and the call
+to sys_open. The read-write lock ensures that concurrent flushes to
+the shard are allowed, but compaction will block (the KVShard is
+blocked) just whilst the map is updated.
+
+Change-Id: Ib7d3107726f7fa5ecc16c6c125334adebad01650
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jim Walker
+Date: 2018-02-21 15:54:07.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------

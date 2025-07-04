@@ -1,0 +1,163 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-38339 Basic auth for prometheus
+
+When ns_server starts prometheus we generate a random password and then
+hash it using pbkdf2.  The resultant hash as well as the salt and
+number of iterations used to generate the hash are passed as arguments
+to prometheus.
+
+A user of a prometheus REST api must pass the random password that was
+used.  Prometheus authentication will see if that password along with
+the salt and number of iterations results in the expected hash.
+
+The corresponding changes to prometheus are being developed in
+
+https://github.com/stevewatanabe/prometheus/tree/basicAuth4
+
+Change-Id: Ia418be167a66e1d1f412e95fa9a7e171edc7edd3
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Steve Watanabe
+Date: 2020-06-15 18:24:50.000000000
+Message: 
+Uploaded patch set 6.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-06-15 18:24:58.000000000
+Message: 
+Patch Set 6:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-test/17560/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-06-15 18:35:33.000000000
+Message: 
+Patch Set 6: Well-Formed+1
+
+Permission granted to commit to restricted branch
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2020-06-15 18:41:19.000000000
+Message: 
+Patch Set 6:
+
+(2 comments)
+Line:116, src/prometheus_cfg.erl -> This function is called when config changes, and it doesn't necessary lead to prometheus start.
+
+Line:214, src/prometheus_cfg.erl -> Can you please check that the password is encrypted in this case when written to disk. See ns_config_default:encrypt/1
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2020-06-15 18:54:19.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+Line:131, src/prometheus_cfg.erl -> You leverage the particular order in the proplist. It's a bit error prone. Usually we assume that our code is agnostic to the order. If you wan't to do matches like that, you can use records or maps. If proplist is your choice, use proplist:get_value/2,3.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2020-06-15 19:03:11.000000000
+Message: 
+Patch Set 6:
+
+(2 comments)
+Line:116, src/prometheus_cfg.erl -> I meant to remove this....  Usually I preface with ">>>" as a reminder.
+
+Line:214, src/prometheus_cfg.erl -> Ok, will do so.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2020-06-15 19:03:47.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+Line:131, src/prometheus_cfg.erl -> Will do!
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2020-06-15 19:10:41.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+Line:131, src/prometheus_cfg.erl -> I would do it the following way:
+
+1) Save user and password as a separate key in the settings (btw you will no need to export anyfunctions in this case), like this:
+
+ {prometheus_creds, {pass, {Username, Password}}}
+
+(You need to wrap value in {pass, _} to make sure it's encrypted when written to disk)
+
+You can extract it easily in prometheus.cfg then:
+{pass, {Username, Password}} = proplists:get_value(prometheus_creds, Settings)
+
+2) Save salt in a separate key in Settings:
+
+{prometheus_hash_salt, Salt}
+
+Using salt you can calculate the hash anytime you need. Iterations can be a define.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2020-06-15 23:51:27.000000000
+MISMATCHED INLINE COMMENT
+Line:131, src/prometheus_cfg.erl -> 1) I don't believe settings are written to disk so wouldn't need "pass".  The info written to ns_config does have "password" so it gets encrypted.
+
+2) I saved salt separately as well as hash as they are calculated and won't change.
+   Iterations are provided by this code which conceivable could change value after prometheus is changed.
+
+iterations() ->
+    ns_config:read_key_fast(memcached_password_hash_iterations, 4000).
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2020-06-16 02:10:56.000000000
+MISMATCHED INLINE COMMENT
+Line:131, src/prometheus_cfg.erl -> Why do we need to save hash and iterations in ns_config? I don't see any need in it. It can be calculated in specs/1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2020-06-16 18:32:08.000000000
+MISMATCHED INLINE COMMENT
+Line:131, src/prometheus_cfg.erl -> if memcached_password_hash_iterations changes, specs function will be called where we can regenerate the hash and restart prometheus. It's not bad in this case as memcached_password_hash_iterations can be changed only manually.
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2020-06-16 15:22:29.000000000
+MISMATCHED INLINE COMMENT
+Line:131, src/prometheus_cfg.erl -> Iterations must be saved as hash_password/2 gets it from ns_config and if someone changes memcached_password_hash_iterations to something different then the hash would change.  Yes, the hash could be recomputed via scram_sha:pbkdf2/4 (would need to be exported).  By saving the hash it doesn't have to be recomputed every time build_settings is called.
+
+What is specs/1 ?
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2020-06-16 18:25:12.000000000
+MISMATCHED INLINE COMMENT
+Line:131, src/prometheus_cfg.erl -> specs/1 is a function in prometheus_cfg module
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2020-06-15 23:51:27.000000000
+MISMATCHED INLINE COMMENT
+Line:214, src/prometheus_cfg.erl -> I've confirmed this get encrypted
+
+(n_0@127.0.0.1)1> ns_config:search_node(ns_to_prometheus_auth_info).
+{value,[{password,"qfAGIS61ZKx8N#oX%lxLs2YBHdpsm^8R"},
+        {salt,"y2Ns2k0rTPNIplpRmUGQarpU7jXoddmHCxY5nEZSwKNt2RWueX8oDlV531EG86bEwHWmuHpWmxIboC6iDihPUA=="},
+and xxd output
+00000540: 5cd8 0e6a 6802 6400 0870 6173 7377 6f72  \..jh.d..passwor   <<<<<<<<<<<<<<<<<<
+00000550: 6468 0264 0009 656e 6372 7970 7465 646d  dh.d..encryptedm   <<<<<<<<<<<<<<<<<<
+00000560: 0000 0041 0026 c7f5 6395 467c e9f1 389d  ...A.&..c.F|..8.
+00000570: e82f 1352 560b bb78 e1f3 5d26 5753 7f41  ./.RV..x..]&WS.A
+00000580: ff90 a821 2129 093a 44f0 2491 f5b7 659f  ...!!).:D.$...e.
+00000590: d2a1 5f4a 7b2a 2e8b 7b5f 9365 cb95 9fd6  .._J{*..{_.e....
+000005a0: 3252 ac37 2268 0264 0004 7361 6c74 6b00  2R.7"h.d..saltk.   <<<<<<<<<
+000005b0: 5879 324e 7332 6b30 7254 504e 4970 6c70  Xy2Ns2k0rTPNIplp   <<<<<<<<<
+000005c0: 526d 5547 5161 7270 5537 6a58 6f64 646d  RmUGQarpU7jXoddm
+000005d0: 4843 7859 356e 455a 5377 4b4e 7432 5257  HCxY5nEZSwKNt2RW
+000005e0: 7565 5838 6f44 6c56 3533 3145 4738 3662  ueX8oDlV531EG86b
+000005f0: 4577 4857 6d75 4870 576d 7849 626f 4336  EwHWmuHpWmxIboC6
+00000600: 6944 6968 5055 413d 3d68 0264 0004 6861  iDihPUA==h.d..ha
+00000610: 7368 6b00 5856 7153 454a 4f6c 554b 7a6e  shk.XVqSEJOlUKzn
+----------------------------------------------------------------------------------------------------------------------

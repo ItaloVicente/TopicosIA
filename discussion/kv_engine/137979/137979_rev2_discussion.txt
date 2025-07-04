@@ -1,0 +1,49 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-41867: [BP] Fix infinite loop due to HdrHistogram being reset
+
+Backport of commits: b888807bb1747b82b2c434966c76fbfc01fbb18c,
+b70c7331a9e21e6e9e4a8219a98cfe3f8c24e6d8,
+8ee8c85e89592fcfd54d6ae4a1dad06910047c26 and
+fb7e114fddc3fa9a86a53f36770c991bd1b79c4b.
+
+Currently if a HdrHistogram has its reset() method called by one thread
+(T1) and is being read by another (T2) using an HdrHistoram::Iterator.
+There is the race that could cause the HdrHistoram::Iterator() to enter
+an infinite loop.
+
+This occurs as HdrHistogram's getNextValue() methods use HdrHistogam_c's
+hdr_iter_next() which intern uses the following function:
+static bool has_next(struct hdr_iter* iter)
+{
+        return iter->cumulative_count < iter->total_count;
+}
+Which logically checks that the total count the Iterator was
+initialize with is > than the sum of all the counts its read from the
+buckets in the histogram. The trouble is, that the reset() method
+changes the bucket counts back to 0. Thus, meaning the condition
+cumulative_count >= total_count may never be met.
+
+To fix this wrap the std::unique_ptr<struct hdr_histogram> with a
+folly::Synchronized<>. This allows us to take an exclusive lock on the
+pointer when performing a reset() of the histogram and allows us to
+ensure that no iterator is reading from the histogram, as the iterator
+takes a non exclusive read lock for the lifetime of the
+HdrHistogram::Iterator struct. This also ensures that
+HdrHistogram::resize() is thread safe as we now take a write lock.
+
+Change-Id: I088df37c02e35303c79c63b4da410fad0f455e9b
+Reviewed-on: http://review.couchbase.org/c/kv_engine/+/137979
+Well-Formed: Build Bot <build@couchbase.com>
+Tested-by: Build Bot <build@couchbase.com>
+Reviewed-by: Dave Rigby <daver@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Richard de Mellow
+Date: 2020-10-13 12:10:46.000000000
+Message: 
+Change has been successfully cherry-picked as d589f504e50122834887d60a89e102664a102b11 by Richard de Mellow
+----------------------------------------------------------------------------------------------------------------------

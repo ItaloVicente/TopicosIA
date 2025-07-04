@@ -1,0 +1,172 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-52311: [7/n] Pause / Resume Bucket: Add cancellation support
+
+If a Resume() request is made while a previous Pause() request is
+still executing, we don't want to have to wait until the Pause()
+completes before resuming. This is particulary important when
+considering failover - if ns_server decides it needs to failover a
+node it needs to being the Bucket back to the Ready state asap so it
+can examine and/or set vBucket state to perform the failover.
+
+As such, we want to be able to cancel a running Pause() operation if a
+Resume() request arrives.
+
+This patch adds cancellation support in the daemon-level handling of
+pause() - e.g. check for cancellation while waiting for clients to
+disconnect. A follow-up patch will expand checking for cancellation
+inside ep-engine (which also has some potentially slow-running tasks
+as part of pause).
+
+=== Implementation Details ===
+
+We do this using Cancellation Tokens - which Folly provides an
+implementation. Quoting from folly/CancellationToken.h:
+
+    A CancellationToken is an object that can be passed into an
+    function or operation that allows the caller to later request that
+    the operation be cancelled.
+
+    A CancellationToken object can be obtained by calling the
+    .getToken() method on a CancellationSource or by copying another
+    CancellationToken object. All CancellationToken objects obtained
+    from the same original CancellationSource object all reference the
+    same underlying cancellation state and will all be cancelled
+    together.
+
+    If your function needs to be cancellable but does not need to
+    request cancellation then you should take a CancellationToken as a
+    parameter.  If your function needs to be able to request
+    cancellation then you should instead take a CancellationSource as
+    a parameter.
+
+In terms of how this maps to kv_engine, we add a CancellationSource to
+each Bucket object, and whenever a Pause() operation occurs we create
+a CancellationToken from the Bucket's CancellationSource and pass the
+token into the BucketManager (and later further down into the
+engine). At suitable points in the pause process (typically before
+some long-lived / blocking operation) the CancellationToken can be
+checked to see if cancellation has been requested, if so then we
+cancel the pause, undoing any steps in the Pause process which have
+already been performed.
+
+Note that one can also register CancellationCallbacks with the
+CancellationToken (multiple callbacks can be registered). Each
+callback can perform whatever necessary "undo" logic to revert the
+back to the unpaused state.
+
+To trigger cancellation, the Resume() method checks to see if
+Cancellation is possible (i.e. a Pause request is in progress), and if
+so requests cancellation and returns early - the cancelled Pause()
+request is responsible for undoing any pause steps already executed.
+
+Change-Id: I1125b6d96d215989b975eda3a4fa81837cd9ea5f
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2022-11-07 14:21:44.000000000
+Message: 
+Uploaded patch set 15.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-11-07 14:37:17.000000000
+Message: 
+Patch Set 15: Verified-1 Code-Review-1
+
+Build Failed 
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/20987/ : FAILURE
+
+<p>clang-format suggested the following changes:
+
+<pre>
+cat <<"EOF" | patch -p1
+diff --git a/daemon/buckets_test.cc b/daemon/buckets_test.cc
+index cbe80c1bf..2b8ad5d00 100644
+--- a/daemon/buckets_test.cc
++++ b/daemon/buckets_test.cc
+@@ -494,7 +494,7 @@ void BucketManagerTest::testPauseBucketCancellable(
+             }};
+ 
+     bucketPausingListenerFunc =
+-            [&amp;testFixture = *this, threaded, expectedPhase, &amp;baton1, &amp;baton2](
++            [&amp; testFixture = *this, threaded, expectedPhase, &amp;baton1, &amp;baton2](
+                     std::string_view bucket, std::string_view phase) {
+                 // Ignore if not the expected phase.
+                 if (phase != expectedPhase) {
+
+EOF
+</pre> ( https://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/20987/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/21709/ : FAILURE
+
+clang-tidy found the following problems:
+
+<pre>
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy-master/kv_engine/daemon/buckets_test.cc:464:29: error: no member named "Stopping" in "Bucket::State" [clang-diagnostic-error]
+        case Bucket::State::Stopping:
+                            ^
+
+</pre> ( https://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/21709/ )
+
+Compile error at /home/couchbase/jenkins/workspace/kv_engine-clang_tidy-master/kv_engine/daemon/buckets_test.cc:464:29:
+error: no member named "Stopping" in "Bucket::State" [clang-diagnostic-error]
+ ( https://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/21709/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine-windows-master/50957/ : FAILURE
+
+Compile error at C:/Jenkins/workspace/kv_engine-windows-master/kv_engine/daemon/buckets_test.cc(464): error C2838: "Stopping": illegal qualified name in member declaration ( https://cv.jenkins.couchbase.com/job/kv_engine-windows-master/50957/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux-debug/job/master/456/ : FAILURE
+
+Compile error at [2022-11-07T14:24:54.565Z] /home/couchbase/jenkins/workspace/kv_engine.linux-debug_master/kv_engine/daemon/buckets_test.cc:464:29:
+error: ?Stopping? is not a member of ?Bucket::State?
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.linux-debug/job/master/456/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/11435/ : FAILURE
+
+Compile error at [2022-11-07T14:28:47.919Z] /home/couchbase/jenkins/workspace/kv_engine.libFuzzer_master/kv_engine/daemon/buckets_test.cc:464:29:
+error: no member named "Stopping" in "Bucket::State"
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/11435/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/11526/ : FAILURE
+
+Compile error at [2022-11-07T14:28:16.503Z] /home/couchbase/jenkins/workspace/kv_engine.aarch64-linux_master/kv_engine/daemon/buckets_test.cc:464:29:
+error: ?Stopping? is not a member of ?Bucket::State?
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/11526/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/24987/ : FAILURE
+
+Compile error at [2022-11-07T14:27:05.784Z] /home/couchbase/jenkins/workspace/kv_engine.threadsanitizer_master/kv_engine/daemon/buckets_test.cc:464:29:
+error: no member named "Stopping" in "Bucket::State"
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/24987/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/23751/ : FAILURE
+
+Compile error at [2022-11-07T14:26:21.102Z] /home/couchbase/jenkins/workspace/kv_engine.linux-CE_master/kv_engine/daemon/buckets_test.cc:464:29:
+error: ?Stopping? is not a member of ?Bucket::State?
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/23751/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/24160/ : FAILURE
+
+Compile error at [2022-11-07T14:25:53.261Z] ../kv_engine/daemon/buckets_test.cc:464:29:
+error: ?Stopping? is not a member of ?Bucket::State?
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/24160/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/32172/ : FAILURE
+
+Compile error at [2022-11-07T14:26:08.570Z] /home/couchbase/jenkins/workspace/kv_engine.ASan-UBSan_master/kv_engine/daemon/buckets_test.cc:464:29:
+error: no member named "Stopping" in "Bucket::State"
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/32172/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/23189/ : FAILURE
+
+Compile error at [2022-11-07T14:32:15.624Z] /Users/couchbase/workspace/workspace/kv_engine.macos_master/kv_engine/daemon/buckets_test.cc:464:29:
+error: no member named "Stopping" in "Bucket::State"
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/23189/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/42768/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

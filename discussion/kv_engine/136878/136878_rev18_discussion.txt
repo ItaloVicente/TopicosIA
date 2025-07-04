@@ -1,0 +1,92 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-41321: 1/4 Defer collection statistic updates until successful commit
+
+Collection statistics (items, disk size and persistent high-seqno) for
+persistent buckets are managed by the flusher thread.  This is done
+because we maintain statistic documents in KVStore (e.g. _local
+documents), and as the flusher writes documents to KVStore, we can count
+and update these statistic documents along with the documents. Warmup
+for example can open a KVStore and know the count and size of all
+collections just by reading the statistic documents.
+
+Prior to this change the visible collection statistics were updated by
+callbacks invoked by the KVStore before 'commit'. So cmd_stat etc... are
+reading counters that are written to from the flusher - if the KVStore
+update fails the flusher retries the batch of items, which means that
+the counters are  updated multiple times, giving the wrong counters or
+in-case of deletes underflow exceptions.
+
+As part of this fix it was also identified that the collections flusher
+code (collections/flush.cc) made decisions about documents in the
+flush batch and documents already stored on disk by querying the
+VB::Manifest object. This is a flawed approach because the VB::Manifest
+contains changes that are not yet 'durable', i.e. we may update the
+statistics on disk based on the VB::Manifest saying a collection was
+dropped, but that drop is somewhere in a yet-to-be persisted
+checkpoint - warm-up and that collection drop redacts but it's too late
+for the statistic updates, the values could now be wrong.
+
+This commit changes how collection statistics are updated to occur in
+multiple steps.
+
+1) As the items of the batch are processed, we now update a flusher
+owned map of collection-ID to collection statistics - this collects
+the 'deltas' of changes being made by the flusher batch.
+
+2) Before commit we read the current collection statistics and apply
+the collected changes to generate statistics for the '_local' updates.
+
+3) If the commit is successful, we update the current in-memory
+statistics.
+
+As part of these steps the changes to collection persisted statistics
+now don't use the VB::Manifest 'map' of what are current collections,
+except for the final 'make visible' write. The functions doing the
+updates now make decisions about dropped collections based on the
+current flush data, which knows if collections were dropped in the batch
+(and the sequence number of the drop), and secondly (for existing items
+in the document update case) what collections have already been dropped
+in the KVStore we are  updating.
+
+Finally to allow for the flusher to make changes to a collection's
+statistics and avoid a cycle of "read statistics, update, write
+statistics" the VB::Manifest is modified so that it doesn't immediately
+discard the count/size/seqno of dropped collections. This allows the
+flusher to just do 'update and write' (which is what it has always done
+for collections).
+
+Change-Id: Ib3065457057bbeca983849cef4c5e1cb2854343c
+Reviewed-on: http://review.couchbase.org/c/kv_engine/+/136878
+Tested-by: Build Bot <build@couchbase.com>
+Reviewed-by: Dave Rigby <daver@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jim Walker
+Date: 2020-10-12 14:14:26.000000000
+Message: 
+Change has been successfully cherry-picked as 5a707cd0102c259b4dcb454c18dd0f20c2e8531e by Jim Walker
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-10-12 14:14:38.000000000
+Message: 
+Patch Set 18:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/5231/ (1/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-10-12 15:28:19.000000000
+Message: 
+Patch Set 18:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv-engine-master-perf/3882/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv-engine-master-perf/3882/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/5231/ : SUCCESS'
+----------------------------------------------------------------------------------------------------------------------

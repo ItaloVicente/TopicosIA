@@ -1,0 +1,130 @@
+======================================================================================================================
+DESCRIPTION:
+
+PackObjectSizeIndex: interface and v1 impl for the object-size index
+
+Introduce an interface for the Object-size index. The interface doesn't
+promise precision on the size (the index could have only ranges of
+sizes), not that an object is there (only certain types and minimual
+sizes are indexed).
+
+Implement a V1 of this index. It indexes only blobs (no trees, nor
+commits) above certain size threshold (configurable). The index stores
+the exact size.
+
+What does optimize this index? We can read the size from memory instead
+than from the pack, saving IO.
+
+Why not index more objects? To limit the size of the index in memory
+(operators can adjust the size threshold to include more/less)
+
+Why the exact size? We foresee use cases for the specific size, e.g. to
+answer the object-size capability or for the offloading of big blobs.
+
+Change-Id: I9ed608ac240677e199b90ca40d420bcad9231489
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Ivan Frade
+Date: 2022-10-19 16:34:29.000000000
+Message: 
+Uploaded patch set 8: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2022-10-19 16:34:40.000000000
+Message: 
+Patch Set 8:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline.java11/1964/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2022-10-19 17:02:35.000000000
+Message: 
+Patch Set 8: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline.java11/1964/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonathan Tan
+Date: 2022-10-21 22:43:25.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> Taking a step back, we want to speed up partial clone by speeding up reading blob sizes. I think it is usually the case that a blob-size filter would allow most blobs through, so why can't we just optimistically read a block of the compressed object from disk (or network, if the packfile is on a network drive), check the size, and if the size is small enough, start the decompression from the block we read? The answer is that we want to do a pass through all the objects first for counting and size calculation for the purpose of progress reports, which is reasonable. We could just drop reporting progress altogether, but it's reassuring to the user, and this size index may later be useful for things like serving directory listings anyway.
+
+So we want some sort of blob size cache that is contiguous on disk, so it can be read efficiently. That makes sense.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonathan Tan
+Date: 2022-10-21 22:49:12.000000000
+Message: 
+Patch Set 8:
+
+(6 comments)
+Line:10, /COMMIT_MSG -> I think we should promise precision - if we want to also use this for directory listings, precision would be useful. (I know that directory listings on the web are sometimes rounded to the nearest .1KiB or .1MiB, but things like VFS also need directory listings sometimes, and those need accurate sizes.)
+
+Line:14, /COMMIT_MSG -> What do we foresee V2 containing? Might be best just to say that we have a version number for forwards compatibility.
+
+Line:15, /COMMIT_MSG -> Below? I think it makes more sense that the ones below a threshold (which is the majority) have size information, whereas for the ones above, you have to check the object itself.
+
+Line:18, /COMMIT_MSG -> All sizes are ultimately read from disk, so it's probably better to say that we can read all the sizes at once rather than having to seek in the packfile.
+
+Line:16, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/PackObjectSizeIndex.java -> Remember to update the javadoc depending on how the discussion over the commit message goes.
+
+Also, if we do support approximate sizes, the interface needs to be more flexible (e.g. having a "isNotLargerThan" which can return "yes", "no", or "unknown").
+
+Line:20, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/PackObjectSizeIndexV1.java -> How big do the offsets and sizes get? If the offsets can fit in 5 bytes and the sizes in 3 bytes, I think you can save a lot of space (and no need separate storage for 32-bit and 64-bit). Also, why are we storing offsets? Can we store the place in the .idx file instead?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ivan Frade
+Date: 2022-10-25 17:06:22.000000000
+MISMATCHED INLINE COMMENT
+Line:10, /COMMIT_MSG -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Ivan Frade
+Date: 2022-10-25 17:06:22.000000000
+MISMATCHED INLINE COMMENT
+Line:14, /COMMIT_MSG -> Done (removed mention to V1 or first implementation).
+----------------------------------------------------------------------------------------------------------------------
+Author: Ivan Frade
+Date: 2022-10-25 17:06:22.000000000
+MISMATCHED INLINE COMMENT
+Line:15, /COMMIT_MSG -> Most of the blobs are small and only a little % is "big".
+
+For the object-size use the more blobs in the index the better, regardless size.
+
+For the filter-by-size, having only the biggest ones is more memory efficient: we only store a small set and most of the objects pass the filter by simple NOT being in the index.
+
+All together, if we index above the threshold the knob is clear: Lower threshold means more memory/more objects/better performance for both cases.
+
+Indexing below threshold, we would improve the filter by size only when having almost all objects in the index.
+----------------------------------------------------------------------------------------------------------------------
+Author: Ivan Frade
+Date: 2022-10-25 17:06:22.000000000
+MISMATCHED INLINE COMMENT
+Line:18, /COMMIT_MSG -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Ivan Frade
+Date: 2022-10-25 17:06:22.000000000
+MISMATCHED INLINE COMMENT
+Line:16, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/PackObjectSizeIndex.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Ivan Frade
+Date: 2022-10-25 17:06:22.000000000
+MISMATCHED INLINE COMMENT
+Line:20, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/PackObjectSizeIndexV1.java -> Any idea on how to reduce the space of this is welcome!
+
+IIUC Sizes can go up to Long.MAX_VALUE.
+
+A position would be definitely a smaller number. So far the index doesn't expose the position, and the reverse index (which exposes it) is not persisted. I'll check these options.
+----------------------------------------------------------------------------------------------------------------------
+Author: Ivan Frade
+Date: 2023-02-14 20:00:32.000000000
+MISMATCHED INLINE COMMENT
+Line:20, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/PackObjectSizeIndexV1.java -> The parent change adds a #findPosition() to the primary index, and now the object-size index goes from idx-position->size.
+
+Most of packs have < 16 million objects, so 3 bytes per position saves some memory. We still support 4 bytes for the few packs bigger than that.
+----------------------------------------------------------------------------------------------------------------------

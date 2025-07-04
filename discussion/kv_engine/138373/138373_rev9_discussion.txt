@@ -1,0 +1,173 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-42029: FollyExecPool: Wait for tasks cancelled in unregisterTaskable
+
++Issue+
+
+When enabling FollyExecutorPool by default, TSan reports the following
+race when running ./ep-engine_ep_unit_tests
+"--gtest_filter=DurabilityRespondAmbiguousTest.*":
+
+AuxIO thread:
+    Previous atomic write of size 8 at 0x7b74000020a0 by thread T8:
+    #0 __tsan_atomic64_fetch_sub <null> (libtsan.so.0+0x000000060890)
+    ...
+    #4 ~HashTable kv_engine/engines/ep/src/hash_table.cc:161 (ep-engine_ep_unit_tests+0x00000122cae1)
+    #5 ~VBucket kv_engine/engines/ep/src/vbucket.cc:286 (ep-engine_ep_unit_tests+0x0000012b3af4)
+    #6 ~EPVBucket kv_engine/engines/ep/src/ep_vb.cc:101 (ep-engine_ep_unit_tests+0x0000011af5e1)
+    ...
+    #10 ~VBucketMemoryDeletionTask kv_engine/engines/ep/src/vbucketdeletiontask.cc:45 (ep-engine_ep_unit_tests+0x0000012e4530)
+    ...
+    #17 std::__shared_ptr<GlobalTask>::reset() /usr/local/include/c++/7.3.0/bits/shared_ptr_base.h:1235 (ep-engine_ep_unit_tests+0x000001221e75)
+    #18 FollyExecutorPool::TaskProxy::~TaskProxy()::{lambda()#1}::operator()() kv_engine/engines/ep/src/folly_executorpool.cc:80 (ep-engine_ep_unit_tests+0x000001221e75)
+
+Main thread:
+    Write of size 8 at 0x7b74000020a0 by main thread:
+    #0 free <null> (libtsan.so.0+0x000000027806)
+    ...
+    #6 CoreStore<...>::~CoreStore() platform/include/platform/corestore.h:50 (ep-engine_ep_unit_tests+0x0000012988b1)
+    #7 ~EPStats kv_engine/engines/ep/src/stats.cc:132 (ep-engine_ep_unit_tests+0x0000012988b1)
+    #8 ~EventuallyPersistentEngine kv_engine/engines/ep/src/ep_engine.cc:6593 (ep-engine_ep_unit_tests+0x0000011e3bb5)
+    ...
+    #12 DurabilityRespondAmbiguousTest_RespondAmbiguousNotificationDeadLock_Test::TestBody() kv_engine/engines/ep/tests/module_tests/evp_store_durability_test.cc:2350 (ep-engine_ep_unit_tests+0x000000bd3642)
+
+The crux of this issue seems to be that a background AuxIO task run
+via the FollyExecutorPool is deleting a VBucket object concurrently
+with the main thread deleting an EPStats object.
+
++Background+
+
+Details of how CB3ExecutorPool and FollyExecutorPool implement
+{{unregisterTaskable()}}, which I believe is what leads to this
+problem.
+
+CB3ExecutorPool:
+
+During CB3ExecutorPool::unregisterTaskable():
+
+1. CB3ExecutorPool::_stopTaskGroup() is called and will wait for
+   VBucketMemoryDeletionTask to run.
+
+2. When VBucketMemoryDeletionTask::run() is call it returns false.
+
+3. CB3ExecutorThread will then synchronously call
+   CB3ExecutorThread::cancelCurrentTask() ->
+   CB3ExecutorPool::cancel(). That removes all Cb3ExecutorPool-owned
+   references to task, and hence will run VBucketMemoryDeletionTask
+   dtor.
+
+4. VBucketMemoryDeletionTask dtor frees the VBucket object.
+
+As such, by the time CB3ExecutorPool::unregisterTaskable() returns the
+VBucket is *guaranteed* to have been freed.
+
+FollyExecutorPool:
+
+During FollyExecutorPool::unregisterTaskable():
+
+1. All tasks scheduled to run in future (owned by IO thread EventBase)
+   are either cancelled (if allowed), or woken to run asap on CPU pool.
+
+2. All tasks waiting to, or currently running on CPU pool are waited
+   for by polling for taskOwners to no longer contain any tasks for
+   the given taskable.
+
+3. (On the CPU threads) Each queued task is run, on completion
+   rescheduleTaskAfterRun is called to add work to the IO thread
+   EventBase to decide when to reschedule, or (in this case) to
+   actualy cancel the task.
+
+4. (On the IO thread) FollyExecutorPool::rescheduleTaskAfterRun is
+   called, for cancelled tasks this calls State::cancelTask() which
+   removes the task from taskOwners - at which point TaskProxy dtor
+   runs, which schedules _another_ task on CPU pool to actually delete
+   the GlobalTask.
+
+The problem here is that the TaskProxy is removed from taskOwners and
+deletes at (4) on the IO thread; however the GlobalTask destruction is
+deferred to later execution on a CPU thread. As such,
+FollyExecutorPool::unregisterTaskable() can see taskOwners having no
+tasks left for the taskable (and hence return) _before_ the VBucket
+object is deleted.
+
+Note the deferred deletion at (5) was added to avoid potentially large
+amounts of work being done on the IO thread - we aim to minimise work
+done here as it can impact the scheduling of other tasks.
+
++Solution+
+
+If the TaskProxy removal from taskOwners is deferred until _after_ the
+GlobalTask shared ownership is released, then unregisterTaskable()
+will no longer return until all GlobalTask references inside
+FollyExecutorPool have been released.
+
+To achieve this changes the ownership model in FollyExecutorPool are
+needed:
+
+1. Don't immediately remove TaskProxy from taskOwners in cancelTask().
+   Instead:
+   a) Mark it as cancelled, by setting the GlobalTask ptr to null,
+   b) Schedule an asynchronous task to release its GlobalTask
+      shared_ptr.
+
+2. This new async task (setup in resetTaskPtrViaCpuPool) releases the
+   TaskProxy's shared ownership on GlobalTask, then schedules an (IO
+   thread) completion task to finally remove the TaskProxy from
+   taskOwners.
+
+unregisterTaskable() is unchanged - it still waits for the taskOwner
+map for the given Taskable become empty; however given the above
+changes that only happens once the GlobalTask reference has been
+released.
+
+Change-Id: Iecbff9f3b45fc9e3d385c67f6a6dd32242dc76fe
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2020-10-20 16:36:26.000000000
+Message: 
+Uploaded patch set 9: Patch Set 8 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-10-20 17:33:27.000000000
+Message: 
+Patch Set 9: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/6527/ : FAILURE
+
+Failure of GoogleTest "EphemeralOrPersistent/STItemPagerTest.ActiveEvictedIfReplicaEvictionInsufficient/persistent_value_only":
+
+<pre>
+[ RUN      ] EphemeralOrPersistent/STItemPagerTest.ActiveEvictedIfReplicaEvictionInsufficient/persistent_value_only
+[2020-10-20T17:21:38.328Z] ../kv_engine/engines/ep/tests/module_tests/item_pager_test.cc:1130: Failure
+[2020-10-20T17:21:38.328Z] Expected: (activeRR) < (100), actual: 100 vs 100
+[2020-10-20T17:21:38.328Z] [  FAILED  ] EphemeralOrPersistent/STItemPagerTest.ActiveEvictedIfReplicaEvictionInsufficient/persistent_value_only, where GetParam() = ("persistent", "value_only") (68178 ms)
+EphemeralOrPersistent/STItemPagerTest.ActiveEvictedIfReplicaEvictionInsufficient/persistent_value_only
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/6527/ )
+
+Failure of a CTest test [2020-10-20T17:21:38.328Z]   1/397 Test #214: ep-engine_ep_unit_tests.EphemeralOrPersistent/STItemPagerTest ............................................... ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/6527/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/14450/ : FAILURE
+
+AddressSanitizer issue: odr-violation: global "cb_new_hook" at ../platform/src/cb_malloc_arena.cc:30:22 ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/14450/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/3726/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/5197/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/26995/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/31266/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/6647/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/5600/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/6807/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

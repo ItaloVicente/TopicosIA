@@ -1,0 +1,112 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-26849 [RocksDB] Avoid data races caused by 'delVBucket'
+
+As we cannot create multiple RocksDB instances on the same DB,
+RocksDBKVStore keeps a vector of handles for the opened DBs. Previously,
+an handle was a unique_ptr. That allowed 'delVBucket' to release the
+handle of a live DB (e.g., a DB used in a 'commit' execution).
+With this change we model DB handles as shared_ptr, and we release a DB
+handle in 'delVBucket' only when the thread executing the deletion is
+the exclusive owner of the shared_ptr (i.e., when any other concurrent
+operation on the same VBucket has completed).
+
+Change-Id: Id9847083038ad7bae3796ede545710f03048229e
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2017-11-20 09:10:41.000000000
+Message: 
+Uploaded patch set 9.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2017-11-20 09:35:39.000000000
+Message: 
+Patch Set 9: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/4464/ : FAILURE
+
+Valgrind detected one or more issues ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/4464/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/2801/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/4303/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/4251/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/3909/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master/4102/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2017-11-20 09:59:20.000000000
+Message: 
+Patch Set 9: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/2801/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/4303/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/4251/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/3909/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master/4102/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/4467/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2017-11-20 10:51:21.000000000
+Message: 
+Patch Set 9: Code-Review-1
+
+(3 comments)
+Line:546, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> Close, but I still think this doesn't explain "why" we don't want to delete while it's still in use (and in fact shared_ptr guarantees the object won't be deleted when in use) - the issue is that we want to guarantee deletion happens on this thread; and not on some other thread which might be sharing ownership.
+
+Line:302, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.h -> I was actually implying that this can stay as KVRocksDB& :) You don't need to pass a shared_ptr here, as this function doesn't manipulate the lifetime of argument. See http://isocpp.github.io/CppCoreGuidelines/CppCoreGuidelines#Rr-smartptrparam
+
+Same comment on other similar functions.
+
+Line:2003, engines/ep/tests/module_tests/kvstore_test.cc -> You might want to use ThreadGate in the start of each thread lambda to increase the likelihood they are scheduled concurrently - that might also allow you to reduce the iteration count in the for() loops.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2017-11-20 14:32:29.000000000
+Message: 
+Patch Set 9:
+
+(1 comment)
+Line:546, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> It seems to me that the "why we do not want to delete the shared_ptr while it is still in use" is that because we do not want to dereference a dangling pointer.
+Actually the deletion cannot happen in any other thread. The shared_ptr for a VBucket is created the first time 'openDB' is called and stored in the member vector 'vbDB'. Then, 'openDB' always returns a copy of the shared_ptr, so there is no way for another thread to be the last owner. Only 'delVBucket' can be the last owner, as it swaps 'vbDB[vbid]' to a local copy. Maybe we want to specify this last thing in comments?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2017-11-20 14:35:22.000000000
+Message: 
+Patch Set 9:
+
+(1 comment)
+Line:302, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.h -> Done
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2017-11-20 16:15:42.000000000
+Message: 
+Patch Set 9:
+
+(1 comment)
+Line:546, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> No we want to delete it here because delete (specifically DestroyDB) is an expensive, IO intensive operation and we don't want to cause another thread (possibly a front-end one) from being blocked performing the delete.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2017-11-21 09:30:24.000000000
+MISMATCHED INLINE COMMENT
+Line:2003, engines/ep/tests/module_tests/kvstore_test.cc -> Strangely enough, using ThreadGate decreases the likelihood that threads are scheduled concurrently. But, empirical tests showed that 10 iterations per thread are enough for ThreadSanitizer to catch data races in roughly the 90% of runs.
+----------------------------------------------------------------------------------------------------------------------

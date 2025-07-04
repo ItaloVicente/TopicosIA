@@ -1,0 +1,135 @@
+======================================================================================================================
+DESCRIPTION:
+
+ExecutorPool: Allow wait() to be asynchronous
+
+ExecutorPool::wait() currently returns a bool if the task was
+found. However for FollyExecutorPool this requires using a blocking
+(runInEventBaseThreadAndWait) call, which forces waking thread to be
+blocked until the IO thread has woken, updated the wake time and
+context-switched back to initial calling thread. Profiling shows this
+blocking & context switching is significant:
+
+* ~30% of MutationCommandContext::storeItem() total time is spent in
+  DcpProducer::scheduleNotify calling FolyExecutorPool::wake()
+
+* ~35% of the runtime of DcpProducer::step() is spent in
+   FollyExecutorPool::wake()
+
+* ~30% of the runtime of dcp_prepare_executor is
+  FollyExecutorPool::wake() - for notifyNewSeqno.
+
+The vast majority of callers of wake() don't care about if the task
+was found (and woken) - note that even _if_ they do check the result,
+there's still no guarantee the task will actually be _run_, given it
+still could be cancelled before then.
+
+As such, modify wait() to return void, avoiding the aforementioned
+costs in FollyExecutorPool. For the limited number of use-cases which
+do check the result, introduce a wakeAndWait() synchronous call which
+is equivalent to the old wake().
+
+Results from mancouch for LongLivedScheduleRun tests (which snooze()
+and wake() repeatedly) - note items_per_second, particulary at higher
+thread counts have increased from 160,000 "items" (Task wake /
+snoozes) per second to 200,000:
+
+Before:
+
+    Running ./kv_engine/ep_engine_benchmarks
+    Run on (24 X 2400 MHz CPU s)
+    CPU Caches:
+      L1 Data 32 KiB (x12)
+      L1 Instruction 32 KiB (x12)
+      L2 Unified 256 KiB (x12)
+      L3 Unified 15360 KiB (x2)
+    Load Average: 5.18, 3.16, 2.42
+    ----------------------------------------------------------------------------------------------------------------------------------------------------------
+    Benchmark                                                                                                Time             CPU   Iterations UserCounters...
+    ----------------------------------------------------------------------------------------------------------------------------------------------------------
+    ExecutorPoolFixture<CB3ExecutorPool>/LongLivedScheduleRun_CB3/Tasks:16/real_time/threads:1           18022 ns        10843 ns        37898 items_per_second=55.4887k/s
+    ExecutorPoolFixture<CB3ExecutorPool>/LongLivedScheduleRun_CB3/Tasks:16/real_time/threads:2           10041 ns        12938 ns        71048 items_per_second=99.5902k/s
+    ExecutorPoolFixture<CB3ExecutorPool>/LongLivedScheduleRun_CB3/Tasks:16/real_time/threads:4           14583 ns        21296 ns        43196 items_per_second=68.5747k/s
+    ExecutorPoolFixture<CB3ExecutorPool>/LongLivedScheduleRun_CB3/Tasks:16/real_time/threads:8           26304 ns        36188 ns        25608 items_per_second=38.0172k/s
+    ExecutorPoolFixture<CB3ExecutorPool>/LongLivedScheduleRun_CB3/Tasks:16/real_time/threads:16          28254 ns        38355 ns        23600 items_per_second=35.3927k/s
+    ExecutorPoolFixture<CB3ExecutorPool>/LongLivedScheduleRun_CB3/Tasks:64/real_time/threads:1           21924 ns        13459 ns        33212 items_per_second=45.6125k/s
+    ExecutorPoolFixture<CB3ExecutorPool>/LongLivedScheduleRun_CB3/Tasks:64/real_time/threads:2           14858 ns        16672 ns        71360 items_per_second=67.3021k/s
+    ExecutorPoolFixture<CB3ExecutorPool>/LongLivedScheduleRun_CB3/Tasks:64/real_time/threads:4           20951 ns        29646 ns        30980 items_per_second=47.7306k/s
+    ExecutorPoolFixture<CB3ExecutorPool>/LongLivedScheduleRun_CB3/Tasks:64/real_time/threads:8           31018 ns        41259 ns        22072 items_per_second=32.2398k/s
+    ExecutorPoolFixture<CB3ExecutorPool>/LongLivedScheduleRun_CB3/Tasks:64/real_time/threads:16          36141 ns        44536 ns        19440 items_per_second=27.6693k/s
+    ExecutorPoolFixture<FollyExecutorPool>/LongLivedScheduleRun_Folly/Tasks:16/real_time/threads:1       20078 ns        10965 ns        41127 items_per_second=49.806k/s
+    ExecutorPoolFixture<FollyExecutorPool>/LongLivedScheduleRun_Folly/Tasks:16/real_time/threads:2        8139 ns         9321 ns        91442 items_per_second=122.869k/s
+    ExecutorPoolFixture<FollyExecutorPool>/LongLivedScheduleRun_Folly/Tasks:16/real_time/threads:4        6239 ns         9835 ns       111232 items_per_second=160.283k/s
+    ExecutorPoolFixture<FollyExecutorPool>/LongLivedScheduleRun_Folly/Tasks:16/real_time/threads:8        6225 ns        11962 ns        82176 items_per_second=160.641k/s
+    ExecutorPoolFixture<FollyExecutorPool>/LongLivedScheduleRun_Folly/Tasks:16/real_time/threads:16       6186 ns        12529 ns        99888 items_per_second=161.66k/s
+    ExecutorPoolFixture<FollyExecutorPool>/LongLivedScheduleRun_Folly/Tasks:64/real_time/threads:1       21371 ns        11212 ns        31203 items_per_second=46.7929k/s
+    ExecutorPoolFixture<FollyExecutorPool>/LongLivedScheduleRun_Folly/Tasks:64/real_time/threads:2        7693 ns         9181 ns        84082 items_per_second=129.983k/s
+    ExecutorPoolFixture<FollyExecutorPool>/LongLivedScheduleRun_Folly/Tasks:64/real_time/threads:4        6271 ns         9808 ns       106016 items_per_second=159.455k/s
+    ExecutorPoolFixture<FollyExecutorPool>/LongLivedScheduleRun_Folly/Tasks:64/real_time/threads:8        7237 ns        11004 ns        96800 items_per_second=138.185k/s
+    ExecutorPoolFixture<FollyExecutorPool>/LongLivedScheduleRun_Folly/Tasks:64/real_time/threads:16       6855 ns        11736 ns       101440 items_per_second=145.881k/s
+
+After:
+
+    Running ./kv_engine/ep_engine_benchmarks
+    Run on (24 X 2400 MHz CPU s)
+    CPU Caches:
+      L1 Data 32 KiB (x12)
+      L1 Instruction 32 KiB (x12)
+      L2 Unified 256 KiB (x12)
+      L3 Unified 15360 KiB (x2)
+    Load Average: 0.88, 1.19, 1.76
+    ----------------------------------------------------------------------------------------------------------------------------------------------------------
+    Benchmark                                                                                                Time             CPU   Iterations UserCounters...
+    ----------------------------------------------------------------------------------------------------------------------------------------------------------
+    ExecutorPoolFixture<CB3ExecutorPool>/LongLivedScheduleRun_CB3/Tasks:16/real_time/threads:1           13503 ns        10302 ns        50239 items_per_second=74.0587k/s
+    ExecutorPoolFixture<CB3ExecutorPool>/LongLivedScheduleRun_CB3/Tasks:16/real_time/threads:2           11494 ns        13471 ns        70048 items_per_second=87.0053k/s
+    ExecutorPoolFixture<CB3ExecutorPool>/LongLivedScheduleRun_CB3/Tasks:16/real_time/threads:4           14301 ns        21178 ns        46496 items_per_second=69.9249k/s
+    ExecutorPoolFixture<CB3ExecutorPool>/LongLivedScheduleRun_CB3/Tasks:16/real_time/threads:8           27235 ns        37663 ns        25584 items_per_second=36.7171k/s
+    ExecutorPoolFixture<CB3ExecutorPool>/LongLivedScheduleRun_CB3/Tasks:16/real_time/threads:16          29427 ns        39505 ns        23552 items_per_second=33.982k/s
+    ExecutorPoolFixture<CB3ExecutorPool>/LongLivedScheduleRun_CB3/Tasks:64/real_time/threads:1           21221 ns        13038 ns        32518 items_per_second=47.1228k/s
+    ExecutorPoolFixture<CB3ExecutorPool>/LongLivedScheduleRun_CB3/Tasks:64/real_time/threads:2           14189 ns        16917 ns        62850 items_per_second=70.4773k/s
+    ExecutorPoolFixture<CB3ExecutorPool>/LongLivedScheduleRun_CB3/Tasks:64/real_time/threads:4           22161 ns        30800 ns        36124 items_per_second=45.1241k/s
+    ExecutorPoolFixture<CB3ExecutorPool>/LongLivedScheduleRun_CB3/Tasks:64/real_time/threads:8           32436 ns        42823 ns        21848 items_per_second=30.8298k/s
+    ExecutorPoolFixture<CB3ExecutorPool>/LongLivedScheduleRun_CB3/Tasks:64/real_time/threads:16          35945 ns        44818 ns        19344 items_per_second=27.8199k/s
+    ExecutorPoolFixture<FollyExecutorPool>/LongLivedScheduleRun_Folly/Tasks:16/real_time/threads:1       25313 ns         9742 ns        28325 items_per_second=39.5046k/s
+    ExecutorPoolFixture<FollyExecutorPool>/LongLivedScheduleRun_Folly/Tasks:16/real_time/threads:2       10153 ns         9773 ns        68586 items_per_second=98.49k/s
+    ExecutorPoolFixture<FollyExecutorPool>/LongLivedScheduleRun_Folly/Tasks:16/real_time/threads:4        5608 ns        11115 ns       132972 items_per_second=178.304k/s
+    ExecutorPoolFixture<FollyExecutorPool>/LongLivedScheduleRun_Folly/Tasks:16/real_time/threads:8        4279 ns        10157 ns       176064 items_per_second=233.697k/s
+    ExecutorPoolFixture<FollyExecutorPool>/LongLivedScheduleRun_Folly/Tasks:16/real_time/threads:16       4790 ns        11551 ns       132352 items_per_second=208.752k/s
+    ExecutorPoolFixture<FollyExecutorPool>/LongLivedScheduleRun_Folly/Tasks:64/real_time/threads:1       24194 ns         9733 ns        28697 items_per_second=41.3325k/s
+    ExecutorPoolFixture<FollyExecutorPool>/LongLivedScheduleRun_Folly/Tasks:64/real_time/threads:2       10239 ns         9549 ns        58634 items_per_second=97.6686k/s
+    ExecutorPoolFixture<FollyExecutorPool>/LongLivedScheduleRun_Folly/Tasks:64/real_time/threads:4        5364 ns        10722 ns       121988 items_per_second=186.424k/s
+    ExecutorPoolFixture<FollyExecutorPool>/LongLivedScheduleRun_Folly/Tasks:64/real_time/threads:8        4686 ns         9809 ns       185968 items_per_second=213.424k/s
+    ExecutorPoolFixture<FollyExecutorPool>/LongLivedScheduleRun_Folly/Tasks:64/real_time/threads:16       4688 ns        11562 ns       115792 items_per_second=213.327k/s
+
+Change-Id: I019455086109a0630155b5366b1e7aca5c0f744e
+Reviewed-on: http://review.couchbase.org/c/kv_engine/+/140317
+Tested-by: Build Bot <build@couchbase.com>
+Reviewed-by: Ben Huddleston <ben.huddleston@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2020-11-26 12:20:06.000000000
+Message: 
+Change has been successfully cherry-picked as 7a753b7e2a6def0bfcd5ba9c6c84c6556bff6834 by Dave Rigby
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-11-26 14:49:48.000000000
+Message: 
+Patch Set 4:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/5728/ (1/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-11-26 17:43:38.000000000
+Message: 
+Patch Set 4:
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv-engine-master-perf/4098/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/5728/ : SUCCESS'
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,154 @@
+======================================================================================================================
+DESCRIPTION:
+
+FileSnapshotTest: fix bug with timestamp thresholding
+
+The filesystem timestamp and the lastRead timestamp are effectively
+two measurements, both affected by the filesystem resolution. Hence we
+should use at least 2x FS resolution as threshold. We use 2.5x for
+extra safety.
+
+Before, the threshold was 1.1x FS resolution, and we could issue the
+following sequence of events,
+
+  start
+  create-file
+  read-file (currentTime)
+  end
+
+which had the following timestamps:
+
+  create-file 1564589081998
+  start 1564589082002
+  read 1564589082003
+  end 1564589082004
+
+In this case, the difference between create-file and read is 5ms,
+which exceeded the 4ms FS resolution, even though the events together
+took just 2ms of runtime.
+
+Reproduce with:
+  bazel test --runs_per_test=100 \
+    //org.eclipse.jgit.test:org_eclipse_jgit_internal_storage_file_FileSnapshotTest
+
+The file system timestamp resolution is 4ms in this case.
+
+This code assumes that the kernel and the JVM use the same clock that
+is synchronized with the file system clock. This seems plausible,
+given the resolution of System.currentTimeMillis() and the latency for
+a gettimeofday system call (typically ~1us), but it would be good to
+justify this with specifications.
+
+Also cover a source of flakiness: if the test runs under extreme load,
+the we could have
+
+  start
+  create-file
+  <long delay>
+  read
+  end
+
+which would register as a unmodified file. Avoid this by skipping the
+test if end-start is too big.
+
+Change-Id: I87d2cf035e01c44b7ba8364c410a860aa8e312ef
+Signed-off-by: Han-Wen Nienhuys <hanwen@google.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Han-Wen NIenhuys
+Date: 2019-07-31 16:44:21.000000000
+Message: 
+Uploaded patch set 7.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2019-07-31 16:44:27.000000000
+Message: 
+Patch Set 7:
+
+Build Started https://ci-staging.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/567/
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonathan Nieder
+Date: 2019-07-31 16:52:01.000000000
+Message: 
+Patch Set 7:
+
+(3 comments)
+
+Yay, thanks for tackling this.
+Line:135, org.eclipse.jgit.test/tst/org/eclipse/jgit/internal/storage/file/FileSnapshotTest.java -> nit: should use a single space
+
+Line:140, org.eclipse.jgit.test/tst/org/eclipse/jgit/internal/storage/file/FileSnapshotTest.java -> I'm probably being dense, but I don't understand this. If !save.isModified(f1), then that's a real bug, right?
+
+Should this comment be a TODO pointing to a bug tracker entry?
+
+Line:398, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/FileSnapshot.java -> Yuck.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Han-Wen NIenhuys
+Date: 2019-07-31 16:58:17.000000000
+Message: 
+Patch Set 7:
+
+(3 comments)
+Line:135, org.eclipse.jgit.test/tst/org/eclipse/jgit/internal/storage/file/FileSnapshotTest.java -> Done
+
+Line:140, org.eclipse.jgit.test/tst/org/eclipse/jgit/internal/storage/file/FileSnapshotTest.java -> no, this is based on timestamps so it's inherently flaky. This tries to limit the flakiness (also: if you run this on a really slow system with very high FS granularity, you'd never run the test.)
+
+The test assumes that l.131 and l.132 execute roughly at the same time, so it looks like a "racy clean" file.  If you run this on a loaded system,  l.131 and l.132 will run at different timestamps, so it stops looking like "racy clean".
+
+note that the file isn't changed at all, so save.isModified(f1) == false is actually the correct answer.
+
+Line:398, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/FileSnapshot.java -> Yes.  
+
+note that I think the 2.5x is more principled than what we had, but I'm not 100% sure it is correct either, and I wish we didn't have to use timestamps.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2019-07-31 17:03:11.000000000
+Message: 
+Patch Set 7: Verified+1
+
+Build Successful 
+
+https://ci-staging.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/567/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2019-08-01 06:00:24.000000000
+Message: 
+Patch Set 7:
+
+(1 comment)
+Line:140, org.eclipse.jgit.test/tst/org/eclipse/jgit/internal/storage/file/FileSnapshotTest.java -> looks like the only thing this test is testing is whether isModified returns true in a racy read situation
+
+on stable-5.1 I added another test [1] which tests if isModified reliably detects that a file was modified
+
+[1] https://git.eclipse.org/r/plugins/gitiles/jgit/jgit/+/stable-5.1/org.eclipse.jgit.test/tst/org/eclipse/jgit/internal/storage/file/FileSnapshotTest.java#218
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonathan Nieder
+Date: 2019-07-31 17:02:43.000000000
+MISMATCHED INLINE COMMENT
+Line:140, org.eclipse.jgit.test/tst/org/eclipse/jgit/internal/storage/file/FileSnapshotTest.java -> > note that the file isn't changed at all, so save.isModified(f1) == false is actually the correct answer.
+
+Ah, that's what I was missing.
+
+In that case, the test seems misguided. Can we remove it?
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonathan Nieder
+Date: 2019-08-01 00:33:20.000000000
+MISMATCHED INLINE COMMENT
+Line:140, org.eclipse.jgit.test/tst/org/eclipse/jgit/internal/storage/file/FileSnapshotTest.java -> I think I'm still confused. The test description says
+
+ "Create a file, but don't wait long enough for the difference between file system clock and system clock to be significant. Assume the file may have been modified. It may have been, but the clock alone cannot determine this."
+
+I don't understand why this is a useful test. Shouldn't we change these to tests where the file really was modified? That way, in the racy case, they are checking that we do not get fooled, and if we're (un)lucky enough for enough time to elapse to avoid the race, they are checking that the normal behavior is good.
+
+Tests should be checking for desirable end-user facing behavior, not implementation details.
+----------------------------------------------------------------------------------------------------------------------
+Author: Han-Wen NIenhuys
+Date: 2019-07-31 17:18:32.000000000
+MISMATCHED INLINE COMMENT
+Line:140, org.eclipse.jgit.test/tst/org/eclipse/jgit/internal/storage/file/FileSnapshotTest.java -> The thing it tests for does happen in the code, so unless we decide to stop using timestamps altogether, I think we had better keep this test.
+----------------------------------------------------------------------------------------------------------------------

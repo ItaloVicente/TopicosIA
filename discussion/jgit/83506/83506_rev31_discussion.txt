@@ -1,0 +1,189 @@
+======================================================================================================================
+DESCRIPTION:
+
+LFS: Add remote download to SmudgeFilter
+
+Transfer data in chunks of 8k Transferring data byte per byte is slow,
+running checkout with CleanFilter on a 2.9MB file takes 20 seconds.
+Using a buffer of 8k shrinks this time to 70ms.
+
+Also register the filter commands in a way that the native GIT LFS can
+be used alongside with JGit.
+
+Implements auto-discovery of LFS server URL when cloning from a Gerrit
+LFS server.
+
+Change-Id: I452a5aa177dcb346d92af08b27c2e35200f246fd
+Also-by: Christian Halstrick <christian.halstrick@sap.com>
+Signed-off-by: Markus Duft <markus.duft@ssi-schaefer.com>
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Markus Duft
+Date: 2018-02-05 07:19:29.000000000
+Message: 
+Uploaded patch set 31: Patch Set 30 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-02-05 07:19:40.000000000
+Message: 
+Patch Set 31:
+
+Build Started https://ci.eclipse.org/jgit/job/jgit.gerrit/12214/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-02-05 07:49:17.000000000
+Message: 
+Patch Set 31: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/jgit.gerrit/12214/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2018-02-05 11:19:08.000000000
+Message: 
+Patch Set 31:
+
+(7 comments)
+
+Some comments despite my recent claim that I didn't really have the time :-) (I don't in general, but I could make room for this now.)
+Line:98, org.eclipse.jgit.lfs/src/org/eclipse/jgit/lfs/SmudgeFilter.java -> That seems to be obsolete and wrong now.
+
+Line:166, org.eclipse.jgit.lfs/src/org/eclipse/jgit/lfs/SmudgeFilter.java -> The plural of "path" is "paths", not "pathes".
+
+Does this _have_ to be a set? Seems to me that:
+
+- In the interface just returning Collection<Path> would be fine.
+- An ArrayList would suffice.
+
+Besides, the method is private, and the only call passes only one ref and ignores the result. So the Json result should have only one result, and there should be only one file written. I would change this to
+
+  private Path getLfsResource(Repository db, LfsPointer ptr)
+
+and also do the "file already exists" check inside.
+
+Line:349, org.eclipse.jgit.lfs/src/org/eclipse/jgit/lfs/SmudgeFilter.java -> Errh... that looks very much like EGit's ConfigureGerritAfterCloneTask.runSshCommand(), except that there's no CredentialsProvider.
+
+Time to make this a public utility function (*with* the CredentialProvider), so that EGit could re-use it? I hate code duplication. If so, the javadoc should state that it returns only the first line sent, and that stderr is discarded.
+
+Line:356, org.eclipse.jgit.lfs/src/org/eclipse/jgit/lfs/SmudgeFilter.java -> Hard-coded timeout. Can we avoid that? Make the timeout a parameter and pass it in.
+
+A possible way to get the value to pass in is to use the ConnectTimeout setting for the host from the OpenSshConfig (i.e., ~/.ssh/config), or a default value (5 seconds looks reasonable) if not set.
+
+Line:378, org.eclipse.jgit.lfs/src/org/eclipse/jgit/lfs/SmudgeFilter.java -> Note that this errorThread halting and process.destroy() may need to be swapped. See https://git.eclipse.org/r/#/c/115802/
+
+Line:387, org.eclipse.jgit.lfs/src/org/eclipse/jgit/lfs/SmudgeFilter.java -> Who is responsible for closing the streams? In the normal case, and when there are exceptions?
+
+Line:397, org.eclipse.jgit.lfs/src/org/eclipse/jgit/lfs/SmudgeFilter.java -> This doesn't correspond to the contract of FilterCommand. The javadoc says it returns the number of bytes read from in, so you'd have to sum up length.
+
+Also, the run() command of a filter is supposed to be called in a loop until it returns -1. I don't know why the interface was specified like that; personally, I would have left the looping responsibility to the filter itself, but returned a long. With int as return type and looping inside we're limited to 2GB max. If you want to be able to handle larger files, then don't loop in here but do rely on being called in a loop, as the contract says. Then it's the caller's responsibility to sum up the int values in a long.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Markus Duft
+Date: 2018-02-05 14:28:04.000000000
+Message: 
+Patch Set 31:
+
+(7 comments)
+
+Thank you very much for reviewing despite missing time :) I did some fixes with the next patchset, and I have some questions inline :)
+Line:98, org.eclipse.jgit.lfs/src/org/eclipse/jgit/lfs/SmudgeFilter.java -> Done
+
+Line:166, org.eclipse.jgit.lfs/src/org/eclipse/jgit/lfs/SmudgeFilter.java -> Corrected most of this, thanks :)
+
+Still I would like to keep that method multi-file capable. Although it is not possible right now, this /will/ be one performance tuning option (multi-file download, parallel download, ...) in the future - git-lfs already has this with the filter-process, which is (unfortunately) not (yet) supported by jgit at all.
+
+Line:349, org.eclipse.jgit.lfs/src/org/eclipse/jgit/lfs/SmudgeFilter.java -> OK. sounds good. Anybody step up and tell me where to put the code and parameter, and I will happily do the work :)
+
+Line:356, org.eclipse.jgit.lfs/src/org/eclipse/jgit/lfs/SmudgeFilter.java -> See above: sounds good. I just have no idea where/how :) If somebody tells me, I will do it.
+
+Line:378, org.eclipse.jgit.lfs/src/org/eclipse/jgit/lfs/SmudgeFilter.java -> Done
+
+Line:387, org.eclipse.jgit.lfs/src/org/eclipse/jgit/lfs/SmudgeFilter.java -> good question. it does not seem to be well-defined... :( but as the streams are both passed by the caller (actually the creator of the filter command), I'd also expect responsibility for proper handling of IOExceptions (closing streams) with the caller.
+
+Line:397, org.eclipse.jgit.lfs/src/org/eclipse/jgit/lfs/SmudgeFilter.java -> true that. not sure whether the definition of the api is good though ;)
+
+I would actually opt for (and implemented) a mix. How about copying a certain amount in one go, but not too much (like max 256MB or so) just to avoid the overhead of excessive buffer allocation, etc. for the small'ish use cases.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2018-02-05 15:21:18.000000000
+Message: 
+Patch Set 31:
+
+(3 comments)
+Line:349, org.eclipse.jgit.lfs/src/org/eclipse/jgit/lfs/SmudgeFilter.java -> Good question. I don't see any existing class where such a utility function would naturally fit. There is a org.eclipse.jgit.util.HttpSupport... maybe a new org.eclipse.jgit.util.SshSupport?
+
+Or does anyone know of a better place?
+
+API would need additional parameters:
+* CredentialsProvider credentialsProvider (may be null)
+* int timeout
+* TimeUnit timeUnit (of the timout)
+
+Then use TimeUnit.asMillis(timeout) instead of hard-coded 5000 below.
+
+At least for Jsch, the JschConfigSessionFactory will already initialize the session with the ConnectTimeout from the config. Which then, however, gets overridden by the timeout passed here... that might need some re-thinking.
+
+Line:387, org.eclipse.jgit.lfs/src/org/eclipse/jgit/lfs/SmudgeFilter.java -> > good question. it does not seem to be well-defined... :( but as the
+ > streams are both passed by the caller (actually the creator of the
+ > filter command), I'd also expect responsibility for proper handling
+ > of IOExceptions (closing streams) with the caller.
+
+Weeelll... in this LFS case, you replace the stream with an internal one that the caller doesn't even know, so he can't close it.
+
+Line:397, org.eclipse.jgit.lfs/src/org/eclipse/jgit/lfs/SmudgeFilter.java -> > true that. not sure whether the definition of the api is good though ;)
+
+Indeed. The more I think about this API the less happy I am. Even with this 8kB buffer, downloading a (typically large) LFS blob may take time. This method should have a progress monitor of some sorts being passed in. If that omission was the reason for the strange API (idea being that the caller would do the progress reporting in that ominous loop), that would still make for rather stuttering progress reporting if you downloaded 256MB chunks (to not overflow the int). Even 256MB may take noticeable time. Progress reporting is perhaps not so important for JGit, but if this gets used via EGit, smooth progress reporting would be good to have.
+
+Repeated allocation and GC of that 8kB buffer could be avoided by making it a field. Allocate once on the first call if still null, null out after read returned -1 or on exception.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Markus Duft
+Date: 2018-02-05 15:52:18.000000000
+Message: 
+Patch Set 31:
+
+(3 comments)
+Line:349, org.eclipse.jgit.lfs/src/org/eclipse/jgit/lfs/SmudgeFilter.java -> Sounds like a plan. What would be a good name for that API? I'd somehow like to reflect that it only returns the first line of output, as I would not actually expect that from a general "runSshCommand" method...
+
+Line:387, org.eclipse.jgit.lfs/src/org/eclipse/jgit/lfs/SmudgeFilter.java -> Hm. I think that the caller should be responsible for handling the streams passed in to the filter command. the filter in turn is responsible to correctly handle any 'internal' additional resources required (like the swapped in stream in this case, and the aOut stream in the clean filter). Does that make sense?
+
+Line:397, org.eclipse.jgit.lfs/src/org/eclipse/jgit/lfs/SmudgeFilter.java -> There is progress reporting for "Checking out files" since a recent change. I don't think that it can get any more fine grained, can it? This would only be possible (AFAICT) if downloading/filtering would be a separate step in the chain. Right now, checking out files will stop at the point where it downloads a file and continue once the file has been checked out (whatever this means in reality - downloading it or taking from the lfs store).
+
+Buffer as a field could be done if progress reporting is of any use (or possible) here. until then I guess it's fine the way it is...?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2018-02-05 17:09:54.000000000
+Message: 
+Patch Set 31:
+
+(3 comments)
+Line:349, org.eclipse.jgit.lfs/src/org/eclipse/jgit/lfs/SmudgeFilter.java -> Don't know :-) Take a look at my comments when I introduced this method over in EGit and Matthias asked for making it a general-purpose utility: https://git.eclipse.org/r/#/c/54653/3/org.eclipse.egit.core/src/org/eclipse/egit/core/op/ConfigureGerritAfterCloneTask.java@283
+
+For a version that just gets the first line and discards stderr, maybe readLineViaSsh?
+
+And I just noticed that this method assumes that the reader.readLine() actually returns. If the remote hangs, so will this client.
+
+Line:387, org.eclipse.jgit.lfs/src/org/eclipse/jgit/lfs/SmudgeFilter.java -> Yes, that does make sense. BTW, in this version the swapped in stream will never be closed if there's an exception on out.write(). Don't know what that will do to the remote end, probably it'll just hang once transmission buffers are full.
+
+Line:397, org.eclipse.jgit.lfs/src/org/eclipse/jgit/lfs/SmudgeFilter.java -> Agreed. I didn't check if progress monitors are indeed passed down far enough so that they could get to the filtering. Anyway, JGit progress monitoring doesn't quite fit the needs of Eclipse, and EGit thus resorts to doing unbounded progress reporting for JGit operations. (If you're interested, see https://git.eclipse.org/r/#/c/88434/2/org.eclipse.egit.core/src/org/eclipse/egit/core/EclipseGitProgressTransformer.java@24 for some discussion on that.)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Markus Duft
+Date: 2018-02-06 06:50:01.000000000
+Message: 
+Patch Set 31:
+
+(3 comments)
+Line:349, org.eclipse.jgit.lfs/src/org/eclipse/jgit/lfs/SmudgeFilter.java -> I guess it does not work to just copy & paste your own arguments against a general purpose utilty from that comment over here? :D I'll work on that. I will push as a separate commit though - OK?
+
+Line:387, org.eclipse.jgit.lfs/src/org/eclipse/jgit/lfs/SmudgeFilter.java -> I changed handling in the later commit https://git.eclipse.org/r/#/c/111376/ now. I would actually squash all those commits, but they are getting too large...
+
+Looking a little closer at all callers I changed my mind and think that the only viable solution at the moment is to make filters handle all streams... :( Although I liked it better to leave it to the caller.
+
+Line:397, org.eclipse.jgit.lfs/src/org/eclipse/jgit/lfs/SmudgeFilter.java -> Done - thanks for the pointer.
+
+----------------------------------------------------------------------------------------------------------------------

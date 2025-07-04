@@ -1,0 +1,74 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-36146 Fix a race condition in CheckpointManager
+
+Fix a race condition in the CheckpointManager when the following
+sequence of events occur:
+
+T1-1. An active stream needs to be moved to the dead state so we can
+call the destructor ActiveStream::~ActiveStream()
+
+T1-2. This then in turn calls ActiveStream::removeCheckpointCursor()
+which gets a shared pointer to the checkpoint cursor
+
+T1-3. The removeCheckpointCursor() method then gets a lock on the
+queueLock
+
+    T2-a. ActiveStream::getItemsRemaining() is called and gets hold of
+    a shared pointer to the same cursor as removeCheckpointCursor()
+    has
+
+    T2-b. CheckpointManager::getNumItemsForCursor() is then called
+    with the raw pointer to the cursor but has to wait till
+    removeCheckpointCursor() has finished executing as queueLock is
+    locked
+
+T1-4. removeCursor_UNLOCKED() is called by removeCheckpointCursor()
+which decrements the number of cursors on checkpoint
+
+        T3-I. The checkpoint remover task then runs removing the
+        checkpoint that the cursor points to as its cursor count is
+        now 0 and its closed.
+
+T1-5. removeCheckpointCursor() then frees the queueLock so
+getNumItemsForCursor() can call getNumItemsForCursor_UNLOCKED()
+
+    T2-c. getNumItemsForCursor_UNLOCKED() then tries to access the
+    member CheckpointList::iterator currentCheckpoint which points
+    to the freed Checkpoint and then when trying to access it we crash.
+
+The fix for this is to set CheckpointCursor::currentCheckpoint to the
+checkpointList.end() when we are deleting the current courser. Then
+check before we dereference a given currentCheckpoint that we make sure
+its not null and is not equal to checkpointList.end().
+
+Change-Id: I4e9ed18188fe4b182e87d1a8d5320a094df64e8d
+Reviewed-on: http://review.couchbase.org/115429
+Tested-by: Build Bot <build@couchbase.com>
+Reviewed-by: Dave Rigby <daver@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2019-10-07 10:11:41.000000000
+Message: 
+Change has been successfully cherry-picked as 39690fbe9db644081aac6f1cf09acf0a4199d251 by Dave Rigby
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-10-07 10:19:49.000000000
+Message: 
+Patch Set 12:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/2365/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-10-07 11:20:07.000000000
+Message: 
+Patch Set 12:
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/2365/ : SUCCESS'
+----------------------------------------------------------------------------------------------------------------------

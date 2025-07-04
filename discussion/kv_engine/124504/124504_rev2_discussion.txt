@@ -1,0 +1,170 @@
+======================================================================================================================
+DESCRIPTION:
+
+[WIP] MB-37280: Remove KVStore::optimizeWrites
+
+Change-Id: Iedf62970e6b7ce4550898cbe2d765d2f1ed982d8
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2020-03-30 12:11:37.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-03-30 12:33:37.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:517, engines/ep/src/couch-kvstore/couch-kvstore.h -> *General state of this patch*
+
+- KVStore::optimizeWrites & friends removed from EPBucket (which means that no KVStore implementation uses it anymore)
+- Major functional impact is on CouchKVStore as we MUST provide a flush-batch of unique keys to the storage. Rocks and Magma are expected to handle key duplicates fine (on the function side), but for all KVStore(s) we want to avoid to write unnecessary data to disk, so I apply the same changes to all KVStores for now
+- Performance impact at persistence. Discussed below (discussing on CouchKVStore, but same for all stores)
+
+
+Let s consider our goal first: we need to end up with a container of unique (by key) items.
+
+Functional constraints: we need to apply the existing deduplication rules
+  (1) Only items with the same key deduplicate
+  (2) Items in different namespace don’t deduplicate
+  (3) We keep the highest segno for every item
+
+
+Current solution: unordered map <DiskDocKey, CouchRequest>
+
+*Ok on functional constraints*
+  - DiskDocKey encodes the namespace, so (1) and (2) are verified
+  - entries are inserted into the map in seqno-order (just as provided by the CheckpointManager)
+
+
+*Perf impact*
+  - Mem usage: we are adding a DiskDocKey allocation for every item to flush. The impact of that depends on the key size
+    - Possible solution: remove DiskDocKey from CouchRequest
+  - Throughput: see results below for now, under investigation for validating hypothesis 
+
+
+[BEFORE]
+Run on (16 X 2300 MHz CPU s)
+2020-03-30 10:38:15
+--------------------------------------------------------------------------------------------------------
+Benchmark                                                 Time           CPU Iterations
+ UserCounters...--------------------------------------------------------------------------------------------------------
+MemTrackingVBucketBench/FlushVBucket/0/1/0           299933 ns     234284 ns       2820 PeakBytesPerItem=169.562k PeakFlushBytes=169.562k   4.16829k items/s store:couchdb mode:insert
+MemTrackingVBucketBench/FlushVBucket/0/1/1           707945 ns     216483 ns       2965 PeakBytesPerItem=174.203k PeakFlushBytes=174.203k   4.51103k items/s store:couchdb mode:replace
+MemTrackingVBucketBench/FlushVBucket/0/100/0         502094 ns     406208 ns       1756 PeakBytesPerItem=2.02539k PeakFlushBytes=202.562k   240.409k items/s store:couchdb mode:insert
+MemTrackingVBucketBench/FlushVBucket/0/100/1        1034511 ns     491069 ns       1378 PeakBytesPerItem=2.22656k PeakFlushBytes=222.703k   198.865k items/s store:couchdb mode:replace
+MemTrackingVBucketBench/FlushVBucket/0/10000/0     16503660 ns   15994349 ns         43 PeakBytesPerItem=521 PeakFlushBytes=4.97765M   610.567k items/s store:couchdb mode:insert
+MemTrackingVBucketBench/FlushVBucket/0/10000/1     25868992 ns   24734103 ns         29 PeakBytesPerItem=604 PeakFlushBytes=5.76767M   394.824k items/s store:couchdb mode:replace
+MemTrackingVBucketBench/FlushVBucket/0/1000000/0 2255499994 ns 2250990000 ns          1 PeakBytesPerItem=522 PeakFlushBytes=497.876M   433.837k items/s store:couchdb mode:insert
+MemTrackingVBucketBench/FlushVBucket/0/1000000/1 3856286068 ns 3850457000 ns          1 PeakBytesPerItem=599 PeakFlushBytes=571.868M   253.622k items/s store:couchdb mode:replace
+
+
+[AFTER]
+Run on (16 X 2300 MHz CPU s)
+2020-03-30 10:47:53
+--------------------------------------------------------------------------------------------------------
+Benchmark                                                 Time           CPU Iterations
+ UserCounters...--------------------------------------------------------------------------------------------------------
+MemTrackingVBucketBench/FlushVBucket/0/1/0           298105 ns     231061 ns       2965 PeakBytesPerItem=169.797k PeakFlushBytes=169.797k   4.22643k items/s store:couchdb mode:insert
+MemTrackingVBucketBench/FlushVBucket/0/1/1           707195 ns     218011 ns       3063 PeakBytesPerItem=174.453k PeakFlushBytes=174.453k   4.47942k items/s store:couchdb mode:replace
+MemTrackingVBucketBench/FlushVBucket/0/100/0         528813 ns     432429 ns       1637 PeakBytesPerItem=2.13965k PeakFlushBytes=214k   225.832k items/s store:couchdb mode:insert
+MemTrackingVBucketBench/FlushVBucket/0/100/1        1089481 ns     520801 ns       1303 PeakBytesPerItem=2.34082k PeakFlushBytes=234.125k   187.512k items/s store:couchdb mode:replace
+MemTrackingVBucketBench/FlushVBucket/0/10000/0     20143754 ns   19633324 ns         34 PeakBytesPerItem=576 PeakFlushBytes=5.49693M   497.401k items/s store:couchdb mode:insert			<— -16%
+MemTrackingVBucketBench/FlushVBucket/0/10000/1     29432720 ns   28353208 ns         24 PeakBytesPerItem=659 PeakFlushBytes=6.28697M   344.428k items/s store:couchdb mode:replace			<— -12%
+MemTrackingVBucketBench/FlushVBucket/0/1000000/0 5151767923 ns 5145644000 ns          1 PeakBytesPerItem=590 PeakFlushBytes=562.699M   189.784k items/s store:couchdb mode:insert		<— -56%
+MemTrackingVBucketBench/FlushVBucket/0/1000000/1 5329421419 ns 5323929000 ns          1 PeakBytesPerItem=653 PeakFlushBytes=623.199M   183.429k items/s store:couchdb mode:replace		<— -27%
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-03-30 13:17:18.000000000
+Message: 
+Patch Set 2: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/27182/ : FAILURE
+
+Failure of a CTest test 192/192 Test  #28: ep-engine_ep_unit_tests ...................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/27182/ )
+
+Failure of a GoogleTest test:
+
+CollectionsDcpTest.test_dcp_create_delete (40 ms) ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/27182/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/2821/ : FAILURE
+
+Failure of a CTest test [2020-03-30T12:31:52.689Z]  34/198 Test  #31: ep-engine_ep_unit_tests ...................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/2821/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/2824/ : FAILURE
+
+Failure of a CTest test [2020-03-30T12:19:27.421Z] 206/208 Test  #31: ep-engine_ep_unit_tests ...................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/2824/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/2873/ : FAILURE
+
+Failure of a CTest test [2020-03-30T12:32:15.992Z]  33/197 Test  #46: ep_testsuite_dcp.value_eviction.comp_passive .................................Child aborted ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/2873/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/1872/ : FAILURE
+
+Failure of a CTest test [2020-03-30T12:26:02.574Z]  49/205 Test  #28: ep-engine_ep_unit_tests ...................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/1872/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/10680/ : FAILURE
+
+Failure of a CTest test [2020-03-30T12:28:29.123Z] 199/199 Test  #30: ep-engine_ep_unit_tests ...................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/10680/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/23243/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/25542/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/1426/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-03-30 16:38:59.000000000
+Message: 
+Removed reviewer Dave Rigby.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-03-30 16:39:02.000000000
+Message: 
+Removed reviewer Jim Walker.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-03-30 16:39:04.000000000
+Message: 
+Removed reviewer Build Bot with the following votes:
+
+* Verified-1 by Build Bot <build@couchbase.com>
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-03-30 16:39:06.000000000
+Message: 
+Removed reviewer Daniel Owen.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-03-30 16:39:08.000000000
+Message: 
+Removed reviewer Richard de Mellow.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-03-30 16:39:09.000000000
+Message: 
+Removed reviewer Ben Huddleston.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-03-30 16:39:10.000000000
+Message: 
+Removed reviewer James Harrison.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-03-30 16:39:11.000000000
+Message: 
+Removed reviewer Dave Finlay.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-03-30 16:39:12.000000000
+Message: 
+Removed reviewer Trond Norbye.
+----------------------------------------------------------------------------------------------------------------------

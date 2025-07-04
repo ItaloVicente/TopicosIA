@@ -1,0 +1,100 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-54279: Pause / Resume: Unlock vb_mutexes from locking thread
+
+As part of EPBucket::prepareForPause(), all of the vb_mutexes are
+lock()ed - and left locked:
+
+a) To ensure that any in-flight VBucket writes have completed and
+b) To inhibit and new writes from occurring.
+
+Then, when the EPBucket is resumed all the vb_mutexes are unlock()ed
+which allows VBucket writes to resume.
+
+However, EPBucket::prepareForResume() is not called on the same thread
+which called prepareForPause() - prepareForPause() runs on a
+background NonIO thread whereas resume runs synchronously in the
+front-end thread. As such, we are incorrectly unlocking a mutex from a
+different thread than the one which locked it - which is Undefined
+Behaviour - from cppreference.com[1]:
+
+    void unlock();
+
+    Unlocks the mutex.
+
+    The mutex must be locked by the current thread of execution,
+    otherwise, the behavior is undefined.
+
+This is helpfully reported by ThreadSanitizer:
+
+    WARNING: ThreadSanitizer: unlock of an unlocked mutex (or by a wrong thread) (pid=58528)
+        #0 pthread_mutex_unlock <null> (libtsan.so.0+0x3bf9a)
+        #1 __gthread_mutex_unlock(pthread_mutex_t*) c++/10.2.0/x86_64-pc-linux-gnu/bits/gthr-default.h:779 (memcached+0x5b594f)
+        #2 std::mutex::unlock() c++/10.2.0/bits/std_mutex.h:118 (memcached+0x602555)
+        #3 EPBucket::prepareForResume() kv_engine/engines/ep/src/ep_bucket.cc:2575 (memcached+0x84b94f)
+        #4 EventuallyPersistentEngine::resume() kv_engine/engines/ep/src/ep_engine.cc:7002 (memcached+0x7d52d3)
+        ...
+
+Fix by changing how we achieve inhibition of future VBucket writes:
+
+- Introduce a EPBucket::paused flag which is set in prepareForPause
+  after all vb_mutexes have been acquired (and hence all in-flight
+  VBucket writes have finished), but then unlock all vb_mutexes before
+  returning from prepareForPause().
+
+- When attempting to acquire a locked VBucket, check new paused flag
+  before attempting to acquire the vb_mutex - if paused is set then
+  block / return early (for try() variant).
+
+This keeps the required pause behaviour but avoids keeping vb_mutexes
+locked and having to later unlock (on a different thread).
+
+[1]: https://en.cppreference.com/w/cpp/thread/mutex
+
+Change-Id: I062583951a101a866866b79dfd6329672bb4ff42
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2022-11-02 15:12:36.000000000
+Message: 
+Uploaded patch set 3.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-11-02 15:46:29.000000000
+Message: 
+Patch Set 3: Verified+1
+
+Build Successful 
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/20934/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/42724/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/21665/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-windows-master/50910/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux-debug/job/master/404/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/11482/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/11391/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/23140/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/23703/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/24940/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/24110/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/32126/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2022-11-03 14:06:23.000000000
+Message: 
+Patch Set 3: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------

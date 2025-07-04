@@ -1,0 +1,157 @@
+======================================================================================================================
+DESCRIPTION:
+
+Respect gitattributes in the compare editor
+
+Apply smudge/clean filters. Store the filters to be applied when
+we create the internal GitBlobStorage and apply them when the stream
+is opened. Unfortunately this requires quite a few interface changes
+to pass through CheckoutMetadata.
+
+Adds tests for the new behavior, including index edits.
+
+Bug: 520693
+Change-Id: If7696501f3e1b8f6d99518915b7292e268d656bd
+Signed-off-by: Thomas Wolf <thomas.wolf@paranor.ch>
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Thomas Wolf
+Date: 2018-02-12 09:47:04.000000000
+Message: 
+Uploaded patch set 7.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-02-12 09:47:11.000000000
+Message: 
+Patch Set 7:
+
+Build Started https://ci.eclipse.org/egit/job/egit.gerrit/10318/
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2018-02-12 09:47:33.000000000
+Message: 
+Patch Set 7:
+
+(3 comments)
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-02-12 10:07:20.000000000
+Message: 
+Patch Set 7: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/egit/job/egit.gerrit/10318/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2018-02-13 08:16:19.000000000
+Message: 
+Patch Set 7:
+
+The user needs some knob somewhere to control for which files smudging happens. It is the correct thing to do in the general case, but with LFS (and possibly other potentially long-running or otherwise expensive filters), the user may not want to have this for some files.
+
+I don't see an obvious knob in standard git for this. Git config merge.renormalize doesn't fit the bill; it's a global setting applying to the whole repo and also is for a different use case (attributes differ between ours, their, and base). Git attribute -diff also isn't quite right, and might conflict with whatever the setting of the diff attribute is for command-line use. (Though perhaps we might want to disable comparisons in Eclipse if indeed -diff is active? -- But that'd be a different story.)
+
+Maybe a different, new gitattribute? +rawdiff could mean that EGit shall not do the smudging. Th attribute could be passed along in the CheckoutMetadata. That would give a user the flexibility to suppress the smudging for individual files as needed. For instance, setting it on really large LFS files, but not, say, on LFS files that are text and smaller than some reasonable size.
+
+Thoughts?
+----------------------------------------------------------------------------------------------------------------------
+Author: Markus Duft
+Date: 2018-02-13 08:41:48.000000000
+Message: 
+Patch Set 7:
+
+I would agree if we somehow force a diff on users (do we? do we automagically diff in some place?). As long as it is a user action to /request/ a diff for a file, I think we can offload at least some responsibility to the user. We should have kind of an emergency break if things get out of hand (e.g. timeout, RAM limit, etc.) so that Eclipse doesn't die due to large blobs. The rest can be "what would you expect if you request a diff on this file?" type of question to the user :)
+
+But that doesn't mean I'm strictly against any more user friendliness if you think it is required - I'm just not yet convinced we absolutely require it...
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2018-02-13 08:45:03.000000000
+Message: 
+Patch Set 7:
+
+> do we automagically diff in some place?
+
+I don't think so, though quick-diff (not in this change) can be rather auto-magic. But the point is that LFS pointers are not discriminated in the UI somehow (and cannot easily be made so), so the user unsuspectingly triggers a comparison, and boom, it'll start downloading a whole DVD image or whatever.
+----------------------------------------------------------------------------------------------------------------------
+Author: Markus Duft
+Date: 2018-02-13 08:50:52.000000000
+Message: 
+Patch Set 7:
+
+> > do we automagically diff in some place?
+ > 
+ > I don't think so, though quick-diff (not in this change) can be
+ > rather auto-magic. But the point is that LFS pointers are not
+ > discriminated in the UI somehow (and cannot easily be made so), so
+ > the user unsuspectingly triggers a comparison, and boom, it'll
+ > start downloading a whole DVD image or whatever.
+
+If you tell Eclipse to diff a .iso file, and you don't have all LFS blobs locally already, yes. That's why I was thinking about the "emergency break". Let's ask differently: what would happen if I try to quick-diff a DVD image which is NOT in LFS, but in normal GIT? The "only" difference is the download, right? We can certainly handle this with some kind of timeout. Maybe a global option (quick-diff-lfs-download-timeout-whatever)? LFS would need to know the purpose of the download then though, which is not nice...
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2018-02-13 09:49:11.000000000
+Message: 
+Patch Set 7:
+
+> > > do we automagically diff in some place?
+ > >
+ > > I don't think so, though quick-diff (not in this change) can be
+ > > rather auto-magic. But the point is that LFS pointers are not
+ > > discriminated in the UI somehow (and cannot easily be made so),
+ > so
+ > > the user unsuspectingly triggers a comparison, and boom, it'll
+ > > start downloading a whole DVD image or whatever.
+ > 
+ > If you tell Eclipse to diff a .iso file, and you don't have all LFS
+ > blobs locally already, yes. That's why I was thinking about the
+ > "emergency break". Let's ask differently: what would happen if I
+ > try to quick-diff a DVD image which is NOT in LFS, but in normal
+ > GIT? The "only" difference is the download, right? We can certainly
+ > handle this with some kind of timeout. Maybe a global option
+ > (quick-diff-lfs-download-timeout-whatever)? LFS would need to know
+ > the purpose of the download then though, which is not nice...
+
+I shouldn't have said "DVD image", that was just a tongue-in-cheek placeholder for "very large file". (BTW, a 4GB download would take about 30-45min with my connection). Maybe we could build something with progress monitors and give the user a way to cancel... though I'm not sure; IStorage.getContents() doesn't take a progress monitor. Would have to look closely where such cancellation could be done in Eclipse's compare framework. But in general it's not nice if the user only notices after the fact that the operation will take minutes or longer, and then has to cancel. If we could know up front that an operation on some file would trigger expensive side-effects we could ask before, but in general we can't know that, and even special-casing this for LFS would be non-trivial and potentially slow down things in general. For this diff (comparison/blame/quick diff) business, a git attribute might be a flexible and relatively cheap way to give the user some control.
+
+The text/binary attribute cannot be used; it may in fact be OK to do comparisons of binary files. Don't know if Eclipse has an image comparator, but it does at least try to determine itself whether some content is text or binary. It could check the first bytes, and if they both indicate images, could open an image diff viewer. (Image diffs can be done quite nicely with a variety of techniques (side-by-side view, or subtracting, or a blink comparator. Perhaps merging would be restricted to "take ours" or "take theirs"...) So for a 7MB jpg stored in LFS, it might be OK to smudge filter to do the download, for a 700MB mp4 video the user might not want it. So set +rawdiff on the mp4 video and it just won't happen. Of course the comparison then compares with the LFS pointer.
+
+BTW, it's not just about download time. Even if the LFS blob is already cached locally, I fear that doing the smudge and comparing two huge files may overwhelm Eclipse (memory requirements; text diff on big files already is slow, warns about falling back to a less precise algorithm, and even then takes time).
+----------------------------------------------------------------------------------------------------------------------
+Author: Markus Duft
+Date: 2018-02-13 11:57:19.000000000
+Message: 
+Patch Set 7:
+
+> I shouldn't have said "DVD image", that was just a tongue-in-cheek
+ > placeholder for "very large file". (BTW, a 4GB download would take
+ > about 30-45min with my connection). Maybe we could build something
+ > with progress monitors and give the user a way to cancel... though
+ > I'm not sure; IStorage.getContents() doesn't take a progress
+ > monitor. Would have to look closely where such cancellation could
+ > be done in Eclipse's compare framework. But in general it's not
+ > nice if the user only notices after the fact that the operation
+ > will take minutes or longer, and then has to cancel. If we could
+
+A cheap (but hacky?) way would be wrapping filtering in a job which we join for while spinning the event loop.
+
+ > know up front that an operation on some file would trigger
+ > expensive side-effects we could ask before, but in general we can't
+ > know that, and even special-casing this for LFS would be
+ > non-trivial and potentially slow down things in general. For this
+ > diff (comparison/blame/quick diff) business, a git attribute might
+ > be a flexible and relatively cheap way to give the user some
+ > control.
+
+Changing built-in filters to be able to ask them whether a certain operation is expensive might be possible, but once we're down to native filter, we lost anyway... Yes, I think if we need/want that control, an attribute is the cheapest/best way to achieve it.
+
+ > ...
+ > BTW, it's not just about download time. Even if the LFS blob is
+ > already cached locally, I fear that doing the smudge and comparing
+ > two huge files may overwhelm Eclipse (memory requirements; text
+ > diff on big files already is slow, warns about falling back to a
+ > less precise algorithm, and even then takes time).
+
+Yes, but in the case there is no download we're neither better nor worse than ANY comparison in Eclipse, right?
+----------------------------------------------------------------------------------------------------------------------

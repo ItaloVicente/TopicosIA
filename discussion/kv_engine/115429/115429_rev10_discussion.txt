@@ -1,0 +1,163 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-36146 Fix a race condition in CheckpointManager
+
+Fix a race condition in the CheckpointManager when the following
+sequence of events occur:
+
+T1-1. An active stream needs to be moved to the dead state so we can
+call the destructor ActiveStream::~ActiveStream()
+
+T1-2. This then in turn calls ActiveStream::removeCheckpointCursor()
+which gets a shared pointer to the checkpoint cursor
+
+T1-3. The removeCheckpointCursor() method then gets a lock on the
+queueLock
+
+    T2-a. ActiveStream::getItemsRemaining() is called and gets hold of
+    a shared pointer to the same cursor as removeCheckpointCursor()
+    has
+
+    T2-b. CheckpointManager::getNumItemsForCursor() is then called
+    with the raw pointer to the cursor but has to wait till
+    removeCheckpointCursor() has finished executing as queueLock is
+    locked
+
+T1-4. removeCursor_UNLOCKED() is called by removeCheckpointCursor()
+which decrements the number of cursors on checkpoint
+
+        T3-I. The checkpoint remover task then runs removing the
+        checkpoint that the cursor points to as its cursor count is
+        now 0 and its closed.
+
+T1-5. removeCheckpointCursor() then frees the queueLock so
+getNumItemsForCursor() can call getNumItemsForCursor_UNLOCKED()
+
+    T2-c. getNumItemsForCursor_UNLOCKED() then tries to access the
+    member CheckpointList::iterator currentCheckpoint which points
+    to the freed Checkpoint and then when trying to access it we crash.
+
+The fix for this is to set CheckpointCursor::currentCheckpoint to the
+checkpointList.end() when we are deleting the current courser. Then
+check before we dereference a given currentCheckpoint that we make sure
+its not null and is not equal to checkpointList.end().
+
+Change-Id: I4e9ed18188fe4b182e87d1a8d5320a094df64e8d
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Richard de Mellow
+Date: 2019-10-03 16:41:06.000000000
+Message: 
+Patch Set 10: Patch Set 9 was rebased
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-10-03 17:29:30.000000000
+Message: 
+Patch Set 10: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/23813/ : FAILURE
+
+Failure of a GoogleTest test:
+
+TransportProtocols/WithMetaTest.basicSet/Mcbp_XattrYes_JsonYes_SnappyYes, where GetParam() = (Mcbp, XattrYes, 4-byte object <00-00 00-00>, 4-byte object <00-00 00-00>) (0 ms) ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/23813/ )
+
+Failure of a CTest test 186/197 Test #188: memcached_testapp.ep.TransportProtocols/WithMetaTest ......................... ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/23813/ )
+
+Timeout of a CTest test  81/197 Test  #63: ep_testsuite_xdcr.value_eviction.magma .......................................} ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/23813/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/20333/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/21417/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/14782/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/13602/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/22801/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/4476/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/7442/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-10-04 09:54:04.000000000
+Message: 
+Patch Set 10:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/23834/ : FAILURE
+
+Timeout of a CTest test  81/197 Test  #63: ep_testsuite_xdcr.value_eviction.magma .......................................} ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/23834/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/20333/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/21417/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/14782/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/13602/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/22801/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/4476/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/7442/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-10-04 10:42:16.000000000
+Message: 
+Patch Set 10:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/23838/ : ABORTED
+
+Timeout of a CTest test  95/197 Test  #63: ep_testsuite_xdcr.value_eviction.magma .......................................} ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/23838/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/20333/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/21417/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/14782/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/13602/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/22801/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/4476/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/7442/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-10-04 11:17:32.000000000
+Message: 
+Patch Set 10:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/23839/ : FAILURE
+
+Failure of a CTest test  26/197 Test  #27: ep_testsuite.full_eviction.comp_passive ...................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/23839/ )
+
+Timeout of a CTest test  63/197 Test  #63: ep_testsuite_xdcr.value_eviction.magma .......................................} ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/23839/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/20333/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/21417/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/14782/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/13602/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/22801/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/4476/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/7442/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

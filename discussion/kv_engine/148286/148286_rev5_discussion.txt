@@ -1,0 +1,308 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-44858: Correct stats if updated between cursors and flush fails
+
+Currently if we update an item in an open checkpoint in the
+checkpoint manager between the backup persistence cursor and the
+regular persistence cursor then we will overcount the stats if the
+flush fails. Correct this by tracking a set of stats that are
+set when we add an item between persistence cursors, reset when a
+flush completes successfully, and applied when a flush fails.
+
+Change-Id: Id441ce37d67e1e6c222573e7eee151fc4aba41d3
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Ben Huddleston
+Date: 2021-03-16 11:13:00.000000000
+Message: 
+Uploaded patch set 5.
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2021-03-16 12:32:31.000000000
+Message: 
+Patch Set 5: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-03-16 12:44:45.000000000
+Message: 
+Patch Set 5: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/29410/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/34254/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/7667/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/6205/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/8297/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/9235/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/9589/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/9381/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/17143/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2021-03-16 13:31:00.000000000
+Message: 
+Patch Set 5: Code-Review-1
+
+I still think that we should address this in a different way.
+
+I've spent some time trying something like "update stats at dedup accordingly". The approach is that the stats like "num-items" should not increase at all in the CM when deduplication happens. That succeeds the test in this patch, but I do see a few failures in other tests. I've not proceeded fixing everything but we should probably try.
+
+If the above turns out being not feasible, then we should probably think of changing the Backup PCursor logic from
+
+1) getItemForPErsistnce -> create the Backup cursor at PCursor position and move the PCursor
+2) If flush succeeds -> then remove the Backup cursor
+3) else -> reset the PCUrsor at Backupt position
+
+to
+
+1) getItemForPErsistnce -> create the Backup cursor at PCursor position and move the Backup cursor (PCursor stays at its pre-flush position)
+2) If flush succeeds -> turn the Backup cursor into the new PCursor and remove the old PCursor
+3) else -> remove the Backup Cursor
+
+I think that the issue seen here will be implicitly fixed by that
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2021-03-16 13:40:17.000000000
+Message: 
+Patch Set 5:
+
+> Patch Set 5: Code-Review-1
+> 
+> I still think that we should address this in a different way.
+> 
+> I've spent some time trying something like "update stats at dedup accordingly". The approach is that the stats like "num-items" should not increase at all in the CM when deduplication happens. That succeeds the test in this patch, but I do see a few failures in other tests. I've not proceeded fixing everything but we should probably try.
+> 
+> If the above turns out being not feasible, then we should probably think of changing the Backup PCursor logic from
+> 
+> 1) getItemForPErsistnce -> create the Backup cursor at PCursor position and move the PCursor
+> 2) If flush succeeds -> then remove the Backup cursor
+> 3) else -> reset the PCUrsor at Backupt position
+> 
+> to
+> 
+> 1) getItemForPErsistnce -> create the Backup cursor at PCursor position and move the Backup cursor (PCursor stays at its pre-flush position)
+> 2) If flush succeeds -> turn the Backup cursor into the new PCursor and remove the old PCursor
+> 3) else -> remove the Backup Cursor
+> 
+> I think that the issue seen here will be implicitly fixed by that
+
+I think we'd have a similar issue if we swapped the cursor order. Consider that we are mid-flush and update an item between the cursors. We would now return SuccessExistingItem and not update the stats. On flush success we'd move the PCursor and flush the item in the next batch which would decrement the stats and cause an undercount.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2021-03-16 14:17:01.000000000
+Message: 
+Patch Set 5:
+
+> Patch Set 5:
+> 
+> > Patch Set 5: Code-Review-1
+> > 
+> > I still think that we should address this in a different way.
+> > 
+> > I've spent some time trying something like "update stats at dedup accordingly". The approach is that the stats like "num-items" should not increase at all in the CM when deduplication happens. That succeeds the test in this patch, but I do see a few failures in other tests. I've not proceeded fixing everything but we should probably try.
+> > 
+> > If the above turns out being not feasible, then we should probably think of changing the Backup PCursor logic from
+> > 
+> > 1) getItemForPErsistnce -> create the Backup cursor at PCursor position and move the PCursor
+> > 2) If flush succeeds -> then remove the Backup cursor
+> > 3) else -> reset the PCUrsor at Backupt position
+> > 
+> > to
+> > 
+> > 1) getItemForPErsistnce -> create the Backup cursor at PCursor position and move the Backup cursor (PCursor stays at its pre-flush position)
+> > 2) If flush succeeds -> turn the Backup cursor into the new PCursor and remove the old PCursor
+> > 3) else -> remove the Backup Cursor
+> > 
+> > I think that the issue seen here will be implicitly fixed by that
+> 
+> I think we'd have a similar issue if we swapped the cursor order. Consider that we are mid-flush and update an item between the cursors. We would now return SuccessExistingItem and not update the stats. On flush success we'd move the PCursor and flush the item in the next batch which would decrement the stats and cause an undercount.
+
+So let's consider this state at begin:
+
+s:1   s:2
+^
+P
+
+If we swap the cursor order, in the middle of a flush the checkpoint would be like:
+
+keyA:1    keyB:2
+^         ^
+P         B
+
+Now we queue another mutation for keyB. Given that the PCursor is still at the left of the deduped mutation (ie, keyB:2), then we dedup (replace keyB:2 by keyB:3) and return SuccessExistingItem and NOT update the stats.
+Not updating the stats is correct in this scenario, as:
+-> if flush succeeds, at this point we decrement diskQueueSize by 1
+-> if flush succeeds, the next flush attempt will still get 1 mutation and decrement diskQueueSize by 1
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2021-03-17 09:37:24.000000000
+Message: 
+Patch Set 5: Code-Review+1
+
+(1 comment)
+Line:346, engines/ep/src/checkpoint.cc -> This is 'currPos' - maybe we want to rename it 'oldItem' or any other similar / more descriptive name
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2021-03-17 09:38:40.000000000
+Message: 
+Patch Set 5:
+
+> Patch Set 5:
+> 
+> > Patch Set 5:
+> > 
+> > > Patch Set 5: Code-Review-1
+> > > 
+> > > I still think that we should address this in a different way.
+> > > 
+> > > I've spent some time trying something like "update stats at dedup accordingly". The approach is that the stats like "num-items" should not increase at all in the CM when deduplication happens. That succeeds the test in this patch, but I do see a few failures in other tests. I've not proceeded fixing everything but we should probably try.
+> > > 
+> > > If the above turns out being not feasible, then we should probably think of changing the Backup PCursor logic from
+> > > 
+> > > 1) getItemForPErsistnce -> create the Backup cursor at PCursor position and move the PCursor
+> > > 2) If flush succeeds -> then remove the Backup cursor
+> > > 3) else -> reset the PCUrsor at Backupt position
+> > > 
+> > > to
+> > > 
+> > > 1) getItemForPErsistnce -> create the Backup cursor at PCursor position and move the Backup cursor (PCursor stays at its pre-flush position)
+> > > 2) If flush succeeds -> turn the Backup cursor into the new PCursor and remove the old PCursor
+> > > 3) else -> remove the Backup Cursor
+> > > 
+> > > I think that the issue seen here will be implicitly fixed by that
+> > 
+> > I think we'd have a similar issue if we swapped the cursor order. Consider that we are mid-flush and update an item between the cursors. We would now return SuccessExistingItem and not update the stats. On flush success we'd move the PCursor and flush the item in the next batch which would decrement the stats and cause an undercount.
+> 
+> So let's consider this state at begin:
+> 
+> s:1   s:2
+> ^
+> P
+> 
+> If we swap the cursor order, in the middle of a flush the checkpoint would be like:
+> 
+> keyA:1    keyB:2
+> ^         ^
+> P         B
+> 
+> Now we queue another mutation for keyB. Given that the PCursor is still at the left of the deduped mutation (ie, keyB:2), then we dedup (replace keyB:2 by keyB:3) and return SuccessExistingItem and NOT update the stats.
+> Not updating the stats is correct in this scenario, as:
+> -> if flush succeeds, at this point we decrement diskQueueSize by 1
+> -> if flush succeeds, the next flush attempt will still get 1 mutation and decrement diskQueueSize by 1
+
+As per offline discussion, the above would fix the flush-failure case but break the flush-success case.
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2021-03-17 10:21:46.000000000
+Message: 
+Patch Set 5:
+
+(1 comment)
+
+> Patch Set 5:
+> 
+> > Patch Set 5:
+> > 
+> > > Patch Set 5: Code-Review-1
+> > > 
+> > > I still think that we should address this in a different way.
+> > > 
+> > > I've spent some time trying something like "update stats at dedup accordingly". The approach is that the stats like "num-items" should not increase at all in the CM when deduplication happens. That succeeds the test in this patch, but I do see a few failures in other tests. I've not proceeded fixing everything but we should probably try.
+> > > 
+> > > If the above turns out being not feasible, then we should probably think of changing the Backup PCursor logic from
+> > > 
+> > > 1) getItemForPErsistnce -> create the Backup cursor at PCursor position and move the PCursor
+> > > 2) If flush succeeds -> then remove the Backup cursor
+> > > 3) else -> reset the PCUrsor at Backupt position
+> > > 
+> > > to
+> > > 
+> > > 1) getItemForPErsistnce -> create the Backup cursor at PCursor position and move the Backup cursor (PCursor stays at its pre-flush position)
+> > > 2) If flush succeeds -> turn the Backup cursor into the new PCursor and remove the old PCursor
+> > > 3) else -> remove the Backup Cursor
+> > > 
+> > > I think that the issue seen here will be implicitly fixed by that
+> > 
+> > I think we'd have a similar issue if we swapped the cursor order. Consider that we are mid-flush and update an item between the cursors. We would now return SuccessExistingItem and not update the stats. On flush success we'd move the PCursor and flush the item in the next batch which would decrement the stats and cause an undercount.
+> 
+> So let's consider this state at begin:
+> 
+> s:1   s:2
+> ^
+> P
+> 
+> If we swap the cursor order, in the middle of a flush the checkpoint would be like:
+> 
+> keyA:1    keyB:2
+> ^         ^
+> P         B
+> 
+> Now we queue another mutation for keyB. Given that the PCursor is still at the left of the deduped mutation (ie, keyB:2), then we dedup (replace keyB:2 by keyB:3) and return SuccessExistingItem and NOT update the stats.
+> Not updating the stats is correct in this scenario, as:
+> -> if flush succeeds, at this point we decrement diskQueueSize by 1
+> -> if flush succeeds, the next flush attempt will still get 1 mutation and decrement diskQueueSize by 1
+
+I don't think I fo
+Line:346, engines/ep/src/checkpoint.cc -> Sure, I did that in a follow up change though as this patch and the successor are both verified +1 - http://review.couchbase.org/c/kv_engine/+/148810
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-03-17 11:31:40.000000000
+Message: 
+Patch Set 5: Code-Review-1
+
+(4 comments)
+Line:324, engines/ep/src/checkpoint.cc -> Meta-point: Indentation is getting quite rediculous here; might want to restructure this to flip logic and add early-exits to the for loop.
+
+Line:344, engines/ep/src/checkpoint.cc -> Would it be simpler / clearer if we instead modified the Item's queueTime instead of this new overload?
+
+Line:721, engines/ep/src/checkpoint_manager.h -> Please document this member.
+
+Line:484, engines/ep/src/vbucket.h -> Prefer a single method with a defaulted argument - see https://isocpp.github.io/CppCoreGuidelines/CppCoreGuidelines#Rf-default-args
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2021-03-17 12:42:47.000000000
+Message: 
+Patch Set 5:
+
+(5 comments)
+Line:324, engines/ep/src/checkpoint.cc -> Indeed. Will see what I can refactor away in a followup to keep the reviews simple
+
+Line:344, engines/ep/src/checkpoint.cc -> My first version did that but it felt wrong to change the Item. It reduces the code change slightly as we don't need the accountItem overload but I'm not sure it's any simpler
+
+Line:346, engines/ep/src/checkpoint.cc -> Pulling into this patch as changes are to be made.
+
+Line:721, engines/ep/src/checkpoint_manager.h -> Done
+
+Line:484, engines/ep/src/vbucket.h -> Can't default to item->queueTime as item is a parameter
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2021-03-17 13:58:43.000000000
+MISMATCHED INLINE COMMENT
+Line:324, engines/ep/src/checkpoint.cc -> http://review.couchbase.org/c/kv_engine/+/148849/1
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2021-03-17 13:32:15.000000000
+MISMATCHED INLINE COMMENT
+Line:484, engines/ep/src/vbucket.h -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-03-17 13:20:04.000000000
+MISMATCHED INLINE COMMENT
+Line:484, engines/ep/src/vbucket.h -> True - but you could achieve similar with a std::optional which if present overrides the value from Item.
+----------------------------------------------------------------------------------------------------------------------

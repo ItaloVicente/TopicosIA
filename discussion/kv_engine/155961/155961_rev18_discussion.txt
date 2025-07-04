@@ -1,0 +1,180 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-29928: Implement auto controller logic for the defragmenter
+
+With changes in 7.0 to memory tracking, we now have visibility of
+an individual bucket's fragmentation, whereas pre 7.0 we only had
+visibility of the entire process.
+
+This commit makes use of the bucket fragmentation to calculate
+the sleep interval of the defragger, the overall idea being that
+as a bucket's defragmentation gets worse, the sleep time reduces.
+The defragger is then running more frequently, visiting more items
+and bringing the fragmentation down.
+
+The commit introduces two new modes of automatic calculation. The reason
+for this is that the second, PID mode, is more experimental. Ultimately
+once it's had some soak time, one mode can remain in code.
+
+The two modes are as follows and can be selected in the bucket config
+(a future patch makes them runtime switchable via cbepctl).
+
+1) auto - Use a 'static' and predictable calculation for converting
+fragmentation into a reduction in sleep time.
+
+2) auto_pid - Use a PID controller to calculate reductions in
+fragmentation. This is less predictable as real time is a factor
+in the calculation, scheduling delays etc... results in unpredictable
+outputs.
+
+The existing mode (just use defragmenter_interval) is named "static".
+
+Both modes of auto controller work by taking the bucket fragmentation
+as a percentage and then using the bucket's low-water mark creating
+a 'score' which is then used for determining how the sleep interval
+maybe calculated. The result is that when fragmentation maybe high,
+but rss is actually small (lots of headroom before low-water mark)
+the score is low, whilst as we approach the low-water mark the score
+increases.
+
+E.g.
+
+fragmentation 23% (allocated:500, rss:650), then with a low-water
+mark of n the value used in calculations (score):
+
+    n    | score
+    600  | 23   (rss > low-water)
+    1000 | 14.95
+    2000 | 7.4
+    3000 | 4.98
+    5000 | 2.99
+
+A spreadsheet with numerous scenarios and the score can be found here:
+
+https://docs.google.com/spreadsheets/d/1W72N2vbrfa5xOVFmS0e3tpFCcEyd8kPk8fqMNmuM1k8/edit#gid=0
+
+auto: This mode takes the score and a range. Below the range
+and the maximum sleep is used, above the range and the minimum sleep is
+used. When the score is within the range we find how far in the range
+the score is, e.g. 20% and map that to be 20% between min and max sleep.
+
+Here the following configuration parameters are being used:
+
+* defragmenter_auto_min_sleep 0.0
+* defragmenter_auto_max_sleep 10.0
+* defragmenter_auto_lower_threshold 0.07
+* defragmenter_auto_upper_threshold 0.25
+
+auto_pid: This mode uses a single configurable threshold and when the
+score exceeds that threshold the PID calculates an output. The returned
+sleep time is the maximum - output, but capped at the configuration
+minimum. The PID itself is configured at runtime and the commit uses
+values for P, I, D and dt based on examination of the "pathogen"
+performance test and use of the `pid_runner` program which allows for
+some examination of P, I and D. The assumption is that fragmentation
+doesn't increase quickly, hence the I and dt term forces the PID to
+only recalculate every 10 seconds with a 'slow' output.
+
+Here the following configuration parameters are being used:
+
+* defragmenter_auto_min_sleep 0.0
+* defragmenter_auto_max_sleep 10.0
+* defragmenter_auto_lower_threshold 0.07
+* defragmenter_auto_pid_p 0.3
+* defragmenter_auto_pid_i 0.0000197
+* defragmenter_auto_pid_d 0.0
+* defragmenter_auto_pid_dt 30000
+
+These values have been used in the pid_runner test and were chosen based
+on the observation that fragmentation in real workloads increases
+slowly. The pathogen test is useful for testing defragmentation, but
+may not be truly representative of real fragmentation growth, for
+example that test achieves fragmentation greater than 35% in a very
+short time, but is operating on a small amount of data, mem_used
+ranges from ~200MB to ~600MB.
+
+First dt: With the observation that fragmentation generally increases
+slowly The dt term controls the rate at which the PID reads the Process
+Variable (PV or in our case scored fragmentation) and reacts. Thus 30
+seconds will elapse before the PID computes a new output value. If the
+PV were changing at faster rates, the dt term would be reduced.
+
+P I D values:
+
+Using pid_runner (in its committed state) a number of scenarios were
+compared where the PV is at a fixed percentage above the SP. These
+scenarios guided the current values of P I and D.
+
+For example when the PV is 1.1x of SP it would take the PID ~20 hours to
+reduce the sleep interval to min (0.0).
+
+When the PV is 2.6x of SP it would take the PID 75 minutes to reduce the
+sleep interval to min (0.0).
+
+    PV x | time to min sleep
+    1.1  | 20h:8m:31s
+    1.2  | 10h:4m:31s
+    1.5  | 4h:1m:31s
+    1.8  | 2h:31m:1s
+    2.0  | 2h:1m:1s
+    2.3  | 1h:33m:1s
+    2.6  | 1h:15m:31s
+    2.9  | 1h:3m:31s
+    3.0  | 1h:0m:31s
+    3.3  | 0h:52m:31s
+    3.5  | 0h:48m:31s
+
+A final note on the use of a PID. Typical use of a PID would be in
+systems where the 'process variable' can be influenced in positive and
+negative ways. E.g. a temperature could be controlled by heating or not
+heating (or forced cooling). In our use-case we can influence
+fragmentation down (by running the defragger), but we cannot raise
+fragmentation to the set-point. i.e. our use of a PID cannot maintain
+a level of fragmentation. This is why in the code, once the
+fragmentation (score) drops below the lower threshold, the PID just
+resets and the max sleep is used.
+
+Change-Id: Ia67d789dc38e0c649d2e7cf8cea945f8f67b711e
+Reviewed-on: http://review.couchbase.org/c/kv_engine/+/155961
+Tested-by: Build Bot <build@couchbase.com>
+Reviewed-by: Dave Rigby <daver@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2021-06-28 10:39:20.000000000
+Message: 
+Change has been successfully cherry-picked as 88a26d6df34fb9478e116eaff70ded22962e2a7e by Dave Rigby
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-06-28 10:59:51.000000000
+Message: 
+Patch Set 18:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-TSan-master/5325/ (1/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-06-28 11:16:35.000000000
+Message: 
+Patch Set 18:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-master/8178/ (2/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-06-28 12:05:07.000000000
+Message: 
+Patch Set 18:
+
+Build Unstable 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-TSan-master/5325/ : UNSTABLE
+
+Failure of a testrunner test ( http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-TSan-master/5325/ )
+
+ERROR: do_warmup_100k (memcapable.WarmUpMemcachedTest)
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-TSan-master/5325/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-master/8178/ : SUCCESS'
+----------------------------------------------------------------------------------------------------------------------

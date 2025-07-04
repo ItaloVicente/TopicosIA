@@ -1,0 +1,209 @@
+======================================================================================================================
+DESCRIPTION:
+
+NCBC-2526:
+
+Motivation
+----------
+Fixes a number of bugs related to timeout and cancellation during connection problems.
+In the worst case, client code would wait forever on cancelled/timed out requests
+
+Modifications
+-------------
+ - Added unit test for cancel during connection problems
+ - Removed the operation request wrapper and queued operations directly
+ - added Cancel() method to operation interface to complete operation task on cancel/timeout.
+ - Fixed affected unit test
+
+Result
+------
+ - timeout/cancel is respected when operation is waiting in send queue
+
+Change-Id: Ife193da35fb69a19e6358259a3b63a1e21aa9620
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Tommy Jakobsen
+Date: 2020-06-05 14:15:52.000000000
+Message: 
+Uploaded patch set 12.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-06-05 14:16:00.000000000
+Message: 
+Patch Set 12:
+
+Build Started http://sdk.jenkins.couchbase.com/job/dotnet/job/sdk/job/couchbase-net-client-cv-trigger/1796/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-06-05 14:17:56.000000000
+Message: 
+Patch Set 12: Verified+1
+
+Build Successful 
+
+http://sdk.jenkins.couchbase.com/job/dotnet/job/sdk/job/couchbase-net-client-cv-trigger/1796/ : success
+----------------------------------------------------------------------------------------------------------------------
+Author: Tommy Jakobsen
+Date: 2020-06-05 15:41:06.000000000
+Message: 
+Patch Set 12:
+
+(1 comment)
+
+> Patch Set 9:
+> 
+> (1 comment)
+----------------------------------------------------------------------------------------------------------------------
+Author: Brant Burnett
+Date: 2020-06-05 15:42:27.000000000
+Message: 
+Patch Set 12:
+
+> Patch Set 11:
+> 
+> (3 comments)
+> 
+> > Patch Set 9:
+> > 
+> > (1 comment)
+> 
+> The only place i found that it was called and awaited was in ClusterNode.ExecuteOp
+> Here it is immediately followed by an await op.Completed which is always completed later anyways
+> This was the task that never completed if it was dropped from the queue. 
+> 
+> Also, the implementation was inconsistent. In the "happy path" the task returned was the request.completedTask. But in the not connected state, it returned the connection cleanup task, which completed before actual sending, and also when the operation was dropped/timed out.
+
+I think changing it to an immediate return may have some value, especially if you looked into those use cases. I especially like that it drops the heap allocation for SendOperationRequest.
+
+However, if we do make this semantic change, we should probably reconsider the method name. SendAsync implies that the send is complete when the task completes. Perhaps QueueAsync instead? For that matter, do we need to return a task or could we just make it synchronous?
+----------------------------------------------------------------------------------------------------------------------
+Author: Brant Burnett
+Date: 2020-06-05 15:52:12.000000000
+Message: 
+Patch Set 12:
+
+> Patch Set 12:
+> 
+> > Patch Set 11:
+> > 
+> > (3 comments)
+> > 
+> > > Patch Set 9:
+> > > 
+> > > (1 comment)
+> > 
+> > The only place i found that it was called and awaited was in ClusterNode.ExecuteOp
+> > Here it is immediately followed by an await op.Completed which is always completed later anyways
+> > This was the task that never completed if it was dropped from the queue. 
+> > 
+> > Also, the implementation was inconsistent. In the "happy path" the task returned was the request.completedTask. But in the not connected state, it returned the connection cleanup task, which completed before actual sending, and also when the operation was dropped/timed out.
+> 
+> I think changing it to an immediate return may have some value, especially if you looked into those use cases. I especially like that it drops the heap allocation for SendOperationRequest.
+> 
+> However, if we do make this semantic change, we should probably reconsider the method name. SendAsync implies that the send is complete when the task completes. Perhaps QueueAsync instead? For that matter, do we need to return a task or could we just make it synchronous?
+
+Also, re: connection retry, the specific issue this code was in there to address is the case where connections have failed, not necessarily as part of configuration in ConfigHandler but just because sometimes one dies. There is some polling logic in place that will notice that and spool back up, but this runs on a cycle which is longer than the operation timeout.
+
+The theory was that we'd also add a quick double check whenever an operation is sent to make sure the pool is up and running, in case the all the connections died (network hiccup, etc). This could alternatively be addressed by having connections notify back to the pool when they die, rather than just setting IsDead to true. This would probably be better, frankly, since it could replace the connection proactively. But also probably out of scope for this changeset.
+----------------------------------------------------------------------------------------------------------------------
+Author: Tommy Jakobsen
+Date: 2020-06-05 16:07:35.000000000
+Message: 
+Patch Set 12:
+
+> Patch Set 12:
+> 
+> > Patch Set 11:
+> > 
+> > (3 comments)
+> > 
+> > > Patch Set 9:
+> > > 
+> > > (1 comment)
+> > 
+> > The only place i found that it was called and awaited was in ClusterNode.ExecuteOp
+> > Here it is immediately followed by an await op.Completed which is always completed later anyways
+> > This was the task that never completed if it was dropped from the queue. 
+> > 
+> > Also, the implementation was inconsistent. In the "happy path" the task returned was the request.completedTask. But in the not connected state, it returned the connection cleanup task, which completed before actual sending, and also when the operation was dropped/timed out.
+> 
+> I think changing it to an immediate return may have some value, especially if you looked into those use cases. I especially like that it drops the heap allocation for SendOperationRequest.
+> 
+> However, if we do make this semantic change, we should probably reconsider the method name. SendAsync implies that the send is complete when the task completes. Perhaps QueueAsync instead? For that matter, do we need to return a task or could we just make it synchronous?
+
+I agree that the name has become misleading, and I actually considered renameing it QueueAsync 😊.
+However, I did not really want to change the design and I my initially small fix is snowballing .
+ My suggestion would be to consider this change a stop gap measure and add a new work item to reconsider/refactor this method as well as reconnect handling as well as cancellation/timeout. It is not clear to me if the Cancellation tokens are supposed to be application cancelled or timeout cancelled. 
+ Many methods have cancellationtoken and timeout params explicitly but also in the passed operation/request. I found one case where a cancellation token source was set with 0ms timeout. It may have worked before just because timeouts were not respected (at least not always). There are some plasces where timeout params are not used.
+----------------------------------------------------------------------------------------------------------------------
+Author: Tommy Jakobsen
+Date: 2020-06-05 16:28:51.000000000
+Message: 
+Patch Set 12:
+
+> Patch Set 12:
+> 
+> > Patch Set 12:
+> > 
+> > > Patch Set 11:
+> > > 
+> > > (3 comments)
+> > > 
+> > > > Patch Set 9:
+> > > > 
+> > > > (1 comment)
+> > > 
+> > > The only place i found that it was called and awaited was in ClusterNode.ExecuteOp
+> > > Here it is immediately followed by an await op.Completed which is always completed later anyways
+> > > This was the task that never completed if it was dropped from the queue. 
+> > > 
+> > > Also, the implementation was inconsistent. In the "happy path" the task returned was the request.completedTask. But in the not connected state, it returned the connection cleanup task, which completed before actual sending, and also when the operation was dropped/timed out.
+> > 
+> > I think changing it to an immediate return may have some value, especially if you looked into those use cases. I especially like that it drops the heap allocation for SendOperationRequest.
+> > 
+> > However, if we do make this semantic change, we should probably reconsider the method name. SendAsync implies that the send is complete when the task completes. Perhaps QueueAsync instead? For that matter, do we need to return a task or could we just make it synchronous?
+> 
+> Also, re: connection retry, the specific issue this code was in there to address is the case where connections have failed, not necessarily as part of configuration in ConfigHandler but just because sometimes one dies. There is some polling logic in place that will notice that and spool back up, but this runs on a cycle which is longer than the operation timeout.
+> 
+> The theory was that we'd also add a quick double check whenever an operation is sent to make sure the pool is up and running, in case the all the connections died (network hiccup, etc). This could alternatively be addressed by having connections notify back to the pool when they die, rather than just setting IsDead to true. This would probably be better, frankly, since it could replace the connection proactively. But also probably out of scope for this changeset.
+
+I guess the polling logic you are referring to is the Connection Pool Scaling Poll which runs on a 30s interval. That was the first change I did as it did not scale up from 0 to minimum after a connection failure. However this did not fix the problem of application call waiting forever. 
+
+What I meant by ConfigHandler.Poll being the effective reconnect retry poll was not that I changed it to do that, but that fixing the timeout cancel caused it to do it indirectly by becoming unblocked as it happened to poll with a system default timeout which did not work before.
+----------------------------------------------------------------------------------------------------------------------
+Author: Tommy Jakobsen
+Date: 2020-06-08 09:08:09.000000000
+Message: 
+Patch Set 12:
+
+> Patch Set 12:
+> 
+> > Patch Set 12:
+> > 
+> > > Patch Set 11:
+> > > 
+> > > (3 comments)
+> > > 
+> > > > Patch Set 9:
+> > > > 
+> > > > (1 comment)
+> > > 
+> > > The only place i found that it was called and awaited was in ClusterNode.ExecuteOp
+> > > Here it is immediately followed by an await op.Completed which is always completed later anyways
+> > > This was the task that never completed if it was dropped from the queue. 
+> > > 
+> > > Also, the implementation was inconsistent. In the "happy path" the task returned was the request.completedTask. But in the not connected state, it returned the connection cleanup task, which completed before actual sending, and also when the operation was dropped/timed out.
+> > 
+> > I think changing it to an immediate return may have some value, especially if you looked into those use cases. I especially like that it drops the heap allocation for SendOperationRequest.
+> > 
+> > However, if we do make this semantic change, we should probably reconsider the method name. SendAsync implies that the send is complete when the task completes. Perhaps QueueAsync instead? For that matter, do we need to return a task or could we just make it synchronous?
+> 
+> I agree that the name has become misleading, and I actually considered renameing it QueueAsync 😊.
+> However, I did not really want to change the design and I my initially small fix is snowballing .
+>  My suggestion would be to consider this change a stop gap measure and add a new work item to reconsider/refactor this method as well as reconnect handling as well as cancellation/timeout. It is not clear to me if the Cancellation tokens are supposed to be application cancelled or timeout cancelled. 
+>  Many methods have cancellationtoken and timeout params explicitly but also in the passed operation/request. I found one case where a cancellation token source was set with 0ms timeout. It may have worked before just because timeouts were not respected (at least not always). There are some plasces where timeout params are not used.
+
+I did rename it QueueSend in my local env. That made it easy to spot that one implementation of executeop is bypassing the send queue. It seems to be used only by DiagnosticsReportProvider.
+----------------------------------------------------------------------------------------------------------------------

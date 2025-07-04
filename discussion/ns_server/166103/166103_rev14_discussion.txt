@@ -1,0 +1,399 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-48930: Remove user tombstones hourly
+
+Creates an agent on all nodes that waits for requests from a single
+"manager" on the leader that coordinates each node to remove the
+tombstones. This is done in basically this process:
+
+ 1. Agent on all nodes, manager on the leader
+ 2. Every hour the manager wakes up and orchestrates a multi-phased
+    job to remove tombstones.
+ 3. Manager sends prepare message to notify all nodes that we are
+    beginning the process. On agent recv of this message, user
+    requests are paused until the process completes. This is managed
+    by the process, or more effectively an ETS table that mirrors it's
+    information.
+ 4. All agents respond with 'ok' when ready.
+ 5. The manager requests the set of all keys for all tombstones on
+    each particular node, from the agents.
+ 6. The intersection of the set of all the keys is determined on the
+    manager.
+ 7. That final set of keys, on which all nodes agree, is sent back to
+    all the agents to be removed.
+ 8. The agents take this set of keys and constructs a select_delete to
+    remove all these keys, that are still active tombstones. These are
+    removed from the DETS and ETS table in memory.
+ 9. The DETS changes are synced to disk, the file is closed, and then
+    reopened to compact the *.dets file. This can only happen as it's
+    opened due to whatever limitations there are in the erlang API for
+    this functionality. Otherwise this file will grow indefinitely
+    until it hits the 2gb max.
+ 10. Responses are sent back to manager and user requests are allowed
+     to continue.
+
+This is the basic flow of a happy-path execution and there are a
+number of fail-safes built into the process, but luckily most of what
+we are doing is entirely reversable at most points of failure, and
+will be reversed automatically by virtue of the replication algorithm.
+This means if we only delete the tombstones on 2 of 3 nodes, we don't
+have to figure out a way to undo the operations, but instead the
+replication algorithm will simple re-replicate the tombstones back to
+the successful nodes and we are at square one.
+
+* Design:
+
+  The basic design is relatively simple and involves agents on all
+  nodes, and a manager on the leader. The agents are made up of a
+  state machine (gen_statem) that simplifies this multi-phase process
+  and gives a number of tools to deal with the possible failure
+  scenarios such as state timeouts, transitions, and a general
+  structure that makes assessing behavior easier. We also have the
+  agents place a monitor on the manager process while they are in the
+  process to detect for the manager crashing, though this would also
+  be safeguarded by the state timeouts, which you can say how long you
+  are allowed to be in a state before an event fires to notify you
+  that this time has elapsed. The manager is just a gen_server that
+  goes through a number of multi-request/responses in succession until
+  the phases of the process have completed and to handle and detect
+  errors along the way.
+
+* Other notes:
+
+  - We don't even actually start the manager if not all nodes are above
+    a certain version. The agents will start, but simply sit in
+    waiting, with no requests being stopped by the menelaus_web
+    handlers.
+
+* Correctness:
+  - We can determine the correctness of this algorithm by thinking of
+    each node as a weakly consistent set (which is what it is) and
+    consider some cases.
+
+    Case 1: All sets are the same, and no messages are mid-flight.
+         This is obviously the simple case where it should be obvious
+         that it is correct for us to remove the tombstones in this
+         case.
+    Case 2: All sets are the same, but there are more deletes that get
+         processed by one of the nodes between getting the keys, and
+         purging. Because we will only attempt to purge the keys we
+         knew about at the time, even if there are others that haven't
+         made their way through replication, it will not result in
+         incorrect, just (potentially) incomplete purging.
+    Case 3: In flight update resurrecting a deleted tombstone on one
+         node that other nodes haven't seen yet. In this case, since
+         we guard all the select_delete statments with the {deleted,
+         true} metadata, this entry will not be selected, despite
+         originally being in the list of keys agreed upon. That means
+         we won't accidetnally clobber this resurrected key.
+    Case 4: Any combination of creates/updates/deletes slip by between
+         collect keys phase, and purge phase. Creates and updates
+         should generally not affect the correctness, unless they
+         resurrect tombstones (see case 3). And further deletes, will
+         simply not be represented in the cleaned tombstones, to be
+         deleted on the next hours purge.
+
+Change-Id: Iab028cc82a2e92e957507bc5a30c3574de0871cd
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Bryan McCoid
+Date: 2021-12-15 22:01:36.000000000
+Message: 
+Uploaded patch set 14: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: Restriction Checker
+Date: 2021-12-15 22:01:51.000000000
+Message: 
+Patch Set 14: Well-Formed+1
+
+Permission granted to commit: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/278422/artifact/restricted.html : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2021-12-16 00:22:48.000000000
+Message: 
+Patch Set 14:
+
+(11 comments)
+
+@Bryan: I have looked at only a sub-set of the entire patch - and have left comments for those specifically. I don't think I can finish the entire patch in one sitting :) Will update my comments in phases.
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2021-12-16 02:51:26.000000000
+Message: 
+Patch Set 14:
+
+(10 comments)
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2021-12-16 18:28:20.000000000
+Message: 
+Patch Set 14:
+
+(1 comment)
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2021-12-16 18:39:05.000000000
+Message: 
+Patch Set 14:
+
+(1 comment)
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2021-12-16 19:12:33.000000000
+Message: 
+Patch Set 14:
+
+(2 comments)
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Artamonau
+Date: 2021-12-16 19:38:40.000000000
+Message: 
+Patch Set 14:
+
+My opinion is that this change does not belong in a minor release. Particularly, the fact that this code needs a bespoke mechanism to detect that all nodes are of correct versions, for me is evidence of that.
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2021-12-16 19:42:27.000000000
+Message: 
+Patch Set 14:
+
+(5 comments)
+Line:55, src/mb_master_sup.erl -> Is it intentional that the 'id' in the child_spec for user_tombstone_manager module is user_tombstone_agent?
+
+Line:214, src/user_tombstone_agent.erl -> Is this Go syntax for assignment that you are using here? :) I think just "dets = D" suffices, no?
+
+Line:218, src/user_tombstone_agent.erl -> Exceeds 80 chars code width.
+
+Line:230, src/user_tombstone_agent.erl -> Same as above - "=" should suffice.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2021-12-16 19:48:13.000000000
+Message: 
+Patch Set 14:
+
+(1 comment)
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2021-12-16 19:59:42.000000000
+Message: 
+Patch Set 14:
+
+> Patch Set 14:
+> 
+> My opinion is that this change does not belong in a minor release. Particularly, the fact that this code needs a bespoke mechanism to detect that all nodes are of correct versions, for me is evidence of that.
+
+A bit above my pay grade I think.. but I'm sure the powers that be will consider that and make a decision one way or the other. I think they mentioned this might be in a special release (for a specific customer), but it's still a bit up in the air as far as I know.
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2021-12-16 20:06:52.000000000
+Message: 
+Patch Set 14:
+
+(3 comments)
+Line:214, src/user_tombstone_agent.erl -> This is a map: http://erlang.org/documentation/doc-6.0/doc/reference_manual/maps.html#id83219
+
+Line:230, src/user_tombstone_agent.erl -> same as above
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-12-16 20:28:21.000000000
+Message: 
+Patch Set 14:
+
+(6 comments)
+
+Before lunch skim. More later.
+Line:92, /COMMIT_MSG -> typo
+
+Line:281, src/menelaus_users.erl -> How do we arrive here?
+
+Line:2, src/user_tombstone_agent.erl -> Should only be 2021 as it's the first year for this file. Also, if this moves into Neo it should be a BSL license.
+
+Line:3, src/user_tombstone_manager.erl -> Same 2021 & BSL.
+
+Line:41, src/user_tombstone_manager.erl -> Should?
+
+Line:154, src/user_tombstone_manager.erl -> Shouldn't this feature be driven by a compat mode change?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2021-12-16 20:46:17.000000000
+Message: 
+Patch Set 14:
+
+(5 comments)
+Line:92, /COMMIT_MSG -> Ack
+
+Line:281, src/menelaus_users.erl -> user_tombstone_agent -> gen_server:call(users_storage, ...) -> menelaus_users (see users_storage_sup) .. Basically there's some abstraction happening and you have to kinda look into the whole users subsystem to get the full picture but if you look at users_storage_sup some of it will become clearer.
+
+Line:2, src/user_tombstone_agent.erl -> Ack
+
+Line:41, src/user_tombstone_manager.erl -> Done
+
+Line:154, src/user_tombstone_manager.erl -> We aren't changing compat versions between now and the addition of the feature, so we can't determine it that way, unfortunately.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2021-12-16 22:19:58.000000000
+Message: 
+Patch Set 14:
+
+(1 comment)
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2021-12-16 22:47:31.000000000
+Message: 
+Patch Set 14:
+
+(4 comments)
+Line:58, src/user_tombstone_agent.erl -> Minor: We seem to be not calling this from any place. Probably needs cleanup.
+
+Line:66, src/user_tombstone_agent.erl -> Question for my own understanding:
+
+I see what we are doing with the ets, but is an ets really necessary? Can we not just use the replication_state/0 above. What performance difference is there if we get that info via the gen_statem:call's? I mean is there any operation as a part of the gen_statem that'll hold-up gen_statem:call(?MODULE, replication_state)?
+
+Line:73, src/user_tombstone_agent.erl -> Minor: Can we call these API'es (prepare, collect_keys, purge) instead of the direct gen_statem:call's done in the users_tombstone_manager?
+
+If not these seems to be not called from anywhere else - we should probably clean them up.
+
+Line:214, src/user_tombstone_agent.erl -> TIL :)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2021-12-16 23:06:04.000000000
+Message: 
+Patch Set 14:
+
+(6 comments)
+Line:58, src/user_tombstone_agent.erl -> Yeah I wasn't sure if I should maybe present these as a public API for the module, but sadly we can't use them (that I know of) with multi call from another node. So I am fine removing them.
+
+Line:66, src/user_tombstone_agent.erl -> Yeah this is highly problematic because there can easily be time taken inside of other calls in the gen_statem (there is a noticeable delay in some stages) and the messages would just pile up. So the ets table allows us to always respond, and quickly. I suppose the other can be removed entirely.. That's the option I'd be more interested in, tbh. There can be potentially many different processes attempting to evaluate this state and so forcing all these through the process' message queue doesn't seem like a good idea.
+
+Line:73, src/user_tombstone_agent.erl -> Yeah these are public api of the module, but we are forced to use the gen_statem:call's because we are calling multi-call from another node so I will just remove.
+
+Line:214, src/user_tombstone_agent.erl -> Done
+
+Line:218, src/user_tombstone_agent.erl -> Ack
+
+Line:230, src/user_tombstone_agent.erl -> Done
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Artamonau
+Date: 2021-12-16 23:11:44.000000000
+Message: 
+Patch Set 14:
+
+(6 comments)
+
+I took only a cursory look and left some comments inline. I continue to strongly believe that this patch must not be made part of any minor release.
+Line:962, src/menelaus_web_rbac.erl -> What does this actually achieve? Who's to say that the next moment after this call returns replication won't be suspended?
+
+Line:201, src/replicated_dets.erl -> That's not how I understand it from reading the documentation. My understanding is that new entries will reuse the space freed up by deleted items.
+
+Line:54, src/user_tombstone_agent.erl -> This looks like an incorrect re-implementation of gen_statem:call(). It may never return if the process starts right around the time when the function is called.
+
+Line:124, src/user_tombstone_agent.erl -> There's no guarantee that this'll give the pid of your caller.
+
+Line:172, src/user_tombstone_agent.erl -> Something like this looks totally possible:
+
+1. Node A is faster than node B.
+2. Node A purges something and then accepts an update to a document that just got purged.
+3. Node A replicates it to node B.
+4. Node B simply discards the update because it didn't complete its purge yet (and the local revision is higher than that from node B).
+
+Line:53, src/user_tombstone_manager.erl -> Limiting the scope of purging to live nodes does not seem correct to me. If I remember correctly how this all works, the nodes that purged tombstones will get fresh revisions for all the deleted users (in case they are recreated). And those will lose to the non-purged users from the other part of the cluster.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-12-17 00:07:41.000000000
+Message: 
+Patch Set 14:
+
+(1 comment)
+Line:154, src/user_tombstone_manager.erl -> If this is being done for just one customer perhaps it can be manually enabled after all nodes are on whatever release this goes into. The following was just on the ns_server slack and seemed applicable.
+
+API below that needs to be set first before we can set clusterEncryptionLevel to strict.
+
+curl -u Administrator:asdasd http://localhost:8091/internalSettings -d "canEnableStrictEncryption=true"
+
+It is a way for us to get around cluster compatibility problems since there is no cluster compat upgrade from 6.6.3 to 6.6.5. Basically the user should make sure all nodes are 6.6.5 before setting the above internalSetting.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2021-12-17 01:18:59.000000000
+Message: 
+Patch Set 14:
+
+(4 comments)
+Line:66, src/user_tombstone_manager.erl -> why not just crash?
+
+Line:80, src/user_tombstone_manager.erl -> dropping on the floor all bad results except one doesn't seem to be a good thing to do
+
+Line:131, src/user_tombstone_manager.erl -> Instead of copy pasting from misc, why don't you just modify misc:multi_call to be able to work with gen_statem or gen_server?
+
+Line:170, src/user_tombstone_manager.erl -> You traverse the list twice. Why not do filtermap first and then check if the result is []?
+
+filtermap could be replaced with this:
+[lists:flatten(Msg) || {_, {nack, Msg}} <- Responses]
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2021-12-17 01:20:19.000000000
+Message: 
+Patch Set 14:
+
+(1 comment)
+Line:154, src/user_tombstone_manager.erl -> I agree with that. I think this feature should not be enabled by default
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2021-12-22 22:00:43.000000000
+MISMATCHED INLINE COMMENT
+Line:55, src/mb_master_sup.erl -> The latest patch doesn't address this.
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2021-12-22 23:33:22.000000000
+MISMATCHED INLINE COMMENT
+Line:55, src/mb_master_sup.erl -> sorry I missed this comment entirely, addressing now..
+----------------------------------------------------------------------------------------------------------------------
+Author: Meni Hillel
+Date: 2021-12-22 04:29:20.000000000
+MISMATCHED INLINE COMMENT
+Line:962, src/menelaus_web_rbac.erl -> Major: I agree with Aliaksei's point about a race, but we still need a to prevent CRUD operations while we are purging. I see you've moved this to prevent replications, but what about local changes. We should prevent them from happening. Otherwise, we can incorrectly resurrect tombstones.
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2021-12-22 20:22:04.000000000
+MISMATCHED INLINE COMMENT
+Line:962, src/menelaus_web_rbac.erl -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2021-12-22 20:22:04.000000000
+MISMATCHED INLINE COMMENT
+Line:962, src/menelaus_web_rbac.erl -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2021-12-22 23:29:40.000000000
+MISMATCHED INLINE COMMENT
+Line:962, src/menelaus_web_rbac.erl -> Meant "ack"
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Artamonau
+Date: 2021-12-22 22:44:21.000000000
+MISMATCHED INLINE COMMENT
+Line:962, src/menelaus_web_rbac.erl -> What has been "Done" here?
+----------------------------------------------------------------------------------------------------------------------
+Author: Meni Hillel
+Date: 2021-12-22 04:29:20.000000000
+MISMATCHED INLINE COMMENT
+Line:987, src/menelaus_web_rbac.erl -> Same as above
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2021-12-22 20:22:04.000000000
+MISMATCHED INLINE COMMENT
+Line:987, src/menelaus_web_rbac.erl -> Done
+----------------------------------------------------------------------------------------------------------------------

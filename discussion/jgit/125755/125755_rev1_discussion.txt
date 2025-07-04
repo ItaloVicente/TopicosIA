@@ -1,0 +1,180 @@
+======================================================================================================================
+DESCRIPTION:
+
+Delete all loose refs empty directories
+
+Remove completely the empty directories under refs/<namespace>
+including the first level partition of the changes, when they are
+completely empty.
+
+Bug: 536777
+Change-Id: I88304d34cc42435919c2d1480258684d993dfdca
+Signed-off-by: Luca Milanesio <luca.milanesio@gmail.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Luca Milanesio
+Date: 2018-07-07 23:51:31.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-07-08 00:09:38.000000000
+Message: 
+Patch Set 1:
+
+Build Started https://ci.eclipse.org/jgit/job/jgit.gerrit/13492/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-07-08 00:26:30.000000000
+Message: 
+Patch Set 1: Verified-1
+
+Build Failed 
+
+https://ci.eclipse.org/jgit/job/jgit.gerrit/13492/ : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2018-07-08 14:04:37.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:888, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/GC.java -> Maybe I'm missing something obvious as I'm not familiar with this code. But I don't understand all this code (both Hector's original version and this changed version).
+
+First, isn't there still a race condition between asynchronous GC removing a directory and some other thread (or even external git) concurrently trying to create a new loose ref? What if the directory deletion here happens _between_ the mkdirs() and the createNewFile() in LockFile.lock()? Then creating the new ref would fail because GC just removed the directory that LockFile thought it had just ensured that it existed. (Since the directory exists already, the mkdirs() would not even have changed the timestamp...)
+
+Second, if I'm reading the code of RefDirectory.pack() correctly, empty ref directories should be removed there already?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2018-07-08 21:29:07.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:888, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/GC.java -> > Yes, that may happen. The client will get an error and hopefully
+ > the person that tried the push will try again.
+
+Not only push. This can also happen in the client (for instance in EGit in Eclipse), if GC runs concurrently (as it does by default). Creating a branch or tag might fail, giving the user an error he'd not understand.
+
+ > > Second, if I'm reading the code of RefDirectory.pack() correctly,
+ > empty ref directories should be removed there already?
+ > 
+ > That is what I thought, but wasn't working.
+ > I was about to try to fix that code when it was pointed out that
+ > Hector fixed it already. That's why I concentrated my efforts in
+ > using Hector's approach.
+
+But now that I've looked at Hector's approach and your modification of it in detail I have the impression that this whole approach is in the wrong place and it would indeed be better to figure out why the deletion in RefDirectory.pack() doesn't work, and then fix it there, and remove this attempt here altogether. (Though RefDirectory will do it only for freshly packed refs, so if there are a lot of old empty folders, some additional cleanup would be needed anyway... and RefDirectory has a similar race condition...)
+
+What does the C implementation of git do? I suppose they would have the same issues. How is this solved there?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2018-07-08 22:55:53.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:888, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/GC.java -> > Honestly I believe CGit doesn't do a good job anyway: I tried a gc
+ > pack-refs and many obsolete empty dirs were not removed.
+
+Interesting. Looking at the code in C git ([1] called via [2]) they seem to do basically the same as we do in RefDirectory.pack(). So why would that leave empty directories behind?
+
+[1] https://github.com/git/git/blob/50f08db/refs/files-backend.c#L986
+[2] https://github.com/git/git/blob/50f08db/refs/files-backend.c#L2816
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Hector Oswaldo Caballero
+Date: 2018-07-09 12:16:03.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:888, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/GC.java -> We've been using this code in production since some months ago and the performance issue associated with lots of empty refs folders is gone. I can also confirm that cgit gc leaves behind those empty folders, at least it did last time I tried it (git 2.15)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Hector Oswaldo Caballero
+Date: 2018-07-09 15:02:40.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:888, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/GC.java -> I just reproduced the case you're citing and you're right. I didn't realize the timestamp could affect the deletion of the hierarchy, but with this change, all the empty (unwanted) folders are gone.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2018-07-09 14:10:24.000000000
+MISMATCHED INLINE COMMENT
+Line:888, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/GC.java -> Using the fix as-is, I saw that only the 1st level of directories was removed but not the others.
+Example:
+
+Before:
+refs/changes/45/271629/20
+
+After:
+refs/changes/45/271629
+
+Bottom line: the number of directories to navigate was still huge.
+
+The problem was in the sequence of the filtering + removal: after removing the '/20' from the example above, the parent directly had its lastUpdateTs updated and thus wasn't removed.
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2018-07-08 21:04:47.000000000
+MISMATCHED INLINE COMMENT
+Line:888, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/GC.java -> > Maybe I'm missing something obvious as I'm not familiar with this code. But I don't understand all this code (both Hector's original version and this changed version).
+
+My code is simply the fix of Hector's code.
+
+> First, isn't there still a race condition between asynchronous GC removing a directory and some other thread (or even external git) concurrently trying to create a new loose ref? What if the directory deletion here happens _between_ the mkdirs() and the createNewFile() in LockFile.lock()? Then creating the new ref would fail because GC just removed the directory that LockFile thought it had just ensured that it existed. (Since the directory exists already, the mkdirs() would not even have changed the timestamp...)
+
+Yes, that may happen. The client will get an error and hopefully the person that tried the push will try again.
+
+> Second, if I'm reading the code of RefDirectory.pack() correctly, empty ref directories should be removed there already?
+
+That is what I thought, but wasn't working.
+I was about to try to fix that code when it was pointed out that Hector fixed it already. That's why I concentrated my efforts in using Hector's approach.
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2018-07-09 14:20:17.000000000
+MISMATCHED INLINE COMMENT
+Line:888, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/GC.java -> Real-life example with numbers for a repo with 500k changes, and an average of 3 PS per change.
+
+Before the prune: 500k * 2 *  (3 + 1) = 4M of directories
+After the  prune: 500k * 2 = 1M of directories
+
+Yes, there is a reduction, but still, it will take a while to navigate 1M of directories, to find out eventually that none of them has any loose refs.
+
+With the extra follow-up fix that I pushed, after the prune, only the refs/{changes,heads,tags,meta} were still present, and all the other empty sub-directories were removed.
+
+We have noticed a significant improvement in performance for Git clones and pushes. (2 to 3 times faster)
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2018-07-08 21:43:16.000000000
+MISMATCHED INLINE COMMENT
+Line:888, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/GC.java -> > > Yes, that may happen. The client will get an error and hopefully
+>  > the person that tried the push will try again.
+> 
+> Not only push. This can also happen in the client (for instance in EGit in Eclipse), if GC runs concurrently (as it does by default). Creating a branch or tag might fail, giving the user an error he'd not understand.
+> 
+>  > > Second, if I'm reading the code of RefDirectory.pack() correctly,
+>  > empty ref directories should be removed there already?
+>  > 
+>  > That is what I thought, but wasn't working.
+>  > I was about to try to fix that code when it was pointed out that
+>  > Hector fixed it already. That's why I concentrated my efforts in
+>  > using Hector's approach.
+> 
+> But now that I've looked at Hector's approach and your modification of it in detail I have the impression that this whole approach is in the wrong place and it would indeed be better to figure out why the deletion in RefDirectory.pack() doesn't work, and then fix it there, and remove this attempt here altogether. 
+
+Hector's fix doesn't work anyway :-(
+It would be helpful to ask Hector if the fix actually works or not for them in production.
+
+> (Though RefDirectory will do it only for freshly packed refs, so if there are a lot of old empty folders, some additional cleanup would be needed anyway... and RefDirectory has a similar race condition...)
+> 
+> What does the C implementation of git do? I suppose they would have the same issues. How is this solved there?
+
+Honestly I believe CGit doesn't do a good job anyway: I tried a gc pack-refs and many obsolete empty dirs were not removed.
+----------------------------------------------------------------------------------------------------------------------

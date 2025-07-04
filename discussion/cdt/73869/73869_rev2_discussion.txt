@@ -1,0 +1,103 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 494650 - Terminating multiple sessions from the Launch bar stop button hangs Eclipse
+
+This change is a continuation of:
+  commit 628389071558c43c52b666995e1eaa5c4aa67a8f
+  Bug 472765: Use gdb's "set substitute-path from to"
+
+See Bug 494650, for the details on the sequence leading to a possible hanging
+
+Change-Id: Id3c7ae8e463839811553e3b00d7ae990df085da3
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Alvaro Sanchez-Leon
+Date: 2016-05-28 14:57:42.000000000
+Message: 
+Patch Set 2: Published edit on patch set 1
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2016-05-28 14:57:48.000000000
+Message: 
+Patch Set 2:
+
+Build Started https://hudson.eclipse.org/cdt/job/cdt-verify/5302/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2016-05-28 15:41:51.000000000
+Message: 
+Patch Set 2: Verified-1
+
+Build Unstable 
+
+https://hudson.eclipse.org/cdt/job/cdt-verify/5302/ : UNSTABLE
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonah Graham
+Date: 2016-05-28 19:32:22.000000000
+Message: 
+Patch Set 2: Code-Review-1
+
+Hi Alvaro, thanks for tracking down this issue. At the moment I would prefer this is not submitted, as although it passed the tests on the build machine, tests in SourceLookupTest (specifically sourceSubstituteChanges and sourceSubstituteAdded) now fail intermittently when I run the tests. This is because the operation has stopped being atomic by changing it from a Query to a DsfRunnable.
+
+That said, I am aware their is a tradeoff between locking the entire GUI (VERY BAD!) and a corner case of source lookup changes not working. I will take a of additional time to investigate and understand the alternatives a bit better, including seeing if I can extract the issues as additional tests.
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonah Graham
+Date: 2016-05-28 20:35:57.000000000
+Message: 
+Patch Set 2: Code-Review-2 Verified-1
+
+(1 comment)
+
+Summary:
+
+With this change the CSourceNotFound does not work reliably, exposing a race condition. I am working on an alternate patch to resolve this issue.
+
+Thank you for tracking down this issue.
+Line:66, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/launching/GdbSourceLookupParticipant.java -> Sadly this is specifically the opposite of what assumption we have to make. We need to run this atomically if the reason for the change to the configuration is a source lookup change followed by a source lookup. That case is exactly the case that the CSourceNotFound editor leads us into. 
+
+Because it takes two commands to GDB to change source substitution settings, the executor thread is "released" while waiting for the result of the first command.
+
+It is in this window that the UI thread issues a source lookup which does a frame lookup to get the file for the active frame, meaning it gets either old or half working information from GDB.
+
+Additionally, at the moment we don't clear the cache until we finish the update of the substitutions. Therefore the UI thread actually gets the cached frame.
+
+I am looking at issuing the clear cache first, followed by queuing both GDB commands at the same time. That may lead to the whole operation being atomic on the executor thread. 
+
+I will provide a proposed update for your review, or comments here if I cannot get to the right solution.
+
+Thanks!
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonah Graham
+Date: 2016-05-29 00:34:09.000000000
+Message: 
+Patch Set 2:
+
+I have submitted an alternate implementation at https://git.eclipse.org/r/#/c/73871/
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc Khouzam
+Date: 2016-05-30 12:35:28.000000000
+Message: 
+Patch Set 2: Code-Review-2
+
+(1 comment)
+
+Good catch by Jonah.
+Line:66, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/launching/GdbSourceLookupParticipant.java -> MI commands are ordered so by sending this one first, we can safely assume it will be processed before any further MI command.
+
+However, the cache is the problem (and I forgot about it).  An MI command that gets its result from the cache can complete faster than an earlier MI command that needs to be sent do GDB.
+
+So Jonah is right that this solution is not sufficient.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Alvaro Sanchez-Leon
+Date: 2016-05-30 15:00:03.000000000
+Message: 
+Abandoned
+
+An improved solution has been submitted and tracked with:
+   https://git.eclipse.org/r/#/c/73871/
+----------------------------------------------------------------------------------------------------------------------

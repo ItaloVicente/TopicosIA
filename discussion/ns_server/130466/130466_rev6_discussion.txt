@@ -1,0 +1,155 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-25123 [WIP] determine if nodes are in time sync with orchestrator
+
+This is a work-in-progress. At this point it implements the
+messaging between the nodes and the orchestrator, the time offset
+calculations and alerting, but has not been thoroughly tested.
+
+To be done:
+- more unit tests
+- testing by hand
+
+Change-Id: I2a39d7fbf0332509854b3bfb09254beaa0fae66e
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Sam Cramer
+Date: 2020-06-23 03:50:34.000000000
+Message: 
+Uploaded patch set 6.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-06-23 03:50:45.000000000
+Message: 
+Patch Set 6: -Well-Formed
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-test/17644/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-06-23 03:55:01.000000000
+Message: 
+Patch Set 6: Well-Formed+1
+
+Permission granted to commit to restricted branch
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2020-06-23 19:08:30.000000000
+MISMATCHED INLINE COMMENT
+Line:84, src/ns_tick_agent.erl -> misc:get_env_default extracts application environment vars. I believe the intent was to store the settings in ns_config (they will be permanent then, survive restarts and can be cluster wide), so what you probably need to use instead is ns_config:read_key_fast/2.
+
+You also will need to subscribe to ns_config events and reload the settings when they are changed in ns_config. For reference see modules that do ns_pubsub:subscribe_link(ns_config_events, ...
+For example, prometheus_cfg
+
+Nitpicking: I would put all the settings to proplist and keep them in ns_config under a single key (say time_offset_settings). Like this:
+Key: time_offset_settings
+Value:
+[{min_interval, ?TIME_OFFSET_MIN_INTERVAL},
+ {rtt_threshold, ?RTT_THRESHOLD},
+ {threshold, ?TIME_OFFSET_THRESHOLD}]
+----------------------------------------------------------------------------------------------------------------------
+Author: Sam Cramer
+Date: 2020-06-23 19:30:19.000000000
+MISMATCHED INLINE COMMENT
+Line:84, src/ns_tick_agent.erl -> Yes, that was my intent -- thanks.  I agree that keeping the settings under a single key is cleaner; I'll do that.
+----------------------------------------------------------------------------------------------------------------------
+Author: Sam Cramer
+Date: 2020-07-11 02:12:37.000000000
+MISMATCHED INLINE COMMENT
+Line:84, src/ns_tick_agent.erl -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2020-06-23 19:08:30.000000000
+MISMATCHED INLINE COMMENT
+Line:106, src/ns_tick_agent.erl -> Not clear why you keep node name in state. We usually assume it's constant (which is not true actually). Are you trying to handle the node rename use-case by keeping the name in state?
+Anyway it looks like in this case nothing bad should happen if nodename changes, we will send one extra request and that's it.
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2020-06-23 19:33:20.000000000
+MISMATCHED INLINE COMMENT
+Line:106, src/ns_tick_agent.erl -> My point was to call node() when you need it, instead of saving it in state
+----------------------------------------------------------------------------------------------------------------------
+Author: Sam Cramer
+Date: 2020-06-23 20:44:14.000000000
+MISMATCHED INLINE COMMENT
+Line:106, src/ns_tick_agent.erl -> Ah.  Understood.
+----------------------------------------------------------------------------------------------------------------------
+Author: Sam Cramer
+Date: 2020-07-11 02:12:37.000000000
+MISMATCHED INLINE COMMENT
+Line:106, src/ns_tick_agent.erl -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Sam Cramer
+Date: 2020-06-23 19:30:19.000000000
+MISMATCHED INLINE COMMENT
+Line:106, src/ns_tick_agent.erl -> The intent is to avoid sending time offset requests to ourself if we're the master. The master is the "time server" and it makes no sense for it to ask itself for how its time differs from that of the master.
+
+I could remove "node" and replace it with a boolean that says "I am master."  Does that sound good, or is there a cleaner way to do that?
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2020-06-23 19:08:30.000000000
+MISMATCHED INLINE COMMENT
+Line:142, src/ns_tick_agent.erl -> It's perfectly legal to use same names for params that should be the same. In this particular case:
+
+handle_cast({time_offset_reply, FromNode, Request, MasterReplySystemTime},
+            #state{master = FromNode} = State)
+
+No need in guard then
+----------------------------------------------------------------------------------------------------------------------
+Author: Sam Cramer
+Date: 2020-07-16 04:17:55.000000000
+MISMATCHED INLINE COMMENT
+Line:142, src/ns_tick_agent.erl -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Sam Cramer
+Date: 2020-07-15 19:07:24.000000000
+MISMATCHED INLINE COMMENT
+Line:142, src/ns_tick_agent.erl -> Uh, strike my last reply; it doesn't make sense.  Yes, matching like you suggest is more elegant.  I'll do that.
+----------------------------------------------------------------------------------------------------------------------
+Author: Sam Cramer
+Date: 2020-06-23 19:30:19.000000000
+MISMATCHED INLINE COMMENT
+Line:142, src/ns_tick_agent.erl -> This is a bug.  I'm trying to compare our current idea of the master (#state.master) to the node that sent us the time_offset_reply.  Unfortunately, that's not what the code does.  Good catch.
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2020-06-23 19:54:24.000000000
+MISMATCHED INLINE COMMENT
+Line:172, src/ns_tick_agent.erl -> Two thoughts:
+1) Looks like we always trigger global alarm even if the event is local, for example please check what we do in case of when we are are of disk space;
+
+2) Maybe it makes sense to move this code to menelaus_web_alerts_srv. For example, how it may work: in ns_tick_agent we calculate if we are out of sync and save it to the process's state. At the same time menelaus_web_alerts_srv periodically polls ns_tick_agent and if out of sync flag is set it triggers the alert.
+The main reason why I think it makes sense to do it this way is consistency with current implementation of menelaus_web_alerts_srv. Looks like right now we have all alarm checks accumulated there and probably it makes sense to do it the same way now as well.
+----------------------------------------------------------------------------------------------------------------------
+Author: Sam Cramer
+Date: 2020-07-11 02:12:37.000000000
+MISMATCHED INLINE COMMENT
+Line:172, src/ns_tick_agent.erl -> 1) You are right: we should emit a global alert for a local issue like this.  I am now doing that.
+
+2) I have moved the code to menelaus_web_alerts_srv.
+----------------------------------------------------------------------------------------------------------------------
+Author: Sam Cramer
+Date: 2020-06-23 20:44:14.000000000
+MISMATCHED INLINE COMMENT
+Line:172, src/ns_tick_agent.erl -> Re: local vs. global alert: when I discussed this ticket with Dave, he was said that we should emit a local alert.  I looked at menelause_web_alerts.srv and saw that we do handle things differently for disk space. I'm not sure if there's something conceptually special in that case. I guess we could argue that low disk space will adversely affect the cluster; a time offset isn't great but may not have similar cluster-wide negative effect. I'll follow up with him on this point.
+
+Re: moving the code to menelause_web_alerts.srv: yes, that would be consistent with our current implementation, especially if we consider these alerts to be global.  In the local case, the menelaus_web_alerts_srv:local_alert/2 interface is exported and it seems to be intended for just this purpose.  On the other hand, it isn't used anywhere so there's no existing practice to cite.
+
+I'll think about this some more.
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2020-06-23 19:08:30.000000000
+MISMATCHED INLINE COMMENT
+Line:215, src/ns_tick_agent.erl -> I believe Master is ahead of Node in this case, no?
+----------------------------------------------------------------------------------------------------------------------
+Author: Sam Cramer
+Date: 2020-07-11 02:12:37.000000000
+MISMATCHED INLINE COMMENT
+Line:215, src/ns_tick_agent.erl -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Sam Cramer
+Date: 2020-06-23 19:30:19.000000000
+MISMATCHED INLINE COMMENT
+Line:215, src/ns_tick_agent.erl -> Yup!
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,167 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-28926: Use collatejson as binary protocol between GSI client and indexer
+
+Change-Id: I02b80c03a3fe9e8999ceec87788bd075b7d345e9
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: amithk
+Date: 2018-10-18 08:05:13.000000000
+Message: 
+Uploaded patch set 10: Patch Set 9 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: John Liang
+Date: 2018-10-18 22:13:23.000000000
+Message: 
+Patch Set 10: Code-Review-1
+
+(13 comments)
+Line:446, secondary/indexer/scan_pipeline.go -> For group aggr, do we have code path that require decoding?
+
+Line:45, secondary/queryport/client/client.go -> To make the code cleaner, one option is to create a new struct to encapsulate []common.SecondKey and [][]byte.   So GetEntries() returns (Result, [][]byte, err).    Result can encapsulate some operations.  This can potentially remove a lot of if-else statement to check for useCjson.   Just a thought.   Needs to go through the code to see if it works.
+
+Line:1351, secondary/queryport/client/client.go -> Can you explain what this is for?
+
+Line:1591, secondary/queryport/client/client.go -> You should not return an error.  Let say that you have a bug that does not call SetUsecjson.   This will cause all index scan to error out.  This is production downtime without workaround.     If SetUsejson is not set, then you should just don't use it.
+
+Line:875, secondary/queryport/client/scatter.go -> see my other comments that we should not return error
+
+Line:1260, secondary/queryport/client/scatter.go -> this could be a performance botteneck.  seckeyBufPool uses syncPool which internally use mutex.   This will serialize all goroutines across every scan.
+
+Line:1267, secondary/queryport/client/scatter.go -> Can the multipler (6) as a constant?   We need to start using the constant in other code, but this could be a separate exercise.
+
+Line:1272, secondary/queryport/client/scatter.go -> Instead of SetScatterError(), you can do one of the following:
+1) Use a flag to instruct client.doScan() that you do not work to retry (e.g. SetNoRetryFlag())
+2) Use a specific error code or error string, so client.doScan() will not retry when it sees this error code
+
+Line:1278, secondary/queryport/client/scatter.go -> There is no need to call FixMissingLiteral() if !sorted or len(skey) == 0, so you should be able to call this in the if-stmt above.
+
+Line:1999, secondary/queryport/client/scatter.go -> See my other comments regarding not returning error
+
+Line:1261, secondary/queryport/n1ql/secondary_index.go -> You should not return an error here.    See my other comments.
+
+Line:1592, secondary/queryport/n1ql/secondary_index.go -> Just a question.  Why the "if" logic and the "else" logic are the same?  skeysCJson is []byte and skeys is []c.SecondaryKey
+
+Line:1867, secondary/queryport/n1ql/secondary_index.go -> This is a performance bottleneck since secKeyBufPool requires mutex.  For scan path, we have to make it lockless.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: John Liang
+Date: 2018-10-19 01:56:35.000000000
+Message: 
+Patch Set 10:
+
+(1 comment)
+Line:419, secondary/queryport/client/client.go -> Besides constructor, is there other place that you would set Usecjson()?  How would you set usecjson after rebalancing?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: prataprc
+Date: 2018-10-19 13:19:54.000000000
+Message: 
+Patch Set 10:
+
+(4 comments)
+Line:994, secondary/collatejson/collate.go -> Deferred functions are generally bad for functions that get repeatedly called (especially in tight loop).
+
+Line:997, secondary/collatejson/collate.go -> if len(code) > 0 && code[0] != TypeArray { }
+
+Sometimes as part of security validation our code is subjected to malformed network packets. If caller can guarantee that len(code) > 0 ignore this comment.
+
+Line:74, secondary/protobuf/query/query.proto -> For consistency sake can we keep `Usecjson` useCjson` ?
+
+Line:86, secondary/protobuf/query/query.proto -> Same here.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2018-10-24 09:37:32.000000000
+MISMATCHED INLINE COMMENT
+Line:994, secondary/collatejson/collate.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2018-10-31 10:21:19.000000000
+MISMATCHED INLINE COMMENT
+Line:446, secondary/indexer/scan_pipeline.go -> No. GroupAggr projection code (IndexScanSource) takes care of giving out result in collatejson format. So, there is no need for “decoding” in the IndexScanDecode phase. Note: In some cases of GroupAggr json marshal/unmarshal is happening in IndexScanSource. This can be taken up later (because, as such, the over-the-wire data format remains consistent in all cases).
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2018-11-13 07:02:08.000000000
+MISMATCHED INLINE COMMENT
+Line:45, secondary/queryport/client/client.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2018-11-02 07:17:19.000000000
+MISMATCHED INLINE COMMENT
+Line:45, secondary/queryport/client/client.go -> Overall, it seems doable. But:
+
+Till now, I tried to keep old and new code paths separate. By implementing this code restructuring, I may need to touch the old codepath as well (especially around backfill).
+
+Also, I will need 2 to 3 days to complete this. So, I think, this can be taken up in the next patch.
+
+Please let me know what you think.
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2018-10-31 10:30:48.000000000
+MISMATCHED INLINE COMMENT
+Line:419, secondary/queryport/client/client.go -> Now, I have moved this to GsiClient::Refresh(). This should be fine for all possible code paths. The only exception is restapi, where scan query and DDL query running in parallel (only via restapi) can undergo a race condition (if cluster version is being updated in same version). But this is very unlikely scenario - especially in production environment.
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2018-11-02 07:17:19.000000000
+MISMATCHED INLINE COMMENT
+Line:419, secondary/queryport/client/client.go -> Please read GsiClient::Refresh() as "gsiKeyspace::Refresh()" when cluster version changes.
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2018-10-31 10:21:19.000000000
+MISMATCHED INLINE COMMENT
+Line:1351, secondary/queryport/client/client.go -> This is introduced to avoid evictRetry in case of error in GetUsecjson or DecodeN1QLValues. Will think about your suggestion and check if there is a better way of handling.
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2018-10-31 10:21:19.000000000
+MISMATCHED INLINE COMMENT
+Line:1591, secondary/queryport/client/client.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2018-10-31 10:21:19.000000000
+MISMATCHED INLINE COMMENT
+Line:875, secondary/queryport/client/scatter.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2018-10-24 09:37:32.000000000
+MISMATCHED INLINE COMMENT
+Line:1260, secondary/queryport/client/scatter.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2018-10-31 10:21:19.000000000
+MISMATCHED INLINE COMMENT
+Line:1267, secondary/queryport/client/scatter.go -> Opened MB-31804.
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2018-10-31 11:25:26.000000000
+MISMATCHED INLINE COMMENT
+Line:1272, secondary/queryport/client/scatter.go -> The problem is: there is no error handling mechanism in scatter-gather-sender code path. So, I have introduced this. I have created a specific error to be set when DecodeN1QLValues fails. And doScan will not retry when that specific error is seen.
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2018-10-31 10:21:19.000000000
+MISMATCHED INLINE COMMENT
+Line:1278, secondary/queryport/client/scatter.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2018-10-31 10:21:19.000000000
+MISMATCHED INLINE COMMENT
+Line:1999, secondary/queryport/client/scatter.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2018-10-31 10:21:19.000000000
+MISMATCHED INLINE COMMENT
+Line:1261, secondary/queryport/n1ql/secondary_index.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2018-10-31 10:21:19.000000000
+MISMATCHED INLINE COMMENT
+Line:1592, secondary/queryport/n1ql/secondary_index.go -> As of now, I haven’t done any backfill optimization. I.e. I will store the []byte in backfill file after gob encoding it.
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2018-10-24 09:37:32.000000000
+MISMATCHED INLINE COMMENT
+Line:1867, secondary/queryport/n1ql/secondary_index.go -> Done
+----------------------------------------------------------------------------------------------------------------------

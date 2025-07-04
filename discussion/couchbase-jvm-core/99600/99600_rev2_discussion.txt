@@ -1,0 +1,130 @@
+======================================================================================================================
+DESCRIPTION:
+
+JVMCBC-565: Proactively fetch config from http if signaled
+
+Motivation
+----------
+Previously, when an http stream is attached to fetch a configuration
+it has been trusted to always send a proper one in a short timeframe.
+When the socket has been closed a new stream would be opened.
+
+This does not account for the fact that a socket can end up in an
+half/closed (dead) state and the client never knows that it has been
+closed upon it. Since a dead socket is not distinguishable from a
+socket where no config stream events are sent over, a new mechanism
+needs to be added in order to return to a healthy state.
+
+Modifications
+-------------
+Other sections of core-io already ask the config manager to grab
+a new configuration because of specific heuristics (i.e. a socket
+has been closed).
+
+This code adds the behavior to the HttpRefresher which is very
+similar to the CarrierRefresher. In fact, most of the code has
+been copied 1:1. In a future change this will be refactored into
+the common parent but for the sake of clarity we are not touching
+the Carrier refresher for now (would be too confusing to review).
+
+As soon as we get our hands on a new configuration the reconfig
+logic of the SDK will jump in and clean up / restore a proper
+state.
+
+Note that this relies on an external signal from the heuristics,
+which means it will go undetected until there is traffic. One
+could argue that if there is no traffic also no impact will be
+seen. The other approach that has been considered reopened
+an idle http connection every x second interval, but this
+heavily penalizes the common case for this edge case
+scenario.
+
+Result
+------
+We now properly handle a half/closed (dead) tcp socket where
+the streaming connection is attached to.
+
+Change-Id: I1f3a9716fa013d249fe524e3fbc064f136ca7abf
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Michael Nitschinger
+Date: 2018-09-27 13:57:34.000000000
+Message: 
+Patch Set 2: Patch Set 1 was rebased
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-09-27 13:57:44.000000000
+Message: 
+Patch Set 2:
+
+Build Started http://sdkbuilds.sc.couchbase.com/job/couchbase-jvm-core-test/520/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-09-27 14:02:40.000000000
+Message: 
+Patch Set 2: Verified+1
+
+Build Successful 
+
+http://sdkbuilds.sc.couchbase.com/job/couchbase-jvm-core-test/520/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Graham Pople
+Date: 2018-09-27 16:45:54.000000000
+Message: 
+Patch Set 2:
+
+(7 comments)
+Line:204, src/main/java/com/couchbase/client/core/config/refresher/HttpRefresher.java -> Despite your explanation to Dave I'm still struggling to see exactly when this happens.
+
+'Note that this relies on an external signal from the heuristics,
+which means it will go undetected until there is traffic. One
+could argue that if there is no traffic also no impact will be
+seen.'
+
+But it also seems that traffic alone is not enough to guarantee this is called, e.g. something needs to go wrong such as a KV endpoint being disconnected by a downed node.  In the scenario we're trying to fix, with half-alive connections, that's not going to happen, no?
+
+Line:210, src/main/java/com/couchbase/client/core/config/refresher/HttpRefresher.java -> Optional: config shadows the function parameter.
+
+Line:218, src/main/java/com/couchbase/client/core/config/refresher/HttpRefresher.java -> Optional: I found allowedToPoll a little misleading as it suggests the bucket is allowed to poll *ever*.  isTimeToPoll maybe better.
+
+Line:220, src/main/java/com/couchbase/client/core/config/refresher/HttpRefresher.java -> Optional: side effect in an FP filter() is a little uggo, would be neater if done in subscribe.
+
+Line:226, src/main/java/com/couchbase/client/core/config/refresher/HttpRefresher.java -> Optional: Could use some comments.  Took me a while to figure out what the code in this chunk was doing, tbh.
+
+Line:232, src/main/java/com/couchbase/client/core/config/refresher/HttpRefresher.java -> How often do you estimate this refresh is going to be called?  Could this (and other debug log lines) be spammy?
+
+Line:250, src/main/java/com/couchbase/client/core/config/refresher/HttpRefresher.java -> What's this check for?  Simple sanity?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Michael Nitschinger
+Date: 2018-09-27 17:01:50.000000000
+Message: 
+Patch Set 2:
+
+(7 comments)
+Line:204, src/main/java/com/couchbase/client/core/config/refresher/HttpRefresher.java -> experiments showed that it indeed helped: the only scenario where it would break down is if ONLY the http streaming connection is half-dead and a node is added to the cluster. In all other cases a kv socket would eventually be closed which would trigger this event.
+
+Line:210, src/main/java/com/couchbase/client/core/config/refresher/HttpRefresher.java -> Ack
+
+Line:218, src/main/java/com/couchbase/client/core/config/refresher/HttpRefresher.java -> agreed, we can change this in a refactoring later (since the other refresher is also affected)
+
+Line:220, src/main/java/com/couchbase/client/core/config/refresher/HttpRefresher.java -> Ack
+
+Line:226, src/main/java/com/couchbase/client/core/config/refresher/HttpRefresher.java -> Ack
+
+Line:232, src/main/java/com/couchbase/client/core/config/refresher/HttpRefresher.java -> node list containing no nodes is basically something that I don't expect to happen at all. When we are refactoring this we might even turn it into a warning since it looks fishy
+
+Line:250, src/main/java/com/couchbase/client/core/config/refresher/HttpRefresher.java -> yes, sanity. If the server returns something that is not json we want to ignore it
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Graham Pople
+Date: 2018-09-27 20:11:54.000000000
+Message: 
+Patch Set 2: Code-Review+2
+
+(1 comment)
+Line:204, src/main/java/com/couchbase/client/core/config/refresher/HttpRefresher.java -> Ok this seems like a sensible change that will help, so I'll +2.  But I think I can see scenarios which this won't catch, will discuss at a less time-critical point.
+
+----------------------------------------------------------------------------------------------------------------------

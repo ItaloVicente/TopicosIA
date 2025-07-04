@@ -1,0 +1,208 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-24860: Switch memory tracking to be more read efficient
+
+The initial CoreStore integration makes getTotalMemUsed a more heavy
+weight function compared to the TLS version. The old getTotalMemUsed
+would always aggregate the current core counters, so means a loop
+and some cache crossing.
+
+This patch re-instates a similar technique used in TLS which means
+that the read of mem_used is 'cheap', a plain and 'global' relaxed
+atomic is read and now the write side (memAlloc/memDealloc) have a
+merge threshold. When the core counter accumulates a abs(value) which
+exceeds the threshold, the core value is accumulated into the
+'global', thus  getTotalMemUsed returns a value which may lag the real
+total, but that matches the TLS behaviour.
+
+An updated benchmark has been written and the orginal TLS code was
+re-benchmarked with a similar benchmark.
+
+Test AllocNRead1 (write heavy test and benchmark output trimmed):
+
+TLS code (github/jimwwalker/kv_engine @ daa00adb):
+
+  Run on (24 X 1232.7 MHz CPU s)
+  2018-01-31 09:03:48
+  -------------------------------------------------------------------
+  Benchmark                            Time           CPU Iterations
+  -------------------------------------------------------------------
+  AllocNRead1/0/threads:96             0 ns          4 ns  163069344
+  AllocNRead1/1/threads:96             0 ns         46 ns   15367776
+  AllocNRead1/2/threads:96             1 ns         87 ns    8211072
+  AllocNRead1/4/threads:96             2 ns        166 ns    4326816
+  AllocNRead1/8/threads:96             4 ns        333 ns    2219808
+  AllocNRead1/16/threads:96            7 ns        635 ns    1079040
+  AllocNRead1/32/threads:96           13 ns       1268 ns     561216
+  AllocNRead1/64/threads:96           27 ns       2477 ns     282048
+  AllocNRead1/128/threads:96          60 ns       5569 ns     139872
+  AllocNRead1/256/threads:96         118 ns      11096 ns      66432
+  AllocNRead1/512/threads:96         213 ns      20396 ns      34656
+  AllocNRead1/1024/threads:96        483 ns      45152 ns      17760
+  AllocNRead1/2048/threads:96        884 ns      84550 ns       7968
+  AllocNRead1/4000/threads:96       1851 ns     169866 ns       4032
+
+CoreStore (i.e. this commit):
+
+  Run on (24 X 1484.67 MHz CPU s)
+  2018-01-31 08:33:59
+  -------------------------------------------------------------------
+  Benchmark                            Time           CPU Iterations
+  -------------------------------------------------------------------
+  AllocNRead1/0/threads:96             0 ns          4 ns  176131200
+  AllocNRead1/1/threads:96             0 ns         43 ns   16286208
+  AllocNRead1/2/threads:96             1 ns         91 ns    7964448
+  AllocNRead1/4/threads:96             2 ns        177 ns    4020960
+  AllocNRead1/8/threads:96             4 ns        366 ns    2025408
+  AllocNRead1/16/threads:96            8 ns        728 ns     967104
+  AllocNRead1/32/threads:96           15 ns       1411 ns     502464
+  AllocNRead1/64/threads:96           33 ns       3034 ns     254400
+  AllocNRead1/128/threads:96          63 ns       5906 ns     124992
+  AllocNRead1/256/threads:96         115 ns      11005 ns      65856
+  AllocNRead1/512/threads:96         268 ns      24049 ns      29568
+  AllocNRead1/1024/threads:96        527 ns      49700 ns      14400
+  AllocNRead1/2048/threads:96       1071 ns     100051 ns       7488
+  AllocNRead1/4000/threads:96       2043 ns     188436 ns       4032
+
+AllocNReadM (read heavy output trimmed):
+
+Test shown does 512 or 1024 writes and increasing reads (128, 256 upto
+4000).
+
+TLS code (github/jimwwalker/kv_engine @ daa00adb):
+
+Run on (24 X 1199.97 MHz CPU s)
+2018-01-31 11:17:57
+----------------------------------------------------------------------
+Benchmark                               Time           CPU Iterations
+----------------------------------------------------------------------
+AllocNReadM/512/128/threads:96          257 ns      23747 ns      27936
+AllocNReadM/512/256/threads:96          265 ns      24671 ns      30528
+AllocNReadM/512/512/threads:96          286 ns      25831 ns      30144
+AllocNReadM/512/1024/threads:96         271 ns      25536 ns      26208
+AllocNReadM/512/2048/threads:96         267 ns      24820 ns      23904
+AllocNReadM/512/4000/threads:96         367 ns      34593 ns      19488
+AllocNReadM/1024/128/threads:96         476 ns      45633 ns      13248
+AllocNReadM/1024/256/threads:96         475 ns      44718 ns      14976
+AllocNReadM/1024/512/threads:96         460 ns      43996 ns      13536
+AllocNReadM/1024/1024/threads:96        626 ns      58202 ns       9600
+AllocNReadM/1024/2048/threads:96        526 ns      49646 ns      11616
+AllocNReadM/1024/4000/threads:96        590 ns      55348 ns      13056
+
+CoreStore (i.e. this commit):
+
+Run on (24 X 1203.98 MHz CPU s)
+2018-01-31 11:18:07
+----------------------------------------------------------------------
+Benchmark                               Time           CPU Iterations
+----------------------------------------------------------------------
+AllocNReadM/512/128/threads:96          270 ns      25084 ns      26016
+AllocNReadM/512/256/threads:96          278 ns      24736 ns      30720
+AllocNReadM/512/512/threads:96          264 ns      24177 ns      31008
+AllocNReadM/512/1024/threads:96         253 ns      24063 ns      26496
+AllocNReadM/512/2048/threads:96         294 ns      26701 ns      27552
+AllocNReadM/512/4000/threads:96         349 ns      32326 ns      24864
+AllocNReadM/1024/128/threads:96         553 ns      47225 ns      10848
+AllocNReadM/1024/256/threads:96         549 ns      49160 ns      14688
+AllocNReadM/1024/512/threads:96         555 ns      48560 ns      14208
+AllocNReadM/1024/1024/threads:96        597 ns      51551 ns      14208
+AllocNReadM/1024/2048/threads:96        533 ns      50062 ns      13728
+AllocNReadM/1024/4000/threads:96        572 ns      54757 ns      13344
+
+Change-Id: I50fd34f6d40c0da4e102220ae86944a10d075572
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jim Walker
+Date: 2018-01-31 11:24:38.000000000
+Message: 
+Uploaded patch set 2: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-01-31 11:59:53.000000000
+Message: 
+Patch Set 2: Code-Review-1
+
+(1 comment)
+Line:159, engines/ep/src/stats.cc -> Technically we could have multiple threads writing to the same core-local store (say we selected ours and then we got context-switched). 
+
+I think what we should do instead is decrement coreMemory by `value+sz`, as that shouldn't loose any updates.
+
+(Same comment in memDeallocated).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-01-31 12:06:17.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:188, engines/ep/src/stats.cc -> I think this suffers from a similar issue - if another thread is running and performs a merge; we might double-count memory (or miss it).
+
+If this is called sufficiently rarely; it should be ok performance-wise to have the iteration of each core perform a exchange(0) to "reset" the core's value and assimilate it into currentSize().
+
+I guess to put it another way - getPreciseTotalMemoryUsed() becomes "gather all core stats into currentSize; return currentSize".
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-01-31 12:18:35.000000000
+Message: 
+Patch Set 2: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/6272/ : FAILURE
+
+Timeout of a CTest test  89/116 Test  #66: memcached-executor-tests .......................} ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/6272/ )
+
+Failure of a CTest test  27/116 Test  #27: ep_testsuite.value_eviction .................... ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/6272/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/6646/ : FAILURE
+
+One of more core files found at the end of the build. Data for post-mortem saved to archived_core_dumps.tar.bz2 under "Build Artifacts". ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/6646/ )
+
+Failure of a CTest test  32/131 Test  #31: ep_testsuite.value_eviction ...................... ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/6646/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/4745/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/487/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master/5951/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/5721/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/6162/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2018-01-31 21:09:23.000000000
+Message: 
+Patch Set 2:
+
+(2 comments)
+Line:159, engines/ep/src/stats.cc -> doh yep, i see, more than 1 thread will copy the value+sz into memUsed, so over or under counting... cmpxhg needed to ensure only one does the update
+
+Line:188, engines/ep/src/stats.cc -> Might remove this one, it's not actually called from anywhere
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-01-31 21:43:00.000000000
+Message: 
+Patch Set 2:
+
+(2 comments)
+Line:159, engines/ep/src/stats.cc -> I think you can just use an (atomic) decrement of the amount we want to subtract from it (value + sz) - we don't need coreMemory to end up as zero here; just as long as we've only removed the same amount we added to totalMemUsed.
+
+Line:188, engines/ep/src/stats.cc -> I think I mentioned on one of the later patches - we might want to use the precise one  for mem_used via cbstats.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2018-02-01 10:03:47.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:159, engines/ep/src/stats.cc -> as i see what you mean (read this after converting to cmpxchg version)
+
+----------------------------------------------------------------------------------------------------------------------

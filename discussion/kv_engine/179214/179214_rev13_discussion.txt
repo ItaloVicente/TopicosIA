@@ -1,0 +1,116 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-51958: Re-enable ReplicaEvictedBeforeActive with fix
+
+ReplicaEvictedBeforeActive was seen to intermittently fail by
+mistakenly evicting from the active vBuckets.
+
+---- Root Cause Analysis ----
+
+Because:
+1. The ItemPager evicts from PreciseTotalMemoryUsed down to
+the low watermark;
+2. We populate the replica vBuckets until their total
+replicaPageableMemory > (high_watermark - low_watermark);
+3. We populate the active vBuckets until
+PreciseTotalMemoryUsed > high_watermark.
+
+When we insert the items with a fixed size of 5k bytes, we will
+always 'overshoot' the population in (2) and (3) by at least 1
+byte, and up to 5k bytes.
+
+With small variations in starting memory usage, and an always
+unequal number of replica vs active items, we will occasionally
+'overshoot' (3) more.
+In other words, we will have:
+
+    PreciseTotalMemoryUsed > replicaPageableMem > high_watermark
+
+Therefore, the ItemPager will be forced to evict
+(PreciseTotalMemoryUsed - high_watermark) bytes from the
+active vBuckets to reach the low_watermark.
+
+We previously attempted to account for this by adding 10,000
+bytes to the minimum required pageableMemory for replica
+vBuckets, but this did not prevent the failures, because:
+
+1. populateVbsUntil inserts an item before testing the predicate;
+2. We call populateVbsUntil on active vBuckets twice, the second
+time to 'top up' to the high watermark, attempting to account
+for memory freed by flushing and removing checkpoints;
+3. populateVbsUntil was at some point changed to flush and expel
+on every mutation, i.e., there is no memory freed by flushing
+
+In other words, we have also 'overpopulated' the active vBuckets
+by at least two items, so the described failure can still occur.
+
+Additionally, setting the replica vBucket to replica state will
+change the total memory used, possibly invalidating the required
+memory preconditions.
+Since we must be in the active state to populate the vBucket,
+this cannot be avoided with the current approach.
+
+---- Fix ----
+
+After populating up to the high watermark and setting the
+replica vBucket state to 'replica', re-set the low watermark,
+taking into account how far we may have 'overshot' the high
+watermark, and the available replicaPageableMemory.
+
+---- Why did the observed failures evict more than one item?  ----
+
+With the given explanation we may expect only one active item to
+be evicted during failures since we can only overshoot by - at
+most - the size of one item. However, this is not the case: ~15
+items were evicted from active vBuckets in all seen test failures.
+
+This is due to setting items' MFU values probabilistically: with
+a given distribution it is almost certain we evict more actives
+than strictly needed to reach the low watermark.
+
+Change-Id: Ia4f71e9df1c6e2a2844a626aab86b9561d23d73a
+Reviewed-on: https://review.couchbase.org/c/kv_engine/+/179214
+Tested-by: Build Bot <build@couchbase.com>
+Reviewed-by: James H <james.harrison@couchbase.com>
+Reviewed-by: Paolo Cocchi <paolo.cocchi@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2022-09-08 10:45:41.000000000
+Message: 
+Change has been successfully cherry-picked as ce1813d397b7422f3506ded0bfd4d3c7a540558e
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-09-08 10:45:52.000000000
+Message: 
+Patch Set 13:
+
+Build Started https://cv.jenkins.couchbase.com/job/kv_engine-post-commit-TSan-master/7937/ (1/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-09-08 11:14:00.000000000
+Message: 
+Patch Set 13:
+
+Build Started https://cv.jenkins.couchbase.com/job/kv_engine-post-commit-master/12016/ (2/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-09-08 11:24:44.000000000
+Message: 
+Patch Set 13:
+
+Build Unstable 
+
+https://cv.jenkins.couchbase.com/job/kv_engine-post-commit-master/12016/ : UNSTABLE
+
+ERROR: rebalancein (unittest.loader._FailedTest)
+ ( https://cv.jenkins.couchbase.com/job/kv_engine-post-commit-master/12016/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine-post-commit-TSan-master/7937/ : UNSTABLE
+
+ERROR: rebalancein (unittest.loader._FailedTest)
+ ( https://cv.jenkins.couchbase.com/job/kv_engine-post-commit-TSan-master/7937/ )
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,66 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-25822: notifyStreamReady: Only notify conn on first added stream
+
+DcpProducer::notifyStreamReady(vbid) is called when there is new data
+available for the given vBucket. Currently this function schedules a
+wake up for the underlying connection if ready.pushUnique() returns
+true - i.e if that stream (vbucket) wasn't already ready to be
+processed.
+
+However, analysis of phosphor traces shows that we end up flagging a
+connection for wakeup multiple times - one per outstanding
+vBucket. While this is functionally safe (all but the first wakeup is
+ultimatly ignored), it has a non-zero performance cost:
+
+1. Each call to BufferLog::unpauseIfSpaceAvailable() (currently per
+   vBucket) calls ConnMap::notifyPausedConnection(schedule=true);
+   which adds an element to ConnMap::pendingNotifications.
+
+2. The DcpConnNotifier (NonIO) task calls notifyIOComplete() for each
+   element in ConnMap::pendingNotifications, which requires acquiring
+   pending_io.mutex for each element. However, these are added to a
+   map (keyed on Connection), so all but the first is essentially
+   ignored.
+
+Local testing showed up to 183 items being added to
+ConnMap::pendingNotifications; when there was only a single DCP
+connection. That is a non-negligible number of duplicates; each of
+which requires a mutex to be required.
+
+Given we only actually process the first wakeup for a given
+connection; change DcpReadyQueue::pushUnique() to only return true if
+the queue was previously empty. This means that we only call
+BufferLog::unpauseIfSpaceAvailable() once per connection.
+
+Change-Id: I44925ba2897f7b468426493e008b22f203d88419
+Reviewed-on: http://review.couchbase.org/94136
+Tested-by: Build Bot <build@couchbase.com>
+Reviewed-by: Trond Norbye <trond.norbye@gmail.com>
+Reviewed-by: Jim Walker <jim@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2018-05-16 11:33:16.000000000
+Message: 
+Change has been successfully cherry-picked as ca5c8d74d048a8c2919f3df334062752432abc96 by Dave Rigby
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-05-16 12:54:05.000000000
+Message: 
+Patch Set 2:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv-engine-vulcan-post-commit/125/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-05-16 14:01:45.000000000
+Message: 
+Patch Set 2:
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv-engine-vulcan-post-commit/125/ : SUCCESS'
+----------------------------------------------------------------------------------------------------------------------

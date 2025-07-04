@@ -1,0 +1,80 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-32181: Wake up EphTombstoneStaleItemDeleter correctly
+
+The EphTombstoneStaleItemDeleter task is supposed to be woken up and
+scheduled once the paired EphTombstoneHTCleaner task
+completes. However, due to a mis-use of the GlobalTask::wakeUp()
+function the task was not actually scheduled - only it's desired
+wakeupTime was updated.
+
+This manifested in the logs as a super-slow scheduling time - e.g.
+
+    2018-11-29T13:55:18.566925Z WARNING (ephemeral-1) Slow scheduling for NON_IO task 'Eph tombstone stale item deleter' on thread nonIO_worker_1. Schedule overhead: 10 s
+
+An immediate consequence is the task wasn't run when desired. However,
+it also had a knock-on effect of breaking the ordering of the
+futureQueue (a std::priority_queue); as that uses the wakeTime as the
+ordering property.
+
+Because the expected invariants of the futureQueue have been broken,
+the ordering of Tasks in the FutureQueue is also broken (as we use
+std::push_heap to add elements which assumes the queue is correctly
+sorted). As a result, *other nonIO tasks* can fail to be scheduled at
+the desired time.
+
+This includes the DCP connection notifier which is responsible for
+checking if DCP no-op timeouts have been exceeded, and can cause DCP
+connections to be incorrectly considered to have exceeded the no-op
+interval and hence disconnected - for example:
+
+    2018-11-29T15:03:13.029478Z INFO (ephemeral-4) DCP (Consumer) eq_dcpq:replication:ns_1@data-1->ns_1@data-2:ephemeral-4 - Disconnecting because a message has not been received for 360s. lastMessageTime:361
+    2018-11-29T15:03:13.032533Z WARNING (ephemeral-6) Slow scheduling for NON_IO task 'DCP connection notifier' on thread nonIO_worker_1. Schedule overhead: 554 s
+
+Fix is to use the correct method (ExecutorPool::wake) to wake the
+task; which updates the wakeTime *and* the potition in the
+futureQueue.
+
+Change-Id: I2b453c6d205fbfdd7b0f46d3dc0bb79359ead797
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2018-11-29 17:23:38.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-11-29 17:23:45.000000000
+Message: 
+Patch Set 2:
+
+Branch restricted. PLEASE READ this URL: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/111470/artifact/restricted.html : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-11-29 17:24:47.000000000
+Message: 
+Patch Set 2: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-vulcan/933/ : ABORTED
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-vulcan/933/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-undefinedsanitizer-vulcan/666/ : ABORTED
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-undefinedsanitizer-vulcan/666/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-vulcan/790/ : ABORTED
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-vulcan/790/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-vulcan/642/ : ABORTED
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-vulcan/642/ )
+----------------------------------------------------------------------------------------------------------------------

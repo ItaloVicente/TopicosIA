@@ -1,0 +1,269 @@
+======================================================================================================================
+DESCRIPTION:
+
+[WIP] Adapt to changes in JGit - DO NOT MERGE
+
+* Update target platform to Jetty 10.0.x
+* Adapt to CanceledException change in JGit
+
+This version of the change includes a debug logging configuration so
+that I can see in the build log what happens in Jetty when this test
+runs in CI. It also skips most tests.
+
+Change-Id: Ie454abc96d2c0c2eedab07fb9f7591823f1096b2
+Signed-off-by: Thomas Wolf <thomas.wolf@paranor.ch>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Thomas Wolf
+Date: 2021-11-23 22:18:50.000000000
+Message: 
+Uploaded patch set 3.
+----------------------------------------------------------------------------------------------------------------------
+Author: EGit Bot
+Date: 2021-11-23 22:19:01.000000000
+Message: 
+Patch Set 3:
+
+Build Started https://ci.eclipse.org/egit/job/egit.gerrit/2463/
+----------------------------------------------------------------------------------------------------------------------
+Author: EGit Bot
+Date: 2021-11-23 22:26:09.000000000
+Message: 
+Patch Set 3: Verified-1
+
+Build Failed 
+
+https://ci.eclipse.org/egit/job/egit.gerrit/2463/ : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2021-11-24 07:45:50.000000000
+Message: 
+Patch Set 3:
+
+When I run this locally (inside my CentoOS 7 VM), I get
+
+  23:35:39.725 [qtp1759198432-68] DEBUG o.e.j.util.ssl.SniX509ExtendedKeyManager - Chose explicit alias=null keyType=EC on sun.security.ssl.SSLEngineImpl@3c8abeaf
+  23:35:39.725 [qtp1759198432-68] DEBUG o.e.j.util.ssl.SniX509ExtendedKeyManager - Chose explicit alias=null keyType=EC on sun.security.ssl.SSLEngineImpl@3c8abeaf
+  23:35:39.725 [qtp1759198432-68] DEBUG o.e.j.util.ssl.SniX509ExtendedKeyManager - Chose explicit alias=null keyType=EC on sun.security.ssl.SSLEngineImpl@3c8abeaf
+  23:35:39.732 [qtp1759198432-68] DEBUG o.e.jetty.util.ssl.SslContextFactory - Selecting alias: keyType=RSA, sni=null, sniRequired=false, certs=[X509@5e665972(localhost,h=[localhost, ],a=[/127.0.0.1],w=[])]
+  23:35:39.732 [qtp1759198432-68] DEBUG o.e.jetty.util.ssl.SslContextFactory - Selected alias=delegate_no_sni_match
+  23:35:39.732 [qtp1759198432-68] DEBUG o.e.j.util.ssl.SniX509ExtendedKeyManager - Chose delegate alias=localhost keyType=RSA on sun.security.ssl.SSLEngineImpl@3c8abeaf
+
+So the server selects a certificate for hostname "localhost" to send to the client in the SSL handshake.
+
+On CI, we get
+
+  23:25:04  22:25:04.311 [qtp771140171-66] DEBUG o.e.j.util.ssl.SniX509ExtendedKeyManager - Chose explicit alias=null keyType=EC on sun.security.ssl.SSLEngineImpl@455fa12a
+  23:25:04  22:25:04.311 [qtp771140171-66] DEBUG o.e.j.util.ssl.SniX509ExtendedKeyManager - Chose explicit alias=null keyType=EC on sun.security.ssl.SSLEngineImpl@455fa12a
+  23:25:04  22:25:04.311 [qtp771140171-66] DEBUG o.e.j.util.ssl.SniX509ExtendedKeyManager - Chose explicit alias=null keyType=EC on sun.security.ssl.SSLEngineImpl@455fa12a
+  23:25:04  22:25:04.311 [qtp771140171-66] DEBUG o.e.jetty.util.ssl.SslContextFactory - Selecting alias: keyType=RSA, sni=null, sniRequired=false, certs=[X509@39696745(centos-7-v3vzl,h=[centos-7-v3vzl, ],a=[/127.0.0.1],w=[])]
+  23:25:04  22:25:04.311 [qtp771140171-66] DEBUG o.e.jetty.util.ssl.SslContextFactory - Selected alias=delegate_no_sni_match
+  23:25:04  22:25:04.311 [qtp771140171-66] DEBUG o.e.j.util.ssl.SniX509ExtendedKeyManager - Chose delegate alias=centos-7-v3vzl keyType=RSA on sun.security.ssl.SSLEngineImpl@455fa12a
+
+Here, the server uses a certificate for "centos-7-v3vzl".
+
+I don't know what causes this difference. It might be the missing CN=localhost, or it might be something else. My CentOS VM has no real hostname (or rather, it uses "localhost.localdomain"),
+so perhaps this difference is also perfectly normal.
+
+The request handling appears to be identical between my local run and the CI run. Client sends an un-authenticated request, gets a 401, then sends an authenticated request. On that second request, a local run proceeds successfully, but on CI we get
+
+  23:25:04  org.eclipse.jetty.http.BadMessageException: 400: Invalid SNI
+  23:25:04  	at org.eclipse.jetty.server.SecureRequestCustomizer.customize(SecureRequestCustomizer.java:254)
+  23:25:04  	at org.eclipse.jetty.server.SecureRequestCustomizer.customize(SecureRequestCustomizer.java:207)
+
+Looking at [1], that exception means the server finds no certificate at all on the SSL session.
+
+I don't get it. Are we doing something wrong, or are we hitting some arcane Jetty (or Apache HTTP or JDK HTTP) bug?
+
+[1] https://github.com/eclipse/jetty.project/blob/d755e3a7/jetty-server/src/main/java/org/eclipse/jetty/server/SecureRequestCustomizer.java#L242
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2021-11-24 08:24:14.000000000
+Message: 
+Patch Set 3:
+
+> Patch Set 3:
+> 
+> When I run this locally (inside my CentoOS 7 VM), I get
+> 
+>   23:35:39.725 [qtp1759198432-68] DEBUG o.e.j.util.ssl.SniX509ExtendedKeyManager - Chose explicit alias=null keyType=EC on sun.security.ssl.SSLEngineImpl@3c8abeaf
+>   23:35:39.725 [qtp1759198432-68] DEBUG o.e.j.util.ssl.SniX509ExtendedKeyManager - Chose explicit alias=null keyType=EC on sun.security.ssl.SSLEngineImpl@3c8abeaf
+>   23:35:39.725 [qtp1759198432-68] DEBUG o.e.j.util.ssl.SniX509ExtendedKeyManager - Chose explicit alias=null keyType=EC on sun.security.ssl.SSLEngineImpl@3c8abeaf
+>   23:35:39.732 [qtp1759198432-68] DEBUG o.e.jetty.util.ssl.SslContextFactory - Selecting alias: keyType=RSA, sni=null, sniRequired=false, certs=[X509@5e665972(localhost,h=[localhost, ],a=[/127.0.0.1],w=[])]
+>   23:35:39.732 [qtp1759198432-68] DEBUG o.e.jetty.util.ssl.SslContextFactory - Selected alias=delegate_no_sni_match
+>   23:35:39.732 [qtp1759198432-68] DEBUG o.e.j.util.ssl.SniX509ExtendedKeyManager - Chose delegate alias=localhost keyType=RSA on sun.security.ssl.SSLEngineImpl@3c8abeaf
+> 
+> So the server selects a certificate for hostname "localhost" to send to the client in the SSL handshake.
+> 
+> On CI, we get
+> 
+>   23:25:04  22:25:04.311 [qtp771140171-66] DEBUG o.e.j.util.ssl.SniX509ExtendedKeyManager - Chose explicit alias=null keyType=EC on sun.security.ssl.SSLEngineImpl@455fa12a
+>   23:25:04  22:25:04.311 [qtp771140171-66] DEBUG o.e.j.util.ssl.SniX509ExtendedKeyManager - Chose explicit alias=null keyType=EC on sun.security.ssl.SSLEngineImpl@455fa12a
+>   23:25:04  22:25:04.311 [qtp771140171-66] DEBUG o.e.j.util.ssl.SniX509ExtendedKeyManager - Chose explicit alias=null keyType=EC on sun.security.ssl.SSLEngineImpl@455fa12a
+>   23:25:04  22:25:04.311 [qtp771140171-66] DEBUG o.e.jetty.util.ssl.SslContextFactory - Selecting alias: keyType=RSA, sni=null, sniRequired=false, certs=[X509@39696745(centos-7-v3vzl,h=[centos-7-v3vzl, ],a=[/127.0.0.1],w=[])]
+>   23:25:04  22:25:04.311 [qtp771140171-66] DEBUG o.e.jetty.util.ssl.SslContextFactory - Selected alias=delegate_no_sni_match
+>   23:25:04  22:25:04.311 [qtp771140171-66] DEBUG o.e.j.util.ssl.SniX509ExtendedKeyManager - Chose delegate alias=centos-7-v3vzl keyType=RSA on sun.security.ssl.SSLEngineImpl@455fa12a
+> 
+> Here, the server uses a certificate for "centos-7-v3vzl".
+> 
+> I don't know what causes this difference. It might be the missing CN=localhost, or it might be something else. My CentOS VM has no real hostname (or rather, it uses "localhost.localdomain"),
+> so perhaps this difference is also perfectly normal.
+> 
+> The request handling appears to be identical between my local run and the CI run. Client sends an un-authenticated request, gets a 401, then sends an authenticated request. On that second request, a local run proceeds successfully, but on CI we get
+> 
+>   23:25:04  org.eclipse.jetty.http.BadMessageException: 400: Invalid SNI
+>   23:25:04  	at org.eclipse.jetty.server.SecureRequestCustomizer.customize(SecureRequestCustomizer.java:254)
+>   23:25:04  	at org.eclipse.jetty.server.SecureRequestCustomizer.customize(SecureRequestCustomizer.java:207)
+> 
+> Looking at [1], that exception means the server finds no certificate at all on the SSL session.
+> 
+> I don't get it. Are we doing something wrong, or are we hitting some arcane Jetty (or Apache HTTP or JDK HTTP) bug?
+> 
+> [1] https://github.com/eclipse/jetty.project/blob/d755e3a7/jetty-server/src/main/java/org/eclipse/jetty/server/SecureRequestCustomizer.java#L242
+
+I think the code causing 400 is one of these validations in
+https://github.com/eclipse/jetty.project/blob/d755e3a7/jetty-server/src/main/java/org/eclipse/jetty/server/SecureRequestCustomizer.java#L262
+I guess the second one since by default SNI required is disabled and SNI host check is enabled
+
+            if (isSniRequired() && (sniHost == null || !x509.matches(sniHost)))
+                throw new BadMessageException(400, "Invalid SNI");
+
+            if (isSniHostCheck() && !x509.matches(serverName))
+                throw new BadMessageException(400, "Invalid SNI");
+
+this would mean the certificate doesn't match the server name
+
+We can try if https://git.eclipse.org/r/c/jgit/jgit/+/188035 helps on the CI
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2021-11-24 08:53:40.000000000
+Message: 
+Patch Set 3:
+
+> >   23:25:04  org.eclipse.jetty.http.BadMessageException: 400: Invalid SNI
+> >   23:25:04  	at org.eclipse.jetty.server.SecureRequestCustomizer.customize(SecureRequestCustomizer.java:254)
+> >   23:25:04  	at org.eclipse.jetty.server.SecureRequestCustomizer.customize(SecureRequestCustomizer.java:207)
+> > 
+> > Looking at [1], that exception means the server finds no certificate at all on the SSL session.
+> > 
+> > I don't get it. Are we doing something wrong, or are we hitting some arcane Jetty (or Apache HTTP or JDK HTTP) bug?
+> > 
+> > [1] https://github.com/eclipse/jetty.project/blob/d755e3a7/jetty-server/src/main/java/org/eclipse/jetty/server/SecureRequestCustomizer.java#L242
+> 
+> I think the code causing 400 is one of these validations in
+> https://github.com/eclipse/jetty.project/blob/d755e3a7/jetty-server/src/main/java/org/eclipse/jetty/server/SecureRequestCustomizer.java#L262
+
+But note that the log says the exception was raised on line 254:
+
+  if (certificates == null || certificates.length == 0 || !(certificates[0] instanceof X509Certificate))
+    throw new BadMessageException(400, "Invalid SNI");
+
+> We can try if https://git.eclipse.org/r/c/jgit/jgit/+/188035 helps on the CI
+
+Yeah, let's try it. Submit it, and once it's in, retrigger this change here.
+
+I also remember that we had sporadic mentions (I think in the forum ) about "git-upload-pack not authorized" errors. Perhaps we're really doing something not quite right client-side, and hit this now.
+----------------------------------------------------------------------------------------------------------------------
+Author: EGit Bot
+Date: 2021-11-24 09:26:31.000000000
+Message: 
+Patch Set 3: -Verified
+
+Build Started https://ci.eclipse.org/egit/job/egit.gerrit/2464/
+----------------------------------------------------------------------------------------------------------------------
+Author: EGit Bot
+Date: 2021-11-24 09:38:05.000000000
+Message: 
+Patch Set 3: Verified-1
+
+Build Failed 
+
+https://ci.eclipse.org/egit/job/egit.gerrit/2464/ : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: EGit Bot
+Date: 2021-11-24 09:47:12.000000000
+Message: 
+Patch Set 3: -Verified
+
+Build Started https://ci.eclipse.org/egit/job/egit.gerrit/2465/
+----------------------------------------------------------------------------------------------------------------------
+Author: EGit Bot
+Date: 2021-11-24 10:00:42.000000000
+Message: 
+Patch Set 3: Verified-1
+
+Build Failed 
+
+https://ci.eclipse.org/egit/job/egit.gerrit/2465/ : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2021-11-24 13:16:16.000000000
+Message: 
+Patch Set 3:
+
+> Patch Set 3:
+> 
+> > >   23:25:04  org.eclipse.jetty.http.BadMessageException: 400: Invalid SNI
+> > >   23:25:04  	at org.eclipse.jetty.server.SecureRequestCustomizer.customize(SecureRequestCustomizer.java:254)
+> > >   23:25:04  	at org.eclipse.jetty.server.SecureRequestCustomizer.customize(SecureRequestCustomizer.java:207)
+> > > 
+> > > Looking at [1], that exception means the server finds no certificate at all on the SSL session.
+> > > 
+> > > I don't get it. Are we doing something wrong, or are we hitting some arcane Jetty (or Apache HTTP or JDK HTTP) bug?
+> > > 
+> > > [1] https://github.com/eclipse/jetty.project/blob/d755e3a7/jetty-server/src/main/java/org/eclipse/jetty/server/SecureRequestCustomizer.java#L242
+> > 
+> > I think the code causing 400 is one of these validations in
+> > https://github.com/eclipse/jetty.project/blob/d755e3a7/jetty-server/src/main/java/org/eclipse/jetty/server/SecureRequestCustomizer.java#L262
+> 
+> But note that the log says the exception was raised on line 254:
+> 
+>   if (certificates == null || certificates.length == 0 || !(certificates[0] instanceof X509Certificate))
+>     throw new BadMessageException(400, "Invalid SNI");
+> 
+> > We can try if https://git.eclipse.org/r/c/jgit/jgit/+/188035 helps on the CI
+> 
+> Yeah, let's try it. Submit it, and once it's in, retrigger this change here.
+> 
+> I also remember that we had sporadic mentions (I think in the forum ) about "git-upload-pack not authorized" errors. Perhaps we're really doing something not quite right client-side, and hit this now.
+
+unfortunately https://git.eclipse.org/r/c/jgit/jgit/+/188035 didn't help
+
+How do we proceed from here ? I need to produce RC1 today.
+----------------------------------------------------------------------------------------------------------------------
+Author: EGit Bot
+Date: 2021-11-24 13:16:32.000000000
+Message: 
+Patch Set 3: -Verified
+
+Build Started https://ci.eclipse.org/egit/job/egit.gerrit/2466/
+----------------------------------------------------------------------------------------------------------------------
+Author: EGit Bot
+Date: 2021-11-24 13:25:28.000000000
+Message: 
+Patch Set 3: Verified-1
+
+Build Failed 
+
+https://ci.eclipse.org/egit/job/egit.gerrit/2466/ : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2021-11-24 13:49:25.000000000
+Message: 
+Patch Set 3:
+
+> How do we proceed from here ? I need to produce RC1 today.
+
+Ignore this test? If you can verify that real-world cloning via HTTPS works in Eclipse with PS 1 of this change, then I think that should be OK for now.
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2021-11-24 13:52:06.000000000
+Message: 
+Patch Set 3:
+
+> ... with PS 1 of this change...
+
+I meant PS 2.
+----------------------------------------------------------------------------------------------------------------------

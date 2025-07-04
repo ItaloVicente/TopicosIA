@@ -1,0 +1,133 @@
+======================================================================================================================
+DESCRIPTION:
+
+ExecutorPool: Allow snooze() to be asynchronous
+
+ExecutorPool::snooze() currently returns a bool if the task was
+found. However for FollyExecutorPool this requires using a blocking
+(runInEventBaseThreadAndWait) call, which forces waking thread to be
+blocked until the IO thread has woken, updated the wake time and
+context-switched back to initial calling thread. Profiling shows this
+blocking & context switching is significant.
+
+The vast majority of callers of snooze() don't care about if the task
+was found (and sleep time modified) - note that even _if_ they do
+check the result, there's still no guarantee the task will actually
+sleep for that particular duration, given it still could be cancelled
+before then.
+
+As such, modify snooze() to return void, avoiding the aforementioned
+costs in FollyExecutorPool. For the limited number of use-cases which
+do check the result, introduce a snoozeAndWait() synchronous call which
+is equivalent to the old snooze().
+
+Results from mancouch show increase of at least 4x in "items" per
+second (Task snoozes per second), depending on variant:
+
+Before:
+
+    ------------------------------------------------------------------------------------------------------------------------------------------------------------
+    Benchmark                                                                                                  Time             CPU   Iterations UserCounters...
+    ------------------------------------------------------------------------------------------------------------------------------------------------------------
+    ExecutorPoolFixture<FollyExecutorPool>/TimeoutAddCancel_Folly/Timeouts:1000/real_time/threads:1        12707 ns        10513 ns        56879 items_per_second=78.698k/s
+    ExecutorPoolFixture<FollyExecutorPool>/TimeoutAddCancel_Folly/Timeouts:1000/real_time/threads:2         8743 ns        10146 ns        80606 items_per_second=114.379k/s
+    ExecutorPoolFixture<FollyExecutorPool>/TimeoutAddCancel_Folly/Timeouts:1000/real_time/threads:4         3621 ns         8356 ns       192968 items_per_second=276.142k/s
+    ExecutorPoolFixture<FollyExecutorPool>/TimeoutAddCancel_Folly/Timeouts:1000/real_time/threads:8         3805 ns        10092 ns       188488 items_per_second=262.835k/s
+    ExecutorPoolFixture<FollyExecutorPool>/TimeoutAddCancel_Folly/Timeouts:1000/real_time/threads:16        3990 ns        12027 ns       158672 items_per_second=250.6k/s
+    ExecutorPoolFixture<FollyExecutorPool>/TimeoutAddCancel_Folly/Timeouts:4096/real_time/threads:1        19279 ns        11868 ns        59127 items_per_second=51.8689k/s
+    ExecutorPoolFixture<FollyExecutorPool>/TimeoutAddCancel_Folly/Timeouts:4096/real_time/threads:2         7757 ns        11060 ns        80116 items_per_second=128.92k/s
+    ExecutorPoolFixture<FollyExecutorPool>/TimeoutAddCancel_Folly/Timeouts:4096/real_time/threads:4         3596 ns         8602 ns       148572 items_per_second=278.113k/s
+    ExecutorPoolFixture<FollyExecutorPool>/TimeoutAddCancel_Folly/Timeouts:4096/real_time/threads:8         3558 ns         9978 ns       195088 items_per_second=281.043k/s
+    ExecutorPoolFixture<FollyExecutorPool>/TimeoutAddCancel_Folly/Timeouts:4096/real_time/threads:16        3909 ns        12486 ns       169296 items_per_second=255.79k/s
+    ExecutorPoolFixture<FollyExecutorPool>/TimeoutAddCancel_Folly/Timeouts:30000/real_time/threads:1       19235 ns        11904 ns        51646 items_per_second=51.9888k/s
+    ExecutorPoolFixture<FollyExecutorPool>/TimeoutAddCancel_Folly/Timeouts:30000/real_time/threads:2        8271 ns        10965 ns        78004 items_per_second=120.908k/s
+    ExecutorPoolFixture<FollyExecutorPool>/TimeoutAddCancel_Folly/Timeouts:30000/real_time/threads:4        3550 ns         8626 ns       202672 items_per_second=281.706k/s
+    ExecutorPoolFixture<FollyExecutorPool>/TimeoutAddCancel_Folly/Timeouts:30000/real_time/threads:8        3849 ns         9955 ns       204360 items_per_second=259.779k/s
+    ExecutorPoolFixture<FollyExecutorPool>/TimeoutAddCancel_Folly/Timeouts:30000/real_time/threads:16       4377 ns        11263 ns       149776 items_per_second=228.473k/s
+
+After:
+
+    ------------------------------------------------------------------------------------------------------------------------------------------------------------
+    Benchmark                                                                                                  Time             CPU   Iterations UserCounters...
+    ------------------------------------------------------------------------------------------------------------------------------------------------------------
+    ExecutorPoolFixture<FollyExecutorPool>/TimeoutAddCancel_Folly/Timeouts:1000/real_time/threads:1         1666 ns         1666 ns       594236 items_per_second=600.187k/s
+    ExecutorPoolFixture<FollyExecutorPool>/TimeoutAddCancel_Folly/Timeouts:1000/real_time/threads:2          841 ns         1682 ns       831738 items_per_second=1.18905M/s
+    ExecutorPoolFixture<FollyExecutorPool>/TimeoutAddCancel_Folly/Timeouts:1000/real_time/threads:4          800 ns         3199 ns       878968 items_per_second=1.25026M/s
+    ExecutorPoolFixture<FollyExecutorPool>/TimeoutAddCancel_Folly/Timeouts:1000/real_time/threads:8         1084 ns         8658 ns       610088 items_per_second=922.925k/s
+    ExecutorPoolFixture<FollyExecutorPool>/TimeoutAddCancel_Folly/Timeouts:1000/real_time/threads:16        1123 ns        17972 ns       621440 items_per_second=890.239k/s
+    ExecutorPoolFixture<FollyExecutorPool>/TimeoutAddCancel_Folly/Timeouts:4096/real_time/threads:1         1296 ns         1295 ns       621361 items_per_second=771.614k/s
+    ExecutorPoolFixture<FollyExecutorPool>/TimeoutAddCancel_Folly/Timeouts:4096/real_time/threads:2          766 ns         1532 ns       818044 items_per_second=1.30574M/s
+    ExecutorPoolFixture<FollyExecutorPool>/TimeoutAddCancel_Folly/Timeouts:4096/real_time/threads:4          711 ns         2842 ns      2151988 items_per_second=1.40658M/s
+    ExecutorPoolFixture<FollyExecutorPool>/TimeoutAddCancel_Folly/Timeouts:4096/real_time/threads:8         1202 ns         9615 ns       692640 items_per_second=831.989k/s
+    ExecutorPoolFixture<FollyExecutorPool>/TimeoutAddCancel_Folly/Timeouts:4096/real_time/threads:16        1118 ns        17559 ns       728496 items_per_second=894.813k/s
+    ExecutorPoolFixture<FollyExecutorPool>/TimeoutAddCancel_Folly/Timeouts:30000/real_time/threads:1        1688 ns         1688 ns       439875 items_per_second=592.541k/s
+    ExecutorPoolFixture<FollyExecutorPool>/TimeoutAddCancel_Folly/Timeouts:30000/real_time/threads:2         698 ns         1394 ns       836644 items_per_second=1.43279M/s
+    ExecutorPoolFixture<FollyExecutorPool>/TimeoutAddCancel_Folly/Timeouts:30000/real_time/threads:4         633 ns         2531 ns       864424 items_per_second=1.58045M/s
+    ExecutorPoolFixture<FollyExecutorPool>/TimeoutAddCancel_Folly/Timeouts:30000/real_time/threads:8        1141 ns         9124 ns       598400 items_per_second=876.792k/s
+    ExecutorPoolFixture<FollyExecutorPool>/TimeoutAddCancel_Folly/Timeouts:30000/real_time/threads:16       1034 ns        16523 ns       661872 items_per_second=967.421k/s
+
+Change-Id: Idfaf073d7f16437d0bb68a03bc1aef23f16709a8
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2021-03-01 13:55:05.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-03-01 15:35:49.000000000
+Message: 
+Patch Set 2: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/9287/ : FAILURE
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/5870/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/7334/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/33894/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/29129/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/7994/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/8938/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/9076/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/16840/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-03-01 20:48:56.000000000
+Message: 
+Patch Set 2: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/5870/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/7334/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/33894/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/29129/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/7994/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/8938/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/9076/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/16840/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/9309/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2021-03-03 09:01:23.000000000
+Message: 
+Patch Set 2: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------

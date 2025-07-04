@@ -1,0 +1,226 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-36572: Use CouchKVStoreFileCache for writing
+
+Currently CouchKVStore opens and closed the underlying couchstore file
+on every call to saveDocs(). Profiling has highlighted that the
+underlying OS close() call (and to a lesser extent the open() call)
+are costly - on Linux with XFS there appears to be non-trivial work to
+release various allocated resources - close() takes around 7% of the
+total flusher runtime.
+
+To improve this, keep the couchstore Db instance for each vBucket open
+across saveDocs() calls. This increases KV-Engine's FD usage
+(potentially 1024 more FDs per Bucket open at once than before), but
+should reduce the costs associated with open/close.
+
+Results
+-------
+
+* Concurrent SyncWrite workload (pillowfight, 2000 threads)
+
+This change reduces the average persistTo latency from 3590ms to
+3384ms - 1.06x faster persistence.
+
+Running on mancouch, Samsung PM863 SSD, XFS, with a 2 node
+cluster_run, Assuming already populated with 3.2M items:
+
+    cbc-pillowfight -U couchbase://127.0.0.1:12000/default \
+        -u Administrator -P asdasd --batch-size=1 --num-items=3200000 \
+        --min-size=512 --max-size=512 --random-body --set-pct=100 \
+        --no-population --durability=persist_to_majority --num-threads=2000 \
+        --sequential --num-cycles=100
+
+Baseline (before this patch):
+
+  sync_write_commit_persist_to_majority (100000 total)
+       0us -   22ms   : (  0.0030%)     3
+      22ms -  753ms   : ( 10.2650%) 10262 ███████▋
+     753ms - 1441ms   : ( 20.1160%)  9851 ███████▍
+    1441ms - 2228ms   : ( 31.5100%) 11394 ████████▌
+    2228ms - 2883ms   : ( 41.4460%)  9936 ███████▍
+    2883ms - 3538ms   : ( 50.8350%)  9389 ███████
+    3538ms - 3932ms   : ( 56.8380%)  6003 ████▌
+    3932ms - 4194ms   : ( 60.7980%)  3960 ██▉
+    4194ms - 4718ms   : ( 68.5430%)  7745 █████▊
+    4718ms - 4980ms   : ( 72.4430%)  3900 ██▉
+    4980ms - 5242ms   : ( 76.3770%)  3934 ██▉
+    5242ms - 5505ms   : ( 80.1380%)  3761 ██▊
+    5505ms - 5505ms   : ( 80.1380%)     0
+    5505ms - 5767ms   : ( 83.8770%)  3739 ██▊
+    5767ms - 6029ms   : ( 87.6620%)  3785 ██▊
+    6029ms - 6029ms   : ( 87.6620%)     0
+    6029ms - 6291ms   : ( 91.2470%)  3585 ██▋
+    6291ms - 6291ms   : ( 91.2470%)     0
+    6291ms - 6553ms   : ( 94.1900%)  2943 ██▏
+    6553ms - 6553ms   : ( 94.1900%)     0
+    6553ms - 6815ms   : ( 96.1390%)  1949 █▍
+    6815ms - 6815ms   : ( 96.1390%)     0
+    6815ms - 7077ms   : ( 97.2950%)  1156 ▊
+    7077ms - 7077ms   : ( 97.2950%)     0
+    7077ms - 7340ms   : ( 97.9340%)   639 ▍
+    7340ms - 7340ms   : ( 97.9340%)     0
+    7340ms - 7602ms   : ( 98.2630%)   329 ▏
+    7602ms - 8388ms   : ( 98.4380%)   175 ▏
+    8388ms - 9961ms   : ( 98.6470%)   209 ▏
+    9961ms - 11010ms  : ( 98.8140%)   167 ▏
+    11010ms - 12058ms : ( 98.9700%)   156
+    12058ms - 13107ms : ( 99.1400%)   170 ▏
+    13107ms - 13631ms : ( 99.2230%)    83
+    13631ms - 14680ms : ( 99.3830%)   160
+    14680ms - 14680ms : ( 99.3830%)     0
+    14680ms - 15204ms : ( 99.4550%)    72
+    15204ms - 16252ms : ( 99.6000%)   145
+    16252ms - 16777ms : ( 99.6660%)    66
+    16777ms - 16777ms : ( 99.6660%)     0
+    16777ms - 17825ms : ( 99.7780%)   112
+    17825ms - 17825ms : ( 99.7780%)     0
+    17825ms - 18874ms : ( 99.8570%)    79
+    18874ms - 18874ms : ( 99.8570%)     0
+    18874ms - 19922ms : ( 99.9160%)    59
+    19922ms - 19922ms : ( 99.9160%)     0
+    19922ms - 20971ms : ( 99.9630%)    47
+    20971ms - 20971ms : ( 99.9630%)     0
+    20971ms - 22020ms : ( 99.9890%)    26
+    22020ms - 22020ms : ( 99.9890%)     0
+    22020ms - 23068ms : (100.0000%)    11
+    Avg               : ( 3590ms)
+
+After this patch:
+
+    sync_write_commit_persist_to_majority (100000 total)
+       0us -   13ms   : (  0.0010%)     1
+      13ms -  655ms   : ( 10.2870%) 10286 ███████▋
+     655ms - 1310ms   : ( 20.0010%)  9714 ███████▎
+    1310ms - 2031ms   : ( 30.5390%) 10538 ███████▉
+    2031ms - 2752ms   : ( 40.8220%) 10283 ███████▋
+    2752ms - 3407ms   : ( 50.3360%)  9514 ███████▏
+    3407ms - 3801ms   : ( 55.9060%)  5570 ████▏
+    3801ms - 4194ms   : ( 61.5710%)  5665 ████▏
+    4194ms - 4456ms   : ( 65.4210%)  3850 ██▉
+    4456ms - 4980ms   : ( 73.3070%)  7886 █████▉
+    4980ms - 5242ms   : ( 77.6200%)  4313 ███▏
+    5242ms - 5242ms   : ( 77.6200%)     0
+    5242ms - 5505ms   : ( 81.5240%)  3904 ██▉
+    5505ms - 5767ms   : ( 85.5130%)  3989 ██▉
+    5767ms - 5767ms   : ( 85.5130%)     0
+    5767ms - 6029ms   : ( 89.4400%)  3927 ██▉
+    6029ms - 6029ms   : ( 89.4400%)     0
+    6029ms - 6291ms   : ( 92.9790%)  3539 ██▋
+    6291ms - 6291ms   : ( 92.9790%)     0
+    6291ms - 6553ms   : ( 96.0060%)  3027 ██▎
+    6553ms - 6553ms   : ( 96.0060%)     0
+    6553ms - 6815ms   : ( 97.8740%)  1868 █▍
+    6815ms - 6815ms   : ( 97.8740%)     0
+    6815ms - 7077ms   : ( 99.0770%)  1203 ▉
+    7077ms - 7077ms   : ( 99.0770%)     0
+    7077ms - 7340ms   : ( 99.6480%)   571 ▍
+    7340ms - 7340ms   : ( 99.6480%)     0
+    7340ms - 7602ms   : ( 99.8430%)   195 ▏
+    7602ms - 7602ms   : ( 99.8430%)     0
+    7602ms - 7864ms   : ( 99.9030%)    60
+    7864ms - 7864ms   : ( 99.9030%)     0
+    7864ms - 8126ms   : ( 99.9330%)    30
+    8126ms - 8126ms   : ( 99.9330%)     0
+    8126ms - 8388ms   : ( 99.9500%)    17
+    8388ms - 8912ms   : ( 99.9680%)    18
+    8912ms - 8912ms   : ( 99.9680%)     0
+    8912ms - 9437ms   : ( 99.9800%)    12
+    9437ms - 9437ms   : ( 99.9800%)     0
+    9437ms - 9961ms   : ( 99.9920%)    12
+    9961ms - 9961ms   : ( 99.9920%)     0
+    9961ms - 10485ms  : ( 99.9990%)     7
+    10485ms - 10485ms : ( 99.9990%)     0
+    10485ms - 11010ms : (100.0000%)     1
+    Avg               : ( 3384ms)
+
+TODO: Interlock compaction more strictly. We _should_ be safe at the
+moment as external locking is used to obtain mutual exclusion between
+flushing and compaction, however that seems error-prone given we
+should be able to go that inside CouchKVStore.
+
+Change-Id: Iad0b538c97fd63ceb8c4970b4debcba52f435892
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Ben Huddleston
+Date: 2020-09-16 20:48:00.000000000
+Message: 
+Uploaded patch set 3: Patch Set 2 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-09-16 22:18:26.000000000
+Message: 
+Patch Set 3: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/30496/ : ABORTED
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/30496/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/6071/ : FAILURE
+
+ThreadSanitizer issue: data race /home/couchbase/jenkins/workspace/kv_engine.threadsanitizer_master/build/../kv_engine/engines/ep/src/linked_list.cc in BasicLinkedList::purgeTombstones(long, std::function<bool (DocKey const&, long, bool)>, std::function<bool ()>)  ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/6071/ )
+
+Failure of a CTest test [2020-09-16T21:26:28.869Z]   1/387 Test #245: ep_testsuite_dcp.ephemeral.comp_active ...................................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/6071/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/3099/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/4572/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/26371/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/4930/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/13745/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/5832/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/5943/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-09-18 13:05:19.000000000
+Message: 
+Patch Set 3: Code-Review-1
+
+(1 comment)
+
+Partially reviewed
+Line:453, engines/ep/src/couch-kvstore/couch-kvstore.cc -> Can't we do fcHandle->erase(itr.first) here, and remove the for-loop below?
+I don't see any lock released before the executing the loop below, so not sure why we have this double step
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-09-18 13:17:48.000000000
+Message: 
+Patch Set 3:
+
+(3 comments)
+Line:1852, engines/ep/src/couch-kvstore/couch-kvstore.cc -> Mmm mismatch in revision possible only after compaction right?
+If so, why not doing that as an epilogue after compaction? We could remove this block from here, what do you think?
+
+Line:2449, engines/ep/src/couch-kvstore/couch-kvstore.cc -> Unrelated to this patch? Are we fixing something here?
+
+Line:4834, engines/ep/tests/module_tests/evp_store_single_threaded_test.cc -> Why this is necessary now and wasn't before?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2020-09-23 15:10:39.000000000
+Message: 
+Patch Set 3:
+
+(4 comments)
+Line:453, engines/ep/src/couch-kvstore/couch-kvstore.cc -> Erasing whilst looping over the container invalidates the iterater that we're using to erase so no
+
+Line:1852, engines/ep/src/couch-kvstore/couch-kvstore.cc -> Mismatch in revision is also possible if we delete and recreate a vBucket between flushes.
+
+It did feel like moving this to updateDbFileMap would be a reasonable idea anyways, so I spent the last day or so getting that to work. It actually ends up complicating both CouchKVStore and our tests quite a bit as we need to ensure that the cache is always correct (in particular had issues where we create new KVStores in tests). It ends up being more code, and it's more complicated so I decided to avoid doing that.
+
+Line:2449, engines/ep/src/couch-kvstore/couch-kvstore.cc -> No idea, I removed
+
+Line:4834, engines/ep/tests/module_tests/evp_store_single_threaded_test.cc -> Now that we keep files open across writes we tend to close them out on KVStore destruction. The KVStore won't be destroyed until test TearDown at which point the mock file ops will have gone out of scope and been destroyed themselves
+
+----------------------------------------------------------------------------------------------------------------------

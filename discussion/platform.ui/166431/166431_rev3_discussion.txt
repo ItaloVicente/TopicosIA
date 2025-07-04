@@ -1,0 +1,286 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 549929 - Provide getDialogSettings outside of AbstractUIPlugin
+
+Moved dialog settings outside of AbstractUIPlugin
+Removed all eclipse.ui references from dialog settings
+Changed dialogsettings into service
+
+
+Change-Id: I4e3338af9d69bd0fd5a9897afc788f8fa40f1026
+Signed-off-by: Wim Jongman <wim.jongman@remainsoftware.com>
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Wim Jongman
+Date: 2020-07-18 21:42:22.000000000
+Message: 
+Uploaded patch set 3.
+----------------------------------------------------------------------------------------------------------------------
+Author: Platform Bot
+Date: 2020-07-18 21:42:59.000000000
+Message: 
+Patch Set 3:
+
+Build Started https://ci.eclipse.org/platform/job/eclipse.platform.ui-Gerrit/23413/
+----------------------------------------------------------------------------------------------------------------------
+Author: Platform Bot
+Date: 2020-07-18 22:14:42.000000000
+Message: 
+Patch Set 3: Verified-1
+
+Build Failed 
+
+https://ci.eclipse.org/platform/job/eclipse.platform.ui-Gerrit/23413/ : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Alex Blewitt
+Date: 2020-07-18 22:17:12.000000000
+Message: 
+Patch Set 3:
+
+(4 comments)
+
+Some minor observations
+Line:130, bundles/org.eclipse.ui.workbench/Eclipse UI/org/eclipse/ui/dialogs/DialogSettingsService.java -> This method will need the preference service to run. Why not have the DS component consume the IPreferencesService by a service reference instead of doing the lookup here?
+
+Line:372, bundles/org.eclipse.ui.workbench/Eclipse UI/org/eclipse/ui/plugin/AbstractUIPlugin.java -> This gets the service but doesn't unget it afterwards. Is that intentional?
+
+You could replace this with:
+
+ServiceCaller.callOnce(getClass(),DialogsSettingsService.class,(service) -> dialogSettings = service.loadDialogSettings(this.getClass()));
+
+Line:421, bundles/org.eclipse.ui.workbench/Eclipse UI/org/eclipse/ui/plugin/AbstractUIPlugin.java -> Worth marking this as deprecated?
+
+Line:143, bundles/org.eclipse.ui.workbench/META-INF/MANIFEST.MF -> If you have *.xml, on startup the DS has to do a findURL to scan for all possible files. If you only have one (or a few) XML files, and list them here by name, it doesn't need to scan all files but can just access it by name directly. I'd suggest we avoid the *.xml approach if possible.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexander Fedorov
+Date: 2020-07-19 09:18:12.000000000
+Message: 
+Patch Set 3:
+
+(2 comments)
+
+@Wim thanks for working on this!
+
+I have several comments regarding implementation that I can try to summarize.
+The good part of code is not related to the UI and can be extracted to be testable by UI-less unit tests. I'm talking about the algo to load the settings, that can be expressed as:
+```
+		IDialogSettings loaded = fromWorkspace()//
+				.orElseGet(() -> fromProduct()//
+						.orElseGet(() -> fromBundle()//
+								.orElseGet(() -> createEmpty())));
+
+```
+This algo can be isolated even more by taking IDialogSettings type as a parameter.
+Also "static" keyword is not friendly for the OSGi (and OOP) world and can be avoided.
+I would also extract an interface to JFace space to follow OSGi best practices and also I would put the implementation to a bundle that is visible for E4 RCPs.
+Line:47, bundles/org.eclipse.ui.workbench/Eclipse UI/org/eclipse/ui/dialogs/DialogSettingsService.java -> I would extract an interface to be a part of org.eclipse.jface
+
+Line:143, bundles/org.eclipse.ui.workbench/META-INF/MANIFEST.MF -> @Alex do you think this rule needs to be supported with PDE?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Alex Blewitt
+Date: 2020-07-19 10:36:50.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:143, bundles/org.eclipse.ui.workbench/META-INF/MANIFEST.MF -> @Alex I think it might make sense to have a cleanup which replaces *.xml in a Serivce-Component: header with an expanded list of XML files, in the same way that an import java.util.* gets expanded to java.util.{List,Set} in JDT. So a (configurable) warning with a code cleanup might be a good addition. However, I don't think PDE should mandate or force people to avoid *.xml if that's their preference.
+
+Maybe have a warning by default with a clean-up/auto-fix to expand, and then allow projects to downgrade that from a warning to an ignore if they wish?
+
+One other advantage of explicitly listing names; you can then ensure that those specific files are listed in the bin.includes of the project. Most of the time the OSGI-INF directory will be added at the top level but if you have list-of-filenames you can verify they are in there, whereas *.xml you just take what you get.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Christoph Laeubrich
+Date: 2020-07-20 05:08:35.000000000
+Message: 
+Patch Set 3: Code-Review-1
+
+(3 comments)
+
+If you really want a "service-per bundle" you should implement a https://docs.osgi.org/javadoc/osgi.core/7.0.0/org/osgi/framework/ServiceFactory.html for bundle-scoped services, then there won't be any need for new API and/or intermediate services.
+This would also allow to save the preference as soon as a bundle unget the service (e.g. is restarted/refreshed/...).
+Line:47, bundles/org.eclipse.ui.workbench/Eclipse UI/org/eclipse/ui/dialogs/DialogSettingsService.java -> Instead of new API I would sugest implementing a service factory instead.
+
+Line:372, bundles/org.eclipse.ui.workbench/Eclipse UI/org/eclipse/ui/plugin/AbstractUIPlugin.java -> @Alex: Its bad habit to keep object references aquired from a service that you do not reference anymore.
+Anyways I think a service-factory would be more suitable here. In any case the service will be "unget" when the bundle stops so this seems okay even though instead of raw OSGi-API a service tracker (possibly with a timeout) should be used.
+
+Beside this I think the whole block should be guarded either
+
+if (dialogSettings == null) {
+
+}
+
+or a mean to unget/reload the settings.
+
+Line:421, bundles/org.eclipse.ui.workbench/Eclipse UI/org/eclipse/ui/plugin/AbstractUIPlugin.java -> Why should't it be possible anymore to trigger saving of the setting by code?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Wim Jongman
+Date: 2020-07-21 14:40:02.000000000
+Message: 
+Patch Set 3:
+
+(5 comments)
+
+Thanks for reviewing. I'm ready to submit my next set. These are the responses to your comments.
+Line:47, bundles/org.eclipse.ui.workbench/Eclipse UI/org/eclipse/ui/dialogs/DialogSettingsService.java -> @Alexander: Thanks, I will take a look at that as the final step.
+@Christoph: What would that service factory return? Must be API right?
+
+Line:130, bundles/org.eclipse.ui.workbench/Eclipse UI/org/eclipse/ui/dialogs/DialogSettingsService.java -> I don't understand "This method will need the preference service to run". Why should it not be running?
+
+This method is already in Platform. I have to add more BPC to change it to DS. Can you explain why this is worth it?
+
+Line:372, bundles/org.eclipse.ui.workbench/Eclipse UI/org/eclipse/ui/plugin/AbstractUIPlugin.java -> @Alex. I will use ServiceCaller
+@Cristoph: It's not so much bad habit as it is counter intuitive. Any cooperative model should be avoided IMHO (e.g. the SWT "dispose" rule). ServiceCaller fixes this nicely.
+I don't get your "block should be guarded" comment.
+
+Line:421, bundles/org.eclipse.ui.workbench/Eclipse UI/org/eclipse/ui/plugin/AbstractUIPlugin.java -> @Alex: I marked is as deprecated.
+@Christoph: The aim is to get rid of AbstractUIPlugin. It will still be possible to call the save method but it is bad practice.
+
+Line:143, bundles/org.eclipse.ui.workbench/META-INF/MANIFEST.MF -> Good one. I changed it back. Nice eye for detail.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Wim Jongman
+Date: 2020-07-21 14:41:51.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:47, bundles/org.eclipse.ui.workbench/Eclipse UI/org/eclipse/ui/dialogs/DialogSettingsService.java -> @Cristoph: I will extract to an interface.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Christoph Laeubrich
+Date: 2020-07-21 15:07:08.000000000
+Message: 
+Patch Set 3:
+
+(3 comments)
+Line:47, bundles/org.eclipse.ui.workbench/Eclipse UI/org/eclipse/ui/dialogs/DialogSettingsService.java -> Even then I think an additional service interface is not needed, that would also make usage in E4 much more smoothly.
+
+Line:372, bundles/org.eclipse.ui.workbench/Eclipse UI/org/eclipse/ui/plugin/AbstractUIPlugin.java -> Using ServiceCaller the way Alex has outlined is simply wrong. If you release the service reference you claim that you are not using the service anymore, keeping references afterwards is invalid.
+
+The guard is meant in case someone calls loadDialogSettings() twice.
+
+Line:421, bundles/org.eclipse.ui.workbench/Eclipse UI/org/eclipse/ui/plugin/AbstractUIPlugin.java -> but the method should still save it then. Either through the service or other other means.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Wim Jongman
+Date: 2020-07-21 15:26:10.000000000
+Message: 
+Patch Set 3:
+
+(3 comments)
+Line:47, bundles/org.eclipse.ui.workbench/Eclipse UI/org/eclipse/ui/dialogs/DialogSettingsService.java -> Then what class would the service factory return?
+
+Line:372, bundles/org.eclipse.ui.workbench/Eclipse UI/org/eclipse/ui/plugin/AbstractUIPlugin.java -> Thanks for the review.
+
+service:
+Where am I keeping references?
+
+guard:
+So you mean "if(dialogSettings != null){}". I can't do that because it breaks the current behavior. Someone might want to reload the dialog settings.
+
+Line:421, bundles/org.eclipse.ui.workbench/Eclipse UI/org/eclipse/ui/plugin/AbstractUIPlugin.java -> Ack
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Christoph Laeubrich
+Date: 2020-07-21 16:43:37.000000000
+Message: 
+Patch Set 3:
+
+(2 comments)
+Line:47, bundles/org.eclipse.ui.workbench/Eclipse UI/org/eclipse/ui/dialogs/DialogSettingsService.java -> The ServiceFactory should return the IDialogSettings for the given bundle, so it would be possible to get IDialogSettings directly, the factory can then be an internal class so client code never needs to reference it.
+
+Line:372, bundles/org.eclipse.ui.workbench/Eclipse UI/org/eclipse/ui/plugin/AbstractUIPlugin.java -> You could simply add a field inside AbstractUIPlugin, you could use ServiceTracker<DialogSettingsService> that is created the first time the method is accecced. 
+About the reaload: Maybe there should be an explicit method in IDialogSetting that performs this. calling this method again to reload does not seem to fit very well into the service model...
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexander Fedorov
+Date: 2020-07-21 17:22:05.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:372, bundles/org.eclipse.ui.workbench/Eclipse UI/org/eclipse/ui/plugin/AbstractUIPlugin.java -> @Christoph As the main goal of this task is to reduce usages of AbstractUIPlugin - how the typical client code could look from your point of view?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Christoph Laeubrich
+Date: 2020-07-21 17:40:29.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:372, bundles/org.eclipse.ui.workbench/Eclipse UI/org/eclipse/ui/plugin/AbstractUIPlugin.java -> E4 Usage would simply be (if a service factory is used for implementation):
+
+@Inject
+IDialogSettings settings;
+
+beside that we can add a simple servicetracker for backward-compat "static" calls, IMO the main problem is that in old e3 code (or in "generic Ui components) you often have the case that you need to access "something" that can't be constructed right away, moving it from one place to the other dosen't really solve this.
+
+To solve this issue, IDialogSettings should be enhanced to get a save() without parameter for the save usecase and a reload() method that handles all the dirty stuff under the hood. Then there would be no need for client-code to actually use any external code once they get hold on to a reference.
+All those load/read seems a bit of exposing internal API to the user as one can't be sure that settings saved with an unknown instance of the settings can savely be read back afterwards.
+
+Actually (if I get the code right) the IDialogSettings are even not bound to any kind of life-cycle but simply load some defaults from the bundle, so there not much to gain anyway from packing this into a service at all but that might be a matter of opinion. So in my opinion all this could simply be transfered to a static method in IDialogSettings itself, no service or everything else is needed.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Wim Jongman
+Date: 2020-07-21 17:56:43.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:372, bundles/org.eclipse.ui.workbench/Eclipse UI/org/eclipse/ui/plugin/AbstractUIPlugin.java -> Okay that is very clever. I will try this out.
+
+"So in my opinion all this could simply be transfered to a static method in IDialogSettings itself, no service or everything else is needed."
+
+I don't get the last sentence. What do you mean by "all this"? Since IDialogSettings is JFace and JFace does not know about OSGi and Platform.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Christoph Laeubrich
+Date: 2020-07-21 18:16:27.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:372, bundles/org.eclipse.ui.workbench/Eclipse UI/org/eclipse/ui/plugin/AbstractUIPlugin.java -> Let me try to make it a little bit more clear:
+
+IDialogSettings interface should have never contained save(Writer/File/Whatever...) methods as IMO these are details of the implementation as there is no contract in HOW the settings a serialized/deserialize (DialogSettings implementation seems to use XML impl).
+
+If (for whatever reason this should be exposed to clients) a save/reload workflow should be possible these should be simply parameterless functions save()/reload() so client code do not need to care the details of WHERE and HOW to store/load, these would simply be a matter of how it was obtained
+
+This could then be for example something like:
+- new FileDialogSettings(new File("/temp/blabla.xml")
+- new PreferencesDialogSettings(node.get("mydialog")
+- Platform.getBundleDialogSettings(myBundle)
+- Platform.getProductDialogSetting()
+- ... whatever we like ...
+
+Base on this basic primitives (storage engines) one could build up a contract (that currently is hidden in code) that there might be a Service, an E4 ContextSupplier or whatever that delegates to the individual primitives (orElseGet() ... described earlier).
+
+I understand that this might be to late now (but probbably not?) to change, but if the whole sake is to move the code out of the concrete class AbstractUIPlugin then it could be simply made a static call to PlatformUI.getDialogSettings() + an E4 ContextSupplier for code that want's to avoid the static reference. DialogSettings obviously do not participate in any LifeCycle, so why not express the static nature with a little syntactic suggar for the E4-world?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Wim Jongman
+Date: 2020-10-17 13:43:57.000000000
+MISMATCHED INLINE COMMENT
+Line:47, bundles/org.eclipse.ui.workbench/Eclipse UI/org/eclipse/ui/dialogs/DialogSettingsService.java -> Moved to later.
+----------------------------------------------------------------------------------------------------------------------
+Author: Wim Jongman
+Date: 2020-10-17 13:43:57.000000000
+MISMATCHED INLINE COMMENT
+Line:130, bundles/org.eclipse.ui.workbench/Eclipse UI/org/eclipse/ui/dialogs/DialogSettingsService.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Wim Jongman
+Date: 2020-10-17 13:43:57.000000000
+MISMATCHED INLINE COMMENT
+Line:372, bundles/org.eclipse.ui.workbench/Eclipse UI/org/eclipse/ui/plugin/AbstractUIPlugin.java -> Yep. Adding ContextSupplier in a later patch.
+----------------------------------------------------------------------------------------------------------------------
+Author: Wim Jongman
+Date: 2020-10-17 13:43:57.000000000
+MISMATCHED INLINE COMMENT
+Line:143, bundles/org.eclipse.ui.workbench/META-INF/MANIFEST.MF -> Done
+----------------------------------------------------------------------------------------------------------------------

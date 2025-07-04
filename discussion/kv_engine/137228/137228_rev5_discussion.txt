@@ -1,0 +1,148 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-41510: Fix infinite loop due to HdrHistogram being reset
+
+Currently if a HdrHistogram has its reset() method called by one thread
+(T1) and is being read by another (T2) using an HdrHistoram::Iterator.
+There is the race that could cause the HdrHistoram::Iterator() to enter
+an infinite loop.
+
+This occurs as HdrHistogram's getNextValue() methods use HdrHistogam_c's
+hdr_iter_next() which intern uses the following function:
+static bool has_next(struct hdr_iter* iter)
+{
+        return iter->cumulative_count < iter->total_count;
+}
+Which logically checks that the total count the Iterator was
+initialize with is > than the sum of all the counts its read from the
+buckets in the histogram. The trouble is, that the reset() method
+changes the bucket counts back to 0. Thus, meaning the condition
+cumulative_count >= total_count may never be met.
+
+To fix this wrap the std::unique_ptr<struct hdr_histogram> with a
+folly::Synchronized<>. This allows us to take an exclusive lock on the
+pointer when performing a reset() of the histogram and allows us to
+ensure that no iterator is reading from the histogram, as the iterator
+takes a non exclusive read lock for the lifetime of the
+HdrHistogram::Iterator struct. This also ensures that
+HdrHistogram::resize() is thread safe as we now take a write lock.
+
+Change-Id: I8cf5eeb0ac3107ce20e915463be3db245c68c8b9
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Richard de Mellow
+Date: 2020-10-01 08:45:31.000000000
+Message: 
+Uploaded patch set 5.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-10-01 09:21:00.000000000
+Message: 
+Patch Set 5: Code-Review-1
+
+(8 comments)
+
+I think you can simplify this quite a bit - see detailed comments.
+Line:503, engines/ep/tests/module_tests/hdrhistogram_test.cc -> Technically reset() can run anytime between creation and the join. 
+
+If you want to guarantee that it runs while in the middle of the iteration, I think you should manually advance the iterator the appropriate number of times, then create (and join) the thread, then finish the iteration.
+
+Line:24, utilities/hdrhistogram.h -> This header doesn't appear used.
+
+Line:44, utilities/hdrhistogram.h -> Not sure this type alias gives anything other than just an unnecessary level of indirection.
+
+Line:58, utilities/hdrhistogram.h -> Firstly, there's already a type alias for this named `SharedMutexWritePriority` which would be clearer to use if that's what we wanted.
+
+However, the default type is already writer priority, to this template parameter is entirely unnecessary.
+
+Line:59, utilities/hdrhistogram.h -> I believe you can simplify this to something like SyncHdrHistogramPtr::ConstRLockedPtr;
+
+Line:90, utilities/hdrhistogram.h -> You have a type alias for this - SyncHdrHistogramPtr.
+
+Line:216, utilities/hdrhistogram.h -> Seems strange to require heap-allocation for the Iterator. What's the reason to use a unique_ptr here?
+
+Line:398, utilities/hdrhistogram.h -> Note that folly::SynchronizedPtr<> is probably a better choice here as it makes it simpler to manipulate the pointed-to object.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-10-01 09:42:37.000000000
+Message: 
+Patch Set 5: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/13998/ : FAILURE
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/3340/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/4813/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/26610/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/30779/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/5183/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/6225/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/6332/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/6105/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2020-10-01 10:37:13.000000000
+Message: 
+Patch Set 5:
+
+(8 comments)
+Line:503, engines/ep/tests/module_tests/hdrhistogram_test.cc -> resetThread() will be run as soon as its created, but the underlying hdr_reset() will not as it requires an exclusive lock, due to getHistogramsIterator() creating a read lock and holding onto it at the point of thread creation. I'll update my comments to reflect this.
+
+Line:24, utilities/hdrhistogram.h -> Done
+
+Line:44, utilities/hdrhistogram.h -> Done
+
+Line:58, utilities/hdrhistogram.h -> Done
+
+Line:59, utilities/hdrhistogram.h -> Done
+
+Line:90, utilities/hdrhistogram.h -> Done
+
+Line:216, utilities/hdrhistogram.h -> The copy constructor for Iterator can no longer be use as the lockPtr's copy constructor is deleted for obvious reasons.
+
+Line:398, utilities/hdrhistogram.h -> As we use a lot of C functions we often need the raw ptr from the std::unique_ptr<>, unfortunately SynchronizedPtr<> make it quite difficult to do this.
+E.g.
+ hdr_add(thisRLockPtr->get(), otherRLockPtr->get());
+Becomes
+hdr_add(const_cast<struct hdr_histogram*>(thisRLockPtr.operator->()), otherRLockPtr.operator->());
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-10-01 12:09:03.000000000
+MISMATCHED INLINE COMMENT
+Line:503, engines/ep/tests/module_tests/hdrhistogram_test.cc -> Note the test as written is racy - at the moment there's no guarantee of any order, the thread may not actually get scheduled until after line 500 (and the iteration has finished).
+
+I'm not sure there's a huge amount you can do (ideally you'd somehow wait until the reset thread was blocked waiting for exclusive access on the mutex, and only _then_ complete the iteration, but that isn't currently possible with the locking we use).
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-10-01 12:09:03.000000000
+MISMATCHED INLINE COMMENT
+Line:216, utilities/hdrhistogram.h -> Sure, but what about move - there is a move ctor for LockedPtr?
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2020-10-01 13:00:04.000000000
+MISMATCHED INLINE COMMENT
+Line:216, utilities/hdrhistogram.h -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-10-01 12:09:03.000000000
+MISMATCHED INLINE COMMENT
+Line:398, utilities/hdrhistogram.h -> Ok no problem, but in that case if you're not using SynchronizedPtr<> flip the #include back to <folly/Synchronized.h>
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2020-10-01 13:00:04.000000000
+MISMATCHED INLINE COMMENT
+Line:398, utilities/hdrhistogram.h -> Thanks for the spot
+----------------------------------------------------------------------------------------------------------------------

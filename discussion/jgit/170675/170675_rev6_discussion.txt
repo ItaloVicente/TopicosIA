@@ -1,0 +1,67 @@
+======================================================================================================================
+DESCRIPTION:
+
+WIP: memory-mapped PackIndexV2
+
+TODO:
+(1) How to safely "unmap" the MappedByteBuffer, once the PackIndex is closed?
+(2) How to handle files larger than Integer.MAX limit?
+    - use a list of multiple buffers, as suggested at https://stackoverflow.com/a/55301147
+    - or introduce assertions, if we don't plan to support them
+(3) How to handle possible multi-threaded access to buffers?
+    - disallow, as currently done
+    - have independent buffers, one per thread
+
+Change-Id: I38c2da4e142fc78fb051e519f5eb4df8ca3577c0
+Signed-off-by: Marc Strapetz <marc.strapetz@syntevo.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Marc Strapetz
+Date: 2020-10-13 10:31:46.000000000
+Message: 
+Uploaded patch set 6.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2020-10-13 10:31:55.000000000
+Message: 
+Patch Set 6:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/3737/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2020-10-13 11:13:05.000000000
+Message: 
+Patch Set 6: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/3737/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandr Miloslavskiy
+Date: 2020-10-13 14:17:30.000000000
+Message: 
+Patch Set 6:
+
+I see the following improvements from this patch:
+
+1) For large indexes, there is no longer a need to keep entire file in memory. For example, the index size of Linux repository is ~240mb. Memory mappings will usually only load portions of file that are actually accessed, and this memory can be discarded and re-loaded by OS as needed. This kind means that application-side memory cost of accessing a file through mapping is zero, because only OS file cache memory is used.
+
+2) There is a significant performance improvement for scenarios where just a few objects are queried from repository before closing it. I estimate that this is actually the most common case. For example, in one of our tests, ~100 commits are read from Linux repository. Warmed up performance is new=7ms, old=162ms. The difference is a lot higher when using HDD with cold file cache. This happens because only small portions of file will be read from disk.
+
+3) git itself and libgit2 already use the memory mapped files for indexes. The way lookup tables are designed in the index file makes it really easy to use together with file mappings.
+
+There is also a downside for specific scenarios:
+If application scatter-reads a significant portion of a larger file, then it could be slower on HDD disks compared to just reading entire file into memory. This doesn't really apply to small files < 50mb or SSD disks. On the other hand, the new memory mapped files are enabled with an option, which allows application to decide what is best in every specific case.
+
+Next, I want to discuss TODO(1), closing the file. Problem is, Java currently give no official means to close a 'MappedByteBuffer' so that the file behind it is unlocked on Windows. This causes problems if the use of JGit is interleaved with the use of git itself, which would not be able to write/delete the index while it's in use by JGit.
+
+Java developers hesitated to add such API for years [1], because it allows for bad things (such as native crashes) to happen if file is accessed after it was closed, whether by a concurrent thread or the same thread later. However, this isn't a problem in JGit: since the new class 'PackIndexV2m' is properly encapsulated, it's easy to ensure that 'MappedByteBuffer' is not accessed after it was closed. Currently, 'PackIndexV2m' enforces that it's only used by a single thread, but this limitation can be lifted by adding 'synchronized' keyword to public methods.
+Note that 'synchronized' is already used quite a lot in 'PackFile', which is tightly connected to 'PackIndex'.
+
+There are ways to really close 'MappedByteBuffer', but these need reflection. Before Java 1.9, a private method could be used. After 1.9, there is a dedicated API 'sun.misc.Unsafe.invokeCleaner()', see also [2].
+
+[1] https://bugs.openjdk.java.net/browse/JDK-4724038
+[2] https://bugs.openjdk.java.net/browse/JDK-8171377
+----------------------------------------------------------------------------------------------------------------------

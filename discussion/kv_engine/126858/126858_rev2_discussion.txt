@@ -1,0 +1,165 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-38999: Handle transition from OSO backfill to memory
+
+Common to both backfill types is the registration of a cursor with
+the checkpoint manager, this is the item which will be streamed from
+memory once the backfill completes. The seqno of that item is set in
+ActiveStream as curChkSeqno.
+
+A sequence ordered backfill always has a start-seqno and an end-seqno,
+the end is set to curChkSeqno - 1. As the disk scan runs it stops at
+the end-seqno.
+
+However OSO backfill doesn't do that, it has to iterate the entire
+by-id index, and cannot stop based on a seqno.
+
+What happens in the MB is that at the time of cursor registration, no
+items exist in memory, but we get a cursor, it is registered at the
+high-seqno + 1, i.e. the next item sequentially after the highest item
+on disk. After the registration of the cursor and the creation of the
+OSO backfill objects, an item arrives in memory and is flushed to disk.
+OSO now runs, it opens the disk, streams all of the items, switches to
+memory and streams all in-memory items - at the switch to memory the
+curChkSeqno item is effectively sent again (once from disk, now from
+memory). This results in a monotonic exception.
+
+Worked example.
+
+1) On disk exists 3 items. seqs 1, 2 and 3.
+2) ActiveStream starts, schedules an OSO backfill.
+   a) Registered cursor is at seqno 4 (no item exists for seqno 4)
+   b) A seq-ordered backfill would set the end as 'curChkSeqno - 1' = 3
+3) An item is written, gets seqno 4 and is flushed.
+   a) On disk exists 4 items. seqnos 1, 2, 3 and 4.
+4) OSO runs over the by-id index and returns seqnos 1, 2, 3 and 4
+   (in id order)
+   a) A seqno ordered backfill would not of returned seq 4
+5) Backfill completes and now sends items from the cursor, which is
+   seqno 4
+6) Exception occurs - seqno 4 is being sent twice.
+
+The fix is to check that items returned from disk are skipped if they
+match the in-memory transition point, e.g. seqno 4 would of been skipped
+from the disk items.
+
+Change-Id: Icf229ff7e8b0b93b33e14cb7c09fab27a11ca42f
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jim Walker
+Date: 2020-04-29 12:16:24.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-04-29 13:08:41.000000000
+Message: 
+Patch Set 2: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/27891/ : FAILURE
+
+Failure of a CTest test  73/386 Test  #67: ep-engine_ep_unit_tests.SingleThreadedEPBucketTest ............................................................................ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/27891/ )
+
+Failure of a GoogleTest test:
+
+SingleThreadedEPBucketTest.ProducerReadyQStreamByteLimitOnBackfill (20 ms) ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/27891/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/541/ : FAILURE
+
+<p>clang-format suggested the following changes:
+
+<pre>
+cat <<"EOF" | patch -p1
+diff --git a/engines/ep/tests/module_tests/collections/collections_oso_dcp_test.cc b/engines/ep/tests/module_tests/collections/collections_oso_dcp_test.cc
+index 1f32e88..cd9270c 100644
+--- a/engines/ep/tests/module_tests/collections/collections_oso_dcp_test.cc
++++ b/engines/ep/tests/module_tests/collections/collections_oso_dcp_test.cc
+@@ -195,7 +195,6 @@ TEST_F(CollectionsOSODcpTest, dropped_collection) {
+     EXPECT_EQ(CollectionUid::vegetable, producers-&gt;last_collection_id);
+     EXPECT_EQ(mcbp::systemevent::id::DeleteCollection,
+               producers-&gt;last_system_event);
+-
+ }
+ 
+ // Test that we can transition to in memory and continue.
+
+EOF
+</pre> ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/541/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/3470/ : FAILURE
+
+Failure of a CTest test [2020-04-29T12:20:04.159Z]  68/403 Test  #70: ep-engine_ep_unit_tests.SingleThreadedEPBucketTest ................................................................ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/3470/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/3448/ : FAILURE
+
+Failure of a CTest test [2020-04-29T12:47:36.707Z]  69/392 Test  #70: ep-engine_ep_unit_tests.SingleThreadedEPBucketTest ................................................................ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/3448/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/3526/ : FAILURE
+
+Failure of a CTest test [2020-04-29T12:43:25.666Z]  67/381 Test  #67: ep-engine_ep_unit_tests.SingleThreadedEPBucketTest ................................................................ ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/3526/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/2527/ : FAILURE
+
+Failure of a CTest test [2020-04-29T12:19:06.848Z]  66/400 Test  #67: ep-engine_ep_unit_tests.SingleThreadedEPBucketTest ................................................................ ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/2527/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/11318/ : FAILURE
+
+Failure of a CTest test [2020-04-29T12:23:11.409Z]  79/386 Test  #69: ep-engine_ep_unit_tests.SingleThreadedEPBucketTest ................................................................ ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/11318/ )
+
+AddressSanitizer issue: 16046 byte(s) leaked in 376 allocation(s). ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/11318/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/23857/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/2023/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-04-29 13:17:15.000000000
+Message: 
+Patch Set 2: Code-Review-1
+
+(1 comment)
+Line:397, engines/ep/src/dcp/active_stream.cc -> Could discarding items at the end of an OSO snapshot mean that after receiving the full snapshot the consumer is not in a consistent state?
+
+If the cursor is at seqno 3, and the items were logically
+
+1. Mutation key-A
+2. Mutation key-B
+3. Mutation key-A
+
+So the OSO snapshot sees seqno 3 key-A and seqno 2 key-B, but discards seqno 3 because it will be read from memory in the next snapshot. Would that mean the consumer would see an OSO snapshot with just key-B, meaning at the end of the snapshot it'd be in a state which never existed on the producer: key-B exists but key-A doesn't?
+
+I haven't thought it through very far. Does that seem possible/is it expected/would it be bad™ for any services?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2020-04-29 14:34:21.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:397, engines/ep/src/dcp/active_stream.cc -> Note quite sure that this isn't exclusive to OSO, sequence order backfill behaves the same, a new issue is needed to track this as both modes of DCP in this case could return an inconsistent disk snapshot.
+
+When the disk runs it should return everything it has as you state we could return a snapshot without any version of A if curChkSeqno is A'
+
+I'll raise one
+
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-04-29 14:39:10.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:397, engines/ep/src/dcp/active_stream.cc -> IIRC, by seqno backfills re-register the cursor in markDiskSnapshot at the seqno after the snapshot end seqno. So everything is read from disk, and the cursor is shuffled over anything that would be read twice.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2020-04-29 16:06:42.000000000
+MISMATCHED INLINE COMMENT
+Line:397, engines/ep/src/dcp/active_stream.cc -> Ah i see that, ok so similar needed in OSO, allow the disk to return all and ush the cursor forwards when we setup the snapshot marker
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,180 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-25822: Create separate mutex for pending_io
+
+This is a recreate of commit 0800742b against our spock branch. Lots
+of refactoring has occurred between spock to vulcan, meaning a simple
+cherry-pick of the original patch was not easy.
+
+This patch recreates the original intent and switches the pending-io
+from a list to std::map (rather than the original switch from std::set
+to std::map)
+
+The LIBEVENT_THREAD::mutex currently guards the whole state of the
+worker thread - as such it is acquired by the worker thread when it
+starts processing event(s) for a connection, and only unlocked when it
+finishes with that connection.
+
+The state guarded includes the pending_io set; which is (primarily):
+
+a) Read at the start of the event loop (to re-register connections in
+   libevent).
+
+b) Written by notify_io_complete when background threads want to
+   wakeup frontend threads.
+
+Profiling of the LIBEVENT_THREAD::mutex wait/lock times shows that
+callers of notify_io_complete (notably ConnManager and DCP
+ConnNotifier task) can end up waiting for long periods (~100ms in
+local testing) to simply add a connection to the pending set.
+
+To improve this, add a separate mutex which is only used for the
+pending_io set. This also requires a change to the data structure for
+the pending_io - we need to additionally record the pending status
+code against each connection.
+
+This is because previously this status (aiostat) was updated with
+LIBEVENT_THREAD::mutex held; therefore no worker thread could possibly
+be running. With the separate mutex this is no longer the case and we
+cannot simply write to aiostat as it may be being accessed by the
+worker. We obviously don't want to have to acquire
+LIBEVENT_THREAD::mutex to update it as that introduces the same
+problem. Instead we record the pending status with the connection in
+pending_io; and when we come to process pending_io in the worker
+thread (which already holds LIBEVENT_THREAD::mutex) we update aiostat
+with the pending status before running it's event loop).
+
+Change-Id: Ifad49f12d2249b92d4ffd3a761e353bb85d0d2d5
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jim Walker
+Date: 2018-05-17 15:07:59.000000000
+Message: 
+Uploaded patch set 3.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-05-17 15:08:06.000000000
+Message: 
+Patch Set 3:
+
+Branch restricted. PLEASE READ this URL: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/90175/artifact/restricted.html : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-05-17 15:25:46.000000000
+Message: 
+Patch Set 3: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-spock/944/ : FAILURE
+
+Failure of a GoogleTest  ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-spock/944/ )
+
+Failure of a CTest test  1/95 Test #85: memcached-shutdown-tests ....................... ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-spock/944/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/8096/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-spock/975/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-spock/923/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-spock/918/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-05-18 06:02:11.000000000
+Message: 
+Patch Set 3:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-spock/947/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-spock/947/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/8096/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-spock/975/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-spock/923/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-spock/918/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2018-05-18 07:02:36.000000000
+Message: 
+Patch Set 3:
+
+(2 comments)
+Line:86, daemon/memcached.h -> Could we update this comment?
+The mutex is to protect the access to this object.
+
+Line:209, daemon/thread.cc -> Why do we need this?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2018-05-18 08:16:32.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:86, daemon/memcached.h -> To be more accurate, we lock on this mutex to guard the connections managed by this thread. That is because we don't have per-connection locking.
+E.g, we need to hold a lock to execute *run_event_loop(connection)*, to avoid a race on the processed connection (connection released for bucket deletion, or updated for a change in the cluster configuration, etc..)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2018-05-18 08:27:49.000000000
+Message: 
+Patch Set 3:
+
+(2 comments)
+Line:86, daemon/memcached.h -> I'll backport the comments
+
+Line:209, daemon/thread.cc -> The LIBTHREAD structure in spock is created by calloc, so any objects inside it haven't had their constructors called
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2018-05-18 08:29:46.000000000
+Message: 
+Patch Set 3: Code-Review-1
+
+(2 comments)
+Line:1046, daemon/memcached.cc -> This should be moved _before_ we lock the thread on line 1028
+
+Line:1703, daemon/memcached.cc -> This should probably go outside the thread lock?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2018-05-18 08:40:44.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:1046, daemon/memcached.cc -> or actually, move line 1028 after this block...
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-05-18 08:43:34.000000000
+Message: 
+Patch Set 3:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-spock/948/ : FAILURE
+
+Failure of a GoogleTest  ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-spock/948/ )
+
+Failure of a CTest test 84/95 Test #85: memcached-shutdown-tests ....................... ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-spock/948/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/8096/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-spock/975/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-spock/923/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-spock/918/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,184 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-46750 Do blind write for initial disk snapshot
+
+To maintain item counts, a KVStore does a lookup on every write to know
+whether a write is an update or insert. This lookup can be avoided in a
+DCP backfill scenario when a vbucket is being streamed right from the
+start (seqno 0). Since the disk snapshot won't have any duplicates, a
+lookup on the consumer side isn't required and we can safely do blind
+writes i.e. writes without lookups while maintaining item counts. This
+scenario commonly occurs during rebalance.
+
+LSMs like Magma benefit from this optimisation as it can now do writes
+without reads while still maintaining item count. On showfast HIDD 250M
+rebalance out test, this improves performance by 22%, with rebalance
+time going from 16.5mins (0.0.0-2265) to 12.8mins.
+
+A new Magma stat called NInserts is also exposed via ep stats to measure
+the number of blind writes issued.
+
+Change-Id: I6855ba10dcf5df8b7ab75bd8a503f0c8f773296d
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Rohan Suri
+Date: 2021-07-01 08:32:58.000000000
+Message: 
+Uploaded patch set 7: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: Rohan Suri
+Date: 2021-07-01 08:37:55.000000000
+Message: 
+Patch Set 7:
+
+I've added tests that Ben had suggested. If there's any more we'd like to have, let me know.
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2021-07-01 14:08:22.000000000
+Message: 
+Patch Set 7: Code-Review-1
+
+(1 comment)
+Line:48, engines/ep/src/ep_types.h -> Not sure of the name (but these things are hard to capture) - blind to me would mean doing something without information. A normal insert with more matches blind as you have to read before you can write - here you're doing the opposite, you have information the key doesn't exist to avoid a read.
+
+A GuidedWrite?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2021-07-01 14:11:31.000000000
+Message: 
+Patch Set 7:
+
+(1 comment)
+Line:48, engines/ep/src/ep_types.h -> Or just a name that more captures what the effect is
+
+"WriteWithoutRead" 
+
+"NoRead" "SkipRead"
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-07-01 14:14:37.000000000
+Message: 
+Patch Set 7: Code-Review-1
+
+(6 comments)
+Line:896, engines/ep/src/ep_bucket.cc -> Whitespace-only change - please revert.
+
+Line:454, engines/ep/src/ep_bucket.cc -> This probably warrants a comment explaining the rationale here.
+
+Line:48, engines/ep/src/ep_types.h -> Indeed. 
+
+One thing to consider - I don't think this is really a Yes/No (True/False) kind of type - it's more like Insert vs Upset; given we have prior knowledge that it _must_ not previously exist.
+
+Line:37, engines/ep/src/vb_commit.h -> Please document the new argument. (I know the existing args are not documented but please at least document the new one.
+
+Line:7218, engines/ep/tests/ep_testsuite_dcp.cc -> Not clear why this test is being changed; could you explain please?
+
+Line:861, engines/ep/tests/module_tests/dcp_reflection_test.cc -> Is DCPLoopbackStreamTest the correct fixture here? The optimisation is solely related to replica (Consumer) behaviour as I understand it, so this is probably better in a DCPConsumer test.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Rohan Suri
+Date: 2021-07-01 16:18:56.000000000
+Message: 
+Patch Set 7:
+
+(3 comments)
+Line:48, engines/ep/src/ep_types.h -> Sure I'd be happy to change it. How about we name the type:
+
+  WriteOperation { Insert, Upsert } ?
+
+I picked BlindWrite since it is a common term in LSM theory, where writes are done without lookup.
+
+> you have information the key doesn't exist to avoid a read
+> given we have prior knowledge that it _must_ not previously exist
+
+In the current scenario, yes this is a requirement - we must know the key does not already exist to safely issue Inserts. In a future scope, Inserts could also be used if we start supporting relaxed item counts as a feature, where we get accurate count only after a full compaction.
+
+Line:7218, engines/ep/tests/ep_testsuite_dcp.cc -> We stream a create and a delete of a key in the same snapshot, which isn't allowed. We should send the delete in a new snapshot. Blind writes uncovered this, since it doesn't do a lookup, the final item count stays at 2 instead of 1.
+
+  dcp->mutation 0 (item count 1)
+  dcp->mutation 1 (item count 2)
+  dcp->deletion 0 (item count stays at 2 since the delete isn't matched with an existing key)
+
+I'll add the context in the commit message.
+
+Line:861, engines/ep/tests/module_tests/dcp_reflection_test.cc -> Sure I could move them. Would SingleThreadedPassiveStreamTest be the right place? 
+
+I chose loopback as per Ben's suggestion. He wanted these tests to be generic DCP backfill tests to improve our general coverage. Link to the chat on kv-magma: https://couchbase.slack.com/archives/CF4FTNFEC/p1622548243220500
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-07-02 15:48:01.000000000
+Message: 
+Patch Set 7:
+
+(3 comments)
+Line:48, engines/ep/src/ep_types.h -> WriteOperation sounds good. While "BlindWrite" might be standard terminology for LSMs, kv_engine itself is agnostic to the underlying KVStore so I don't think using LSM-specific terminology for generic concepts is suitable language here.
+
+> In a future scope, Inserts could also be used if we start supporting relaxed item counts as a feature, where we get accurate count only after a full compaction.
+
+That's fine - but I'd argue that BlindWrites are more of an implementation detail of _how_ Magma avoids the cost of item counting if that's disabled, which I think still means the "BlindWrite" terminology should be limited to Magma / MAgmaKVStore at most.
+
+Line:7218, engines/ep/tests/ep_testsuite_dcp.cc -> Ack. A brief comment inline in the test is probably best, then the reader there sees why a new snapshot marker is being added.
+
+Line:861, engines/ep/tests/module_tests/dcp_reflection_test.cc -> So certainly in the general case LoopbackStreamTest is a good fixture for things checking the end-to-end (Producer -> Consumer) flow, but given this feature only relates to the Consumer (replica) vBucket I think it's adding unnecessary complexity to test it via LoopbackStreamTest.
+
+SingleThreadedPassiveStreamTest looks like a sensible place.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Rohan Suri
+Date: 2021-07-02 22:23:57.000000000
+Message: 
+Patch Set 7:
+
+(1 comment)
+Line:861, engines/ep/tests/module_tests/dcp_reflection_test.cc -> Sure. Do we still want to test overwrites, purged writes, deletes, resurrections (generic DCP scenarios)? Or write tests for this feature?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-07-05 07:46:16.000000000
+Message: 
+Patch Set 7:
+
+(1 comment)
+Line:861, engines/ep/tests/module_tests/dcp_reflection_test.cc -> For this patch I would focus on tests covering this new feature.
+
+I don't know the context of the discussions you had with Ben, certainly having more test coverage in the loopback tests is always a good thing, but they probably belong in their own patch.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Rohan Suri
+Date: 2021-07-05 13:20:39.000000000
+MISMATCHED INLINE COMMENT
+Line:896, engines/ep/src/ep_bucket.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Rohan Suri
+Date: 2021-07-05 13:20:39.000000000
+MISMATCHED INLINE COMMENT
+Line:454, engines/ep/src/ep_bucket.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Rohan Suri
+Date: 2021-07-05 13:20:39.000000000
+MISMATCHED INLINE COMMENT
+Line:48, engines/ep/src/ep_types.h -> I agree. I've refactored it to "WriteOperation".
+
+Done.
+----------------------------------------------------------------------------------------------------------------------
+Author: Rohan Suri
+Date: 2021-07-05 13:20:39.000000000
+MISMATCHED INLINE COMMENT
+Line:37, engines/ep/src/vb_commit.h -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Rohan Suri
+Date: 2021-07-05 13:20:39.000000000
+MISMATCHED INLINE COMMENT
+Line:7218, engines/ep/tests/ep_testsuite_dcp.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Rohan Suri
+Date: 2021-07-05 13:20:39.000000000
+MISMATCHED INLINE COMMENT
+Line:861, engines/ep/tests/module_tests/dcp_reflection_test.cc -> Sure, when Ben is back I'll check with him and then add the loopback tests in a separate patch. For now I've written a test confined to this feature. Let me know if we need anymore tests.
+----------------------------------------------------------------------------------------------------------------------

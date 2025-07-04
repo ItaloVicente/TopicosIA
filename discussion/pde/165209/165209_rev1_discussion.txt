@@ -1,0 +1,108 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 442858 - WIP [target] refresh p2 repositories on reload
+
+TODO: job, progress
+TODO: API for oomph?
+
+Change-Id: I89284dff5f9be7c8b217300adb35e423eb1a3908
+Signed-off-by: Julian Honnen <julian.honnen@vector.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Julian Honnen
+Date: 2020-06-19 10:55:21.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: PDE Bot
+Date: 2020-06-19 10:56:07.000000000
+Message: 
+Patch Set 1:
+
+Build Started https://ci.eclipse.org/pde/job/eclipse.pde.ui-Gerrit/2652/
+----------------------------------------------------------------------------------------------------------------------
+Author: Julian Honnen
+Date: 2020-06-19 11:17:57.000000000
+Message: 
+Patch Set 1:
+
+Ed, what do you think of this behavior?
+
+Should we add API in AbstractBundleContainer to support refresh of targlet containers?
+----------------------------------------------------------------------------------------------------------------------
+Author: Ed Merks
+Date: 2020-06-19 11:53:15.000000000
+Message: 
+Patch Set 1:
+
+I noticed that while analyzing https://bugs.eclipse.org/bugs/show_bug.cgi?id=560548#c6 that is appears p2 doesn't do a "deep" reload so if there is a composite involved, the children of the composite might still use a soft-referenced cached state.  
+
+I've not looked deeply at the calls being made here if they would suffer from the same problem.
+
+For Oomph we generally call
+org.eclipse.equinox.internal.p2.repository.helpers.AbstractRepositoryManager.flushCache() to ensure that no cached repository state is reused so I don't think we need anything special given we already dive into internals...
+----------------------------------------------------------------------------------------------------------------------
+Author: PDE Bot
+Date: 2020-06-19 12:17:05.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/pde/job/eclipse.pde.ui-Gerrit/2652/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Julian Honnen
+Date: 2020-06-19 13:53:05.000000000
+Message: 
+Patch Set 1: Code-Review-1
+
+> I've not looked deeply at the calls being made here if they would suffer from the same problem.
+Indeed, this doesn't work for composites.
+
+What's your recommendation for PDE?
+TBH I've never understood why the manual reload is necessary at all.
+----------------------------------------------------------------------------------------------------------------------
+Author: Ed Merks
+Date: 2020-06-19 14:27:40.000000000
+Message: 
+Patch Set 1:
+
+Generally what we do in Oomph when starting any kind of profile transaction is this:
+
+  public void flushCachedRepositories()
+  {
+    IMetadataRepositoryManager metadataRepositoryManager = getMetadataRepositoryManager();
+    if (metadataRepositoryManager instanceof CachingRepositoryManager.Metadata)
+    {
+      CachingRepositoryManager.Metadata manager = (CachingRepositoryManager.Metadata)metadataRepositoryManager;
+      manager.flushCache();
+    }
+
+    IArtifactRepositoryManager artifactRepositoryManager = getArtifactRepositoryManager();
+    if (artifactRepositoryManager instanceof CachingRepositoryManager.Artifact)
+    {
+      CachingRepositoryManager.Artifact manager = (CachingRepositoryManager.Artifact)artifactRepositoryManager;
+      manager.flushCache();
+    }
+  }
+
+But that's of course using our derived classes for the instanceof tests.  Given that org.eclipse.equinox.internal.p2.repository.helpers.AbstractRepositoryManager.flushCache() is a public method, one could do the instanceof test against that and then call the public method.
+
+This should flush all the soft references and after that, any attempt to load a repo will load it from the internet (or from the disk cached metadata if the lastModified hasn't changed).  
+
+Note that too that both the content metadata *and* the artifact metadata are flushed.  If the two get out of sync, other bad things will happen.  I.e., the artifact might not be found. (I've seen that happen often enough!)
+
+I think this would be simpler and is less prone to cached state being reuse, e.g., deep composite structures.
+----------------------------------------------------------------------------------------------------------------------
+Author: Julian Honnen
+Date: 2020-06-19 15:36:12.000000000
+Message: 
+Patch Set 1:
+
+That would certainly fix this bug, but I'm a bit hesitant to flush all repositories via P2 internals on TP reloads.
+
+Vikas, WDYT?
+----------------------------------------------------------------------------------------------------------------------

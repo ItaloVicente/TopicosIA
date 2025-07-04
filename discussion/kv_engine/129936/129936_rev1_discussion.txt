@@ -1,0 +1,184 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-39618: Use coarse clock for CappedDurationVBucketVisitor
+
+CappedDurationVBucketVisitor::pauseVisitor() determines if it should
+pause by calling steady_clock::now() and comparing it to the start
+time, to see if the visitor has run for too long.
+
+For tasks which either (a) run frequently or (b) spend little time per
+VBucket, the number of calls to steady_clock::now() can be
+significant. In the case of DurabilityTimeoutTask, it runs every 25ms,
+and on a cluster with zero SyncWrites currently in progress it will
+have little work to do when visiting a VBucket. As such, both (a) and
+(b) are true for it.
+
+steady_clock::now() is implemented on Linux using
+clock_gettime(CLOCK_MONOTONIC). This is _normally_ a very fast call,
+using the VDSO to return a result without having a make a syscall in
+the common case. As such, the large number of steady_clock::now()
+calls are not an issue.
+
+However, under certain environments clock_gettime(CLOCK_MONOTONIC) is
+*not* fast - for example if the 'HPET' clocksource is in use - a full
+syscall is required. This is the case in the original MB linked, where
+Docker for Mac was using HPET in it's embedded Linux VM. However HPET
+could also be used in other environments - it has been seen in the
+past on cloud-based virtualization platforms
+
+This results in a significant increase in the idle CPU of memcached
+(specifically the NonIO threads servicing the DurabilityTimeoutTask) -
+ the OP's environment 3 idle, empty Buckets went from ~15% CPU to
+150% CPU.
+
+To address this, change the clock used by CappedDurationVBucketVisitor
+to one backed by clock_gettime(CLOCK_MONOTONIC_COARSE) (on
+Linux). This is an altenative clock which only gives 1 millisecond
+resolution, *but* crucually can always be handled in userspace[1]
+without having to make a syscall (even when HPET is in use).
+
+This reduces the CPU overhead back to the original 15%.
+
+[1]: https://elixir.bootlin.com/linux/v4.19.76/source/arch/x86/entry/vdso/vclock_gettime.c#L282
+
+Change-Id: I111cd5f0703b0b2dd6902c4ab0584da4477e94ac
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2020-06-05 15:30:23.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-06-05 15:30:38.000000000
+Message: 
+Patch Set 1: Well-Formed-1
+
+Branch restricted. PLEASE READ this URL: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/186223/artifact/restricted.html : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-06-05 15:55:58.000000000
+Message: 
+Patch Set 1: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/1392/ : FAILURE
+
+Failure of GoogleTest "TransportProtocols/WithMetaTest.basicSet/Mcbp_XattrYes_JsonYes_SnappyYes
+":
+
+<pre>
+[ RUN      ] TransportProtocols/WithMetaTest.basicSet/Mcbp_XattrYes_JsonYes_SnappyYes
+unknown file: error: C++ exception with description "create_connect_plain_socket: Can"t connect to port == -1" thrown in SetUp().
+[  FAILED  ] TransportProtocols/WithMetaTest.basicSet/Mcbp_XattrYes_JsonYes_SnappyYes, where GetParam() = (Mcbp, XattrYes, 4-byte object <00-00 00-00>, 4-byte object <00-00 00-00>) (0 ms)
+TransportProtocols/WithMetaTest.basicSet/Mcbp_XattrYes_JsonYes_SnappyYes
+
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/1392/ )
+
+Failure of a CTest test 175/181 Test #171: memcached_testapp.ep.TransportProtocols/WithMetaTest ......................... ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/1392/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/1394/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [0079/0097]: test dcp early termination (couchstore)...Exceeded maximum wait time of 60000000us waiting for stat "ep_dcp_num_running_backfills(dcp)" to be 0 (last value:1) - aborting.
+[2020-06-05T15:39:32.326Z] /usr/bin/timeout: the monitored command dumped core
+[2020-06-05T15:39:32.326Z] 
+[2020-06-05T15:39:32.326Z] 
+[2020-06-05T15:39:32.326Z] 99% tests passed, 1 tests failed out of 187
+[2020-06-05T15:39:32.326Z] 
+[2020-06-05T15:39:32.326Z] Total Test time (real) = 112.13 sec
+[2020-06-05T15:39:32.326Z] 
+[2020-06-05T15:39:32.326Z] The following tests FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/1394/ )
+
+Failure of a CTest test [2020-06-05T15:39:32.325Z] 187/187 Test  #41: ep_testsuite_dcp.value_eviction.comp_active ..................................Child aborted ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/1394/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/25855/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/1261/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/mad-hatter/732/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/1173/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/1389/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/1378/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-06-08 09:36:38.000000000
+Message: 
+Patch Set 1:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/1398/ : FAILURE
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/25855/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/1261/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/mad-hatter/732/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/1173/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/1389/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/1378/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/1397/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-06-08 11:44:33.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/25855/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/1261/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/mad-hatter/732/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/1173/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/1389/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/1378/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/1397/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/1399/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-06-09 08:28:07.000000000
+Message: 
+Patch Set 1:
+
+check approval
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-06-09 08:28:22.000000000
+Message: 
+Patch Set 1: Well-Formed+1
+
+Permission granted to commit: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/186733/artifact/restricted.html : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2020-06-09 08:37:09.000000000
+Message: 
+Patch Set 1: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------

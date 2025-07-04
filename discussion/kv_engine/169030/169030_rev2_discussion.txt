@@ -1,0 +1,245 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-50383: Ensure we end dcp legacy stream if default collection is empty
+
+Problem:
+MB-50383 demonstrated if a vbucket had no items in it due to following
+steps, we would fail the DCP stream instead of returning a DCPStreamEnd
+with the flag set to status OK.
+
+1. Create a second collection
+2. Write a key to default collection and flush it
+3. Delete the key in the default collection and flush
+4. Write a key to second collection and flush
+5. Perform compaction on the vbucket
+
+We will fail the stream as the high seqno vbucket is in the second
+collection, which means we will allow the dropping of tombstone of step
+3. This would then cause us to fail the backfill and set the stream to
+dead due to KVStore::getBySeqno() return cb::engine_errc::no_such_key as
+the tombstone has been purged.
+
+Fix:
+Instead of failing back fill in
+DCPBackfillBySeqnoDisk::markLegacyDiskSnapshot() due to
+KVStore::getBySeqno() returning cb::engine_errc::no_such_key, we should
+instead continue to in the markLegacyDiskSnapshot() method and perform a
+backfill to try and find the highest valid tombstone or alive document
+that can be streamed to the client.
+
+Also in the situation that the scan covers the full range of the DCP
+stream i.e. the stream's streanEndSeqno == backfillEndSeqno. Then check
+check if the endSeqno is greater than the maxVisableSeqno for the
+default collection. As if this is the case we'll need to send a
+DcpStreamEnd to the client. To do this we'll reduce the current
+streamEnd to the maxVisableSeqno of the default collection that we found
+when performing the scan of the vbucket on disk.
+
+Change-Id: I70312f2f9beed1ec06d1b959150e73e8caa16192
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Richard de Mellow
+Date: 2022-01-21 09:42:20.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-01-21 09:49:47.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-01-21 10:07:15.000000000
+Message: 
+Patch Set 2: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/43062/ : FAILURE
+
+Failure of GoogleTest "AllBucketTypes/SingleThreadedPassiveStreamTest.ConsumerReceivesUserXattrsInSyncDelete_NoSysXattr/persistent_nexus_couchstore_magma_full_eviction":
+
+<pre>
+[ RUN      ] AllBucketTypes/SingleThreadedPassiveStreamTest.ConsumerReceivesUserXattrsInSyncDelete_NoSysXattr/persistent_nexus_couchstore_magma_full_eviction
+unknown file: error: C++ exception with description "KVStoreFactory ctor: Specified dbname "ep_engine_ep_unit_tests.db/test.736601" is not a directory" thrown in SetUp().
+unknown file: error: SEH exception with code 0xc0000005 thrown in TearDown().
+[  FAILED  ] AllBucketTypes/SingleThreadedPassiveStreamTest.ConsumerReceivesUserXattrsInSyncDelete_NoSysXattr/persistent_nexus_couchstore_magma_full_eviction, where GetParam() = ("persistent_nexus_couchstore_magma", "full_eviction") (3 ms)
+AllBucketTypes/SingleThreadedPassiveStreamTest.ConsumerReceivesUserXattrsInSyncDelete_NoSysXattr/persistent_nexus_couchstore_magma_full_eviction
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/43062/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/16976/ : FAILURE
+
+Compile error at [2022-01-21T09:56:15.058Z] ../kv_engine/engines/ep/src/checkpoint_types.h:17:10:
+fatal error: platform/memory_tracking_allocator.h: No such file or directory
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/16976/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/13838/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/14994/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/36450/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/15805/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/16669/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/4639/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/17751/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/25085/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/4697/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-01-21 11:19:14.000000000
+Message: 
+Patch Set 2:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/16983/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [0053/0093]: test get failover log.../usr/bin/timeout: the monitored command dumped core
+[2022-01-21T11:10:00.045Z] 
+[2022-01-21T11:10:00.045Z] 
+[2022-01-21T11:10:00.045Z] 99% tests passed, 2 tests failed out of 439
+[2022-01-21T11:10:00.045Z] 
+[2022-01-21T11:10:00.045Z] Total Test time (real) = 361.76 sec
+[2022-01-21T11:10:00.045Z] 
+[2022-01-21T11:10:00.045Z] The following tests FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/16983/ )
+
+One of more core files found at the end of the build. Data for post-mortem saved to archived_core_dumps.tar.bz2 under "Build Artifacts". ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/16983/ )
+
+Test exceeded the timeout:
+[2022-01-21T11:10:00.045Z] Running [0053/0093]: test get failover log.../usr/bin/timeout: the monitored command dumped core ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/16983/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/13838/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/14994/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/36450/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/15805/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/16669/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/4639/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/17751/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/25085/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/4697/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/43076/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-01-21 13:54:31.000000000
+Message: 
+Patch Set 2: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/13838/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/14994/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/36450/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/15805/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/16669/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/4639/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/17751/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/25085/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/4697/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/43076/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/17002/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2022-01-24 13:54:42.000000000
+Message: 
+Patch Set 2: Code-Review-1
+
+(8 comments)
+Line:7, /COMMIT_MSG -> This needs to be updated
+
+Line:10, /COMMIT_MSG -> Do you mean the default collection had no items in it ?
+
+Line:2333, engines/ep/src/dcp/active_stream.cc -> I see that this is called just once in ActiveStream, I think that we can remove the function and just inline the code
+
+Line:437, engines/ep/src/dcp/active_stream.h -> this could be just a setEndSeqnoFor*, just for naming consistency
+
+Line:443, engines/ep/src/dcp/backfill_by_seqno_disk.cc -> You can add a simple but useful comment at this point saying something like:
+
+  // The following of the execution addresses 2 cases:
+  //   1. HighSeqno exists but the item isn't committed
+  //   2. HighSeqno doesn't exist
+  // In both cases we need to find the highest committed seqno etc..
+
+Line:533, engines/ep/src/dcp/backfill_by_seqno_disk.cc -> Is this correct? It seems that you're picking up the wrong variable here, shouldn't this be endSeqnoForScan ?
+If I'm wrong and the logic is correct, here a comment with an example would help for visualizing seqnos and what we are doing
+
+Line:534, engines/ep/src/dcp/backfill_by_seqno_disk.cc -> again, the function is logically just doing an assignment, I think that we can inline it here
+
+Line:867, engines/ep/tests/module_tests/collections/evp_store_collections_legacy_dcp_tests.cc -> It seems like the "empty default collection" test has disappeared ?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-01-24 17:27:01.000000000
+MISMATCHED INLINE COMMENT
+Line:7, /COMMIT_MSG -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-01-24 17:27:01.000000000
+MISMATCHED INLINE COMMENT
+Line:10, /COMMIT_MSG -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-01-24 17:27:01.000000000
+MISMATCHED INLINE COMMENT
+Line:2333, engines/ep/src/dcp/active_stream.cc -> This is still needed as end_seqno_ is private and so we don't have access to it from DCPBackfillBySeqnoDisk.
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-01-24 17:27:01.000000000
+MISMATCHED INLINE COMMENT
+Line:437, engines/ep/src/dcp/active_stream.h -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-01-24 17:27:01.000000000
+MISMATCHED INLINE COMMENT
+Line:443, engines/ep/src/dcp/backfill_by_seqno_disk.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-01-24 17:27:01.000000000
+MISMATCHED INLINE COMMENT
+Line:533, engines/ep/src/dcp/backfill_by_seqno_disk.cc -> So the endSeqno is the last seqno that ActiveStream has requested to bee backfilled it might be the same as endSeqnoForScan but it also might not be. Here we're interested in what is the highest possible seqno the ActiveStream thinks we might backfill. The value of endSeqnoForScan is just an optimisation so we don't need to search every seqno to find the maxVisibleSeqno of the default collection.
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-01-24 17:27:01.000000000
+MISMATCHED INLINE COMMENT
+Line:534, engines/ep/src/dcp/backfill_by_seqno_disk.cc -> This can't be done without making end_seqno_ public as this method isn't part of ActiveStream. As we're modifying the active stream object.
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-01-24 17:27:01.000000000
+MISMATCHED INLINE COMMENT
+Line:867, engines/ep/tests/module_tests/collections/evp_store_collections_legacy_dcp_tests.cc -> Added an empty test
+----------------------------------------------------------------------------------------------------------------------

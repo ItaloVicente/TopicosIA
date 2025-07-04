@@ -1,0 +1,134 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-32117: Remove stale SyncWrites from the tracked container
+
+A SyncWrite is stale if it has been acknowledged by all nodes in the
+Replication Chain. Note that by logic a stale SyncWrite has been also
+committed.
+
+Note that in the current implementation both the replicas and commit
+state is embedded in the SyncWrite pointed by each replica/commit
+iterator. So, given that by logic we remove only unreferenced
+SyncWrites, then the tracked container can be empty only before the
+first SyncWrite is added for tracking. I.e., stale-removal can remove up
+to (container_size - 1) elements.
+
+Change-Id: I1bf795430bc9eab427ffbd0186f9b0adcaa9737e
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2018-12-14 16:00:38.000000000
+Message: 
+Uploaded patch set 3.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2018-12-14 16:50:50.000000000
+Message: 
+Patch Set 3:
+
+> Note this approach feels somewhat complex. I think it would be simpler (and I don't think we loose much) if you simply remove stale SyncWrites immediately after committing them.
+In terms of handling the iterators; you could simply make any iterator pointing to the item you want to remove instead point to the previous element; if that element doesn't exist then you could simplify by always having a sentinel element at the start of the list which is effectively seqno zero.
+
+About your comments here (and also about those in the parent patch on the need of the commit iterator).
+For reaching what you say (remove committed SW immediately and no need of commit iterator), we have to change the way an iterator keeps the state of replica/committed. Currently I use a raw iterator, and the state is embedded in iterator->getBySeqno(). That s why I delete only unreferenced SyncWrites (i.e., I don't lose the state).
+
+A possible solution is to use an IteratorWrapper for tracking the replica seqno, e.g.:
+
+struct IteratorWrapper {
+    Container::iterator it;
+    int64_t seqno;
+}
+
+Doing that:
+1) I write the state in seqno, so we have the state even if 'it' has been invalidated (note that I can re-point invalid iterators to container::end(), I can use end() as "sentinel element")
+2) So, I can remove all committed SWs
+3) But, after committing I have to re-point invalid iterators to the sentinel-element
+4) Also, when a new seqnoACK comes I have to move/reset the iterator depending on if it points to the sentinel-element or a SyncWrite.
+
+All that sounds even more complex than what it is now.
+
+Note that currently an iterator points to last ack-received/SW-committed. Maybe changing an iterator to point to /next/ pending ack/commit could help in simplifying the model ? Investigating on that..
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-12-14 17:31:38.000000000
+Message: 
+Patch Set 3:
+
+> > Note this approach feels somewhat complex. I think it would be
+ > simpler (and I don't think we loose much) if you simply remove
+ > stale SyncWrites immediately after committing them.
+ > In terms of handling the iterators; you could simply make any
+ > iterator pointing to the item you want to remove instead point to
+ > the previous element; if that element doesn't exist then you could
+ > simplify by always having a sentinel element at the start of the
+ > list which is effectively seqno zero.
+ > 
+ > About your comments here (and also about those in the parent patch
+ > on the need of the commit iterator).
+ > For reaching what you say (remove committed SW immediately and no
+ > need of commit iterator), we have to change the way an iterator
+ > keeps the state of replica/committed. Currently I use a raw
+ > iterator, and the state is embedded in iterator->getBySeqno(). That
+ > s why I delete only unreferenced SyncWrites (i.e., I don't lose the
+ > state).
+ > 
+ > A possible solution is to use an IteratorWrapper for tracking the
+ > replica seqno, e.g.:
+ > 
+ > struct IteratorWrapper {
+ > Container::iterator it;
+ > int64_t seqno;
+ > }
+ > 
+ > Doing that:
+ > 1) I write the state in seqno, so we have the state even if 'it'
+ > has been invalidated (note that I can re-point invalid iterators to
+ > container::end(), I can use end() as "sentinel element")
+ > 2) So, I can remove all committed SWs
+ > 3) But, after committing I have to re-point invalid iterators to
+ > the sentinel-element
+ > 4) Also, when a new seqnoACK comes I have to move/reset the
+ > iterator depending on if it points to the sentinel-element or a
+ > SyncWrite.
+ > 
+ > All that sounds even more complex than what it is now.
+
+Why do you need to know the iterator's seqno? Isn't that implicit in it's position?
+
+Given that whenever there's a seqno_acknowledge message you get told the seqno to advance /to/ you, I don't see why you need the seqno in the iterator. If you do as I suggested you'd just advance it as long as it->seqno is less than seqno_ack.in_memory_seqno.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-12-14 17:59:53.000000000
+Message: 
+Patch Set 3: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/4326/ : FAILURE
+
+Failure of a CTest test  28/170 Test  #27: ep-engine_ep_unit_tests ...................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/4326/ )
+
+Undefined Sanitizer: home/couchbase/jenkins/workspace/kv_engine-ASan-UBSan-master/kv_engine/engines/ep/src/dcp/backfill-manager.cc:140:62: runtime error: member call on address 0x621000320100 which does not point to an object of type "DcpConnMap" ( http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/4326/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/14741/ : FAILURE
+
+Failure of a CTest test  59/190 Test  #61: ep_testsuite_checkpoint.value_eviction.rocksdb ............................... ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/14741/ )
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/6730/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/15218/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/6684/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/13558/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/13220/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-02-08 16:54:57.000000000
+Message: 
+Abandoned
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,87 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-48506: Don't rely on allocator for estimating mem-release at expel
+
+At expel we need to compute an estimate of the memory released.
+There are many ways of doing that, but in our case all is conditioned
+by the fact that we need to use a O(1) call to CheckpointQueue::splice
+for extracting items from CheckpointQueue::toWrite.
+This is how it currently works:
+
+1. We acquire the CM::queueLock and we instantiate a
+   CheckpointQueue(toWrite.get_allocator()) 'expelledItems' container.
+   Ie, we store expelled items in a container that uses the same
+   allocator as Checkpoint::toWrite
+2. The toWrite->expelledItems splice opearation performed in
+   Checkpoint::expelItems() doesn't perform any actual
+   deallocation/allocation on toWrite/expelledItems, so allocators
+   accounting is not updated at this point
+3. The caller of Checkpoint::expelItems() gets 'expelledItems' and
+   copies it into a CheckpointQueue() 'dest'. Note that this
+   destination container uses its own allocator, which computes the
+   actual memory usage of the original 'expelledItems'. That is what
+   allows us to make a dest.get_allocator().gteBytesAllocated() call
+   for computing the exact mem-overedead released by expel.
+4. Also, in step (3) the original 'expelledItems' container goes
+   out-of-scope and deallocations are accounted in the 'toWrite'
+   allocator. That is how we correctly update the 'toWrite' mem-usage
+
+The important point in the description above is that at step (3) we
+need to perform a O(N = toWrite-size) copy for computing the
+mem-overhead released by expel. That copy is performed under
+CM::queueLock and must be avoided.
+
+As collateral (but not completely irrelevant) point, note that the copy
+that we want to remove is O(N) in both time and space, so avoiding the
+copy would also decrease the mem-utilization spike at expel.
+
+This patch removes the needs of relying on that copy for computing the
+mem-overhead deallocation. This is a pre-requirement for then avoiding
+the copy in a follow-up patch.
+
+Note: Currently the call to splice(range) isn't really O(1) as
+CheckpointQueue is a std::list that provides only a O(N) splice(range)
+API. We'll get to a real O(1) splice in a dedicated follow-up patch.
+
+Change-Id: I84e1b813061fd8e55e94c110a84ee8e2be883d30
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2021-09-23 15:34:06.000000000
+Message: 
+Uploaded patch set 9: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2021-09-23 15:48:32.000000000
+Message: 
+Patch Set 9:
+
+(2 comments)
+Line:524, engines/ep/src/checkpoint_manager.cc -> Hmm - the queued_item->size() includes the size of the blob, and that won't be freed unless the SV has been evicted from the HT (or updated since); that's probably likely in the replica-big-initial-checkpoint case, but generally i imagine the blobs are likely to still be resident, making this more likely to overestimate, even if nothing references the queued_item.
+
+Line:2255, engines/ep/tests/module_tests/checkpoint_test.cc -> nit
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2021-09-24 05:24:39.000000000
+Message: 
+Patch Set 9:
+
+(1 comment)
+Line:524, engines/ep/src/checkpoint_manager.cc -> True..
+At first look that sounds like a problem, as we are saying that X is being released while something less actually is, but I think that's the correct thing to do in the end. Consider the overall behaviour:
+1. Blob referenced by both HT and CM
+2. CM expel -> blob still around but we state we have released that mem *from CM*
+3. The effect of (2) is that that mem is not accounted in CM but only in other struct (HT), which means that we'll attempt recovery by HT ejection rather than trying again recovery from CM
+
+We can open an MB if we feel that there is something to change (or at least investigate) specifically on that 👍
+
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2021-09-30 10:25:41.000000000
+MISMATCHED INLINE COMMENT
+Line:524, engines/ep/src/checkpoint_manager.cc -> That seems fine 👍
+----------------------------------------------------------------------------------------------------------------------

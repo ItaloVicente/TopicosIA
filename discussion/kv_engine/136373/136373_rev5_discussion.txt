@@ -1,0 +1,89 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-31869: Make ConnMap::connNotifier const
+
+At http://review.couchbase.org/c/kv_engine/+/101187 we introduce some
+new code path that accesses the ConnNotifier from bgthreads.
+That leads to a data-race between create-bucket (fethread) and some of
+the task executed in bgthreads (eg, PagingVisitor).
+
+The problem is that currently the ConnMap initialization is split in 2
+phases: the ctor and the initialize() method. In particular,
+ConnMap::connNotifier is contructed in ConnMap::initialize(), which
+is executed *after* the EP ExecutorPool and some tasks (eg,
+PagingVisitor) are up and running.
+When we introduce a call to ConnMap from the PagingVisitor, that races
+with the bucket creation on ConnMap::connNotifier.
+
+Given that ConnMap::connNotifier is intrinsically const, then make it
+so and construct it in ConnMap ctor. No further synchronization is
+required to guard the lifetime of that member.
+
+CV picked that up for http://review.couchbase.org/c/kv_engine/+/101187
+on TSAN in the ep_perfsuite "Expiry pager latency" test.
+
+Change-Id: I0d11346d58e4363f726b43f1b983054ec40c7db9
+Reviewed-on: http://review.couchbase.org/c/kv_engine/+/136373
+Reviewed-by: Ben Huddleston <ben.huddleston@couchbase.com>
+Tested-by: Build Bot <build@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2020-09-18 12:44:11.000000000
+Message: 
+Change has been successfully cherry-picked as d19865d002ff39de5944769a45d759bd74ba4756 by Paolo Cocchi
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-09-18 12:44:21.000000000
+Message: 
+Patch Set 5:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/5034/ (2/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2020-09-18 13:30:27.000000000
+Message: 
+Patch Set 5:
+
+This code change doesn't look right, now that there is no need for if (connNotifier) the shared_ptr should be remove all together
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-09-18 13:48:57.000000000
+Message: 
+Patch Set 5:
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv-engine-master-perf/3785/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/5034/ : SUCCESS'
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-09-28 07:43:21.000000000
+Message: 
+Patch Set 5:
+
+> Patch Set 5:
+> 
+> This code change doesn't look right, now that there is no need for if (connNotifier) the shared_ptr should be remove all together
+
+Currently the ConnNotifierCallback task has "weak" shared-ownerships on ConnMap::connNotifier, so we need the shared_ptr unless we want to change ConnNotifierCallback too:
+
+    class ConnNotifierCallback : public GlobalTask {
+        ..
+        const std::weak_ptr<ConnNotifier> connNotifierPtr;
+    };
+
+    class ConnNotifier : public std::enable_shared_from_this<ConnNotifier> {}
+    void ConnNotifier::start() {
+        ..
+        ExTask connotifyTask = std::make_shared<ConnNotifierCallback>(
+                &connMap.getEngine(), shared_from_this());
+        task = ExecutorPool::get()->schedule(connotifyTask);
+    }
+
+That kind of change is out-of-scope here anyway (as here we are only fixing the race on the initialization of the shared_ptr), so this patch seems fine.
+----------------------------------------------------------------------------------------------------------------------

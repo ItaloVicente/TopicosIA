@@ -1,0 +1,118 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-32535 [SR]: Notify SyncWrite client when request complete
+
+When a SyncWrite request is complete, notify the client which make the
+request so the response can be sent back.
+
+To do this we use notifyIOComplete() method on the engine; however
+unlike other existing instances where the notification is done by a
+background task; we are calling it from the DurabilityMonitor which
+doesn't have direct access to the engine instance. Additionally unlike
+existing EWOULDBLOCK notification for stores this isn't a idempotent
+operation - if we performed the store() again then that would cause
+/another/ mutation to occur. To solve this, we:
+
+1. Define a new SyncWriteCompleted callback object, an instance of
+   which is passed into VBucket when it is created. This is typically
+   instantiated with a function / lambda from KVBucket which calls
+   engine.notifyIOComplete().
+
+2. From VBucket::notifyClientOfCommit() this callback object is
+   invoked.
+
+3. Inside EPEngine::storeIfInner() if this is a SyncWrite operation,
+   use engineSpecific to record that this is a SyncWrite which has
+   successfully been prepared, and that the next call to store()
+   should simply return the completed status & CAS of the
+   now-committed item.
+
+Change-Id: I38a6dae3aeb98dcedd1ae1ec321db054ff1b7cd7
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2019-01-09 17:41:04.000000000
+Message: 
+Uploaded patch set 3: Patch Set 2 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-01-09 18:20:29.000000000
+Message: 
+Patch Set 3: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/7091/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/15188/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/4715/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/15676/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/13923/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/7100/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/13581/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2019-01-10 09:13:26.000000000
+Message: 
+Patch Set 3: Code-Review-1
+
+(1 comment)
+
+just a minor one
+Line:718, engines/ep/src/kv_bucket.h -> worth using your 'typedef' SyncWriteCompleteCallback (and in the .cc)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-01-10 10:47:13.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:2320, engines/ep/src/ep_engine.cc -> Ok so all this has not been clear to me at first look, mainly because I didn't consider the way we use EWOULDBLOCK for a Durable write.
+This is my understanding now:
+
+1) new Durable store (item is Pending)
+2) we process the prepare in KVBucket::set, which returns EWOULDBLOCK
+3) memcached gets EWOULDBLOCK and the connection is paused
+4) when the Durable Write is committed, then we notify the connection and memcached repeats *exactly the same operation*: that means that the item in input here is still "pending", even if the Durable Write has been committed
+5) that s why we need to use something for signaling the Committed write: we use EngineSpecific to signal that we are executing for the second time
+
+If we don't do that, then we would end up with memcached repeating the same operation indefinitely.
+
+Is my understanding correct ?
+
+If it is, maybe we want to highlight in comments that by logic the second execution for a Durable Write happens only after the write has been committed?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-01-10 11:30:26.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:2320, engines/ep/src/ep_engine.cc -> > Is my understanding correct ?
+
+Yes
+
+> If it is, maybe we want to highlight in comments that by logic the second execution for a Durable Write happens only after the write has been committed?
+
+I think it's covered in the comment block at line 2385. I'll do a follow-up patch (don't want to re-do CV) which references that one from here.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-01-10 11:40:30.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:718, engines/ep/src/kv_bucket.h -> Good spot - implemented these in an odd order ;)
+
+----------------------------------------------------------------------------------------------------------------------

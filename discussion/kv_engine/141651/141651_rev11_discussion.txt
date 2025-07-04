@@ -1,0 +1,361 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-42795: Replace setup/reset context with switch execute env
+
+The setup/reset context API was not sufficient for maintaining thread
+context and magma is unable to support stackable contexts. By switching
+to a new API that supports passing in the execution environment pointer,
+we can implement execution guards that can provide stackable
+environments.
+
+A compactor thread picks up a compaction task and sets the execution
+environment to the kvstore being compaction. During compaction, we need
+to create and destroy sstables which require accessing the global
+execution environment since we are utilizing the global fd cache.
+The magma code path might have multiple calls to setup the global
+execution environment requiring the environments to be stackable.
+
+Example:
+
+- setup execution environment to specific bucket via SetExecutionEnv
+- global execution guard
+- global execution guard
+- destructor of 2nd global execution guard
+  should set execution env to 1st exec env
+- destructor of 1st global execution guard
+  should set execution to starting exec env from setup
+- reset back to original execution env
+
+Note: A null ExecutionEnv is valid. It means we are using the global
+execution env. This can happen with some tests which don't fully
+implement a mock environment including a mock ep engine.
+
+Change-Id: I0afbfcdeae0a2eef99c5ca229244d7175f10af71
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Scott Lashley
+Date: 2020-12-16 21:05:55.000000000
+Message: 
+Uploaded patch set 11.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-12-16 23:41:48.000000000
+Message: 
+Patch Set 11: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/6875/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/6875/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/8198/ : FAILURE
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/28121/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/4859/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/32625/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/6324/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/7922/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/7804/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/15742/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Scott Lashley
+Date: 2020-12-17 00:50:47.000000000
+Message: 
+Patch Set 11:
+
+Hey Dave. Sarath asked for changes which I've reflected in the latest patch.
+With this new change, it defines a null ExecutionEnv as being the global environment setting.
+If you still want to check that currEngine is not null with Expects check, then I'll file a blocker task for kv group to add mock engine to MagmaKVStoreTest as I tried for about 2 hours before giving up on how to do it.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-12-17 01:51:39.000000000
+Message: 
+Patch Set 11:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/6875/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/6875/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/28121/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/4859/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/32625/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/6324/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/7922/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/7804/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/15742/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/8199/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-12-17 13:28:49.000000000
+Message: 
+Patch Set 11: Code-Review-1
+
+> Patch Set 11:
+> 
+> Hey Dave. Sarath asked for changes which I've reflected in the latest patch.
+> With this new change, it defines a null ExecutionEnv as being the global environment setting.
+> If you still want to check that currEngine is not null with Expects check, then I'll file a blocker task for kv group to add mock engine to MagmaKVStoreTest as I tried for about 2 hours before giving up on how to do it.
+
+Regarding the change to the single 'SwitchEnvironment' method, I still think that you'd be better served by an API which is as strict as possible (if you know you're switching "into" a bucket then you should assert the environment you are using is non-null) - hence the two Switch / Reset methods you initially had. I say this particularly given the time and effort spent investigating memory tracking issues in Magma recently, and how critical it is for correct DGM operations that memory usage is 100% accurately accounted to the correct bucket.
+
+As described in previous comments, I was proposing the Expect() is _inside_ the lambda, so every time a switch "into" an engine occurs, a check is made that's a valid engine. Your recent patches were just checking it once (inside MagmaKVStore ctor), which indeed isn't going to pass if the test doesn't have a ObjectRegistry set for the current thread.
+
+As per previous comments previously, you could handle this by simply passing in a different lambda if at the point MagmaKVStore is constructed there's no current engine. In pseudocode:
+
+ MagmaKVStore::MagmaKVStore() {
+     ...
+     auto* currEngine = ObjectRegistry::getCurrentEngine();
+     if (currEngine) {
+         // Valid engine associated with this Magma instance,
+         // use switch functions which validate it.
+         SetupThreadCtx = ... lambda which calls Expects(ctx) before switching thread
+     } else {
+         // No valid engine associated with this Magma instance - must be a unit test.
+         SetupThreadCtx = ... lambda just switches thread (no check)
+     }
+     ResetThreadCtx = ... lambda which switches to null, returning old.
+
+Obviously with a single SwitchEnvironment() method you cannot assert that the environment is non-null; as you're using the same method to switch away from the current engine (back to "no-bucket").
+
+In response to:
+> ... I'll file a blocker task for kv group to add mock engine to MagmaKVStoreTest as I tried for about 2 hours before giving up on how to do it.
+
+That's not particulary helpful. "Blocker" priority is defined as:
+
+> Blocks development and/or testing work, production could not run.
+
+Clearly (the lack of) such an Expect wouldn't block development or testing, and there is no production Magma yet. Magma isn't a GA feature for CC, so even _if_ it did block your development, it wouldn't have a fixVersion of Cheshire-Cat and hence it wouldn't be a priority for development.
+----------------------------------------------------------------------------------------------------------------------
+Author: Scott Lashley
+Date: 2020-12-17 13:38:09.000000000
+Message: 
+Patch Set 11:
+
+Dave, please schedule a discussion with Sarath ASAP so you all can figure out what is best. I'm not going to get in the middle of this discussion. He's online, your online, you could do it today.
+----------------------------------------------------------------------------------------------------------------------
+Author: Scott Lashley
+Date: 2020-12-17 13:53:54.000000000
+Message: 
+Patch Set 11:
+
+> Patch Set 11: Code-Review-1
+> 
+> > Patch Set 11:
+> > 
+> > Hey Dave. Sarath asked for changes which I've reflected in the latest patch.
+> > With this new change, it defines a null ExecutionEnv as being the global environment setting.
+> > If you still want to check that currEngine is not null with Expects check, then I'll file a blocker task for kv group to add mock engine to MagmaKVStoreTest as I tried for about 2 hours before giving up on how to do it.
+> 
+> Regarding the change to the single 'SwitchEnvironment' method, I still think that you'd be better served by an API which is as strict as possible (if you know you're switching "into" a bucket then you should assert the environment you are using is non-null) - hence the two Switch / Reset methods you initially had. I say this particularly given the time and effort spent investigating memory tracking issues in Magma recently, and how critical it is for correct DGM operations that memory usage is 100% accurately accounted to the correct bucket.
+> 
+> As described in previous comments, I was proposing the Expect() is _inside_ the lambda, so every time a switch "into" an engine occurs, a check is made that's a valid engine. Your recent patches were just checking it once (inside MagmaKVStore ctor), which indeed isn't going to pass if the test doesn't have a ObjectRegistry set for the current thread.
+> 
+> As per previous comments previously, you could handle this by simply passing in a different lambda if at the point MagmaKVStore is constructed there's no current engine. In pseudocode:
+> 
+>  MagmaKVStore::MagmaKVStore() {
+>      ...
+>      auto* currEngine = ObjectRegistry::getCurrentEngine();
+>      if (currEngine) {
+>          // Valid engine associated with this Magma instance,
+>          // use switch functions which validate it.
+>          SetupThreadCtx = ... lambda which calls Expects(ctx) before switching thread
+>      } else {
+>          // No valid engine associated with this Magma instance - must be a unit test.
+>          SetupThreadCtx = ... lambda just switches thread (no check)
+>      }
+>      ResetThreadCtx = ... lambda which switches to null, returning old.
+> 
+> Obviously with a single SwitchEnvironment() method you cannot assert that the environment is non-null; as you're using the same method to switch away from the current engine (back to "no-bucket").
+> 
+> In response to:
+> > ... I'll file a blocker task for kv group to add mock engine to MagmaKVStoreTest as I tried for about 2 hours before giving up on how to do it.
+> 
+> That's not particulary helpful. "Blocker" priority is defined as:
+> 
+> > Blocks development and/or testing work, production could not run.
+> 
+> Clearly (the lack of) such an Expect wouldn't block development or testing, and there is no production Magma yet. Magma isn't a GA feature for CC, so even _if_ it did block your development, it wouldn't have a fixVersion of Cheshire-Cat and hence it wouldn't be a priority for development.
+
+
+Also, I understand that Setup/Reset is 1 way to wrap going into and out of context.
+But I think what has been proposed might fit better with how ObjectRegistry works.
+The SwithExecutionEnv(someBucketEnv == ep_engine ptr) and SwitchExecutionEnv(GlobalEnv) seems just as valid and seems to me good self documenting code. But, that's just my opinion. Please have that discussion with Sarath so we can move forward.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-12-17 14:17:12.000000000
+Message: 
+Patch Set 11:
+
+@Sarath: Scott has asked for your input on this.
+----------------------------------------------------------------------------------------------------------------------
+Author: Scott Lashley
+Date: 2020-12-17 14:31:13.000000000
+Message: 
+Patch Set 11:
+
+> Patch Set 11:
+> 
+> @Sarath: Scott has asked for your input on this.
+
+
+As I mentioned earlier, I don't see any clear advantage of a Setup/Reset over a switchEnv(bucket)/switchEnv(global) scheme. The fact that switchEnv is similar to onSwitchThread makes me lean to using that interface.
+----------------------------------------------------------------------------------------------------------------------
+Author: Sarath Lakshman
+Date: 2020-12-17 15:04:05.000000000
+Message: 
+Patch Set 11:
+
+> Patch Set 11:
+> 
+> @Sarath: Scott has asked for your input on this.
+
+The stackable guards within magma are going to work as follows.
+
+prev = SwitchToEnv(dbEnv)
+
+// Execute some code
+
+// Switch back to prior env
+if prev == null {
+    SwitchToDefaultEnv()
+} else {
+    SwitchToEnv(prev)
+}
+
+
+I don't see any advantage in adding a non-null check by splitting methods to SwitchToEnv(customEnv) and SwitchToDefaultEnv() as switch method would still return valid prev state as null. The switching back method depends on the prev env == null check to use either of the switch methods anyway.
+----------------------------------------------------------------------------------------------------------------------
+Author: Sarath Lakshman
+Date: 2020-12-17 15:13:49.000000000
+Message: 
+Patch Set 11:
+
+> Patch Set 11:
+> 
+> > Patch Set 11:
+> > 
+> > @Sarath: Scott has asked for your input on this.
+> 
+> The stackable guards within magma are going to work as follows.
+> 
+> prev = SwitchToEnv(dbEnv)
+> 
+> // Execute some code
+> 
+> // Switch back to prior env
+> if prev == null {
+>     SwitchToDefaultEnv()
+> } else {
+>     SwitchToEnv(prev)
+> }
+> 
+> 
+> I don't see any advantage in adding a non-null check by splitting methods to SwitchToEnv(customEnv) and SwitchToDefaultEnv() as switch method would still return valid prev state as null. The switching back method depends on the prev env == null check to use either of the switch methods anyway.
+
+I guess if we have to prevent accidentally passing null to switch, we have to introduce some explicit type like..
+
+struct ExecEnv {
+    enum EnvType{Default, UserDefined};
+    EnvType Type{UserDefined};
+    void *Context;
+}
+
+ExecEnv SwitchEnv(ExecEnv to)
+
+In this case it can at least ensure that if it is a user defined type, context should be non-null.
+----------------------------------------------------------------------------------------------------------------------
+Author: Scott Lashley
+Date: 2020-12-17 15:17:19.000000000
+Message: 
+Patch Set 11:
+
+> Patch Set 11:
+> 
+> > Patch Set 11:
+> > 
+> > > Patch Set 11:
+> > > 
+> > > @Sarath: Scott has asked for your input on this.
+> > 
+> > The stackable guards within magma are going to work as follows.
+> > 
+> > prev = SwitchToEnv(dbEnv)
+> > 
+> > // Execute some code
+> > 
+> > // Switch back to prior env
+> > if prev == null {
+> >     SwitchToDefaultEnv()
+> > } else {
+> >     SwitchToEnv(prev)
+> > }
+> > 
+> > 
+> > I don't see any advantage in adding a non-null check by splitting methods to SwitchToEnv(customEnv) and SwitchToDefaultEnv() as switch method would still return valid prev state as null. The switching back method depends on the prev env == null check to use either of the switch methods anyway.
+> 
+> I guess if we have to prevent accidentally passing null to switch, we have to introduce some explicit type like..
+> 
+> struct ExecEnv {
+>     enum EnvType{Default, UserDefined};
+>     EnvType Type{UserDefined};
+>     void *Context;
+> }
+> 
+> ExecEnv SwitchEnv(ExecEnv to)
+> 
+> In this case it can at least ensure that if it is a user defined type, context should be non-null.
+
+My intent is to mirror what ObjectRegistry does. It assumes nullptr means global. Why not keep things simple and familiar?
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-12-17 15:30:23.000000000
+Message: 
+Patch Set 11: -Code-Review
+
+> Patch Set 11:
+> 
+> > Patch Set 11:
+> > 
+> > @Sarath: Scott has asked for your input on this.
+> 
+> The stackable guards within magma are going to work as follows.
+> 
+> prev = SwitchToEnv(dbEnv)
+> 
+> // Execute some code
+> 
+> // Switch back to prior env
+> if prev == null {
+>     SwitchToDefaultEnv()
+> } else {
+>     SwitchToEnv(prev)
+> }
+> 
+> 
+> I don't see any advantage in adding a non-null check by splitting methods to SwitchToEnv(customEnv) and SwitchToDefaultEnv() as switch method would still return valid prev state as null. The switching back method depends on the prev env == null check to use either of the switch methods anyway.
+
+Well, given the many weeks(?) spent trying to track down the accounting issues so far in Magma, as I mentioned previously, any extra checks we can add to validate switching seem valuable to me - see above about the discussion where any time you "start" work against a bucket, the env _should_ be non-null; even if other switches may be null.
+
+It's ultimately the Magma team's choice on how you want to implement switching the current thread, but I think we can do better here.
+
+If you really don't want to add the non-null checks here (which again as per previous comments seems to be the most decoupled app <-> Magma approach), I would strongly recommend you add equivalent checks in Magma itself whenever you start work on a bucket.
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,86 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-36723 [1/2] Change default ExecutorPool #reader / #writer to #cores
+
+Summary
+-------
+
+Change the calculation of how many Writer threads are created to be
+equal to the number of CPU cores.  The calculation of how many Reader
+threads to create is currently dependent on how many Writers are
+created, so also change them to default to the number of available CPU
+cores.
+
+This shouldn't affect single-bucket tests yet; until the number of
+shards is changed these extra threads will just be idle. See the next
+patch in this series for the num_shards increase.
+
+Background
+----------
+
+The rationale for this is that the current throughput of
+persistence-dependent ops (e.g. SyncWrites) with the current defaults
+(4 shards / 4 writer threads) is generally much lower than modern
+SSD-based systems are capable of.
+
+Given couchstore's disk IO is all synchronous (blocking), the number
+of concurrent IO operations issued to the disk subsystem is limited to
+the number of Flusher tasks (i.e. number of shards) - default 4.
+
+Commodity SSDs are typically capable of 32 concurrent IOPs (queue
+depth), enterprise-grade SSDS, mutli-disk RAID and NVMe disks are
+capable of _significantly_ more; so only issuing up to 4 writes ops
+concurrently is insufficient to fully utilise disks.
+
+Note: Reader / Writer threads are typically IO-bound, so a Writer
+thread should only consume a fraction of a CPU core. As such, creating
+one per CPU core shouldn't cause too much contention with other,
+CPU-bound threads in the system.
+
+Note (2): For maximum IO throughput we should ideally create as many
+Reader / Writer threads (and shards) as concurrent IOPs the system can
+support (given we use synchronous IO).  However, knowing the number of
+concurrent IOPs the system can support is hard, so we use #CPUs as a
+sensible default proxy for it - machines with lots of CPU cores are
+more likely to have more IO than little machines.
+
+Change-Id: I41ef97154b05c33f88f00467556b1fa5937e5f9b
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2019-11-01 16:50:13.000000000
+Message: 
+Patch Set 6: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-11-05 11:11:14.000000000
+Message: 
+Patch Set 6: Code-Review+2
+
+(2 comments)
+Line:593, engines/ep/src/executorpool.cc -> This is an interesting point. I thought about it when we looked at the cbmonitor disk-utilization ~ 100% achieved with this change.
+Aren't we expecting any degradation on BGFetch? Have we seen any already?
+
+Line:251, engines/ep/src/executorpool.h -> Ah nice translation :)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-11-05 11:38:37.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+Line:593, engines/ep/src/executorpool.cc -> So the original problem (and reason for this code) was that N flushers could all run at once and starve BGFetcher tasks.
+
+However, a lot has changed since that was added (3.0 iirc):
+
+- We limit the number of concurrent compactors to 1.
+- We force an fsync() every 16MB written, to minimise BGFetch impact.
+- We've fixed bugs with scheduling Flushers and with seqno tree write amplification. 
+
+As such I'm not concerned about slowdown in BGFetch - if anything we _should_ be faster now given there's more Reader threads (and BGFetch tasks) to distribute the workload.
+
+----------------------------------------------------------------------------------------------------------------------

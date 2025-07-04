@@ -1,0 +1,126 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-35297: Cancel RangeScans that exist for "too long"
+
+A RangeScan cannot 'exist' indefinitely as disk cannot be released by
+compaction. This commit adds a task that will 'force' cancel any
+RangeScan that has existed for longer than a configuration defined
+duration (180 seconds by default). This cancelling occurs irrespective
+of the scan state/progress.
+
+A cancellation task is created per vbucket and shares code with the
+durability timeout task. The idea is that when a scan is created, the
+task will change from sleep(-1) to sleep(180). When the task wakes it
+will check the state of the vbucket's scans and force cancel any that
+have a 180 second existence. At this point the task may sleep(-1) or
+set a sleep time based on the vbucket's scans, e.g. if scans remain
+the sleep time is set to be the duration until the next scan would
+of exceeded the 180 seconds.
+
+Change-Id: I409b00ab08772fa36af8f2fad83c0b083fe26165
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jim Walker
+Date: 2022-08-22 17:03:55.000000000
+Message: 
+Uploaded patch set 28.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-08-22 17:36:09.000000000
+Message: 
+Patch Set 28: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/18863/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/19647/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/48561/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/40813/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/9439/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/9340/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/22668/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/21590/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/21944/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/29970/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/20867/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-08-24 12:47:51.000000000
+Message: 
+Patch Set 28: Code-Review-1
+
+(3 comments)
+Line:1358, engines/ep/configuration.json -> Do we want to make this dynamic? Seems like it could be useful to adjust at runtime
+
+Line:134, engines/ep/src/range_scans/range_scan_owner.cc -> Without any sleep this will immediately run again - is that desired?
+
+Line:179, engines/ep/src/range_scans/range_scan_owner.cc -> Seems like this should only be called if we just created the timeout task at line 172.
+
+Could we restructure this so we set the initial sleep time in the constructor - i.e.
+
+    auto [itr, emplaced] =
+        map.try_emplace(scan->getUuid(), std::move(scan));
+        if (!timeoutTask) {
+            timeoutTask = std::make_unique<EventDrivenTimeoutTask>(
+                        std::make_shared<RangeScanTimeoutTask>(taskable, vb,
+                       std::chrono::steady_clock::now() + maxScanDuration
+        }
+
+(While logically the map.size() should only be size==1 when we don't have a timeoutTask, and have just created one, it feels simpler / safer to make it explicit)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2022-08-24 19:20:54.000000000
+Message: 
+Patch Set 28:
+
+(4 comments)
+File Comment: /PATCHSET_LEVEL -> Thanks for review - let me know if change is still needed
+Line:1358, engines/ep/configuration.json -> Next patch makes this and some other config dynamic
+
+Line:134, engines/ep/src/range_scans/range_scan_owner.cc -> I was cloning the durability timeout (as per earlier review) which does the same http://src.couchbase.org/source/xref/trunk/kv_engine/engines/ep/src/durability_timeout_task.cc?r=e0e5d5c9#97-108
+
+Inside the "cancelRangeScanExceedingDuration" path we should be updating the sleep time of the task to match that of the next timeout
+
+At the point that the RangeScanOwner goes to owning 0 scans, the task sleep is set to -1 (forever)
+
+Line:179, engines/ep/src/range_scans/range_scan_owner.cc -> We don't destroy the timeoutTask in this setup, so with that change going from 0 to one again we'd skip waking up the task
+
+Would that be more desirable to have it destroyed (at line 335 below) and then recreated each time we go the map flips from empty to !empty?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-08-31 08:54:35.000000000
+Message: 
+Patch Set 28:
+
+(3 comments)
+Line:1358, engines/ep/configuration.json -> 👍
+
+Line:134, engines/ep/src/range_scans/range_scan_owner.cc -> Gotcha. 
+
+I think it's worth a comment similar to the DurabilityTimeoutTask one, just to highlight that this /is/ slept elsewhere.
+
+Line:179, engines/ep/src/range_scans/range_scan_owner.cc -> I was thinking for symmetry we should either create it every time the map goes from zero to non-zero (and delete when it hits zero items again), or create the task in the VBucket ctor and keep it around until the VBucket is destroyed.
+
+I had a look at SyncWriteTimeouts and they essentially create a timeout task when a VBucket becomes actice (for the ADM).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2022-08-31 10:11:54.000000000
+MISMATCHED INLINE COMMENT
+Line:179, engines/ep/src/range_scans/range_scan_owner.cc -> Looking into this now, I didn't spot that ~EventDrivenTimeout issues a cancel - so will be nicer for an idle system to cancel all tasks
+----------------------------------------------------------------------------------------------------------------------

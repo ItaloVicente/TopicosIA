@@ -1,0 +1,216 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-30854: Add support for Required IPv4/IPv6 listeners
+
++Problem+
+
+Currently memcached attempts to bind IPv4 and IPv6 listening ports
+based on the "ipv4" & "ipv6" parameters for each interface listed in
+the config file, with the following values:
+
+    true  - Attempt to listen on the given port/protocol.
+    false - Don't attempt to listen on the given port/protocol.
+
+If we fail to bind on a given protocol, it is only considered a fatal
+error if _no_ protocol could be bound. For example; if IPv4 fails but
+IPv6 succeeds then that's treated as a warning and memcached will
+continue to startup.
+
+This can be problematic in some deployments - consider an environment
+using IPv4, but which has IPv6 present on the system. If memcached
+fails to listen on IPv4 then memcached will still start, even though
+this node is not accessible.
+
+This is particulary troublesome if the management port (11209) *is*
+successful in listening, as ns_server will consider the memcached
+process healthy (and potentially distribute vBuckets to it) - even
+through clients (using port 11210) cannot connect.
+
++Solution+
+
+This patch changes the ipv4 & ipv6 interface parameters, adding a new
+"required" value which allows ns_server to specify that this
+port/protocol *must* bind. There are now three possible values:
+
+* required - The specified protocol must be enabled on this
+             interface. If it cannot be enabled, then memcached will
+             fail to start.
+
+* optional - The specified protocol should be enabled on this
+             interface. If it cannot be enabled, then permit memcached
+             to still start.
+
+* off      - Do not attempt to enable the specified protocol on this
+             interface.
+
+(The previous boolean values of true and false are still supported for
+backwards compatibility; mapping to "optional" and "off"
+respectively).
+
+This patch also adds additional logging around the creation of the
+listening sockets; to make it more explicit when a listening socket
+fails.
+
+Note: the default value for both ipv4 & ipv6 is "optional" - this is
+      /close/ to the previous behaviour - a failure to bind is not
+      considered fatal - however it *does* mean that failing to bind
+      any protocols on a given interface is no longer fatal. The
+      expectation is that ns_server should be specifying at least one
+      protocol as "required" going forward.
+
+Change-Id: I39779967314d252e7b0c30249fec807133e9e2f7
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2018-10-10 15:13:52.000000000
+Message: 
+Uploaded patch set 3: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-10-10 15:14:00.000000000
+Message: 
+Patch Set 3:
+
+Branch restricted. PLEASE READ this URL: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/106055/artifact/restricted.html : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2018-10-10 15:21:04.000000000
+Message: 
+Patch Set 3: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-10-10 15:43:51.000000000
+Message: 
+Patch Set 3: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-alice/15/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-alice/25/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-undefinedsanitizer-alice/17/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-alice/32/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/11474/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-alice/36/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-alice/37/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-10-10 16:27:45.000000000
+Message: 
+Patch Set 3:
+
+check approval
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-10-10 16:27:57.000000000
+Message: 
+Patch Set 3: Well-Formed+1
+
+Permission granted to commit: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/106059/artifact/restricted.html : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Finlay
+Date: 2018-10-11 05:06:48.000000000
+Message: 
+Patch Set 3:
+
+Dave - I wanted to check the behavior of this and Abhi's patch (http://review.couchbase.org/#/c/100485/) prior to merging. I think I found one problem - can I ask you to look at it and if you believe I'm mistaken then fine to merge the patches on my behalf.
+
+The memcached.json file looks fine. Memcached restarts constantly if it's in IPv4 required and the IPv4 port is not available. However, if I start a separate process (nc) listening on the same port but an IPv6 socket, memcached still restarts constantly.
+
+Can you try this and see if you see the same behavior. If indeed this is a problem, better to address now rather than let this get to QE.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-10-11 09:33:59.000000000
+Message: 
+Patch Set 3:
+
+> Dave - I wanted to check the behavior of this and Abhi's patch
+ > (http://review.couchbase.org/#/c/100485/) prior to merging. I think
+ > I found one problem - can I ask you to look at it and if you
+ > believe I'm mistaken then fine to merge the patches on my behalf.
+ > 
+ > The memcached.json file looks fine. Memcached restarts constantly
+ > if it's in IPv4 required and the IPv4 port is not available.
+ > However, if I start a separate process (nc) listening on the same
+ > port but an IPv6 socket, memcached still restarts constantly.
+ > 
+ > Can you try this and see if you see the same behavior. If indeed
+ > this is a problem, better to address now rather than let this get
+ > to QE.
+
+Hi Dave,
+
+So I restested - TL;DR: the code is ok, but out-of-the-box netcat doesn't actually do what we want (bind to only IPv6); we need to use another method (I chose "netcat6"
+
+---
+
+Attempting to block IPv6 using netcat with the arguments:
+
+    $ nc -6 -l 12000
+
+This indeed does result in memcached failing to start - as it reports it cannot bind IPv6 (expected), but *also* cannot bind IPv4 (not expected!):
+
+    2018-10-11T10:05:37.110110Z INFO Enable user port(s)
+    2018-10-11T10:05:37.111212Z WARNING Failed to bind to [::]:12000 - Address already in use
+    2018-10-11T10:05:37.111304Z WARNING Failed to bind to 0.0.0.0:12000 - Address already in use
+    2018-10-11T10:05:37.111326Z CRITICAL Failed to create required IPv4 socket for "*:12000"
+    2018-10-11T10:05:37.111328Z WARNING Failed to create optional IPv6 socket for "*:12000"
+
+Why can memcached not bind IPv4 here? Examining the state of listening sockets, we see something curious - netcat is listening on "tcp46" protocol socket:
+
+    $ netstat -lna|grep "Proto Recv-Q Send-Q  Local\|12000"
+    Proto Recv-Q Send-Q  Local Address          Foreign Address        (state)
+    tcp46      0      0  *.12000                *.*                    LISTEN
+
+Some Googling suggests this is because of IPv6 dual-stack - unless the socket is bound with the IPV6_V6ONLY socket option, an AF_INET6 socket will also bind the IPv4 variant. From http://man7.org/linux/man-pages/man7/ipv6.7.html :
+
+       IPV6_V6ONLY (since Linux 2.4.21 and 2.6)
+              If this flag is set to true (nonzero), then the socket is re‐
+              stricted to sending and receiving IPv6 packets only.  In this
+              case, an IPv4 and an IPv6 application can bind to a single
+              port at the same time.
+
+              If this flag is set to false (zero), then the socket can be
+              used to send and receive packets to and from an IPv6 address
+              or an IPv4-mapped IPv6 address.
+
+              The argument is a pointer to a boolean value in an integer.
+
+              The default value for this flag is defined by the contents of
+              the file /proc/sys/net/ipv6/bindv6only.  The default value for
+              that file is 0 (false).
+
+Indeed, in memcached we do set IPV6_V6ONLY when binding our IPv6 listening socket.
+
+Instead of "nc", I tested using nc6 ("brew install netcat6" on macOS), which does set IPV6_V6ONLY:
+
+    $ nc6 -6 -l -p 12000
+
+Checking via netstat, note proto is now "tcp6" (not dual-stack):
+
+    $ netstat -lna|grep "Proto Recv-Q Send-Q  Local\|12000"
+    Proto Recv-Q Send-Q  Local Address          Foreign Address        (state)
+    tcp6       0      0  *.12000                                       *.*                                           LISTEN
+
+Now if we re-test memcached we see the expected result: IPv4 (required) succeeds, IPv6 (optional) fails and memcached successfully starts:
+
+    2018-10-11T10:31:22.565731Z INFO Enable user port(s)
+    2018-10-11T10:31:22.567453Z WARNING Failed to bind to [::]:12000 - Address already in use
+    2018-10-11T10:31:22.567575Z INFO 8 Listen on 0.0.0.0:12000
+    2018-10-11T10:31:22.567608Z WARNING Failed to create optional IPv6 socket for "*:12000"
+    2018-10-11T10:31:22.567688Z INFO 9 Listen on [::]:11999
+    2018-10-11T10:31:22.567778Z INFO 10 Listen on 0.0.0.0:11999
+    2018-10-11T10:31:22.570054Z INFO Initialization complete. Accepting clients.
+----------------------------------------------------------------------------------------------------------------------

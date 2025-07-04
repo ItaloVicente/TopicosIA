@@ -1,0 +1,272 @@
+======================================================================================================================
+DESCRIPTION:
+
+BatchRefUpdate: repro racy atomic update, and fix it
+
+PackedBatchRefUpdate was creating a new packed-refs list that was
+potentially unsorted. This would be papered over when the list was
+read back from disk in parsePackedRef, which detects unsorted ref
+lists on reading, and sorts them. However, the BatchRefUpdate also
+installed the new (unsorted) list in-memory in
+RefDirectory#packedRefs.
+
+With the timestamp granularity code committed to stable-5.1, we can
+more often accurately decide that the packed-refs file is clean, and
+will return the erroneous unsorted data more often. Unluckily timed
+delays also cause the file to be clean, hence this problem was
+exacerbated under load.
+
+The symptom is that refs added by a BatchRefUpdate would stop being
+visible directly after they were added. In particular, the Gerrit
+integration tests uses BatchRefUpdate in its setup for creating the
+Admin group, and then tries to read it out directly afterward.
+
+The test is rather indirect, because a unittest would require access to
+the data written by PackedBatchRefUpdate. A better approach would be
+to revise RefList.Builder, so it detects out-of-order lists and
+automatically sorts them.
+
+Change-Id: I613c8059964513ce2370543620725b540b3cb6d1
+Signed-off-by: Han-Wen Nienhuys <hanwen@google.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Han-Wen NIenhuys
+Date: 2019-09-02 11:31:23.000000000
+Message: 
+Uploaded patch set 3: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2019-09-02 11:31:30.000000000
+Message: 
+Patch Set 3:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/1166/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2019-09-02 11:41:59.000000000
+Message: 
+Patch Set 3: Verified-1
+
+Build Failed 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/1166/ : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2019-09-02 11:51:07.000000000
+Message: 
+Patch Set 3:
+
+(2 comments)
+
+Please link bug 548716 in the commit message. I think what you describe in the commit message matches the symptoms there.
+Line:396, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/PackedBatchRefUpdate.java -> Which lock failed? Perhaps a different exception would be better.
+
+Line:404, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/PackedBatchRefUpdate.java -> Please don't report a lock failure here. That's what happens in bug 548716, but it's not correct. Rather the fetch requests a ref it already had.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Han-Wen NIenhuys
+Date: 2019-09-02 11:53:09.000000000
+Message: 
+Patch Set 3:
+
+> Patch Set 2: Verified-1
+> 
+> Build Failed 
+> 
+> https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/1165/ : FAILURE
+
+test failure for 
+
+[ERROR] testRacyGitDetection(org.eclipse.jgit.lib.RacyGitTests)  Time elapsed: 0.299 s  <<< FAILURE!
+org.junit.ComparisonFailure: expected:<...de:100644, time:t1, [smudged, length:0], content:a2][b, mod...> but was:<...de:100644, time:t1, [length:2], content:a2][b, mod...>
+	at org.eclipse.jgit.lib.RacyGitTests.testRacyGitDetection(RacyGitTests.java:171)
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2019-09-02 11:58:14.000000000
+Message: 
+Patch Set 3:
+
+> > Patch Set 2: Verified-1
+ > >
+ > > Build Failed
+ > >
+ > > https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/1165/
+ > : FAILURE
+ > 
+ > test failure for
+ > 
+ > [ERROR] testRacyGitDetection(org.eclipse.jgit.lib.RacyGitTests) 
+ > Time elapsed: 0.299 s  <<< FAILURE!
+ > org.junit.ComparisonFailure: expected:<...de:100644, time:t1,
+ > [smudged, length:0], content:a2][b, mod...> but was:<...de:100644,
+ > time:t1, [length:2], content:a2][b, mod...>
+ > at org.eclipse.jgit.lib.RacyGitTests.testRacyGitDetection(RacyGitTests.java:171)
+
+stable-4.9 doesn't have all the fixes done between 5.1.8 and 5.1.10
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2019-09-02 11:59:00.000000000
+Message: 
+Patch Set 3:
+
+(2 comments)
+Line:10, /COMMIT_MSG -> That's exactly what I was observing in bug 548716.
+
+Line:23, /COMMIT_MSG -> Which explains why the next fetch would re-want them, and then fail in its BatchRefUpdate and raise this misleading "lock failed" exception.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Han-Wen NIenhuys
+Date: 2019-09-02 12:18:06.000000000
+Message: 
+Patch Set 3:
+
+(2 comments)
+
+before we attribute https://bugs.eclipse.org/bugs/show_bug.cgi?id=548716 to this, can you verify that the problem goes away with this change?
+Line:396, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/PackedBatchRefUpdate.java -> see below.
+
+Line:404, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/PackedBatchRefUpdate.java -> I think this is a lock failure from the perspective of a BatchRefUpdate: the update tries to apply an update that corresponds to an older state.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Han-Wen NIenhuys
+Date: 2019-09-02 12:43:06.000000000
+Message: 
+Patch Set 3:
+
+(2 comments)
+Line:10, /COMMIT_MSG -> Ack
+
+Line:23, /COMMIT_MSG -> Ack
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2019-09-02 13:55:19.000000000
+Message: 
+Patch Set 3: Verified+1
+
+(5 comments)
+
+Thanks for finding this bug and fixing it :-)
+
+How did you find the root cause ? I was also chasing it.
+
+I cherry-picked this fix on stable-5.1 and compiled Gerrit stable-2.16 against this version and successfully verified this fixes bug [1].
+
+[1] https://bugs.chromium.org/p/gerrit/issues/detail?id=11373
+Line:53, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/PackedBatchRefUpdate.java -> this import is now unused, hence remove it
+
+Line:58, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/PackedBatchRefUpdate.java -> also remove this import when removing unused method byName()
+
+Line:395, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/PackedBatchRefUpdate.java -> eclipse compiler raises error: potential NPE on cmd
+
+seems the compiler isn't smart enough to understand that cmp is set to -1 if cmd == null, silence the error by asserting cmd is not null before this line:
+
+ assert cmd != null;
+
+Line:403, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/PackedBatchRefUpdate.java -> eclipse compiler raises errors: potential NPE on cmd and on ref
+
+same problem as above, silence bogus errors using assertions
+
+ assert cmd != null;
+ assert ref != null;
+
+Line:493, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/PackedBatchRefUpdate.java -> remove this no longer used private method
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Han-Wen NIenhuys
+Date: 2019-09-02 14:12:13.000000000
+Message: 
+Patch Set 3:
+
+> Patch Set 3: Verified+1
+> 
+> (5 comments)
+> 
+> Thanks for finding this bug and fixing it :-)
+> 
+> How did you find the root cause ? I was also chasing it.
+
+I got reftable to the point that I could build gerrit against 
+it, and tried benchmarking CreateChange on packed-refs and reftable (reftable is faster, of course :-). The packed-refs flavor was dumping 500s all over, because after the BRU, the indexer wants to read back the change from storage. After that, it was relatively easy to reproduce and track down. 
+
+> I cherry-picked this fix on stable-5.1 and compiled Gerrit stable-2.16 against this version and successfully verified this fixes bug [1].
+> 
+> [1] https://bugs.chromium.org/p/gerrit/issues/detail?id=11373
+
+I'll have a look at your comments later today.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2019-09-02 15:10:29.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:190, org.eclipse.jgit.test/tst/org/eclipse/jgit/internal/storage/file/BatchRefUpdateTest.java -> I can't make this test fail when reverting PackedBatchRefUpdate to the previous version (effectively eliminating the fix in PackedBatchRefUpdate) neither on linux (SLES 15, 176 cores, ext4) nor on Mac
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Han-Wen NIenhuys
+Date: 2019-09-02 15:19:44.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:190, org.eclipse.jgit.test/tst/org/eclipse/jgit/internal/storage/file/BatchRefUpdateTest.java -> 176 cores sounds like really upscale machine, and the faster your machine, the less likely this is to hit. I was using this test on a 2012 lenovo T420.
+
+We could do a test that does a single iteration, and then read back the data to check that it was sorted.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2019-09-02 15:57:42.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:404, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/PackedBatchRefUpdate.java -> I don't quite agree. In bug 548716 this tried to apply an update that corresponded to older state because an earlier update had corrupted the database. Reporting "lock failed" is highly misleading here. Just look at the initial reaction of the (not inexperienced) developers in bug 548716, myself included: we all started by hunting for stale lock files. (And of course we didn't find any.)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Han-Wen NIenhuys
+Date: 2019-09-02 16:32:28.000000000
+MISMATCHED INLINE COMMENT
+Line:190, org.eclipse.jgit.test/tst/org/eclipse/jgit/internal/storage/file/BatchRefUpdateTest.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Han-Wen NIenhuys
+Date: 2019-09-02 16:32:09.000000000
+MISMATCHED INLINE COMMENT
+Line:53, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/PackedBatchRefUpdate.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Han-Wen NIenhuys
+Date: 2019-09-02 16:32:09.000000000
+MISMATCHED INLINE COMMENT
+Line:58, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/PackedBatchRefUpdate.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Han-Wen NIenhuys
+Date: 2019-09-02 16:32:09.000000000
+MISMATCHED INLINE COMMENT
+Line:395, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/PackedBatchRefUpdate.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Han-Wen NIenhuys
+Date: 2019-09-02 16:32:09.000000000
+MISMATCHED INLINE COMMENT
+Line:396, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/PackedBatchRefUpdate.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Han-Wen NIenhuys
+Date: 2019-09-02 16:32:09.000000000
+MISMATCHED INLINE COMMENT
+Line:403, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/PackedBatchRefUpdate.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Han-Wen NIenhuys
+Date: 2019-09-02 16:32:09.000000000
+MISMATCHED INLINE COMMENT
+Line:404, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/PackedBatchRefUpdate.java -> The semantics of LOCK_FAILURE are set by the tests, see eg.
+
+https://eclipse.googlesource.com/jgit/jgit/+/2f751c34e132cf86d51271255f92cdbc105c18d2/org.eclipse.jgit.test/tst/org/eclipse/jgit/internal/storage/file/BatchRefUpdateTest.java#242
+
+changing what we return here would be a change in behavior, which the JGit project is very hesitant about. In any event, changing the behavior should be pursued in a different change.
+----------------------------------------------------------------------------------------------------------------------
+Author: Han-Wen NIenhuys
+Date: 2019-09-02 16:32:09.000000000
+MISMATCHED INLINE COMMENT
+Line:493, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/PackedBatchRefUpdate.java -> Done
+----------------------------------------------------------------------------------------------------------------------

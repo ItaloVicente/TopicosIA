@@ -1,0 +1,221 @@
+======================================================================================================================
+DESCRIPTION:
+
+[467631] submodules always shown as modified
+
+This change fixes an issue where unchecked-out submodules show up as deleted. In
+IndexDiff.java, while iterating over the working directory and comparing it to the
+index, a gitlink for an unchecked-out module appears similar to a deleted file.
+Line 504 ostensibly excludes gitlinks from being marked as missing, but fails to do
+so because the condition for marking a file as missing is:
+
+  !isEntryGitLink(dirCacheIterator) || ignoreSubmoduleMode != IgnoreSubmoduleMode.ALL
+
+This means that even if the file is a gitlink, it will be marked as missing _unless_
+ignoreSubmoduleMode == IgnoreSubmoduleMode.ALL. Since ignoreSubmoduleMode has a null
+value by default, a gitlink ends up being marked as missing. The solution is to change
+the condition for marking a file as missing to:
+
+  !isEntryGitLink(dirCacheIterator) && ignoreSubmoduleMode != IgnoreSubmoduleMode.ALL
+
+Now, gitlinks for unchecked-out submodules will not be wrongly marked as missing, but
+legitimately-deleted files will. If the deleted files are from a submodule, then they
+will not be marked as missing if ignoreSubmoduleMode == IgnoreSubmoduleMode.ALL, which
+is the expected behavior.
+
+Bug: https://bugs.eclipse.org/bugs/show_bug.cgi?id=467631
+Change-Id: Ic7c83524fc04b7e8675095663aa55ceca6a28262
+Signed-off-by: Vivin Paliath <vivin.paliath@gmail.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Vivin Paliath
+Date: 2018-07-27 23:59:54.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-07-28 00:00:03.000000000
+Message: 
+Patch Set 1:
+
+Build Started https://ci.eclipse.org/jgit/job/jgit.gerrit/13577/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-07-28 00:12:33.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/jgit.gerrit/13577/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2018-07-28 09:54:22.000000000
+Message: 
+Patch Set 1:
+
+Did you see bug 521613?
+----------------------------------------------------------------------------------------------------------------------
+Author: Vivin Paliath
+Date: 2018-08-09 01:06:36.000000000
+Message: 
+Patch Set 1:
+
+I will take a look.
+----------------------------------------------------------------------------------------------------------------------
+Author: Vivin Paliath
+Date: 2018-08-10 00:59:22.000000000
+Message: 
+Patch Set 1:
+
+I think that is an unrelated bug since the check mentioned in this issue happens before the code in 521613.
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Halstrick
+Date: 2018-08-24 14:45:45.000000000
+Message: 
+Patch Set 1:
+
+(4 comments)
+
+Nice catch. Only minor comments ...
+Line:7, /COMMIT_MSG -> I would not mention the bug in brackets. He's listed already in the message. But tell what you did like 'Fixed reporting submodules as deleted ...'
+
+Line:29, /COMMIT_MSG -> Just say
+  Bug: 467631
+
+Line:126, org.eclipse.jgit.test/tst/org/eclipse/jgit/lib/IndexDiffSubmoduleTest.java -> You could avoid cloning. In fact the problem you solve is not related to cloning or transport. Just delete the submodule in the working tree of the original test repo and do the IndexDiff. Like:
+
+	@Theory
+	public void testUncheckedOutSubmodulesDoNotShowUp(IgnoreSubmoduleMode mode)
+			throws Exception {
+		recursiveDelete(submodule_trash);
+		IndexDiff indexDiff = new IndexDiff(db, Constants.HEAD,
+				new FileTreeIterator(db));
+		indexDiff.setIgnoreSubmoduleMode(mode);
+		assertFalse(indexDiff.diff());
+	}
+
+Line:503, org.eclipse.jgit/src/org/eclipse/jgit/lib/IndexDiff.java -> minor: in other parts of this file we describe with such comments the state we have reached at that line. So 'in index, not in workdir' is sufficient. Your new comment line could be copied before 506 because there we have reached the state "and not a gitlink"
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2018-08-24 15:54:32.000000000
+Message: 
+Patch Set 1: Code-Review-2
+
+I don't think this is correct. It'll omit normal missing files if ignoreSubmoduleMode == ALL, even when there are no submodules in sight anywhere.
+
+Test case:
+
+  @Test
+  public void testMissing() throws Exception {
+    File file2 = writeTrashFile("file2", "file2");
+    File file3 = writeTrashFile("dir/file3", "dir/file3");
+    try (Git git = new Git(db)) {
+      git.add().addFilepattern("file2").addFilepattern("dir/file3")
+          .call();
+      git.commit().setMessage("commit").call();
+      assertTrue(file2.delete());
+      assertTrue(file3.delete());
+      IndexDiff diff = new IndexDiff(db, Constants.HEAD,
+          new FileTreeIterator(db));
+      diff.setIgnoreSubmoduleMode(IgnoreSubmoduleMode.ALL);
+      diff.diff();
+      assertEquals(2, diff.getMissing().size());
+      assertTrue(diff.getMissing().contains("file2"));
+      assertTrue(diff.getMissing().contains("dir/file3"));
+      assertEquals(0, diff.getChanged().size());
+      assertEquals(0, diff.getModified().size());
+      assertEquals(0, diff.getAdded().size());
+      assertEquals(0, diff.getRemoved().size());
+      assertEquals(Collections.EMPTY_SET, diff.getUntrackedFolders());
+    }
+  }
+
+This test should succeed no matter what the setting of setIgnoreSubmodule is. There are no submodules in this git repo at all. It will fail with this change.
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2018-08-24 19:33:29.000000000
+Message: 
+Patch Set 1:
+
+The real problem sits deeper. In AbstractTreeIterator.pathCompare(), GITLINKS and TREES do not compare equal. As a result, a TreeWalk will first return (GITLINK for index and HEAD, and null for working tree), and next (null for index and HEAD, and TREE for working tree). So we see this as a remove GITLINK followed by an untracked empty folder (which will be filtered out by the IndexDiffFilter).
+
+Which is of course wrong. I suspect Paths.lastPathChar() has to handle TYPE_TREE and TYPE_GITLINK the same.
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2018-08-24 19:44:33.000000000
+Message: 
+Patch Set 1:
+
+> So we see this as a remove GITLINK followed by an untracked
+ > empty folder (which will be filtered out by the IndexDiffFilter).
+
+s/remove GITLINK/missing GITLINK/
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2018-08-24 20:54:45.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:126, org.eclipse.jgit.test/tst/org/eclipse/jgit/lib/IndexDiffSubmoduleTest.java -> I disagree.
+
+First, recursiveDelete(submodule_trash) would also remove the modules/submodule directory, leaving only modules. That's not the state after a clone: after cloning, modules/submodule exists as an empty directory. With only modules, reporting the submodule as missing would even be correct.
+
+Second, the problem as reported is that after a clone the working tree is not clean and JGit reports all submodules as missing, when it should not. Writing the test according to this is perfectly fine, and I prefer it over all kinds of shortcuts to simulate the same state. Doing a clone and then doing the index diff is exactly what we want to test here.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2018-08-25 09:16:01.000000000
+Message: 
+Patch Set 1:
+
+> The real problem sits deeper. In AbstractTreeIterator.pathCompare(),
+ > GITLINKS and TREES do not compare equal.
+
+Alternate fix pushed to https://git.eclipse.org/r/#/c/128057/ .
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Halstrick
+Date: 2018-08-27 09:50:10.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:126, org.eclipse.jgit.test/tst/org/eclipse/jgit/lib/IndexDiffSubmoduleTest.java -> Not sure whether its relevant because of your alternative fix: heres the draft I wrote
+
+No problem keeping your tests. As long as the tests cover the new code I am happy. I also like this tests which try to reproduce exactly what users of JGit do (kind of integration tests).
+
+On the other hand I like to have unit tests which work on JGit internals, run fast and test exactly the broken functionality without being dependent on unrelated code, like transport code. I looked at
+what you fixed in IndexDiff and tried to produce a minimal test which covers this situation. The test I proposed fails without your fix in IndexDiff and runs with your fix. That's because your fix is for a situation where it is irrelevant whether in the filesystem the submodule_trash folder exists or is just empty. In both cases worktreeiterator will be null in IndexDiff.
+
+So why not have your tests and this test?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Halstrick
+Date: 2018-08-27 12:35:18.000000000
+Message: 
+Patch Set 1:
+
+Ok, I see that in 128057 you have added such a non-transport test. Strange that we would both have accepted the change to IndexDiff and added green tests for that fix ... and in the end found out that fix would be incorrect.
+
+Then we can abandon this one, right?
+----------------------------------------------------------------------------------------------------------------------
+Author: Vivin Paliath
+Date: 2018-08-28 20:07:59.000000000
+Message: 
+Patch Set 1:
+
+If the other fix addresses this issue, then I guess we can ignore?
+----------------------------------------------------------------------------------------------------------------------
+Author: David Pursehouse
+Date: 2019-04-19 07:12:45.000000000
+Message: 
+Abandoned
+
+Abandoning after 6 months or more of inactivity.
+
+If this change is still needed, please restore it.
+----------------------------------------------------------------------------------------------------------------------

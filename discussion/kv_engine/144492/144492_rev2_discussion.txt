@@ -1,0 +1,147 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-39292: 2/n Add a 'SharedMetaDataTable'
+
+To be able to correctly identify legal or illegal changes to a
+collection's metadata we need a place to store and access
+the metadata (primarily the name, but other metadata will be included).
+
+To avoid unnecessary memory increases, we need a place in memory where
+the VB::ManifestEntry objects will be able to reference the data. The
+data will then be stored once per KVBucket.
+
+This patch introduces a custom container type for the storage and
+retrieval of the metadata to be associated with collections (and
+scopes).
+
+The intention is that the name, scope-id and ttl of a collection will
+not be stored in the VB::ManifestEntry, but referenced (and
+ref-counted).
+
+This container deliberately does not make use of std::shared_ptr as
+memory profiling during the development already highlights that
+collections/scopes can give a noticeable increase to mem_used. A
+version of this patch series which used std::shared_ptr resulted
+in a net increase to VB::ManifestEntry (and the scopes map).
+Although probably a fraction of a real deployment, keeping mem_used
+increases low may help users evaluating (when vbuckets per node
+could be high). The use of a plain reference achieves a net reduction
+in the VB::ManifestEntry (see patch 3/n).  As VB::Manifest and
+VB::ManifestEntry are tightly coupled it isn't too problematic to
+use a reference and explicit calls to reference and dereference the
+shared metadata.
+
+The container uses a multimap for storage because we need to support
+the possibility that different id->meta mappings could exist.
+
+* vbucket 0 has collection:x with name:fruit
+* vbucket 1 has collection:x with name:vegetable
+
+This can happen in failure circumstances when the vbuckets see
+different state time-lines (which is intended to be force corrected).
+
+Note the SharedMetaDataTable will be used by VB::Manifest for scope
+name storage too, hence the full templating of key and value allow
+the container to be reused.
+
+Change-Id: I7c7ded00827bf4fa1978668a1ffaebe908749dc6
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jim Walker
+Date: 2021-01-28 12:06:44.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2021-01-28 17:37:40.000000000
+Message: 
+Patch Set 2:
+
+(3 comments)
+Line:28, /COMMIT_MSG -> OOI, how does STRCPtr stack up against this? (If it is even suitable)
+
+Line:58, engines/ep/src/collections/shared_metadata_table.h -> Are changes to this value protected by a lock somewhere? Or should this be std::atomic?
+
+Line:73, engines/ep/src/collections/shared_metadata_table.h -> Might it be better to move ValueView away from being a class template param, to being a method template param?
+
+It's not used in any class members, and having it where it is ties you to one view-type wherever you use the template instance instance. If it were a parameter for the methods instead, then at each usage you could use any type for lookup for which equality comparison (and conversion to Value) is defined, more like hetrogeneous lookup in std ordered containers
+
+
+Though if it's always expected that there will only be one view type, there's not much difference 😊
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2021-01-29 15:17:35.000000000
+Message: 
+Patch Set 2:
+
+(2 comments)
+Line:28, /COMMIT_MSG -> Kind of an option, it would result in just 8 bytes being held by the VB::ManifestEntry - the atomic stuff isn't needed here though, so the now removed RCPtr would of been ok
+
+Line:73, engines/ep/src/collections/shared_metadata_table.h -> Next patch up (3/n) is the only user of this code, and so far it seems as generic as it needs to be. That said, you'd need to point me at an example of what you really mean.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2021-01-29 15:44:24.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:73, engines/ep/src/collections/shared_metadata_table.h -> Roger - if it's unlikely that you'd want multiple different view types it's probably goodo as is :)
+
+For reference I was (doing a weak job of) trying to describe
+
+ template <class Key, class Value>
+ class SharedMetaDataTable {
+ public:
+ ...
+     template <class ValueView>
+     const Value& createOrReference(Key id, const ValueView& valueView);
+ ...
+ }
+
+
+ template <class Key, class Value>
+ template <class ValueView>
+ const Value& SharedMetaDataTable<Key, Value>::createOrReference(
+        Key id, const ValueView& valueView) {
+     ...
+ }
+
+
+so then users could do
+
+ SharedMetaDataTable<KeyFoo, ValueBar> metadata;
+ KeyFoo key;
+ SomeValueViewBaz a;
+ SomeValueViewQux b;
+
+ metadata.createOrReference(key, a);
+ metadata.createOrReference(key, b);
+
+
+So any type that Value can be compared == to and constructed from can be used in createOrReference rather than having to specify just the one ValueView type when declaring metadata.
+
+In the end it's going to be six of one half a dozen of the other if there's only ever one view type 😊
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-02-01 10:29:51.000000000
+MISMATCHED INLINE COMMENT
+Line:28, /COMMIT_MSG -> I think SingleThreadedRCPtr is probably a better choice than rolling a very similar class inside SharedMetaDataTable - it's been heavily used / tested and ref-counting type stuff is already delicate to get 100% correct.
+
+I don't think the extra atomic cost should be much of a factor; we already use it for queued_item / Blob management and I don't recall any issues there.
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2021-02-01 10:57:42.000000000
+MISMATCHED INLINE COMMENT
+Line:28, /COMMIT_MSG -> Sure can take a look - at the time of writing the conversion from shared_ptr to something 'smaller' I had forgotten that STRCPtr still existed
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2021-02-01 13:48:59.000000000
+MISMATCHED INLINE COMMENT
+Line:73, engines/ep/src/collections/shared_metadata_table.h -> Ah gotcha, since this seems like the better approach, it's done.
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,216 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-46510: Sequential index creation is failing with "Build Already In Progress"
+
+RCA: Index creation with deferred = false should be a synchronus call but when we create index with one or more replicas,
+create index returns as soon as one of the replica is in active state even when other replicas have not finished building yet.
+Fix: recoverable create index will now wait for all replicas to finish building before returning from create index call.
+
+Change-Id: Ie1d79d368d25940d7852f8fa4f96db73ad3f1ed0
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Yogendra Acharya
+Date: 2021-08-31 11:48:30.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Yogendra Acharya
+Date: 2021-08-31 12:23:21.000000000
+Message: 
+Patch Set 1:
+
+I have tested for partitioned index as well as replica index. Functional test is still running. Let me know if there are any additional places where the same problem needs to be fixed.
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2021-08-31 19:59:49.000000000
+Message: 
+Patch Set 1:
+
+(2 comments)
+Line:4687, secondary/manager/client/metadata_provider.go -> This block is not needed since x && true == x, so it never changes the state.
+
+Line:4694, secondary/manager/client/metadata_provider.go -> It is not clear to me how this calculation is supposed to work. Since an instance is allowed to match any desired status, setting "allMatching = false" when it did not happen to match s, the currently examined status, does not seem correct.
+
+Overall I think all the code inside the loops could benefit from simplification. Changing "for inst" to be the outer loop and "for status" to be the inner loop might help with this.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2021-08-31 20:03:41.000000000
+Message: 
+Patch Set 1:
+
+It would also be good to test a partitioned index that has replicas, if you have not already.
+----------------------------------------------------------------------------------------------------------------------
+Author: Yogendra Acharya
+Date: 2021-09-01 03:12:10.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:4694, secondary/manager/client/metadata_provider.go -> This function can have two different behaviours 
+1) return true if all instances match any one of the status in input status list but each instance can have different status
+2) return true if all instance match one of the status in input status list but every instance must have exact same status 
+
+I have opted for 2nd behaviour which is a more strict requirement. i.e with create index num_replica =1 waiting on [index_state_created, index_state_deleted], 
+
+With behaviour 2 the function will return true and satisfy wait only if both instances either have status as index_state_created or they both have status as index_state_deleted, it will return false if one instance is in index_state_created and other is in index_state_deleted,
+
+If we opt for behaviour 1 then in this example with one instance having status index_state_created and other having index_status_deleted will return true and satisfy wait.
+
+e.g of behaviour 1  
+input status[A, B] meta.Instances[I1, I2] with I1.status = A and I2.status = B return true -- this is what I have actively prevented.
+
+e.g of behaviour 2
+e.g a) input status[A, B] meta.Instances[I1, I2] with I1.status = A and I2.status = A return true
+e.g b) input status[A, B] meta.Instances[I1, I2] with I1.status = B and I2.status = B return true
+e.g c) input status[A, B] meta.Instances[I1, I2] with I1.status = A and I2.status = B return false
+
+The loops reversal will be useful and will simplify code if we go for behaviour 1. 
+With behaviour 2 little more simplification is possible as I can break on first allmatching=false and will avoid the need for allMatching && true statement that you have pointed out in previous comment.
+
+@Amit @Deep, @Varun which behaviour from above two is more appropriate?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2021-09-01 03:42:44.000000000
+Message: 
+Patch Set 1:
+
+Hi @yogendra,
+
+We can list down all different scenarios and make a design note - no need for a lot of details but, it makes sense to put the requirements + approach + scenarios at a single place so that this can be reviewed easily.
+
+As deep was saying during the call, fixing the bug can be the side effect of the larger change where we define a behaviour that is good for the product.
+
+We need to decide whether we should wait for only one instance to be active or we should wait for all. Similarly, if one instance gets deleted, should we wait for all instances to be deleted or we can return? For example the answer for above Q for "active" and "deleted" state can be different.
+----------------------------------------------------------------------------------------------------------------------
+Author: amithk
+Date: 2021-09-01 03:44:45.000000000
+Message: 
+Patch Set 1:
+
+Also, when the index gets scheduled for background creation, at the point also we wait for the index state. We need to test that code path as well.
+----------------------------------------------------------------------------------------------------------------------
+Author: Yogendra Acharya
+Date: 2021-09-01 05:55:14.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+
+> Patch Set 1:
+> 
+> Hi @yogendra,
+> 
+> We can list down all different scenarios and make a design note - no need for a lot of details but, it makes sense to put the requirements + approach + scenarios at a single place so that this can be reviewed easily.
+> 
+> As deep was saying during the call, fixing the bug can be the side effect of the larger change where we define a behaviour that is good for the product.
+> 
+> We need to decide whether we should wait for only one instance to be active or we should wait for all. Similarly, if one instance gets deleted, should we wait for all instances to be deleted or we can return? For example the answer for above Q for "active" and "deleted" state can be different.
+
+Thanks Amit, i will post a design note, abandoning the current review for the time being, will open new review once everyone puts comments on design note.
+Line:4687, secondary/manager/client/metadata_provider.go -> Ack
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Yogendra Acharya
+Date: 2021-09-01 05:55:48.000000000
+Message: 
+Abandoned
+
+I am posting a design note, once I get comments from everyone on design note i will post new review.
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2021-09-01 16:29:27.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:4694, secondary/manager/client/metadata_provider.go -> @Yogendra IMO 1 is the desired behavior, but the code can still be simplified to be more understandable by swapping the inner and outer loops:
+
+for _, inst := range meta.Instances {
+	instMatches := false
+	for _, status := range status {
+		if inst.State == status && ... {
+			instMatches = true // this instance is in one of the allowed statuses 
+			break
+		}
+	}
+	if instMatches == false { // this instance is not in any allowed status
+		return false
+	}
+}
+return true
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2021-09-01 16:40:49.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:4694, secondary/manager/client/metadata_provider.go -> @Yogendra -- I misread your comment. Please ignore my reply above. Behavior 2 that you coded for might be more desirable. I will look at your spec.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2021-09-01 16:50:33.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:4694, secondary/manager/client/metadata_provider.go -> @Yogendra -- now having read your spec, my original comment with the simplified loops is indeed applicable, as we now agree that 1 is the better behavior, and that's what my simplified loops above implement.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2021-09-01 17:40:06.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:4694, secondary/manager/client/metadata_provider.go -> @Yogendra -- here is a version updated to handle the all == false case as well (above was pseudocode only for all == true) -- it just needs an extra early return check to cover both cases:
+
+for _, inst := range meta.Instances {
+	instMatches := false
+	for _, status := range status {
+		if inst.State == status && ... {
+			if !all {
+				return true
+			}
+			instMatches = true // this instance is in one of the allowed statuses 
+			break
+		}
+	}
+	if instMatches == false { // this instance is not in any allowed status
+		return false
+	}
+}
+return true
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Yogendra Acharya
+Date: 2021-09-08 07:43:31.000000000
+Message: 
+Restored
+----------------------------------------------------------------------------------------------------------------------
+Author: Yogendra Acharya
+Date: 2021-09-08 07:43:35.000000000
+Message: 
+Removed reviewer Jeelan Basha Poola.
+----------------------------------------------------------------------------------------------------------------------
+Author: Yogendra Acharya
+Date: 2021-09-08 07:43:36.000000000
+Message: 
+Removed reviewer Kevin Cherkauer.
+----------------------------------------------------------------------------------------------------------------------
+Author: Yogendra Acharya
+Date: 2021-09-08 07:43:37.000000000
+Message: 
+Removed reviewer null.
+----------------------------------------------------------------------------------------------------------------------
+Author: Yogendra Acharya
+Date: 2021-09-08 07:43:38.000000000
+Message: 
+Removed reviewer null.
+----------------------------------------------------------------------------------------------------------------------

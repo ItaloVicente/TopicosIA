@@ -1,0 +1,98 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-36380 [2/2]: Fix missing Flusher wakeup
+
+There is a a race between the Flusher completing a flush iteration and
+deciding if it needs to snooze or not, and a front-end thread
+notifying there's a new mutation to be flushed:
+
+    Flusher::step()
+        ...
+        case State::Running:
+            flushVB();
+            if (_state == State::Running) {
+                double tosleep = computeMinSleepTime();
+    *** notifyFlushEvent() called here ***
+                if (tosleep > 0) {
+                    task->snooze(tosleep);
+                }
+         ...
+
+* computeMinSleepTime() primarily checks if Flusher::pendingMutation is
+  false, if that is the case then the flusher can be put to sleep for
+  a period (between 2 and 10 seconds depending on when it last
+  snoozed).
+
+* notifyFlushEvent() does a compare-exchange on
+  Flusher::pendingMutation, if successful (false -> true) then it
+  calls wake().
+
+Consider the scenario where computeMinSleepTime has returned a
+non-zero value (i.e. no pending work currently), but immediately
+before task->snooze() is called, notifyFlushEvent() is called by a
+front-end thread. That will wake up the task, however the snooze
+immediately below will effectively cancel the wake up, and the task
+will be put to sleep.
+
+If no additional notifyFlushEvent() calls occur, then the Flusher will
+not be run to actually flush the outstanding work until the snooze()
+expires, up to 10s.
+
+Fix by changing the sleep / wake logic in the Flusher to be the same
+as other tasks - initially put the Task to sleep (before clearing the
+notification flag), perform relevent work, then at the end re-check if
+any work is still required and if so wakeup the task.
+
+If a parallel thread also attempts to wake up via notifyFlushEvent()
+then that's fine - it can also wake the task.
+
+Change-Id: I926d98ccbc7d02320420d911bc2dd2455c1c0d44
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2019-10-08 19:30:44.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-10-08 19:34:01.000000000
+Message: 
+Patch Set 2: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/20423/ : ABORTED
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/20423/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/23930/ : ABORTED
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/23930/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/14893/ : ABORTED
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/14893/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/22899/ : ABORTED
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/22899/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/4577/ : ABORTED
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/4577/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/7536/ : ABORTED
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/7536/ )
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/13692/ : FAILURE
+
+Compile error at /home/couchbase/jenkins/workspace/kv-engine-cv-perf/kv_engine/engines/ep/src/flusher.h:67:10:
+error: "function" in namespace "std" does not name a template type
+ ( http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/13692/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/21512/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

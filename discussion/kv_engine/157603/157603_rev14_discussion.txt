@@ -1,0 +1,148 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-46827: Introduce the new checkpoint memory recovery logic
+
+With this patch the checkpoints memory behaviour is fully driven by:
+
+- checkpoint_memory_ratio
+- checkpoint_memory_recovery_upper_mark
+- checkpoint_memory_recovery_lower_mark
+
+At any incoming mutation the system checks whether the new data can be
+accepted/rejected and whether checkpoint memory recovery needs to be
+attempted, with the following logic:
+
+- If the checkpoint mem-usage is below the recovery_upper_mark, then
+  just accept the mutation
+- Else, if the checkpoint mem-usage is above the recovery_upper_mark,
+  then accept the mutation (ie, don't enter any TempOOM phase) and
+  trigger checkpoint mem-recovery
+- Else, checkpoint mem-usage has hit the checkpoint quota (as defined by
+  checkpoint_memory_ratio), so reject the mutation (ie, enter a
+  TempOOM phase) and trigger checkpoint mem-recovery
+
+Checkpoint memory recovery attempts to push the checkpoints mem-usage
+down to recovery_lower_mark, then it yields.
+
+The patch sets checkpoint_memory_ratio=0.5 to maintain a similar
+behaviour (in terms of mem-recovery thresholds) to the old
+cursor_dropping_checkpoint_mem_upper_mark (now unused, will be removed
+in a follow-up patch).
+
+Change-Id: I16146133ee83d16ec0d39be91263fd16922fcd56
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2021-08-10 07:52:20.000000000
+Message: 
+Uploaded patch set 14: Patch Set 13 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-08-10 08:04:03.000000000
+Message: 
+Patch Set 14: Code-Review-1
+
+(2 comments)
+
+-1 for if we need to handle delete also?
+Line:214, engines/ep/configuration.json -> We can tune this further, but I do think something in the region of 90% is better - what's the point in giving memory to checkpoint manager  (via checkpoint_memory_ratio) if it's not allowed to use it? ;)
+
+Line:3298, engines/ep/src/vbucket.cc -> Do we need a similar check for delete (which can have potentially a large value these days)?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2021-08-10 08:14:22.000000000
+Message: 
+Patch Set 14:
+
+> Patch Set 14: Code-Review-1
+> 
+> (2 comments)
+> 
+> -1 for if we need to handle delete also?
+
+So theoretically one would say that any operation queued into the CM must check the CM-quota limit.
+In practical not sure, as for the Bucket-quota limit we skip the check for Delete/Expiry. Maybe that's because historically we considered deletions as a path to mem-recovery? Or maybe we just missed it :shrugh: Planned to discuss offline.
+It seems fine to start with what this patch covers (ie, alive mutations) and then expand in case.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2021-08-10 08:26:13.000000000
+Message: 
+Patch Set 14:
+
+(1 comment)
+Line:214, engines/ep/configuration.json -> Hehe indeed - The semantic of a value like 0.6 is more to consider that mem-recovery is not instantaneous, so under load you may still hit the CM-quota (and thus tempoon'ing) if you don't start mem-recovery in advance.
+But yes, let's set it to 0.9% and see how it behaves - we'll need test&tuning anyway for finding a decent default
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-08-10 08:52:21.000000000
+Message: 
+Patch Set 14: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/9861/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/38424/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/11166/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/32764/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/801/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/13316/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/12957/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/12769/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/20860/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/11886/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/781/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2021-08-10 13:05:31.000000000
+Message: 
+Patch Set 14:
+
+(1 comment)
+Line:214, engines/ep/configuration.json -> For now defaulting this to 0.9 and the checkpoint_memory_recovery_lower_mark below to 0.6.
+Which are similar values already experimented in the linked MB and the system behaved quite well in terms of both ingestion-rate / active RR.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2021-08-10 13:21:43.000000000
+Message: 
+Patch Set 14:
+
+> Patch Set 14:
+> 
+> > Patch Set 14: Code-Review-1
+> > 
+> > (2 comments)
+> > 
+> > -1 for if we need to handle delete also?
+> 
+> So theoretically one would say that any operation queued into the CM must check the CM-quota limit.
+> In practical not sure, as for the Bucket-quota limit we skip the check for Delete/Expiry. Maybe that's because historically we considered deletions as a path to mem-recovery? Or maybe we just missed it :shrugh: Planned to discuss offline.
+> It seems fine to start with what this patch covers (ie, alive mutations) and then expand in case.
+
+As per offline discussion, allowing Deletion/Expiration and Commit/Abort to bypass the checkpoint quota checks for now. Details on why in the updated commit message.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2021-08-10 13:22:08.000000000
+MISMATCHED INLINE COMMENT
+Line:3298, engines/ep/src/vbucket.cc -> Addressed in the main patch discussion
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2021-08-10 13:23:57.000000000
+MISMATCHED INLINE COMMENT
+Line:3298, engines/ep/src/vbucket.cc -> Done
+----------------------------------------------------------------------------------------------------------------------

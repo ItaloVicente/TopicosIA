@@ -1,0 +1,209 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-39594: Chunk algorithm for leb128 decoding
+
+Change the byte-by-byte leb128 decoder to an approach that minimises
+loads. This approach works on the fact that our leb128 usage is always
+a prefix inside some larger buffer, e.g. the prefix of the incoming
+key. So even if the leb128 prefix only occupies 2-bytes, we can use
+one larger load, shift/or the register rather than 2x 1 byte loads.
+
+As the collection-ID gets larger, the benefit increases as can be
+seen in micro-benchmarking.
+
+Before removing the non chunk based code, the old and new were
+benchmarked together.
+
+The following shows the NoThrow variant in full, with "_old" being
+the byte-by-byte approach. The params show the integer being encoded
+followed by how much trailing data exists in the input buffer.
+
+Some highlights together, in general the chunk approach is faster,
+on smaller inputs the two are very close, e.g. a 1 byte decode.
+
+bench_unsigned_leb128_decodeNoThrow/1/0       11 ns
+bench_unsigned_leb128_decode_oldNoThrow/1/0   13 ns
+
+As sizes increase, and we're into say the 3-byte leb size plus a 4 byte
+key the gap widens.
+
+bench_unsigned_leb128_decodeNoThrow/11189196/4      14 ns
+bench_unsigned_leb128_decode_oldNoThrow/11189196/4  26 ns
+
+That trend continues as can be seen in the full output which is
+included at the end of this message.
+
+> ./memcached_unsigned_leb128_bench  --benchmark_filter=Throw
+Run on (12 X 2600 MHz CPU s)
+2020-06-16 11:22:35
+
+Change-Id: I89d8cb8dc1130a75cc9dde14c963008711b0f7b9
+-------------------------------------------------------------------------------------------
+Benchmark                                                    Time           CPU Iterations
+-------------------------------------------------------------------------------------------
+bench_unsigned_leb128_decodeNoThrow/1/0                     11 ns         11 ns   52246994
+bench_unsigned_leb128_decodeNoThrow/1/1                     11 ns         11 ns   62338588
+bench_unsigned_leb128_decodeNoThrow/1/2                     11 ns         11 ns   61443932
+bench_unsigned_leb128_decodeNoThrow/1/3                     11 ns         11 ns   62480475
+bench_unsigned_leb128_decodeNoThrow/1/4                     11 ns         11 ns   62494978
+bench_unsigned_leb128_decodeNoThrow/1/5                     11 ns         11 ns   62657763
+bench_unsigned_leb128_decodeNoThrow/1/6                     11 ns         11 ns   58311952
+bench_unsigned_leb128_decodeNoThrow/1/7                     11 ns         11 ns   62404721
+bench_unsigned_leb128_decodeNoThrow/1/8                     12 ns         12 ns   61002179
+bench_unsigned_leb128_decodeNoThrow/512/0                   13 ns         13 ns   57259245
+bench_unsigned_leb128_decodeNoThrow/512/1                   12 ns         12 ns   57029264
+bench_unsigned_leb128_decodeNoThrow/512/2                   12 ns         12 ns   56713226
+bench_unsigned_leb128_decodeNoThrow/512/3                   12 ns         12 ns   56893455
+bench_unsigned_leb128_decodeNoThrow/512/4                   12 ns         12 ns   57788675
+bench_unsigned_leb128_decodeNoThrow/512/5                   12 ns         12 ns   57285955
+bench_unsigned_leb128_decodeNoThrow/512/6                   13 ns         13 ns   56256982
+bench_unsigned_leb128_decodeNoThrow/512/7                   12 ns         12 ns   57160122
+bench_unsigned_leb128_decodeNoThrow/512/8                   12 ns         12 ns   56594926
+bench_unsigned_leb128_decodeNoThrow/11189196/0              14 ns         13 ns   46801768
+bench_unsigned_leb128_decodeNoThrow/11189196/1              13 ns         13 ns   51776680
+bench_unsigned_leb128_decodeNoThrow/11189196/2              14 ns         14 ns   51759834
+bench_unsigned_leb128_decodeNoThrow/11189196/3              13 ns         13 ns   52010967
+bench_unsigned_leb128_decodeNoThrow/11189196/4              14 ns         14 ns   50647199
+bench_unsigned_leb128_decodeNoThrow/11189196/5              13 ns         13 ns   51983543
+bench_unsigned_leb128_decodeNoThrow/11189196/6              13 ns         13 ns   52114354
+bench_unsigned_leb128_decodeNoThrow/11189196/7              14 ns         14 ns   51715858
+bench_unsigned_leb128_decodeNoThrow/11189196/8              13 ns         13 ns   52819027
+bench_unsigned_leb128_decodeNoThrow/179027149/0             13 ns         13 ns   53019458
+bench_unsigned_leb128_decodeNoThrow/179027149/1             14 ns         14 ns   52838164
+bench_unsigned_leb128_decodeNoThrow/179027149/2             14 ns         14 ns   52086821
+bench_unsigned_leb128_decodeNoThrow/179027149/3             13 ns         13 ns   52898857
+bench_unsigned_leb128_decodeNoThrow/179027149/4             13 ns         13 ns   52942467
+bench_unsigned_leb128_decodeNoThrow/179027149/5             13 ns         13 ns   52273525
+bench_unsigned_leb128_decodeNoThrow/179027149/6             13 ns         13 ns   53028696
+bench_unsigned_leb128_decodeNoThrow/179027149/7             13 ns         13 ns   52870889
+bench_unsigned_leb128_decodeNoThrow/179027149/8             13 ns         13 ns   52991362
+bench_unsigned_leb128_decodeNoThrow/-1/0                    14 ns         14 ns   50328212
+bench_unsigned_leb128_decodeNoThrow/-1/1                    14 ns         14 ns   49566295
+bench_unsigned_leb128_decodeNoThrow/-1/2                    14 ns         14 ns   49860036
+bench_unsigned_leb128_decodeNoThrow/-1/3                    14 ns         14 ns   50399234
+bench_unsigned_leb128_decodeNoThrow/-1/4                    14 ns         14 ns   50485745
+bench_unsigned_leb128_decodeNoThrow/-1/5                    14 ns         14 ns   50289163
+bench_unsigned_leb128_decodeNoThrow/-1/6                    14 ns         14 ns   50041105
+bench_unsigned_leb128_decodeNoThrow/-1/7                    14 ns         14 ns   50334364
+bench_unsigned_leb128_decodeNoThrow/-1/8                    14 ns         14 ns   50147936
+bench_unsigned_leb128_decode_oldNoThrow/1/0                 13 ns         13 ns   54399353
+bench_unsigned_leb128_decode_oldNoThrow/1/1                 13 ns         13 ns   54643102
+bench_unsigned_leb128_decode_oldNoThrow/1/2                 13 ns         13 ns   53190681
+bench_unsigned_leb128_decode_oldNoThrow/1/3                 13 ns         13 ns   54500156
+bench_unsigned_leb128_decode_oldNoThrow/1/4                 14 ns         13 ns   55008526
+bench_unsigned_leb128_decode_oldNoThrow/1/5                 13 ns         13 ns   54601758
+bench_unsigned_leb128_decode_oldNoThrow/1/6                 13 ns         13 ns   52749373
+bench_unsigned_leb128_decode_oldNoThrow/1/7                 13 ns         13 ns   54274505
+bench_unsigned_leb128_decode_oldNoThrow/1/8                 13 ns         13 ns   54506521
+bench_unsigned_leb128_decode_oldNoThrow/512/0               18 ns         18 ns   38882408
+bench_unsigned_leb128_decode_oldNoThrow/512/1               19 ns         19 ns   37932978
+bench_unsigned_leb128_decode_oldNoThrow/512/2               19 ns         19 ns   38233190
+bench_unsigned_leb128_decode_oldNoThrow/512/3               19 ns         19 ns   38532251
+bench_unsigned_leb128_decode_oldNoThrow/512/4               18 ns         18 ns   38284002
+bench_unsigned_leb128_decode_oldNoThrow/512/5               19 ns         19 ns   35585741
+bench_unsigned_leb128_decode_oldNoThrow/512/6               18 ns         18 ns   38162321
+bench_unsigned_leb128_decode_oldNoThrow/512/7               18 ns         18 ns   38828920
+bench_unsigned_leb128_decode_oldNoThrow/512/8               18 ns         18 ns   38542860
+bench_unsigned_leb128_decode_oldNoThrow/11189196/0          26 ns         26 ns   26420777
+bench_unsigned_leb128_decode_oldNoThrow/11189196/1          27 ns         27 ns   26155904
+bench_unsigned_leb128_decode_oldNoThrow/11189196/2          27 ns         26 ns   26174389
+bench_unsigned_leb128_decode_oldNoThrow/11189196/3          27 ns         27 ns   26260800
+bench_unsigned_leb128_decode_oldNoThrow/11189196/4          26 ns         26 ns   26267796
+bench_unsigned_leb128_decode_oldNoThrow/11189196/5          27 ns         27 ns   26226167
+bench_unsigned_leb128_decode_oldNoThrow/11189196/6          28 ns         28 ns   26325191
+bench_unsigned_leb128_decode_oldNoThrow/11189196/7          27 ns         27 ns   26012248
+bench_unsigned_leb128_decode_oldNoThrow/11189196/8          26 ns         26 ns   26387214
+bench_unsigned_leb128_decode_oldNoThrow/179027149/0         27 ns         27 ns   26279630
+bench_unsigned_leb128_decode_oldNoThrow/179027149/1         27 ns         26 ns   26389203
+bench_unsigned_leb128_decode_oldNoThrow/179027149/2         27 ns         27 ns   26336582
+bench_unsigned_leb128_decode_oldNoThrow/179027149/3         26 ns         26 ns   26417587
+bench_unsigned_leb128_decode_oldNoThrow/179027149/4         27 ns         27 ns   26297500
+bench_unsigned_leb128_decode_oldNoThrow/179027149/5         27 ns         27 ns   26412702
+bench_unsigned_leb128_decode_oldNoThrow/179027149/6         28 ns         28 ns   25704015
+bench_unsigned_leb128_decode_oldNoThrow/179027149/7         28 ns         27 ns   25125448
+bench_unsigned_leb128_decode_oldNoThrow/179027149/8         28 ns         28 ns   25500818
+bench_unsigned_leb128_decode_oldNoThrow/-1/0                30 ns         30 ns   22820035
+bench_unsigned_leb128_decode_oldNoThrow/-1/1                31 ns         31 ns   22550747
+bench_unsigned_leb128_decode_oldNoThrow/-1/2                29 ns         29 ns   23559822
+bench_unsigned_leb128_decode_oldNoThrow/-1/3                30 ns         30 ns   22688158
+bench_unsigned_leb128_decode_oldNoThrow/-1/4                29 ns         29 ns   23395487
+bench_unsigned_leb128_decode_oldNoThrow/-1/5                30 ns         30 ns   22602008
+bench_unsigned_leb128_decode_oldNoThrow/-1/6                29 ns         29 ns   23928352
+bench_unsigned_leb128_decode_oldNoThrow/-1/7                30 ns         30 ns   22741301
+bench_unsigned_leb128_decode_oldNoThrow/-1/8                30 ns         30 ns   23562122
+
+Change-Id: I351489759466370f49acaddd7f6c82570890a466
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jim Walker
+Date: 2020-06-16 11:08:29.000000000
+Message: 
+Uploaded patch set 11.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-06-16 12:00:53.000000000
+Message: 
+Patch Set 11: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/28570/ : FAILURE
+
+CMake error: C:/Jenkins/workspace/kv_engine-windows-master/tlm/cmake/Modules/CouchbaseGoogleTestAddTests.cmake:39 (message) ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/28570/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/12017/ : FAILURE
+
+Failure of a CTest test [2020-06-16T11:31:02.390Z] 372/393 Test #281: memcached_mcbp_test ............................................................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/12017/ )
+
+Undefined Sanitizer: kv_engine/include/mcbp/protocol/unsigned_leb128.h:75:35: runtime error: shift exponent 35 is too large for 32-bit type "unsigned int" ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/12017/ )
+
+AddressSanitizer issue: heap-buffer-overflow ../kv_engine/include/mcbp/protocol/unsigned_leb128.h:108 in decode_unsigned_leb128<unsigned char> ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/12017/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/4273/ : FAILURE
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/4136/ : FAILURE
+
+Failure of GoogleTest "UnsignedLeb128/2.non_canonical":
+
+<pre>
+[ RUN      ] UnsignedLeb128/2.non_canonical
+[2020-06-16T11:29:42.573Z] unknown file: Failure
+[2020-06-16T11:29:42.573Z] C++ exception with description "decode_unsigned_leb128: invalid buf size:2" thrown in the test body.
+[2020-06-16T11:29:42.573Z] [  FAILED  ] UnsignedLeb128/2.non_canonical, where TypeParam = unsigned int (0 ms)
+UnsignedLeb128/2.non_canonical
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/4136/ )
+
+Failure of a CTest test [2020-06-16T11:29:42.573Z] 387/398 Test #397: memcached_unsigned_leb128_test .................................................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/4136/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/4188/ : FAILURE
+
+Failure of GoogleTest "UnsignedLeb128/0.non_canonical":
+
+<pre>
+[ RUN      ] UnsignedLeb128/0.non_canonical
+[2020-06-16T11:23:45.056Z] unknown file: Failure
+[2020-06-16T11:23:45.056Z] C++ exception with description "decode_unsigned_leb128: invalid buf size:2" thrown in the test body.
+[2020-06-16T11:23:45.056Z] [  FAILED  ] UnsignedLeb128/0.non_canonical, where TypeParam = unsigned char (0 ms)
+UnsignedLeb128/0.non_canonical
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/4188/ )
+
+Failure of a CTest test [2020-06-16T11:23:45.055Z] 394/410 Test #409: memcached_unsigned_leb128_test .................................................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/4188/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/1284/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/24604/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/2780/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/3244/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2020-06-25 14:44:41.000000000
+Message: 
+Abandoned
+----------------------------------------------------------------------------------------------------------------------

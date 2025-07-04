@@ -1,0 +1,155 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 513589:  Added Added ICBuildCommandLauncherConfiguration to be new
+ICBuildConfiguration adapter (for core build projects that support using
+ICommandLauncher) and CBuildCommandLauncherFactory (new impl of
+ICommandLauncherFactory extension to handle all core-build based
+projects).
+
+Change-Id: Ie835a50fdae34e80a9358f4d8cd9f95267ecaa7a
+Signed-off-by: slewis <slewis@composent.com>
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Scott Lewis
+Date: 2017-09-13 05:17:13.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2017-09-13 05:17:19.000000000
+Message: 
+Patch Set 1:
+
+Build Started https://hudson.eclipse.org/cdt/job/cdt-verify-test-cdt-other/497/ (3/3)
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2017-09-13 05:17:19.000000000
+Message: 
+Patch Set 1:
+
+Build Started https://hudson.eclipse.org/cdt/job/cdt-verify-test-cdt-ui-only/493/ (1/3)
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2017-09-13 05:17:19.000000000
+Message: 
+Patch Set 1:
+
+Build Started https://hudson.eclipse.org/cdt/job/cdt-verify-test-dsf-gdb-only/495/ (2/3)
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2017-09-13 05:37:10.000000000
+Message: 
+Patch Set 1: Verified-1
+
+Build Unstable 
+
+https://hudson.eclipse.org/cdt/job/cdt-verify-test-cdt-other/497/ : UNSTABLE
+
+https://hudson.eclipse.org/cdt/job/cdt-verify-test-cdt-ui-only/493/ : SUCCESS
+
+https://hudson.eclipse.org/cdt/job/cdt-verify-test-dsf-gdb-only/495/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Doug Schaefer
+Date: 2017-09-13 15:15:29.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:25, core/org.eclipse.cdt.core/src/org/eclipse/cdt/core/build/ICBuildCommandLauncherConfiguration.java -> Core Build doesn't use the language settings. I'm not sure why these are here.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Scott Lewis
+Date: 2017-09-13 16:44:51.000000000
+Message: 
+Patch Set 1:
+
+The main answer to why registerLanguageSettings and verifyLanguageSettings are there is that the ICommandLauncherFactory has them and I wasn't clear about whether they were needed for core build.   If they aren't used/needed for core build, then they could simply be deleted, leaving just getContainerLauncher() for this interface.   If that's the case please let me know and I'll revise and resubmit.
+----------------------------------------------------------------------------------------------------------------------
+Author: Doug Schaefer
+Date: 2017-09-13 16:48:44.000000000
+Message: 
+Patch Set 1:
+
+> The main answer to why registerLanguageSettings and
+ > verifyLanguageSettings are there is that the ICommandLauncherFactory
+ > has them and I wasn't clear about whether they were needed for core
+ > build.   If they aren't used/needed for core build, then they could
+ > simply be deleted, leaving just getContainerLauncher() for this
+ > interface.   If that's the case please let me know and I'll revise
+ > and resubmit.
+
+I guess I'm missing the big picture here. Do you have a document on the wiki or somewhere describing how all this works with a sample core build extension like CMake or Qt?
+----------------------------------------------------------------------------------------------------------------------
+Author: Scott Lewis
+Date: 2017-09-14 00:46:55.000000000
+Message: 
+Patch Set 1:
+
+No I don't have a document.  I'll produce one if necessary, but haven't had time yet. 
+Currently in cdt core there is an ICommandLauncherFactory extension point.  I guess Jeff created this extension point some time ago.  The ICommandLauncherFactory extension has these methods:
+
+	public ICommandLauncher getCommandLauncher(IProject project);
+	public ICommandLauncher getCommandLauncher(ICConfigurationDescription cfgd);
+	public void registerLanguageSettingEntries(IProject project, List<? extends ICLanguageSettingEntry> entries);
+	public List<ICLanguageSettingEntry> verifyLanguageSettingEntries(IProject project, List<ICLanguageSettingEntry> entries);
+
+The org.eclipse.cdt.core.CommandLauncherManager actually loads/reads the extensions and uses them...i.e. gets a factory and calls its methods with a given project.
+
+There is an existing implementation of this extension point in the docker launcher plugin (ContainerCommandLauncherFactory).  The impl of each of the 4 methods above looks for the managed builder config adapters, checks Jeff's managed builder enabled flag and if enabled returns a non-null ICommandLauncher (specifically, ContainerCommandLauncher).  This is implemented in the docker launcher plugin.
+
+The org.eclipse.cdt.core.CommandLauncherManager loads/reads the extensions and uses them.
+
+Rather than mix the core builder ICommandLauncherFactory with the ContainerCommandLauncherFactory (i.e. have it handle both the core build and the managed builder), I've created a second impl of ICommandLauncherFactory called CBuildCommandLauncherFactory.   What this impl does is 1) Look for ICBuildConfiguration adapter;  2) If found, look for (new) ICBuildCommandFactoryConfiguration adapter interface.   3) If found, call the corresponding getCommandLauncher(); registerLanguageSettingEntries, verifyLanguageSettingEntries methods on ICBuildCommandFactoryConfiguration adapter.   The CommandLauncherFactory basically just delegates the creation of the ICommandLauncher to the ICBuildCommandLauncherConfiguration impl (see impl below).   Because the core builder associates a single build configuration instance with a single project (via the ICBuildConfigurationProvider) and the ICBuildCommandFactoryConfiguration is an adapter on that project's build config the ICBuildCommandLauncherConfiguration will have access to the ICBuildConfiguration properties and/or toolchains within the given project's build configuration.
+
+The CBuildCommandLauncherFactory is intended to function appropriately for any/all core-build based projects.   As discussed with Jeff on the bug, another way would be to put this delegation logic in the existing ContainerCommandLauncherFactory, but there are two things against this IMHO:  1) It would mix the code for both the managed builder and core builder into a single class (ContainerCommandLauncherFactory) and 2) This impl would then be bound to the docker launcher impl of ICommandLauncher and so have to be reimplemented for every new provider of ICommandLauncher (i.e. other than docker).   By having a second extension (CBuildCommandLauncherFactory) in core rather than in docker launcher and delegating to ICBuildCommandFactoryConfiguration, it can serve for any/all future core-build based projects.
+
+The reason I added verifyLanguageSettingEntries and registerLanguageSettingEntries to ICBuildCommandLauncherConfiguration is that these two methods (without project param) exist on ICommandLauncherFactory.   They are required for managed builder, but I wasn't sure whether they would be required for core builder, so I added them.  If they are not required for core builder, then I believe it would make sense to simply remove them from ICBuildCommandLauncherConfiguration and have that interface with a single method:   ICommandLauncher getCommandLauncher();   I simply wasn't sure how the language settings were used in the core builder, and so added them for completeness.
+
+In the case of CMake...or any other core-build based project, all they have to do is to create a build configuration that implements the ICBuildCommandLauncherConfiguration adapter...e.g.
+
+public class CMakeBuildConfiguration extends CBuildConfiguration implements ICBuildCommandFactoryConfiguration {
+
+...
+
+public ICommandLauncher getCommandLauncher() {
+// check properties, toolchains, etc for whether our ICommandLauncher is enabled
+// if so return an instance of appropriate type...e.g.
+    if (isEnabled())
+        return new ContainerCommandLauncher();   // the ContainerCommandLauncher class is from docker launcher
+    else return null;
+}
+
+All of the interaction with the CommandLauncherManager and ICommandLauncherFactory is essentially taken care of by this CBuildCommandLauncherFactory.  With Jeff's priority mechanism, it would be possible to create a new ICommandLauncherFactory if needed without changing the existing code (although to be avoided I would say).
+
+This has no deps on docker specifically, rather it's all ICommandLauncher, ICommandLauncherFactory, ICBuildCommandLauncherConfiguration so no changes needed to any of this for remote, other types of ICommandLaunchers.
+----------------------------------------------------------------------------------------------------------------------
+Author: Doug Schaefer
+Date: 2017-09-15 14:22:43.000000000
+Message: 
+Patch Set 1:
+
+Please put this in a bugzilla. Attaching it to a code review that will disappear into the archives isn't appropriate. Thanks!
+
+Until I see an end-to-end implementation, for CMake for example, I can't +1 this.
+----------------------------------------------------------------------------------------------------------------------
+Author: Doug Schaefer
+Date: 2017-09-15 14:22:53.000000000
+Message: 
+Patch Set 1: Code-Review-1
+----------------------------------------------------------------------------------------------------------------------
+Author: Scott Lewis
+Date: 2017-09-15 16:13:52.000000000
+Message: 
+Patch Set 1:
+
+Doug:  I've created a new bug:  522376.   It wasn't my expectation that this gerrit change would be verified.   Since we are working on Yocto, however, we might focus on our Yocto impl of ICBuildCommandLauncherConfiguration first...rather than CMake...as our resources are few.   Perhaps  I can share the work as we go, as I expect that some of the impl can/could move up into docker.launcher rather than yocto specifically...and then it could be used by CMake and other core-build projects also.
+----------------------------------------------------------------------------------------------------------------------
+Author: Scott Lewis
+Date: 2017-11-02 00:33:36.000000000
+Message: 
+Abandoned
+
+dropping in favor of forthcoming contribution
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,121 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-37774: Add per-collection memory usage stat
+
+Extend existing statistics to track per collection memory usage of
+stored values.
+
+Change-Id: I297dd5404781a52c6dfa60e158a347f9f68ffac6
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: James H
+Date: 2020-02-11 15:02:37.000000000
+Message: 
+Uploaded patch set 6.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-02-11 17:54:43.000000000
+Message: 
+Patch Set 6: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/15359/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/15359/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/24377/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/26065/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/22241/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/1656/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/9577/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/1683/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/1756/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/847/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-02-12 10:27:55.000000000
+Message: 
+Patch Set 6: Verified+1
+
+Overriding - everything passes except perf, which failed (due to unrelated issues) before the job was made non-voting. Retriggering updates the status as an informational vote... but does not cause buildbot to redo the overall vote
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-02-12 10:27:57.000000000
+Message: 
+Removed Verified-1 by Build Bot <build@couchbase.com>
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-02-12 11:26:03.000000000
+Message: 
+Patch Set 6: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/15375/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/15375/ )
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-02-12 11:38:56.000000000
+Message: 
+Removed Verified-1 by Build Bot <build@couchbase.com>
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-02-12 14:55:08.000000000
+Message: 
+Patch Set 6: Code-Review-1
+
+(5 comments)
+
+In terms of alternatives to a locked std::unordered_map, consider folly::AtomicHashMap.
+Line:257, engines/ep/src/collections/manager.cc -> isn't this pointless? success is initialised to true, and we always OR with true...
+
+Line:469, engines/ep/src/hash_table.cc -> If this is core-local, why do we need to call collectionMemUsed.lock()?
+
+Note that epilogue() is a super-hot function (called on every HashTable modification - we want to minimise the amount of work done in it (including taking mutexes etc. Prepare just using atomics.
+
+Line:249, engines/ep/src/hash_table.h -> Can you move this to before the bool members (minimise struct size / packing overhead).
+
+Line:592, engines/ep/src/stats.h -> As per previous comment, I think looking up an ordered map (while locked) is going to slow things down quite a bit. Can you look at the results of some HashTable benchmarks before / after this change? (with suitable multi-threading)
+
+Line:1812, engines/ep/src/vbucket.cc -> For new stuff prefer using fmt with fmt::memory_buffer - it's faster, and doesn't require you to predict the size of buffer used - it initially uses a stack buffer but will expand to heap if/when necessary.
+
+See example in Configuration::addStats().
+
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-02-12 16:43:43.000000000
+Message: 
+Patch Set 6:
+
+(5 comments)
+
+Yeah I explored the folly Atomic and Concurrent maps - Atomic didn't seem best suited in that memory won't be freed for the life of the map, and performance will drop if more collections are added than the map was initialised to hold. If the node is up for a long time and collections created and deleted over time that doesn't seem great.
+
+If you think it would be acceptable, I'd happily flip back to the version which used that.
+Line:257, engines/ep/src/collections/manager.cc -> ... looks like it :P perhaps it was intended to be an && originally, do all the stats we can but if any fail the overall success=false.
+
+Line:469, engines/ep/src/hash_table.cc -> Core local but when collecting the stats all the core locals will be read. Would definitely prefer to use atomics, but even if the values are atomic the map structure itself needs to be thread safe, and as as noted AtomicHashMap has drawbacks I thought would make it unsuitable.
+
+The lock is a SpinLock, and would only contend with threads getting stats.
+
+Line:249, engines/ep/src/hash_table.h -> Done
+
+Line:592, engines/ep/src/stats.h -> Sure can do. It's core local though :shrug:
+
+Line:1812, engines/ep/src/vbucket.cc -> Done
+
+----------------------------------------------------------------------------------------------------------------------

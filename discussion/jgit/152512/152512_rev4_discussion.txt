@@ -1,0 +1,160 @@
+======================================================================================================================
+DESCRIPTION:
+
+PackBitmapIndex: Optimize memory usage of the building pack bitmap
+index process.
+
+Currently, the garbage collection is consistently failing for some large
+repositories in the building bitmap phase, e.g. kernel_msm-3.18. The
+reason is that JGit tries to put every bitmap into
+PackBitmapIndexBuilder now for delta compression and quick bitmap object
+walk purpose which costs lots of memory for repositories with many
+branches.
+
+Save memory by only putting the bitmaps corresponding to old commits to
+the PackBitmapIndexBuilder. The original high performance of the bitmap
+object walk is kept as there is still a good bitmap index coverage and a
+pervious commit is cached.
+
+Add a delta compression list in PackBitmapIndexBuilder as it doesn't
+have all bitmaps now.
+
+Add a list of ready-to-write StoredEntrys to keep the original format of
+the output bitmap file.
+
+Change-Id: Ic627a7b6f25ce4c09baf7adba626de7015a20795
+Author: Yunjie Li <yunjieli@google.com>
+Signed-off-by: Yunjie Li <yunjieli@google.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Yunjie Li
+Date: 2019-11-12 23:48:59.000000000
+Message: 
+Uploaded patch set 4.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2019-11-12 23:49:06.000000000
+Message: 
+Patch Set 4:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/1886/
+----------------------------------------------------------------------------------------------------------------------
+Author: Yunjie Li
+Date: 2019-11-12 23:51:35.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2019-11-13 00:03:31.000000000
+Message: 
+Patch Set 4: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/1886/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Terry Parker
+Date: 2019-12-20 01:37:13.000000000
+Message: 
+Patch Set 4:
+
+(7 comments)
+Line:11, /COMMIT_MSG -> s/.../the Code Aurora Linux kernel repo/
+
+Line:17, /COMMIT_MSG -> The description is focussing a bit too much on the mechanics rather than the algorithmic change. Something like this will help people understand (please update when I get details wrong):
+Historically, bitmap index creation happened in 3 phases:
+1) Select the commits to which bitmaps should be attached
+2) Create all of the bitmaps for them, stored in undeltified (uncompressed?) format
+3) Write the bitmap index to disk
+
+I/We investigated interleaving steps 2 & 3, but for phase 2 it is most efficient to create bitmaps starting with the oldest commit and moving to the newest commit, because the newer commits are able to reuse the work for the older ones. But bitmap deltification is more optimal when a newer commit's bitmap is the base, and the current disk format writes bitmaps out for the newest commits first.
+
+So instead this change introduces a new collection to hold the deltified & compressed representations of the bitmaps, keeping a smaller subset of commits in the PackBitmapIndexBuilder to help make the revwalks more efficient.
+
+Line:18, /COMMIT_MSG -> ... and only using it to optimize the revwalks.
+
+Line:2, org.eclipse.jgit/src/org/eclipse/jgit/internal/revwalk/AddToBitmapWithCacheFilter.java -> There is new guidance on copyright headers: https://www.eclipse.org/projects/handbook/#ip-copyright-headers. https://git.eclipse.org/r/c/147144/10/org.eclipse.jgit.http.server/src/org/eclipse/jgit/http/server/UploadPackErrorHandler.java is a new example.
+
+Please apply that to any new files (no need to clean up existing ones).
+
+Line:95, org.eclipse.jgit/src/org/eclipse/jgit/internal/revwalk/AddToBitmapWithCacheFilter.java -> It seems like doing this step before creating the filter would allow reusing AddToBitmapFilter. E.g., rather than:
+  BitmapCommit c = prevCommit;
+  BitmapBuilder b = new BitmapBuilder();
+  RevFilter f= new AddToBitmapWithCacheFilter(c, b);
+reuse existing classes this way:
+  BitmapBuilder b = new BitmapBuilder();
+  b.or(prevCommit.getBitmap();
+  RevFilter f= new AddToBitmapFilter(b);
+
+This would probably allow you to revert the changes in BitmapWalker too. If I'm wrong about this it is because I'm having trouble reviewing this large a change on my laptop screen. Splitting out any no-op refactorings first would help.
+
+Line:53, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/pack/BitmapCommit.java -> If after other reworks it is still beneficial to make this a top-level class, please split it out as a separate change to make the review easier.
+
+Line:1149, org.eclipse.jgit/src/org/eclipse/jgit/storage/pack/PackConfig.java -> The other configuration parameters here actually affect how the packfile and/or its bitmap indices are constructed, whereas this parameter is purely for optimization of memory usage. Through experimentation we can probably find an optimal value here and hardcode it, rather than cluttering the public API.
+
+So please revert this and hardcode with a value that is a no op. We can use internal patches to experiment and find the optimal value.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2019-12-26 09:33:36.000000000
+Message: 
+Patch Set 4: Code-Review-1
+
+(19 comments)
+Line:7, /COMMIT_MSG -> nit: this commit message header is a bit too wide, see
+https://wiki.eclipse.org/EGit/Contributor_Guide#Commit_message_guidelines
+
+Line:11, /COMMIT_MSG -> can you add the git url for this example so that we can verify your patch
+
+Line:20, /COMMIT_MSG -> did you mean previous ?
+
+Line:29, /COMMIT_MSG -> I think there's no need to add the author as a redundant footer in the commit message since Git is already tracking author and committer for each commit.
+
+Line:197, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/PackBitmapIndexBuilder.java -> move this refactoring into a separate change
+
+Line:210, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/PackBitmapIndexBuilder.java -> use active voice: "Process a commit and prepare its bitmap ..."
+
+Line:213, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/PackBitmapIndexBuilder.java -> I don't understand this
+
+Line:228, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/PackBitmapIndexBuilder.java -> inline this ?
+
+ bitmapsToWrite.add(generateStoredEntry(oldest));
+
+Line:233, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/PackBitmapIndexBuilder.java -> reduce
+
+Line:234, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/PackBitmapIndexBuilder.java -> what are the conditions when we don't need to keep the bitmap ?
+
+Line:382, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/PackBitmapIndexBuilder.java -> inline ?
+
+Line:100, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/pack/BitmapCommit.java -> objectId or oid if you want it short ?
+
+Line:116, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/pack/BitmapCommit.java -> that's a strange abbreviation, either commit or c if you like it short
+
+Line:133, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/pack/BitmapCommit.java -> nit: remove the extra empty line
+
+Line:146, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/pack/BitmapCommit.java -> comment empty block
+
+Line:199, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/pack/BitmapCommit.java -> this is hard to understand, better:
+
+Set whether the bitmap of the BitmapCommit ...
+
+Line:214, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/pack/BitmapCommit.java -> the new BitmapCommit
+
+Line:101, org.eclipse.jgit/src/org/eclipse/jgit/revwalk/BitmapWalker.java -> next release is now 5.7, rebase your change on origin/master and update to @since 5.7
+
+Line:103, org.eclipse.jgit/src/org/eclipse/jgit/revwalk/BitmapWalker.java -> leaky abstraction: public API must not expose internal classes
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Terry Parker
+Date: 2020-02-05 04:30:00.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:95, org.eclipse.jgit/src/org/eclipse/jgit/internal/revwalk/AddToBitmapWithCacheFilter.java -> Ok, after talking offline I see that the walk is used to build up a bitmap of all objects reachable from a commit, and that you can only use a shortcut when you are sure the commit is an ancestor of the commit in question, which isn't necessarily true in my suggested rework. Let me think a bit more about how this can be made more clear.
+
+----------------------------------------------------------------------------------------------------------------------

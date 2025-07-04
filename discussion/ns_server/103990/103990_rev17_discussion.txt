@@ -1,0 +1,186 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-32776: Retry rebalance upon failure.
+
+Change-Id: Iee10d6d4bdc20f5b011ee88d8446651c6f7dbc84
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Poonam Dhavale
+Date: 2019-03-20 15:54:18.000000000
+Message: 
+Uploaded patch set 17.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-03-20 15:54:25.000000000
+Message: 
+Patch Set 17:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-test/9122/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-03-20 15:59:25.000000000
+Message: 
+Patch Set 17: Well-Formed+1
+
+Permission granted to commit to restricted branch
+----------------------------------------------------------------------------------------------------------------------
+Author: Poonam Dhavale
+Date: 2019-03-20 16:25:56.000000000
+Message: 
+Patch Set 17:
+
+run simple-test
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-03-20 16:26:04.000000000
+Message: 
+Patch Set 17:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-simple-test/563/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-03-20 17:12:50.000000000
+Message: 
+Patch Set 17: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/ns-server-simple-test/563/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Poonam Dhavale
+Date: 2019-03-20 17:17:04.000000000
+Message: 
+Patch Set 17: Verified+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Artamonau
+Date: 2019-03-25 21:00:59.000000000
+Message: 
+Patch Set 17:
+
+(1 comment)
+
+Couple of thoughts.
+
+1. I understand the desire to cancel pending rebalance retries early so they don't ever hit a failed "check". But I still consider the way it's done during rebalance attempts problematic. Imagine the following:
+
+ - Rebalance is running but about to fail.
+ - New rebalance is initiated. The REST API handler cancels pending retry successfully (which might or might not be there).
+ - The ongoing rebalance fails and schedules a new retry.
+ - REST API handler continues to initiate a new rebalance.
+ - The new rebalance quickly fails and attempts to schedule a retry and fails because of the ID mismatch.
+
+I believe the cancelation needs to happen from inside the ns_orchestrator process similarly to how it's done with autofailover. That has an additional benifit of not canceling retries unnecessarily: the REST API handler does it very early when there's not even a guarantee that the rebalance request will get accepted.
+
+2. I would like there to be a new call for rebalance retry instead of an extended maybe_start_rebalance. I see at least two reasons to do this:
+
+  - Some of the checks that maybe_start_rebalance performs are unnecessary on a retry (or are subsumed by the retry rebalance check). For me it's a good indication that rebalance retry is different enough to be handled by its own call.
+  - In a way it's an extension of the previous point, but I don't like that when scheduling a retry we need to deduce which changes were actually performed by the rebalance and update the arguments passed to maybe_start_rebalance accordingly. This deduction step makes assumptions that aren't necessarily correct. For example, it assumes that ns_node_disco:nodes_wanted() will return the same value as at the beginning of the rebalance that triggered the retry. I think a new call dedicatted just for rebalance retry makes for a cleaner solution. The new call can simply check that the configuration "check" saved at the beginning of the failed rebalance is still applicable in the current configuration, make whatever adjustments needed for that and pass the torch to start_rebalance.
+
+  Note that the assumptions about global state not changing in "unexpected" ways are unfortunately pervasive in our code. I'm hoping to address this as part of moving the orchestration to new config. But for now, I'd like us to at least not introduce new instances of this.
+
+3. I think the retry check needs to be made stricter to prevent from retrying rebalance when the configuration looks the same but is in fact different when viewed historically (the ABA problem I referred to before). Examples of this include (but probably are not limited to):
+
+  - A node is ejected and then added back to the cluster (node UUID will be different).
+  - Bucket is deleted and then recreated (bucket UUID will be different).
+  - Node cluster membership state changes in between. The final state is potentially the same as it was before. We can use vclocks to handle this case: save vclocks attached to membership values and then check that they are the same on retry.
+  - There might be more that I haven't thought of.
+
+4. ns_orchestrator should probably attempt to cancel pending retries in more places. For example, why do this for autofailover but not a regular failover? Alternatively, the auto_rebalance process could subscribe to ns_config updates and perform the cancelation on its own. Note that I still view this as merely an attempt not to do unnecessary retry attempts. Yet the main safety guarantees are provided by the rebalance retry check in ns_orchestrator.
+Line:144, src/auto_rebalance.erl -> You need to flush the retry_rebalance messages here too.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Poonam Dhavale
+Date: 2019-03-27 20:31:27.000000000
+Message: 
+Patch Set 17:
+
+(1 comment)
+Line:144, src/auto_rebalance.erl -> Will do.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Poonam Dhavale
+Date: 2019-03-27 20:44:56.000000000
+Message: 
+Patch Set 17:
+
+1. The purpose of this feature is to automatically retry failed rebalance 
+"when a user is not around”.  
+
+2. If a user is around running commands, then as mentioned in the spec,
+the document will ask them to first cancel any pending retries.
+It is up to the user then to retry the rebalance manually.
+The retry checks we add are meant to be best effort.
+
+3. The rebalance REST API cancels the retry right away because
+ it indicates that a user is around running commands. 
+
+4. Regarding the rebalance race condition: 
+This can happen if a user runs rebalance command before the previous
+ rebalance has completed. This is possible but an edge case. 
+
+But, we can add a cancellation from inside  the orchestrator to handle this scenario.
+
+5. Regarding "not extending maybe_start_rebalance": 
+I had also wanted to do the same in the beginning.
+ In fact, I went thru couple of rearrangements of this code.
+ I did not like those and I settled on the one currently because it 
+appeared to be cleaner. 
+
+I also want to leverage the existing nodes_mismatch check in the maybe_start_rebalance.
+
+6. Regarding "new call can simply check that the configuration "check" saved 
+at the beginning of the failed rebalance”: 
+
+This is exactly how I also started coding initially. 
+
+Once the rebalance starts, it may itself change the config in some way 
+e.g. Eject failed nodes. This is a legitimate change. 
+
+The config may also change after rebalance fails and before the retry. 
+This is probably due to some user action. We want to catch some of 
+these and fail the retry. 
+
+That is why it updates the retry check at the end of the rebalance to 
+account for legitimate config changes.
+
+7. Regarding the step using  "ns_node_disco:nodes_wanted()”: 
+I thought the way it calculates “Ejected by rebalance” nodes should 
+give us what we want. What issues do you see with this calculation?   
+
+8. Regarding the ABA problem: 
+
+As mentioned earlier, if user is at the 
+console running commands, then they should first cancel the retry. 
+The checks we add are not foolproof. 
+
+But, we can augment the checks with node UUIDs, bucket UUIds, 
+vclocks to handle these edge cases.
+
+9. Currently, the feature is enabled by default. 
+I am wondering whether to change the default to OFF. 
+The user will then opt-in consciously.
+
+10. Regarding "why do this for autofailover but not a regular failover?” 
+Because regular failover is triggered by user. 
+As mentioned earlier, they should have cancelled any pending retries first. If they do not,  the failed_nodes check during the retry should take care of it.
+
+But, if needed, we can cancel the retry for manual failover as well. 
+
+11. Regarding "the auto_rebalance process could subscribe to ns_config updates”:
+I had also thought of this  before making the last round of changes. 
+But, this too has holes/race conditions and unnecessary  if the checks are performed by the orchestrator.
+
+
+Please let me know your thoughts.
+----------------------------------------------------------------------------------------------------------------------
+Author: Poonam Dhavale
+Date: 2019-04-01 16:01:50.000000000
+Message: 
+Patch Set 17: -Verified
+
+I was hoping to merge these changes and handle pending comments in future patches. 
+But, in the interest of saving time, I will go ahead and make the changes  mentioned above - whichever are possible.
+----------------------------------------------------------------------------------------------------------------------

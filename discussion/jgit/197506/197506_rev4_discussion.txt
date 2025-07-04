@@ -1,0 +1,406 @@
+======================================================================================================================
+DESCRIPTION:
+
+Optimise loading of PackedRefList when content hasn't changed
+
+When using core.trustfolderstat set to false, the packedrefs
+are loaded at every lookup (by ref or by prefix) which is proven
+to be very expensive:
+1. the full packedrefs is loaded from disk every time
+2. the full content is used for SHA1 computation
+3. all PackedRefList objects are create in memory
+
+Keep a copy of the raw binary content in the PackedRefList so that
+it can be checked byte-by-byte with the one read from disk and, if
+that hasn't changed, avoid to perform 2. and 3.
+
+The refs benchmark test (GetRefsBenchmark) on a 500k-refs
+(33 MBytes packed-refs) repository on a local SSD with
+core.trustfolderstat=false shows:
+- Before this change: 250ms /ref-lookup
+- With this change: 22ms /ref-lookup
+
+On a shared NFS drive on the same repo:
+- Before this change: 500ms /ref-lookup
+- After this change: 120ms /ref-lookup
+
+The associated performance figure is therefore between 4x and 10x
+times faster, even though there is a memory footprint is involved.
+
+TODO: Make this configurable, so that Gerrit admin can
+choose between performance and memory footprint.
+
+Signed-off-by: Luca Milanesio <luca.milanesio@gmail.com>
+Change-Id: Ia378f8f2284411fdecb01c10f8faa5665c6fb579
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Luca Milanesio
+Date: 2022-12-21 08:51:54.000000000
+Message: 
+Uploaded patch set 4: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2022-12-21 08:52:12.000000000
+Message: 
+Patch Set 4:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/5889/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2022-12-21 09:02:32.000000000
+Message: 
+Patch Set 4: Verified-1
+
+Build Failed 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/5889/ : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Jacek Centkowski
+Date: 2022-12-21 09:12:18.000000000
+Message: 
+Patch Set 4: Code-Review+1
+
+(2 comments)
+Line:31, /COMMIT_MSG -> nit: remove `is`?
+
+Line:1349, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/RefDirectory.java -> AFAIU `Arrays.equals` takes care of `null` parameters so maybe it could be skipped?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Fabio Ponciroli
+Date: 2023-01-02 08:54:46.000000000
+Message: 
+Patch Set 4:
+
+(2 comments)
+Line:18, /COMMIT_MSG -> nit: `.` not needed
+
+Line:1349, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/RefDirectory.java -> You could skip one of the checks for `null`, it that what you mean @Jacek? I.e.:
+
+```
+return packedRefsBytes != null
+	&& Arrays.equals(packedRefsBytes, cmpPackedRefsBytes);
+
+```
+
+The above works fine.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jacek Centkowski
+Date: 2023-01-02 09:14:37.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:1349, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/RefDirectory.java -> AFAIU you could skip both and have:
+```
+return Arrays.equals(packedRefsBytes, cmpPackedRefsBytes);
+```
+WDYT?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Fabio Ponciroli
+Date: 2023-01-02 09:44:26.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:1349, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/RefDirectory.java -> Nope, I don't think it would work since if both `packedRefsBytes` and `cmpPackedRefsBytes` are `null` we want to return `false`.
+
+The code you suggested would return `true`.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jacek Centkowski
+Date: 2023-01-02 18:01:30.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:1349, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/RefDirectory.java -> yeap, what's the point in returning new pack if it has anyway `null` content which is the same as current?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Nasser Grainawi
+Date: 2023-01-03 18:03:06.000000000
+Message: 
+Patch Set 4: Code-Review-1
+
+(1 comment)
+Line:10, /COMMIT_MSG -> I think we should support and prefer Change I00da88e4cc as the performant alternative to this approach unless there's a known NFS client that it doesn't work for.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Nasser Grainawi
+Date: 2023-01-07 22:24:52.000000000
+MISMATCHED INLINE COMMENT
+Line:10, /COMMIT_MSG -> > I believe it also apply alongside Change I00da88e4cc: within the filesystem resolution, JGit will re-read the packed-refs anyway to prevent racy reads.
+
+Ok, so for example, my 3.5 test server has this in ~/.config/jgit/config:
+
+ [filesystem "Oracle Corporation|11.0.12|nfs-server:/nfs/path/to/repos"]
+ 	timestampResolution = 4000 nanoseconds
+ 	minRacyThreshold = 0 nanoseconds
+
+Then given that, IIUC for 10,000 nanoseconds (multiplier of 2.5) after the packed-refs file was modified, FileSnapshot.isModified("/nfs/path/to/repos/...") will return true?
+
+What kind of values do you have for filesystem.timestampResolution and filesystem.minRacyThreshold that you're concerned about this? Maybe I'm being naive, but I don't think a 10 microsecond window of re-read risk is significant. I found another test host we have where the timestampResolution is 13000 nanoseconds, so that's a 32.5 microsecond window (still small in my opinion). Your timings below clearly show that the work to read the packed-refs file will take much longer (1000x+?) than that resolution. Are you worried multiple threads are going to start reading the file in that time?
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2023-01-11 23:20:12.000000000
+MISMATCHED INLINE COMMENT
+Line:10, /COMMIT_MSG -> > > The discussion thread is becoming complex for me to follow, would you like to conference on that? I may have honestly missed the questions and cannot find the ones you're referring to in this long discussion thread.
+> 
+> Sorry about that, I'll try to summarize. We can jump on a call and then record the conclusions here too if it helps.
+
++1
+
+> Q1: What kind of values do *you* have for filesystem.timestampResolution and filesystem.minRacyThreshold for the system(s) where you're trying to provide this improvement?
+
+We have a lot of customers and variety of systems, I can say we can see pretty much all the combinations shown by Matthias in his talk at slide 9 [1].
+
+> Q2: (sub-question of Q1 really) Are you trying to improve this use case for a server using Java8 and with repositories stored on an ext3 volume?
+
+JGit is Java 8 on stable-5.13. I know Java 11 improves the precision of the filesystem TS visible from Java and I agree that the improvements are therefore less visible.
+
+> Q3: The benchmark timings in this commit show that, for problematic cases, the work to read the packed-refs file will take much longer than the resolution time (except for the terrible 1s Java8+ext3 case). Given that, I'm not clear on in what scenario you expect to be re-reading the packed-refs file within that resolution time. 
+
+Production servers have a high-level of concurrency, therefore all concurrent reads happening within the resolution time of the filesystem would consume significant more CPU (10x more) without this change.
+
+> The write paths are protected by a lock, so I think that leaves only the read-only path.
+
+Correct, I am referring to the parallel reads.
+
+> Am I misreading that? If not, do you expect multiple read-only threads to start reading the packed-refs file after an update and during the resolution time?
+
+Correct. We have analysed the height of the spikes in CPU utilisation and correlated with the updates of the packed-refs. After deploying this fix, the CPU utilisation during the spikes went down by 90% and the the P95 and P99 were reduced by 90%.
+
+I agree with you that the average figures of CPU utilisation will not go down by 90% because this change reduces the height of the spike, but it remains a spike that lasts the duration of the filesystem resolution as it is perceived by the Java VM.
+
+[1] https://speakerdeck.com/msohn/racy-jgit-a-short-history-of-time?slide=9
+----------------------------------------------------------------------------------------------------------------------
+Author: Nasser Grainawi
+Date: 2023-01-11 00:00:47.000000000
+MISMATCHED INLINE COMMENT
+Line:10, /COMMIT_MSG -> > > > > What kind of values do you have for filesystem.timestampResolution and filesystem.minRacyThreshold that you're concerned about this? 
+> > > 
+> > > Also, bear in mind that other setups may have filesystems with higher resolution values, see slide 9 [1] of Matthias's talk at the Gerrit User Summit 2019 in Sunnyvale. If you also combine the matrix with the versions of Java 11 vs. 8, you may come up with a resolution of msec.
+> > 
+> > See below.
+> > 
+> > > 
+> > > > Maybe I'm being naive, but I don't think a 10 microsecond window of re-read risk is significant. I found another test host we have where the timestampResolution is 13000 nanoseconds, so that's a 32.5 microsecond window (still small in my opinion). Your timings below clearly show that the work to read the packed-refs file will take much longer (1000x+?) than that resolution. Are you worried multiple threads are going to start reading the file in that time?
+> > > 
+> > > The optimisation introduced by this change may be irrelevant for your setup, which is fair. Other setups may have higher resolutions and unfortunately still based on Java 8 (e.g., Gerrit v2.16.x) and would therefore experience a significant performance improvement with this change thanks to the optimised packed-refs loading that is paid with a price of a higher memory footprint.
+> > 
+> > But even with msec resolution time, is it >100ms or even >10ms? The benchmark numbers for "expensive" reading of packed-refs listed in this commit message are >200ms.
+> 
+> In Matthia's table there is also 1s (due to JVM bugs), which means that parallel threads could re-run continuously the same packfile and calculating the SHA1 on all of it for 1s. That creates a CPU spike for *that* second. If the packfiles are created frequently (e.g. 1-2 times per minute) you have a series of CPU spikes.
+
+Are you trying to improve this use case for a server using Java8 and with repositories stored on an ext3 volume (I believe that's the 1s case)?
+
+> 
+> > You didn't answer my questions about the resolution times for your use case or if you're worried about multiple threads reading packed-refs concurrently.
+> 
+> See above.
+
+I don't see these answers above... Am I missing it?
+
+> 
+> > I think those are important to determining if this change or a different change is needed. Can you try to answer them please?
+> 
+> I have also shared the numbers and the improvements observed running the benchmark tool. That shows the improvement provided by this change.
+
+Yes, but the improvement only matters if there's a use case where you would actually encounter the problem.
+
+> With your resolution and use-case, most likely the improvement is negligible and therefore this change isn't relevant.
+
+I understand that, but it's code that has to be maintained in JGit and that can make it harder to make other changes in the future, so it still affects me and others.
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2023-01-07 21:34:16.000000000
+MISMATCHED INLINE COMMENT
+Line:10, /COMMIT_MSG -> I believe it also apply alongside Change I00da88e4cc: within the filesystem resolution, JGit will re-read the packed-refs anyway to prevent racy reads.
+
+This change would reduce by 90% the time to reload the packed-refs during that window.
+----------------------------------------------------------------------------------------------------------------------
+Author: Nasser Grainawi
+Date: 2023-01-12 19:16:04.000000000
+MISMATCHED INLINE COMMENT
+Line:10, /COMMIT_MSG -> > > Q1: What kind of values do *you* have for filesystem.timestampResolution and filesystem.minRacyThreshold for the system(s) where you're trying to provide this improvement?
+> 
+> We have a lot of customers and variety of systems, I can say we can see pretty much all the combinations shown by Matthias in his talk at slide 9 [1].
+
+Ack. Thanks for clarifying.
+
+> 
+> > Q2: (sub-question of Q1 really) Are you trying to improve this use case for a server using Java8 and with repositories stored on an ext3 volume?
+> 
+> JGit is Java 8 on stable-5.13. I know Java 11 improves the precision of the filesystem TS visible from Java and I agree that the improvements are therefore less visible.
+
+You didn't answer my question. 😊 Is Java8+ext3 included in the "pretty much all the combinations" you mentioned above?
+
+Additionally, that's a good point about stable-5.13. Since this optimization doesn't really apply to Java 11+, I guess it could be reverted in the merge to stable-6.0 so that the maintenance cost isn't carried forward.
+
+> 
+> > Q3: The benchmark timings in this commit show that, for problematic cases, the work to read the packed-refs file will take much longer than the resolution time (except for the terrible 1s Java8+ext3 case). Given that, I'm not clear on in what scenario you expect to be re-reading the packed-refs file within that resolution time. 
+> 
+> Production servers have a high-level of concurrency, therefore all concurrent reads happening within the resolution time of the filesystem would consume significant more CPU (10x more) without this change.
+> 
+> > The write paths are protected by a lock, so I think that leaves only the read-only path.
+> 
+> Correct, I am referring to the parallel reads.
+
+Ack, thanks for confirming.
+
+> 
+> > Am I misreading that? If not, do you expect multiple read-only threads to start reading the packed-refs file after an update and during the resolution time?
+> 
+> Correct. We have analysed the height of the spikes in CPU utilisation and correlated with the updates of the packed-refs. After deploying this fix, the CPU utilisation during the spikes went down by 90% and the the P95 and P99 were reduced by 90%.
+
+Ack, thanks for confirming.
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2023-01-10 23:42:38.000000000
+MISMATCHED INLINE COMMENT
+Line:10, /COMMIT_MSG -> > > > What kind of values do you have for filesystem.timestampResolution and filesystem.minRacyThreshold that you're concerned about this? 
+> > 
+> > Also, bear in mind that other setups may have filesystems with higher resolution values, see slide 9 [1] of Matthias's talk at the Gerrit User Summit 2019 in Sunnyvale. If you also combine the matrix with the versions of Java 11 vs. 8, you may come up with a resolution of msec.
+> 
+> See below.
+> 
+> > 
+> > > Maybe I'm being naive, but I don't think a 10 microsecond window of re-read risk is significant. I found another test host we have where the timestampResolution is 13000 nanoseconds, so that's a 32.5 microsecond window (still small in my opinion). Your timings below clearly show that the work to read the packed-refs file will take much longer (1000x+?) than that resolution. Are you worried multiple threads are going to start reading the file in that time?
+> > 
+> > The optimisation introduced by this change may be irrelevant for your setup, which is fair. Other setups may have higher resolutions and unfortunately still based on Java 8 (e.g., Gerrit v2.16.x) and would therefore experience a significant performance improvement with this change thanks to the optimised packed-refs loading that is paid with a price of a higher memory footprint.
+> 
+> But even with msec resolution time, is it >100ms or even >10ms? The benchmark numbers for "expensive" reading of packed-refs listed in this commit message are >200ms.
+
+In Matthia's table there is also 1s (due to JVM bugs), which means that parallel threads could re-run continuously the same packfile and calculating the SHA1 on all of it for 1s. That creates a CPU spike for *that* second. If the packfiles are created frequently (e.g. 1-2 times per minute) you have a series of CPU spikes.
+
+This change makes those spikes 10x lower, easing the pressure on the CPU.
+
+> You didn't answer my questions about the resolution times for your use case or if you're worried about multiple threads reading packed-refs concurrently.
+
+See above.
+
+> I think those are important to determining if this change or a different change is needed. Can you try to answer them please?
+
+I have also shared the numbers and the improvements observed running the benchmark tool. That shows the improvement provided by this change.
+With your resolution and use-case, most likely the improvement is negligible and therefore this change isn't relevant.
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2023-01-11 09:48:56.000000000
+MISMATCHED INLINE COMMENT
+Line:10, /COMMIT_MSG -> > > > > > What kind of values do you have for filesystem.timestampResolution and filesystem.minRacyThreshold that you're concerned about this? 
+> > > > 
+> > > > Also, bear in mind that other setups may have filesystems with higher resolution values, see slide 9 [1] of Matthias's talk at the Gerrit User Summit 2019 in Sunnyvale. If you also combine the matrix with the versions of Java 11 vs. 8, you may come up with a resolution of msec.
+> > > 
+> > > See below.
+> > > 
+> > > > 
+> > > > > Maybe I'm being naive, but I don't think a 10 microsecond window of re-read risk is significant. I found another test host we have where the timestampResolution is 13000 nanoseconds, so that's a 32.5 microsecond window (still small in my opinion). Your timings below clearly show that the work to read the packed-refs file will take much longer (1000x+?) than that resolution. Are you worried multiple threads are going to start reading the file in that time?
+> > > > 
+> > > > The optimisation introduced by this change may be irrelevant for your setup, which is fair. Other setups may have higher resolutions and unfortunately still based on Java 8 (e.g., Gerrit v2.16.x) and would therefore experience a significant performance improvement with this change thanks to the optimised packed-refs loading that is paid with a price of a higher memory footprint.
+> > > 
+> > > But even with msec resolution time, is it >100ms or even >10ms? The benchmark numbers for "expensive" reading of packed-refs listed in this commit message are >200ms.
+> > 
+> > In Matthia's table there is also 1s (due to JVM bugs), which means that parallel threads could re-run continuously the same packfile and calculating the SHA1 on all of it for 1s. That creates a CPU spike for *that* second. If the packfiles are created frequently (e.g. 1-2 times per minute) you have a series of CPU spikes.
+> 
+> Are you trying to improve this use case for a server using Java8 and with repositories stored on an ext3 volume (I believe that's the 1s case)?
+> 
+> > 
+> > > You didn't answer my questions about the resolution times for your use case or if you're worried about multiple threads reading packed-refs concurrently.
+> > 
+> > See above.
+> 
+> I don't see these answers above... Am I missing it?
+
+The discussion thread is becoming complex for me to follow, would you like to conference on that? I may have honestly missed the questions and cannot find the ones you're referring to in this long discussion thread.
+ 
+> > > I think those are important to determining if this change or a different change is needed. Can you try to answer them please?
+> > 
+> > I have also shared the numbers and the improvements observed running the benchmark tool. That shows the improvement provided by this change.
+> 
+> Yes, but the improvement only matters if there's a use case where you would actually encounter the problem.
+
+Correct.
+
+> > With your resolution and use-case, most likely the improvement is negligible and therefore this change isn't relevant.
+> 
+> I understand that, but it's code that has to be maintained in JGit and that can make it harder to make other changes in the future, so it still affects me and others.
+
+Sure, all reviews and points of view are all more than welcome.
+----------------------------------------------------------------------------------------------------------------------
+Author: Nasser Grainawi
+Date: 2023-01-11 20:42:00.000000000
+MISMATCHED INLINE COMMENT
+Line:10, /COMMIT_MSG -> > The discussion thread is becoming complex for me to follow, would you like to conference on that? I may have honestly missed the questions and cannot find the ones you're referring to in this long discussion thread.
+
+Sorry about that, I'll try to summarize. We can jump on a call and then record the conclusions here too if it helps.
+
+Q1: What kind of values do *you* have for filesystem.timestampResolution and filesystem.minRacyThreshold for the system(s) where you're trying to provide this improvement?
+
+Q2: (sub-question of Q1 really) Are you trying to improve this use case for a server using Java8 and with repositories stored on an ext3 volume?
+
+Q3: The benchmark timings in this commit show that, for problematic cases, the work to read the packed-refs file will take much longer than the resolution time (except for the terrible 1s Java8+ext3 case). Given that, I'm not clear on in what scenario you expect to be re-reading the packed-refs file within that resolution time. The write paths are protected by a lock, so I think that leaves only the read-only path. Am I misreading that? If not, do you expect multiple read-only threads to start reading the packed-refs file after an update and during the resolution time?
+----------------------------------------------------------------------------------------------------------------------
+Author: Nasser Grainawi
+Date: 2023-01-10 23:37:00.000000000
+MISMATCHED INLINE COMMENT
+Line:10, /COMMIT_MSG -> > > What kind of values do you have for filesystem.timestampResolution and filesystem.minRacyThreshold that you're concerned about this? 
+> 
+> Also, bear in mind that other setups may have filesystems with higher resolution values, see slide 9 [1] of Matthias's talk at the Gerrit User Summit 2019 in Sunnyvale. If you also combine the matrix with the versions of Java 11 vs. 8, you may come up with a resolution of msec.
+
+See below.
+
+> 
+> > Maybe I'm being naive, but I don't think a 10 microsecond window of re-read risk is significant. I found another test host we have where the timestampResolution is 13000 nanoseconds, so that's a 32.5 microsecond window (still small in my opinion). Your timings below clearly show that the work to read the packed-refs file will take much longer (1000x+?) than that resolution. Are you worried multiple threads are going to start reading the file in that time?
+> 
+> The optimisation introduced by this change may be irrelevant for your setup, which is fair. Other setups may have higher resolutions and unfortunately still based on Java 8 (e.g., Gerrit v2.16.x) and would therefore experience a significant performance improvement with this change thanks to the optimised packed-refs loading that is paid with a price of a higher memory footprint.
+
+But even with msec resolution time, is it >100ms or even >10ms? The benchmark numbers for "expensive" reading of packed-refs listed in this commit message are >200ms.
+
+You didn't answer my questions about the resolution times for your use case or if you're worried about multiple threads reading packed-refs concurrently. I think those are important to determining if this change or a different change is needed. Can you try to answer them please?
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2023-01-07 22:48:21.000000000
+MISMATCHED INLINE COMMENT
+Line:10, /COMMIT_MSG -> > > I believe it also apply alongside Change I00da88e4cc: within the filesystem resolution, JGit will re-read the packed-refs anyway to prevent racy reads.
+> 
+> Ok, so for example, my 3.5 test server has this in ~/.config/jgit/config:
+> 
+>  [filesystem "Oracle Corporation|11.0.12|nfs-server:/nfs/path/to/repos"]
+>  	timestampResolution = 4000 nanoseconds
+>  	minRacyThreshold = 0 nanoseconds
+> 
+> Then given that, IIUC for 10,000 nanoseconds (multiplier of 2.5) after the packed-refs file was modified, FileSnapshot.isModified("/nfs/path/to/repos/...") will return true?
+
+Correct.
+
+> What kind of values do you have for filesystem.timestampResolution and filesystem.minRacyThreshold that you're concerned about this? 
+
+Also, bear in mind that other setups may have filesystems with higher resolution values, see slide 9 [1] of Matthia's talk at the Gerrit User Summit 2019 in Sunnyvale. If you also combine the matrix with the versions of Java 11 vs. 8, you may come up with a resolution of msec.
+
+> Maybe I'm being naive, but I don't think a 10 microsecond window of re-read risk is significant. I found another test host we have where the timestampResolution is 13000 nanoseconds, so that's a 32.5 microsecond window (still small in my opinion). Your timings below clearly show that the work to read the packed-refs file will take much longer (1000x+?) than that resolution. Are you worried multiple threads are going to start reading the file in that time?
+
+The optimisation introduced by this change may be irrelevant for your setup, which is fair. Other setups may have higher resolutions and unfortunately still based on Java 8 (e.g., Gerrit v2.16.x) and would therefore experience a significant performance improvement with this change thanks to the optimised packed-refs loading that is paid with a price of a higher memory footprint.
+
+The test also shows that even with immediate re-read of the packed-refs, with this settings the data is not reloaded because of the content byte-by-byte comparison, even during the racy-read. That avoids CPU spikes and increase of latency when the packed-refs is updated and then the racy-read window starts.
+
+[1] https://speakerdeck.com/msohn/racy-jgit-a-short-history-of-time?slide=9
+[2] https://speakerdeck.com/msohn/racy-jgit-a-short-history-of-time?slide=11
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2023-01-07 21:38:28.000000000
+MISMATCHED INLINE COMMENT
+Line:18, /COMMIT_MSG -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2023-01-07 21:38:28.000000000
+MISMATCHED INLINE COMMENT
+Line:31, /COMMIT_MSG -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2023-01-07 21:37:27.000000000
+MISMATCHED INLINE COMMENT
+Line:1349, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/RefDirectory.java -> Done
+----------------------------------------------------------------------------------------------------------------------

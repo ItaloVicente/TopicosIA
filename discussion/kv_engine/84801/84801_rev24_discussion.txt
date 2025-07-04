@@ -1,0 +1,114 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-26455: Allow correct processing of 'old' keys and separator changes
+
+The collection's separator can only be changed when 0 collections
+exist. However nothing stops the separator from changing if there are
+deleted collections (and their keys) in play.
+
+Prior to this commit each separator change resulted in a single system
+event being mutated, that event had a static key. Thus a VB could have
+the following sequence of keys/events.
+
+    1  fruit::1
+    2  fruit::2
+    <fruit collection is deleted>
+    <separator is changed from :: to - >
+    <fruit collection is recreated>
+    6  fruit-1
+    7  fruit-2
+    <fruit collection is deleted>
+    <separator is changed from - to # >
+    9  $collections_separator (the Item value contains the new separator)
+    10 $collections::fruit (fruit recreated)
+    11 fruit#1
+    12 fruit#2
+
+In this sequence, some of the changes are lost historically because a
+static key is used for the separator change. Between seqno 2 and 6 the
+separator changed from :: to -, but the separator change system event
+is currently at seqno 9 with # as its value.
+
+With this setup a problem exists if we were to process the historical
+data e.g. whilst backfilling for DCP or performing a compaction
+collection erase. The problem is that when we go back to seqno 1 and
+2, we have no knowledge of the separator for those items,  all we have
+is the current # separator. We cannot determine that fruit::1 is a
+fruit collection key.
+
+This commit addresses this problem by making each separator change
+generate a unique key. The key itself will encode the new separator,
+and because the key is unique it will reside at the correct point in
+history for each separator change.
+
+The unique key format will be:
+
+    $collections_separator:<seqno>:<new_separator>
+
+With this change the above sequence now looks as:
+
+    1  fruit::1
+    2  fruit::2
+    <fruit collection is deleted>
+    4  $collections_separator:3:- (change separator to -)
+    <fruit collection is recreated>
+    6  fruit-1
+    7  fruit-2
+    <fruit collection is deleted>
+    9  $collections_separator:8:# (change separator to #)
+    10 $collections::fruit (fruit recreated)
+    11 fruit#1
+    12 fruit#2
+
+Now the code which looks at the historical data (e.g. backfill) will
+encounter these separator change keys before it encounters collection
+keys using that separator. Backfill and collections-erase can just
+maintain a current separator and can now correctly split keys to
+discover the collection they belong to. The collections eraser and
+KVStore scanning code now include a collections context which has data
+and associated code for doing this tracking.
+
+A final piece of the commit is the garbage collection of these unique
+keys. i.e. if each separator change puts a unique key into the seqno
+index, how can we clean these away when they're no longer needed (i.e.
+all fruit:: keys purged)?
+
+Whilst the eraser runs it tracks all 'separator change' keys, because
+a separator change can only happen when 0 collections exist, it can
+assume that all but the latest separator change key are redundant once
+the erase has completed. This list of keys are simply deleted in the
+normal way by pushing a deleted Item into the checkpoint once
+compaction is complete.
+
+Change-Id: I4b38b04ed72d6b39ceded4a860c15260fd394118
+Reviewed-on: http://review.couchbase.org/84801
+Tested-by: Build Bot <build@couchbase.com>
+Reviewed-by: Dave Rigby <daver@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2018-03-08 15:40:00.000000000
+Message: 
+Change has been successfully cherry-picked as dea189104162b6c91519bc37043cb1f5eedc147c by Dave Rigby
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-03-08 16:54:13.000000000
+Message: 
+Patch Set 24:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv-engine-master-post-commit/3505/ (2/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-03-08 18:18:37.000000000
+Message: 
+Patch Set 24:
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv-engine-master-perf/303/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-master-post-commit/3505/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

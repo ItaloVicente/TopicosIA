@@ -1,0 +1,148 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-47197: Add support for cross-connection limits [1/n]
+
+As part of MB-46881 one needs to be able to rate limit clients
+based upon total usage across all their connection.
+
+This initial patch add some of the framework needed in order
+to do so, but it is not enabled unless memcached.json contains
+
+    "tenant_specific_stats": true
+
+If enabled each "user" is assigned to the following limits:
+
+    Network ingress: 50MB/min
+    Network egress : 50MB/min
+    Operations     : 6000/min
+    Connections:   : 10 concurrent
+
+We don't need the metrics to be absolute correct, so we use a
+"sloppy" mechanism to enforce the limitations (which means
+that one may exceed the limitations with a few ops/bytes, but
+we don't care that much).
+
+The check use a "SloppyGauge" which holds a minute-counter and
+a value. Whenever we detect that we're operating in a different
+minute we reset the counter. This isn't done with a lock (just
+two atomics) which means that multiple threads may operate on
+the two variables "at the same time" (two threads may decide
+to clear the value and thread 1 clears it and sets its new
+value before thread 2 clears it again). We can accept that
+limited error margin to avoid having to add locks.
+
+While the patch schedule a task to run ever 30 minute to
+purge idle tenants none of them gets purged as the method to
+decide if it should be purged isn't implemented yet.
+
+One may receive cross-connection tenant stats by requesting
+the tenant stat group:
+
+    mcstat -b bucket tenants
+
+Which retrieves the statistics for all tenants, or one may
+receive for a single tenant by using:
+
+    mcstat -b bucket 'tenants {"domain":"local","user":"jones"}'
+
+The system currently only collect the following information
+on a per tenant base:
+
+     {{"sent", 0},
+      {"received", 0},
+      {"curr_conns", 0},
+      {"total_conns", 0}}
+
+Enforcing concurrent connections is a bit "hard" as we don't
+know the tenant until the connection is successfully authenticated.
+We could abort the authentication and reply with "rate limit"
+instead of authentication success, but that could potentially
+break (old) clients. We don't want to return success and just
+close the connection, as we want to be able to return an error
+message letting the client know why it was disconnected.
+To work around the problem we're disconnecting the clients whenever
+they try to execute packets. That means that you could in theory
+connect way too many connections to the server, but you wouldn't
+be able to use any of them as they would be disconnected when
+they try to execute a packet.
+
+Change-Id: If4f063bff7efade8cf6e8afd611f04cb26a801bf
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Trond Norbye
+Date: 2021-07-02 09:31:48.000000000
+Message: 
+Uploaded patch set 27.
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2021-07-02 09:41:17.000000000
+Message: 
+Patch Set 27:
+
+I cleaned up the experiments I've been playing around with into a patch to get some comments
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-07-02 10:05:32.000000000
+Message: 
+Patch Set 27: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/12084/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [0038/0096]: test dcp cursor dropping backfill...Exceeded maximum wait time of 60000000us waiting for stat "ep_cursors_dropped" to be greater or equal than 1 (last value:0) - aborting.
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/12084/ )
+
+One of more core files found at the end of the build. Data for post-mortem saved to archived_core_dumps.tar.bz2 under "Build Artifacts". ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/12084/ )
+
+Test exceeded the timeout:
+[2021-07-02T09:53:39.701Z] /usr/bin/timeout: the monitored command dumped core ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/12084/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/10361/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/37470/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/31961/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/8979/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/11931/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/19979/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/11014/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/12426/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-07-02 10:21:39.000000000
+Message: 
+Patch Set 27: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/10361/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/37470/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/31961/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/8979/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/11931/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/19979/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/11014/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/12426/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/12086/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

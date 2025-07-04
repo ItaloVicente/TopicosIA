@@ -1,0 +1,152 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-9321 Infrastructure for new orchestration.
+
+The two core concepts are leader activities and leader leases. The
+leader activity is any task requiring a degree of coordination in the
+cluster. Normally these tasks are started by the master node. In order
+to provide the required safety guarantees, each activity has a quorum
+attached to it. Quorum specifies a set of nodes that need to agree to
+run the task. The quorum can either specify a specific set of nodes
+required, or it can require a majority of nodes in a set. Or
+both. Leader lease is a promise from a node to serve master's and only
+master's requests for a specified amount of time. The master node will
+proactively acquire these leases even when there are no activities to
+run at the moment.
+
+Brief technical overview.
+
+ - Each node in the cluster will always run at least leader_activities
+   and leader_lease_agent processes.
+
+ - leader_lease_agent is the process that responds to master requests
+   for a lease. Every time a lease is granted, it's persisted to disk,
+   so that even if the process dies, when it restarts, it will
+   continue honoring the lease.
+
+ - leader_activities process keeps track of all the activities that
+   are being run by the node. When a lease expires, the activities are
+   terminated. Before all the activities are safely terminated, the
+   lease will not be granted to other nodes.
+
+ - In addition to the above two processes, master node is also running
+   a leader_lease_acquirer. Its job is to acquire and renew the leases
+   when time is up. It tries to be smart and keeps track of
+   communication delays to the other nodes, so it doesn't request
+   lease renewals too early.
+
+ - Leader lease is identified by a tuple of node name and a unique
+   id. The latter creates some issues (node renames are hard), but
+   improves diagnosability. Whenever lease_acquirer process starts, it
+   generates a fresh id for the lease. Then all the activities that
+   are being started are tagged with the id. That makes sure that
+   stale activity requests are rejected.
+
+Culprits:
+
+ - There's still a heavy reliance on ns_config, which doesn't provide
+   proper consistency guarantees. To mitigate this fact, I try to make
+   sure the config gets synchronized to all nodes at strategic points.
+
+ - There's a reliance on time flowing at somewhat similar rate at
+   different nodes. Which is a strong assumption. In order to lower
+   the odds of related issues, the leader node will abandon its lease
+   with some grace period, before the lease actually expires on the
+   nodes. In addition, all the important processes are set to have
+   high priority.
+
+ - Not all safety features are used as of now. The idea is that any
+   potentially dangerous activity that needs to do something at a
+   particular node needs to be funneled through
+   leader_activities. That would guarantee that even if things go
+   wrong, another conflicting activity won't get started. Addressing
+   this should also prevent most of problems stemming from the time
+   issues.
+
+Change-Id: Ia4e688f187365bf777a681bc296063ca3d8550b7
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Aliaksey Artamonau
+Date: 2018-02-09 14:53:57.000000000
+Message: 
+Uploaded patch set 11.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-02-09 14:54:12.000000000
+Message: 
+Patch Set 11:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-test/2710/
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Artamonau
+Date: 2018-02-09 14:54:55.000000000
+Message: 
+Patch Set 11: Verified+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-02-09 15:22:46.000000000
+Message: 
+Patch Set 11: Well-Formed+1
+
+Permission granted to commit to restricted branch
+----------------------------------------------------------------------------------------------------------------------
+Author: Poonam Dhavale
+Date: 2018-02-10 00:06:32.000000000
+Message: 
+Patch Set 11:
+
+If rebalance is performed immediately after add node, then the rebalance can take ~15s longer. 
+The add node could be to add a new node or recovery of a failed over node.
+
+Before the new node is added to the cluster, it holds local lease. 
+
+After add node, master will try to acquire the lease from the newly added node but that fails because the lease is already held by the new node.
+
+Master has to wait for that lease to expire. If a rebalance is performed immediately, then it has wait ~15s or less for the quorum. 
+
+I think, this is OK since the delay is seen only if the user performs rebalance soon (within 15s) after add node.
+
+But, if the user changes lease time from 15s to something higher then the delay can be longer.
+
+BTW, how did you select 15s as default lease time?
+----------------------------------------------------------------------------------------------------------------------
+Author: Poonam Dhavale
+Date: 2018-02-10 00:50:29.000000000
+Message: 
+Patch Set 11:
+
+And needless to say, auto-failover could also be delayed.
+
+Case#1: Similar scenario as in an earlier comment. n0 is the master and has lease. Bunch of nodes go down including n0. n1 is the new master. The down nodes all come up. They read persisted lease data which has n0 as the lease holder. n1 tries to acquire the lease from these nodes but has to wait for n0’s lease to expire. Around that time, nodeX goes down. n1 tries to auto-fail over nodeX but has to wait for quorum.
+
+Case #2: Similar scenario as in previous comment. If an existing node fails soon after other add nodes, master has to wait for quorum before it can auto-failover.
+
+But, these are edge-edge cases. The node has to fail within short timing window.
+ Also, auto-failover requires only majority quorum. So, the number of nodes that were down in case#1 or being added in case #2 have to be such that master cannot form majority quorum.
+----------------------------------------------------------------------------------------------------------------------
+Author: Poonam Dhavale
+Date: 2018-02-10 01:01:34.000000000
+Message: 
+Patch Set 11:
+
+> I'm
+ > planning to do couple of things to improve the situation in some
+ > cases: save the lease not only when it's renewed, but maybe also
+ > update it while the time is ticking; save a lease with updated time
+ > left when the leader_lease_agent process is terminating.
+
+
+Sounds good. Will reduce the timing window for some of the edge cases.
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Artamonau
+Date: 2018-02-10 02:03:10.000000000
+Message: 
+Patch Set 11:
+
+> With all callbacks optional why do we need this to be a behavior?
+
+That's what abolish_leases is for.
+----------------------------------------------------------------------------------------------------------------------

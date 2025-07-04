@@ -1,0 +1,77 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-51639: Unconditionally persist disk snapshot end for HPS
+
+Currently if we receive a disk snapshot with prepares in it we
+persist the snapshot end as the HPS value, if we receive a
+disk snapshot without prepares in it then we do not persist a
+value for the HPS (i.e. it remains 0). We also do not send
+completed prepares to replicas during disk backfills. This
+exposes us to the following scenario:
+
+1) Create cluster with 2 replicas
+2) Perform 2 or more SyncWrites
+3) One replica must receive fewer than the total number of SyncWrites
+4) Other replica receives all SyncWrites and they are committed
+5) Swap rebalance out the replica with all SyncWrites (4)
+6) Restart new replica (5)
+7) Failover active (behind replica (3) is promoted and the missing
+   writes are lost permanently when new replica (5) rolls back on
+   reconnection)
+
+Our on disk state would change as follows:
+
+Active:  [1:Pre] [2:Pre] [3:Commit 4:Commit] MemoryHPS:2 DiskHPS:2
+
+R1:      [1:Pre] [2:Pre] [3:Commit 4:Commit] MemoryHPS:2 DiskHPS:2 (4 from above steps)
+R1b:     [3:Commit 4:Commit]                 MemoryHPS:4 DiskHPS:0 (5 from above steps - 1:Pre, 2:Pre not sent as they are completed)
+<< Restart & Warmup R1 >>
+R1b:     [3:Commit 4:Commit]                 MemoryHPS:0 DiskHPS:0 (Restarted R1b)
+
+R2       [1:Pre]                             MemoryHPS:1 DiskHPS:1 (Replica at 3 in above steps)
+
+Handle this situation by unconditionally persisting the snapshot
+end as the HPS value for disk snapshots. This mimics the in memory
+behaviour which sets the HPS to the snapshot end of disk snapshots
+for de-dupe reasons.
+
+Change-Id: Idb912bc6ff5abcc4fc4eea5179fb518f524f5ae9
+Reviewed-on: https://review.couchbase.org/c/kv_engine/+/172517
+Reviewed-by: Dave Rigby <daver@couchbase.com>
+Tested-by: Build Bot <build@couchbase.com>
+Well-Formed: Restriction Checker
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Ben Huddleston
+Date: 2022-04-01 10:18:43.000000000
+Message: 
+Change has been successfully cherry-picked as f9c565b58b24f8fca799fbdc0cb370660dd5435a
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-04-01 10:18:51.000000000
+Message: 
+Patch Set 4:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-neo/88/ (1/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-04-01 10:18:52.000000000
+Message: 
+Patch Set 4:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-TSan-neo/60/ (2/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-04-01 10:53:17.000000000
+Message: 
+Patch Set 4:
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-neo/88/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-TSan-neo/60/ : SUCCESS'
+----------------------------------------------------------------------------------------------------------------------

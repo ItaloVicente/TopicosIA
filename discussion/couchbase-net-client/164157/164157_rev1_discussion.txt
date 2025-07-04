@@ -1,0 +1,148 @@
+======================================================================================================================
+DESCRIPTION:
+
+[WIP] NCBC-2989: Use transient HttpClient instances
+
+Motivation
+----------
+We currently use a singleton CouchbaseHttpClient which inherits from
+HttpClient. Using a singleton HttpClient is common practice and known to
+A) improve performance by allowing HTTP keep-alives and reducing DNS
+requests and B) avoid problems with TCP port depletion.
+
+However, the common practice is misunderstood. In fact, it is the
+HttpClientHandler within the HttpClient that should be reused, more so
+than the HttpClient itself. Additionally, it should only be reused for a
+limited period of time. Failure to replace the HttpClientHandler
+occasionally can cause unexpected network failures if DNS names are
+changed to refer to new IP addresses.
+
+More importantly, our current pattern of a singleton CouchbaseHttpClient
+introduces side effects. There are multiple places in the codebase where
+we are setting properties on this client as if it was transient when it
+is in fact a singleton. Setting these properties is affecting other
+usages of the singleton by other internal services. Examples include
+setting the Timeout to infinite or setting a per-connection ID on
+DefaultRequestHeaders.
+
+Modifications
+-------------
+Drop CouchbaseHttpClient in favor of CouchbaseHttpClientFactory, and
+replace all usages of CouchbaseHttpClient with transient, short-lived
+HttpClient instances created by CouchbaseHttpClientFactory.
+
+Within the factory, reuse the same HttpMessageHandler stack for each
+HttpClient created. Replace this stack with a new stack once it is two
+minutes old. Use GC to track when the old stack is no longer in use and
+dispose of the old handlers. This is based on the pattern used by
+Microsoft.Extensions.Http.
+
+Results
+-------
+Each consuming service may safely manipulate the HttpClient with
+values such as timeouts and connection ID headers without affecting
+other services.
+
+If DNS addresses change to refer to a new Couchbase node IP, the
+HttpClient will switch to the new servers within 2 minutes rather than
+continuing to reuse the same connection to the old IP indefinitely.
+
+Note: This approach adds more complexity around HttpClient, for which it
+would have been nice to use the thoroughly tested
+Microsoft.Extensions.Http package. However, this would have required
+bringing in Microsoft.Extensions.DependencyInjection and more as a
+dependency.
+
+Change-Id: Ifd77d34288b29206634259bd34bcc271642a7983
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Brant Burnett
+Date: 2021-10-22 13:41:19.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-10-22 13:41:30.000000000
+Message: 
+Patch Set 1:
+
+Build Started http://sdk.jenkins.couchbase.com/job/dotnet/job/sdk/job/couchbase-net-client-cv-trigger/2798/
+----------------------------------------------------------------------------------------------------------------------
+Author: Brant Burnett
+Date: 2021-10-22 13:43:04.000000000
+Message: 
+Patch Set 1:
+
+This is functional, it just needs more unit tests. However, I wanted to make sure that this approach is okay before I take the time to write all the tests. Let me know!
+
+Thanks,
+Brant
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-10-22 13:45:18.000000000
+Message: 
+Patch Set 1: Verified-1
+
+Build Failed 
+
+http://sdk.jenkins.couchbase.com/job/dotnet/job/sdk/job/couchbase-net-client-cv-trigger/2798/ : failed
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-10-22 18:06:18.000000000
+Message: 
+Patch Set 1: -Verified
+
+Build Started http://sdk.jenkins.couchbase.com/job/dotnet/job/sdk/job/couchbase-net-client-cv-trigger/2799/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-10-22 18:10:03.000000000
+Message: 
+Patch Set 1: Verified-1
+
+Build Failed 
+
+http://sdk.jenkins.couchbase.com/job/dotnet/job/sdk/job/couchbase-net-client-cv-trigger/2799/ : failed
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard Ponton
+Date: 2021-10-22 18:34:49.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:85, src/Couchbase/Core/IO/HTTP/CouchbaseHttpClientFactory.cs -> We have a backlog item (NCBC-2477) to replace HttpClientHander with SocketsHttpHandler, but we'd have to abstract it for .NET Standard 2.0 support.
+
+That may be too much to do in this PR, but can we at least start with abstracting this to HttpMessageHandler instead?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jeffry Morris
+Date: 2021-10-26 17:44:40.000000000
+MISMATCHED INLINE COMMENT
+Line:57, /COMMIT_MSG -> I feel like we maybe duplicating efforts if Microsoft.Extensions.Http already has a solution. It's a fairly large commit albeit most of the size is related to integration/replacing the older HttpClient. Is the cost of bringing in the Microsoft.Extensions.Http & DI package worth it?
+
+This is a core component for all of the HTTP services, so think we should be very carefully about this.
+----------------------------------------------------------------------------------------------------------------------
+Author: Brant Burnett
+Date: 2021-10-26 19:16:34.000000000
+MISMATCHED INLINE COMMENT
+Line:57, /COMMIT_MSG -> I agree, that was a concern I had as well. Bringing in the Microsoft solution has the upside that we can:
+
+A) Replace our internal DI implementation with theirs
+B) Use their IHttpClientFactory solution.
+
+Note: I wouldn't recommend just using the overall global DI container, we'd still keep our own container instance per Cluster.
+
+The downsides are:
+
+A) Adding another dependency, not only that but one which gets 
+version bumped along with .NET. Though the 6.0 version is backward compatible to .NET Standard 2.0, so that's nice.
+B) The MS implementation of IHttpClientFactory is a bit broader in scope, capable of handling a lot more than we need. So this implementation might be a smidge more performant because we can make certain assumptions (i.e. we know we only have one HttpMessageHandler stack every 2 minutes, simplifying cleanup logic).
+
+Either approach is a valid solution. I'm happy to implement this either way, just let me know. If you want to take the MS approach, then I'll put this aside and focus on swapping out the DI container next.
+----------------------------------------------------------------------------------------------------------------------
+Author: Brant Burnett
+Date: 2021-10-22 22:25:47.000000000
+MISMATCHED INLINE COMMENT
+Line:85, src/Couchbase/Core/IO/HTTP/CouchbaseHttpClientFactory.cs -> Ack
+----------------------------------------------------------------------------------------------------------------------

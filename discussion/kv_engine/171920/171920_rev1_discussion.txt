@@ -1,0 +1,209 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-49512: Reset task ptr on scheduler thread during taskable shutdown
+
+It was observed that a task being run whilst we call unregisterTaskable on
+another thread would schedule the reset of the task pointer on the cpuPool
+rather than the scheduler thread which caused long shutdowns as we had to
+wait for the cpuPool to finish running long running tasks. These long
+bucket shutdowns caused rebalance failures.
+
+To fix this issue, reset the task pointer on the scheduler thread if we are
+currently shutting down a taskable.
+
+Change-Id: I3e6d13ba1004f32e960280123edd860487d566ff
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Ben Huddleston
+Date: 2022-03-08 12:35:06.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-03-08 13:41:51.000000000
+Message: 
+Patch Set 1: Verified-1 Code-Review-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-neo/31/ : FAILURE
+
+<p>clang-tidy suggested the following changes:
+<pre>
+
+cat &lt;&lt;&quot;EOF&quot; | patch -p1
+diff --git a/engines/ep/tests/module_tests/executorpool_test.cc b/engines/ep/tests/module_tests/executorpool_test.cc
+index f8bf4cc2e..adb0a9f0f 100644
+--- a/engines/ep/tests/module_tests/executorpool_test.cc
++++ b/engines/ep/tests/module_tests/executorpool_test.cc
+@@ -25,6 +25,7 @@
+ #include &lt;folly/portability/GMock.h&gt;
+ #include &lt;folly/synchronization/Baton.h&gt;
+ #include &lt;nlohmann/json.hpp&gt;
++#include &lt;utility&gt;
+ #include &lt;phosphor/phosphor.h&gt;
+ #include &lt;programs/engine_testapp/mock_cookie.h&gt;
+ 
+@@ -1328,10 +1329,10 @@ public:
+                           std::function&lt;bool(LambdaTask&amp;)&gt; lambdaFunc,
+                           std::function&lt;void()&gt; dtorFunc)
+         : LambdaTask(taskable, TaskId::ItemPager, 0, true, lambdaFunc),
+-          dtorFunc(dtorFunc) {
++          dtorFunc(std::move(dtorFunc)) {
+     }
+ 
+-    ~DestructionLambdaTask() {
++    ~DestructionLambdaTask() override {
+         dtorFunc();
+     }
+ 
+EOF
+
+</pre> ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-neo/31/ )
+
+clang-tidy found the following problems:
+
+<pre>
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy-neo/kv_engine/engines/ep/tests/module_tests/executorpool_test.cc:1329:27: warning: pass by value and use std::move [modernize-pass-by-value]
+                          std::function<void()> dtorFunc)
+                          ^
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy-neo/kv_engine/engines/ep/tests/module_tests/executorpool_test.cc:28:1: note: FIX-IT applied suggested code changes
+#include <phosphor/phosphor.h>
+^
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy-neo/kv_engine/engines/ep/tests/module_tests/executorpool_test.cc:1331:20: note: FIX-IT applied suggested code changes
+          dtorFunc(dtorFunc) {
+                   ^
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy-neo/kv_engine/engines/ep/tests/module_tests/executorpool_test.cc:1331:28: note: FIX-IT applied suggested code changes
+          dtorFunc(dtorFunc) {
+                           ^
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy-neo/kv_engine/engines/ep/tests/module_tests/executorpool_test.cc:1334:5: warning: annotate this function with "override" or (rarely) "final" [modernize-use-override]
+    ~DestructionLambdaTask() {
+    ^
+                             override
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy-neo/kv_engine/engines/ep/tests/module_tests/executorpool_test.cc:1334:29: note: FIX-IT applied suggested code changes
+    ~DestructionLambdaTask() {
+                            ^
+clang-tidy suggested the following changes:
+
+cat &lt;&lt;&quot;EOF&quot; | patch -p1
+diff --git a/engines/ep/tests/module_tests/executorpool_test.cc b/engines/ep/tests/module_tests/executorpool_test.cc
+index f8bf4cc2e..adb0a9f0f 100644
+--- a/engines/ep/tests/module_tests/executorpool_test.cc
++++ b/engines/ep/tests/module_tests/executorpool_test.cc
+@@ -25,6 +25,7 @@
+ #include &lt;folly/portability/GMock.h&gt;
+ #include &lt;folly/synchronization/Baton.h&gt;
+ #include &lt;nlohmann/json.hpp&gt;
++#include &lt;utility&gt;
+ #include &lt;phosphor/phosphor.h&gt;
+ #include &lt;programs/engine_testapp/mock_cookie.h&gt;
+ 
+@@ -1328,10 +1329,10 @@ public:
+                           std::function&lt;bool(LambdaTask&amp;)&gt; lambdaFunc,
+                           std::function&lt;void()&gt; dtorFunc)
+         : LambdaTask(taskable, TaskId::ItemPager, 0, true, lambdaFunc),
+-          dtorFunc(dtorFunc) {
++          dtorFunc(std::move(dtorFunc)) {
+     }
+ 
+-    ~DestructionLambdaTask() {
++    ~DestructionLambdaTask() override {
+         dtorFunc();
+     }
+ 
+EOF
+
+</pre> ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-neo/31/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-neo/37/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [45/159]: mem stats...Exceeded maximum wait time of 60000000us waiting for stat "ep_items_rm_from_checkpoints" to change from 0 (last value:0) - aborting.
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-neo/37/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/neo/30/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [45/159]: mem stats...Exceeded maximum wait time of 60000000us waiting for stat "ep_items_rm_from_checkpoints" to change from 0 (last value:0) - aborting.
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/neo/30/ )
+
+Failure of GoogleTest "TransportProtocols/TenantTest.TenantStats/Mcbp":
+
+<pre>
+[ RUN      ] TransportProtocols/TenantTest.TenantStats/Mcbp
+[2022-03-08T13:06:37.027Z] /home/couchbase/jenkins/workspace/kv_engine.threadsanitizer_neo/kv_engine/tests/testapp/testapp_tenant.cc:158: Failure
+[2022-03-08T13:06:37.027Z] Expected equality of these values:
+[2022-03-08T13:06:37.027Z]   10
+[2022-03-08T13:06:37.027Z]   json["connections"]["current"].get<int>()
+[2022-03-08T13:06:37.027Z]     Which is: 11
+[2022-03-08T13:06:37.027Z] [  FAILED  ] TransportProtocols/TenantTest.TenantStats/Mcbp, where GetParam() = Mcbp (965 ms)
+TransportProtocols/TenantTest.TenantStats/Mcbp
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/neo/30/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/neo/31/ : FAILURE
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/neo/30/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [20/93]: test producer stream request (partial)...Exceeded maximum wait time of 60000000us waiting for stat "ep_items_rm_from_checkpoints" to be 100 (last value:0) - aborting.
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/neo/30/ )
+
+One of more core files found at the end of the build. Data for post-mortem saved to archived_core_dumps.tar.bz2 under "Build Artifacts". ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/neo/30/ )
+
+Test exceeded the timeout:
+[2022-03-08T12:42:16.350Z] /usr/bin/timeout: the monitored command dumped core ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/neo/30/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/neo/32/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [45/159]: mem stats...Exceeded maximum wait time of 60000000us waiting for stat "ep_items_rm_from_checkpoints" to change from 0 (last value:0) - aborting.
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/neo/32/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/neo/30/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [45/159]: mem stats...Exceeded maximum wait time of 60000000us waiting for stat "ep_items_rm_from_checkpoints" to change from 0 (last value:0) - aborting.
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/neo/30/ )
+
+One of more core files found at the end of the build. Data for post-mortem saved to archived_core_dumps.tar.bz2 under "Build Artifacts". ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/neo/30/ )
+
+Test exceeded the timeout:
+[2022-03-08T12:49:48.817Z] /usr/bin/timeout: the monitored command dumped core ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/neo/30/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/neo/25/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [45/159]: mem stats...Exceeded maximum wait time of 60000000us waiting for stat "ep_items_rm_from_checkpoints" to change from 0 (last value:0) - aborting.
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/neo/25/ )
+
+Test exceeded the timeout:
+[2022-03-08T12:50:06.137Z] /usr/bin/timeout: the monitored command dumped core ( http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/neo/25/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/14801/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-neo/30/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/neo/31/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

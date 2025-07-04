@@ -1,0 +1,151 @@
+======================================================================================================================
+DESCRIPTION:
+
+RevWalk: integrate commit-graph with commit parsing
+
+RevWalk#createCommit() will inspect the commit-graph file to find the
+specified object's graph position and then return a new RevCommitCG
+instance.
+
+RevCommitCG is subclass of RevCommit, which represents the commit parsed
+from commit-graph file. Compared with RevCommit, it additionally
+includes graph position and generation number.
+RevCommitCG overrides RevCommit#parseHeaders(RevWalk), JGit will supply
+the headers of a RevCommit from commit-graph when calling it, including
+parents, the root tree, the commit date and the generation number.
+By loading commits from the graph instead of parsing commit buffers,
+we save a lot of time on long commit walks when RevWalk#isRetainBody()
+is false.
+
+The startup cost of reading the entire commit graph is small. After
+testing, reading a commit-graph with 1 million commits takes less than
+50ms. If we use RepositoryCache, it will not be initialized util the
+commit-graph is rewritten.
+
+Bug: 574368
+Change-Id: I90d0f64af24f3acc3eae6da984eae302d338f5ee
+Signed-off-by: kylezhao <kylezhao@tencent.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Kyle Zhao
+Date: 2023-01-05 11:49:56.000000000
+Message: 
+Uploaded patch set 49.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2023-01-05 11:50:05.000000000
+Message: 
+Patch Set 49:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline.java11/2822/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2023-01-05 12:02:33.000000000
+Message: 
+Patch Set 49: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline.java11/2822/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2023-01-05 12:04:22.000000000
+Message: 
+Patch Set 49:
+
+(2 comments)
+File Comment: /PATCHSET_LEVEL -> I just pushed a version implemented by RevCommitCG, please see what needs to be improved.
+
+Regards,
+Kyle
+----------------------------------------------------------------------------------------------------------------------
+Author: Ivan Frade
+Date: 2023-01-05 23:29:04.000000000
+Message: 
+Patch Set 49:
+
+(5 comments)
+Line:49, org.eclipse.jgit/src/org/eclipse/jgit/revwalk/RevCommitCG.java -> IIUC RevWalk reparses the headers on every #parseHeader invocation (don't know why). but that shouldn't be necessary... should this check if PARSED flag is already set and skip completely the #parseHeaders?
+
+Line:49, org.eclipse.jgit/src/org/eclipse/jgit/revwalk/RevCommitCG.java -> If walk.commitGraph() doesn't return null anymore, this parseInGraph just means "graph.getCommitData() != null... maybe we can do this more clear? 
+
+e.g. doing that here and then calling parseInGraph with the CommitGraph.CommitData? or even inlining parseInGraph...
+
+Line:49, org.eclipse.jgit/src/org/eclipse/jgit/revwalk/RevCommitCG.java -> Somewhere we need to accomodate this from RevCommit:
+```
+if (!walk.shallowCommitsInitialized) {
+    walk.initializeShallowCommits(this);
+}
+```
+
+It sets the parents to NO_PARENTS and ignores whatever the pack (commit-graph in this case) says for shallow commits.
+
+Line:1171, org.eclipse.jgit/src/org/eclipse/jgit/revwalk/RevWalk.java -> It would be simpler and probably more efficient to create a "EmptyCommitGraph" implementation of the CommitGraph interface, create a static instance somehere (EMPTY_COMMIT_GRAPH) and here do just:
+
+if (commitGraph == null) {
+  commitGraph = reader.getCommitGraph().orElse(EMPTY_COMMIT_GRAPH);
+}
+
+return commitGraph.
+
+Line:1721, org.eclipse.jgit/src/org/eclipse/jgit/revwalk/RevWalk.java -> This is more symmetrical and clear if we just have a new method:
+RevCommit createCommit(AnyObjectId id, int pos) {
+  // if pos >= 0 return RevCommitGC otherwise RevCommit
+} 
+
+And call it from #createCommit(AnyObjectId) with createCommit(id, graph.findGraphPosition(id))
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ivan Frade
+Date: 2023-01-06 22:33:55.000000000
+MISMATCHED INLINE COMMENT
+Line:49, org.eclipse.jgit/src/org/eclipse/jgit/revwalk/RevCommitCG.java -> The check I was asking for is that one in the RevWalk.
+
+Thanks for bringing up that duplicated PARSED. I don't know the context of those flags, but sounds like they could be unified (?) It is orthogonal to the commit-graph though, so I resolve this comment.
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2023-01-06 07:52:18.000000000
+MISMATCHED INLINE COMMENT
+Line:49, org.eclipse.jgit/src/org/eclipse/jgit/revwalk/RevCommitCG.java -> > IIUC RevWalk reparses the headers on every #parseHeader invocation (don't know why). but that shouldn't be necessary... should this check if PARSED flag is already set and skip completely the #parseHeaders?
+
+JGit currently checks the PARSED flag in RevWalk.
+
+eg.
+```
+public void parseHeaders(RevObject obj)
+			throws MissingObjectException, IOException {
+		if ((obj.flags & PARSED) == 0)
+			obj.parseHeaders(this);
+	}
+```
+
+RevWalk#PARSED is used instead of RevObject#PARSED, although their values are both 1. This does get confusing, maybe they should all use RevWalk#PARSED ?
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2023-01-06 07:52:18.000000000
+MISMATCHED INLINE COMMENT
+Line:49, org.eclipse.jgit/src/org/eclipse/jgit/revwalk/RevCommitCG.java -> Oops! I didn't notice this, thanks！
+
+Done.
+
+By the way, because of this, I found that we should not write commit-graph for shallow repo, here is the bugfix[1].
+
+[1] https://git.eclipse.org/r/c/jgit/jgit/+/199262
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2023-01-06 07:52:18.000000000
+MISMATCHED INLINE COMMENT
+Line:49, org.eclipse.jgit/src/org/eclipse/jgit/revwalk/RevCommitCG.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2023-01-06 07:52:18.000000000
+MISMATCHED INLINE COMMENT
+Line:1171, org.eclipse.jgit/src/org/eclipse/jgit/revwalk/RevWalk.java -> Agree, done.
+----------------------------------------------------------------------------------------------------------------------
+Author: Kyle Zhao
+Date: 2023-01-06 07:52:18.000000000
+MISMATCHED INLINE COMMENT
+Line:1721, org.eclipse.jgit/src/org/eclipse/jgit/revwalk/RevWalk.java -> Done
+----------------------------------------------------------------------------------------------------------------------

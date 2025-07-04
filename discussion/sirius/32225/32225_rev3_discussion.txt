@@ -1,0 +1,134 @@
+======================================================================================================================
+DESCRIPTION:
+
+[438603] Update TreeUIUpdater to run a single runnable
+
+Update TreeUIUpdater postcommit to run a single runnable in the UI
+thread.
+Add a notificationFilter which could be reused by other dialect
+postcommit to refresh UI according to notation model changes.
+Externalize the VSM change notification in
+DescriptionFileChangedNotifier.
+
+
+Bug: 438603
+Change-Id: I83f2233580b6f5212ae4746fd21302bdbd84da82
+Signed-off-by: Esteban Dugueperoux <esteban.dugueperoux@obeo.fr>
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Esteban DUGUEPEROUX
+Date: 2014-08-28 16:16:20.000000000
+Message: 
+Uploaded patch set 3.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2014-08-28 16:16:46.000000000
+Message: 
+Patch Set 3:
+
+Build Started https://hudson.eclipse.org/sirius/job/sirius.gerrit/1969/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2014-08-28 16:17:29.000000000
+Message: 
+Patch Set 3: Verified-1
+
+Build Failed 
+
+https://hudson.eclipse.org/sirius/job/sirius.gerrit/1969/ : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2014-08-29 06:33:00.000000000
+Message: 
+Patch Set 3: -Verified
+
+Build Started https://hudson.eclipse.org/sirius/job/sirius.gerrit/1972/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2014-08-29 06:36:08.000000000
+Message: 
+Patch Set 3: Verified+1
+
+Build Successful 
+
+https://hudson.eclipse.org/sirius/job/sirius.gerrit/1972/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Pierre-Charles David
+Date: 2014-09-05 10:38:58.000000000
+Message: 
+Patch Set 3: Code-Review-2
+
+(9 comments)
+Line:52, plugins/org.eclipse.sirius.tree.ui/src/org/eclipse/sirius/tree/ui/tools/internal/editor/provider/TreeUIUpdater.java -> New instances of these are re-created on each invocation of resourceSetChanged, so we can probably do without this initializations.
+
+Line:69, plugins/org.eclipse.sirius.tree.ui/src/org/eclipse/sirius/tree/ui/tools/internal/editor/provider/TreeUIUpdater.java -> See my remark about doing unexpected work (especially of this kind) in a constructor that I put on another class. I know this is not introduced by this patch and the problem existed earlier, but given that this change also touches the only user of TreeUIUpdater it would be the opportunity to fix/improve this.
+
+Line:238, plugins/org.eclipse.sirius.tree.ui/src/org/eclipse/sirius/tree/ui/tools/internal/editor/provider/TreeUIUpdater.java -> This potentially costly difference computation could be lifted out of the runnable so that it is not done while we have the lock on the UI thread.
+
+Line:243, plugins/org.eclipse.sirius.tree.ui/src/org/eclipse/sirius/tree/ui/tools/internal/editor/provider/TreeUIUpdater.java -> The runnable accesses the fields in the TreeUIUpdater, but is run asynchronously. There is a possible race condition if when the runnable finally executes in the UI thread (later, at an undetermined time) the TreeUIUpdater has already received a new resourceSetChanged(), and thus modified the values of these fields. In that case accesses to the fields inside the run() method would see modified values different from what it was intended to process.
+
+Given that we re-created fresh new values for these fields on each resourceSetChanged() invocation, the Runnable could be moved into a separate (private static) class where it can capture the actual values it is supposed to work with. There's no need for it to make copies: once it has created the runnable, resourceSetChanged will never modify the instances it has passed to the runnable, but create new ones instead.
+
+Line:254, plugins/org.eclipse.sirius.tree.ui/src/org/eclipse/sirius/tree/ui/tools/internal/editor/provider/TreeUIUpdater.java -> toExpand/toCollapse & co. should be reset to null, or they will leak model elements and SWT/JFace widgets.
+
+Line:37, plugins/org.eclipse.sirius.ui/src/org/eclipse/sirius/ui/tools/internal/editor/DescriptionFileChangedNotifier.java -> Constructors should not have side-effects like this.
+
+* It mixes two tasks, and makes it impossible for client code (or sub-classes) to decouple them.
+* It breaks the common assumption that just creating an object and then forgetting about it does no harm.
+* It is not documented that just by creating an instance of this class, client code suddenly has the responsibility to ensure its dispose() method will be called.
+* I don't think it can be an issue in the specific case, but it is with this general pattern: it leaks a reference to "this" to outside code, at a time "this" is not guaranteed to be completely initialized. I someone created a sub-class of DescriptionFileChangedNotifier which needs to do additional work to initialize itself, the outside code will see a half-initiliazed object which is not guaranteed to work properly.
+
+Line:36, plugins/org.eclipse.sirius/src/org/eclipse/sirius/business/api/dialect/DRepresentationNotificationFilter.java -> super() call is implicit. No harm, but not needed.
+
+Line:42, plugins/org.eclipse.sirius/src/org/eclipse/sirius/business/api/dialect/DRepresentationNotificationFilter.java -> It does not change much (maybe just a taste issue), but introducing a local seems overkill.
+
+Line:45, plugins/org.eclipse.sirius/src/org/eclipse/sirius/business/api/dialect/DRepresentationNotificationFilter.java -> getRepresentation() involves repeated calls to eContainer(), and can be costly. Especially inside a method like this one which will be called for every individual Notification when commiting a transaction.
+
+I don't see (at first glance) how we can optimize getRepresentation() while still keeping it dialect-agnostic. We can not return null/none early just based on instanceof tests on DRepresentationElement: dialects are free to use in their model implementation elements which do not inherit from it.
+
+In the context of a given dialect, we know all the possible types that can be found inside a DRepresentation of this dialect, deduce a minimal set of super-types against which to test (for trees DTreeItemContainer and TreeItemStyle should cover everything).
+
+I have not actually measured how much calling getRepresentations so often costs, but OTOH I don't see any hard numbers on how much adding this filter improves the performance either.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Esteban DUGUEPEROUX
+Date: 2014-09-08 08:25:25.000000000
+Message: 
+Patch Set 3:
+
+(9 comments)
+Line:52, plugins/org.eclipse.sirius.tree.ui/src/org/eclipse/sirius/tree/ui/tools/internal/editor/provider/TreeUIUpdater.java -> This is done in the next change-set
+
+Line:69, plugins/org.eclipse.sirius.tree.ui/src/org/eclipse/sirius/tree/ui/tools/internal/editor/provider/TreeUIUpdater.java -> See my answer in DescriptionFileChangedNotifier.
+about "domain!=null" I can replace it by an assert.
+
+Line:238, plugins/org.eclipse.sirius.tree.ui/src/org/eclipse/sirius/tree/ui/tools/internal/editor/provider/TreeUIUpdater.java -> Done
+
+Line:243, plugins/org.eclipse.sirius.tree.ui/src/org/eclipse/sirius/tree/ui/tools/internal/editor/provider/TreeUIUpdater.java -> Done
+
+Line:254, plugins/org.eclipse.sirius.tree.ui/src/org/eclipse/sirius/tree/ui/tools/internal/editor/provider/TreeUIUpdater.java -> Done
+
+Line:37, plugins/org.eclipse.sirius.ui/src/org/eclipse/sirius/ui/tools/internal/editor/DescriptionFileChangedNotifier.java -> This class follows object patterns:
+1. encapsulation : user of class have not to be aware of implementation details
+2. Named according to its role and not according to its implementation like we can see with VisibilityPropagatorAdapter
+
+It behaves like SWT widget, it is a resource which need to be disposed at the end of use.
+
+When you write "It mixes two tasks, and makes it impossible for client code (or sub-classes) to decouple them." 
+
+If you talk about tasks of notificationFilter registration and listener registration, these tasks must not be decoupled and are implementations details then must be encapsulated. 
+
+When you write "I don't think it can be an issue in the specific case, but it is with this general pattern: it leaks a reference to "this" to outside code, at a time "this" is not guaranteed to be completely initialized. I someone created a sub-class of DescriptionFileChangedNotifier which needs to do additional work to initialize itself, the outside code will see a half-initiliazed object which is not guaranteed to work properly."
+
+DescriptionFileChangedNotifier  is not intented to be subclassed, if you want I can make it final. In addition I can add a assertion in constructor about TransactionalEditingDomain!=null.
+
+Line:36, plugins/org.eclipse.sirius/src/org/eclipse/sirius/business/api/dialect/DRepresentationNotificationFilter.java -> Done
+
+Line:42, plugins/org.eclipse.sirius/src/org/eclipse/sirius/business/api/dialect/DRepresentationNotificationFilter.java -> This improve readibility to have the return value declared at the beginning instead of having two retuns, one in the if block and the last at the end. In addition if more conditions are added then more returns instructions will be added then readibility will decrease and checkstyles will warning that.
+
+Line:45, plugins/org.eclipse.sirius/src/org/eclipse/sirius/business/api/dialect/DRepresentationNotificationFilter.java -> Before the TreeUIUpdater had not filter, neither the TableUIUpdater.
+Then adding this common filter is better than no one.
+Indeed having dialect specific will be more efficient. This could be another task.
+
+----------------------------------------------------------------------------------------------------------------------

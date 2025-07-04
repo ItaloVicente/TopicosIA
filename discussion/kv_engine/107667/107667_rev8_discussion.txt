@@ -1,0 +1,179 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-33715 [SR]: Track only high_prepared_seqno in ADM
+
+The original design for Durability allowed out-of-order commits.
+To achieve that, the DurabilityMonitor at Replica needed to ack both
+memory/disk seqnos, and the DM at Active had to track both as well.
+
+After design review (see DesignDoc for motivation) we have to ensure
+In-Order Commits. Now a Replica acks a single strictly-monotonic
+quantity (the high_prepared_seqno), so the Active needs to track a
+single seqno per Replica.
+
+Note: we don't have a full implementation of high_prepared_seqno yet. So
+(as for Replica) the Active acks a Prepare only when it is persisted
+(even if it is Level=Majority). That is just a temporary (but
+semantically correct) pessimization.
+
+Change-Id: I41a59d3a314389c9bd77e139e57d306ba51e67f1
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2019-04-15 15:18:35.000000000
+Message: 
+Uploaded patch set 8: Patch Set 7 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-04-15 16:28:16.000000000
+Message: 
+Patch Set 8: Code-Review-1
+
+(4 comments)
+Line:3, engines/ep/src/durability/active_durability_monitor.cc -> ?
+
+Line:58, engines/ep/src/durability/active_durability_monitor.h -> If this is only called infrequently (e.g. for stats etc) then safer to return a value - consider if the topology changed between someone calling this method and then attempting to use the returned value.
+
+Line:145, engines/ep/src/durability/active_durability_monitor.h -> How would this ever happen? I.e. why would a replica acknowledge greater than what seqnos the ADM knows about?
+
+Line:271, engines/ep/src/durability/active_durability_monitor.h -> The member variables of this should probably be protected or private - otherwise as soon as you call wlock() you can modify any state and break invariants.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-04-15 16:39:25.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:3, engines/ep/src/durability/active_durability_monitor.cc -> Mmm, this is the old durability_monitor.cc.
+Need to change it since couple of patches ago.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-04-15 16:52:29.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:145, engines/ep/src/durability/active_durability_monitor.h -> Given the current design, you are right, as:
+1) we track a single seqno
+2) Replica acks as soon as SW is locally satisfied (ie, *not* at snapshot boundaries)
+
+In fact, in my initial version of this patch I had completely removed all the "NodeAckSeqno" stuff (given that at this point write-seqno and ack-seqno will always coincide).
+Here I just preferred to defer to a follow-up patch to avoid noise.
+Happy to fix here if you agree.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-04-15 16:55:21.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:271, engines/ep/src/durability/active_durability_monitor.h -> If I hide them, then DurabilityMonitor cannot access them and we need to revert this change back to when we had a double access-level for most of the DM functions, e.g.:
+
+size_t DM::getNumTracked() const {
+    return state.rlock()->getNumTracked();
+}
+
+size_t DM::state::getNumTracked() const {
+    return trackedWrites.size();
+}
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-04-15 17:02:51.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:271, engines/ep/src/durability/active_durability_monitor.h -> Ah ok, I didn’t spot that:)
+
+Maybe add a comment to the top level State struct explaining why everything is just public.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-04-15 17:04:44.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:145, engines/ep/src/durability/active_durability_monitor.h -> Feel free to fix in a follow up if you prefer.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-04-15 17:34:22.000000000
+Message: 
+Patch Set 8: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/18618/ : ABORTED
+
+Failure of a CTest test  46/198 Test  #43: ep_testsuite_basic.full_eviction.rocksdb .....................................Child aborted ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/18618/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/17191/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/280/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/9882/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/16526/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/10400/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/19268/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/3166/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-04-16 07:26:12.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:145, engines/ep/src/durability/active_durability_monitor.h -> I forgot a point here: high_prepared_seqno accounts non-sync writes.
+If a Replica blindly acks high_prepared_seqno (which is what we are doing I think), then the ack'ed seqno could *not* be present in the DM's tracked-writes.
+
+It sounds like we need to keep this, probably better we reconsider that after we have implemented the new ack-logic at Replica.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-04-16 09:21:28.000000000
+Message: 
+Patch Set 8:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/18634/ : ABORTED
+
+Failure of a CTest test   1/198 Test   #1: memcached-breakpad-test-segfault ............................................. ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/18634/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/17191/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/280/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/9882/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/16526/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/10400/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/19268/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/3166/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-04-16 10:47:35.000000000
+Message: 
+Patch Set 8:
+
+(2 comments)
+Line:58, engines/ep/src/durability/active_durability_monitor.h -> Legacy from before we moved the topology to VBucket, removed.
+
+Line:271, engines/ep/src/durability/active_durability_monitor.h -> Done
+
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,61 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-26907: Introduce usage of Expiration event for DCP
+
+This commit introduces implementation of Expiration event within
+DCP, which in turn triggers the Expiration code path instead of
+the deletion path. This also introduces the assumption that if the
+expiry path is being used, then deletion_v2 is also enabled.
+This also implements the ability to output an expiry opcode, as
+demonstrated by the test included in this patch.
+
+Change-Id: I2809941461310fce14e5fae5786a5d2b17b87f61
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Chris Farman
+Date: 2018-10-12 14:39:58.000000000
+Message: 
+Uploaded patch set 4: Patch Set 3 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-10-12 15:36:53.000000000
+Message: 
+Patch Set 4: Code-Review-1
+
+(12 comments)
+
+See detailed comments below, but I still think this can be simplified.
+
+In general the idea I had was that Item and StoredValue already know if they were TTL expired or deleted based on if they have an expiry set. As such you don't need the extra state.
+Line:1965, daemon/connection.cc -> A lot of duplication with deletion_v2 here - can you see if you can unify them - for example having both call a helper function for the first part of the functions (~lines  1927-1947) ?
+
+Line:253, daemon/protocol/mcbp/engine_wrapper.h -> Documentation needs updating
+
+Line:565, engines/ep/src/dcp/consumer.cc -> It looks like Item::exp field is being used inconsistenly (pre-dates your change) - here it's being passed the deleteTime (i.e. when we deleted a document); in general however that field is supposed to represent the expiry time (see ItemMetaData).
+
+I think we should clean this up (probably as a patch before your change) - make ItemMetaData::exptime always contain the expiry time (or zero if the item doesn't have one - i.e. explicit delete or still alive item); then for the purposes of passing the delete time into DcpConsumer::deletion add a new deleteTime field to Mutation Response (see line 601 below).
+
+Once you've done that (in a pre-patch); then you don't need to add any extra `DeleteSource` argument - you simply determine it based on the Item's deleted and ItemMetdata::exptime fields.
+
+Line:621, engines/ep/src/dcp/consumer.cc -> Hmm, looking back up at DcpConsumer::deletion() - if there's a separate DcpConsumer::expiration() method, then why do you need to make any changes to DcpConsumer::deletion - arn't DCP_EXPIRATION messages going to be handled by this function?
+
+Line:637, engines/ep/src/dcp/producer.cc -> Nit: use camelCase.
+
+Line:655, engines/ep/src/dcp/producer.cc -> I'd suggest designing your interface in a more robust manner - instead of allowing the possibility of such a inconsistency; simply say that enabling DCP_EXPIRATION also enables DCP_v2.
+
+Line:658, engines/ep/src/dcp/producer.cc -> Again, this feels unnecessary / inconsistent. As per previous comments, just make sure that StoredValues / Items /always/ know their Deletion source; and then either use that extra information (i.e. in producers->expiration), or ignore it (deleteV1 / V2).
+
+Line:374, engines/ep/src/dcp/producer.h -> Please document this method.
+
+Line:375, engines/ep/src/dcp/producer.h -> Can this be null? If not, prefer a reference.
+
+Line:222, engines/ep/src/stored-value.cc -> That sounds like a bug - although wouldn't an explicitly deleted item (not TTL) have a zero expiration and hence this isn't an issue?
+
+Line:228, engines/ep/src/stored-value.cc -> As previous comments, you shouldn't need this as it's implicit based on the expiration time.
+
+Line:22, engines/ep/tests/mock/mock_dcp.h -> Why do you need this? I think you should be able to forward-declare `item`.
+
+----------------------------------------------------------------------------------------------------------------------

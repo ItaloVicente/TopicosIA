@@ -1,0 +1,236 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-47197: Add support for cross-connection limits [1/n]
+
+As part of MB-46881 one needs to be able to rate limit clients
+based upon total usage across all their connection.
+
+This initial patch add some of the framework needed in order
+to do so, and as it stands it enables it by default (to
+make it easier to play around with.
+
+The default user limits is stored in JSON files in
+
+    <root>/etc/couchbase/kv/security/user.d/default.json
+
+(There is a readme in the directory describing the format
+and how to add per-user overrides)
+
+In the current prototype the file is loaded _the first time_
+the user logs in. Until the file has been loaded (or there
+is no file for the user) the user is assigned the following
+limits:
+
+    Network ingress: 10MB/min
+    Network egress : 10MB/min
+    Operations     : 60/min
+    Connections:   : 1 concurrent
+
+We don't need the metrics to be absolute correct, so we use a
+"sloppy" mechanism to enforce the limitations (which means
+that one may exceed the limitations with a few ops/bytes, but
+we don't care that much).
+
+The check use a "SloppyGauge" which holds a minute-counter and
+a value. Whenever we detect that we're operating in a different
+minute we reset the counter. This isn't done with a lock (just
+two atomics) which means that multiple threads may operate on
+the two variables "at the same time" (two threads may decide
+to clear the value and thread 1 clears it and sets its new
+value before thread 2 clears it again). We can accept that
+limited error margin to avoid having to add locks.
+
+While the patch schedule a task to run ever 30 minute to
+purge idle tenants none of them gets purged as the method to
+decide if it should be purged isn't implemented yet.
+
+One may receive cross-connection tenant stats by requesting
+the tenant stat group:
+
+    mcstat -b bucket tenants
+
+Which retrieves the statistics for all tenants, or one may
+receive for a single tenant by using:
+
+    mcstat -b bucket 'tenants {"domain":"local","user":"jones"}'
+
+The system currently only collect the following information
+on a per tenant base:
+
+    {
+      "connections": {
+        "current": 10,
+        "total": 12
+      },
+      "constrains": {
+        "connections": 10,
+        "egress": 52428800,
+        "ingress": 52428800,
+        "operations": 6000
+      },
+      "egress": 144552,
+      "ingress": 144264,
+      "operations": 6021,
+      "rate_limited": {
+        "connections": 1,
+        "egress": 0,
+        "ingress": 0,
+        "operations": 1
+      }
+    }
+
+Enforcing concurrent connections is a bit "hard" as we don't
+know the tenant until the connection is successfully authenticated.
+We could abort the authentication and reply with "rate limit"
+instead of authentication success, but that could potentially
+break (old) clients. We don't want to return success and just
+close the connection, as we want to be able to return an error
+message letting the client know why it was disconnected.
+To work around the problem we're disconnecting the clients whenever
+they try to execute packets. That means that you could in theory
+connect way too many connections to the server, but you wouldn't
+be able to use any of them as they would be disconnected when
+they try to execute a packet.
+
+The unit test is currently disabled as it is not possible
+to enable/disable the tracking at runtime
+
+Change-Id: If4f063bff7efade8cf6e8afd611f04cb26a801bf
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Trond Norbye
+Date: 2021-07-12 07:25:14.000000000
+Message: 
+Uploaded patch set 36: Patch Set 35 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-07-12 07:57:03.000000000
+Message: 
+Patch Set 36: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/37579/ : FAILURE
+
+Failure of GoogleTest "RbacTest.DcpOpenWithConsumerAccess":
+
+<pre>
+[ RUN      ] RbacTest.DcpOpenWithConsumerAccess
+unknown file: error: C++ exception with description "Select bucket [default] failed: Rate limit: Max Connections (50)" thrown in the test body.
+[  FAILED  ] RbacTest.DcpOpenWithConsumerAccess (14 ms)
+RbacTest.DcpOpenWithConsumerAccess
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/37579/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/12028/ : FAILURE
+
+Failure of GoogleTest "RbacTest.DcpOpenWithConsumerAccess":
+
+<pre>
+[ RUN      ] RbacTest.DcpOpenWithConsumerAccess
+[2021-07-12T07:54:18.819Z] unknown file: Failure
+[2021-07-12T07:54:18.819Z] C++ exception with description "Select bucket [default] failed: Rate limit: Max Connections (50)" thrown in the test body.
+[2021-07-12T07:54:18.819Z] [  FAILED  ] RbacTest.DcpOpenWithConsumerAccess (5 ms)
+RbacTest.DcpOpenWithConsumerAccess
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/12028/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/12187/ : FAILURE
+
+Failure of GoogleTest "CollectionsRbacBucket.BucketAccessScopeSuccess":
+
+<pre>
+[ RUN      ] CollectionsRbacBucket.BucketAccessScopeSuccess
+[2021-07-12T07:39:48.288Z] unknown file: Failure
+[2021-07-12T07:39:48.288Z] C++ exception with description "Select bucket [default] failed: Rate limit: Max Connections (50)" thrown in SetUp().
+[2021-07-12T07:39:48.288Z] [  FAILED  ] CollectionsRbacBucket.BucketAccessScopeSuccess (9 ms)
+CollectionsRbacBucket.BucketAccessScopeSuccess
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/12187/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/11111/ : FAILURE
+
+Failure of GoogleTest "RbacTest.DcpOpenWithConsumerAccess":
+
+<pre>
+[ RUN      ] RbacTest.DcpOpenWithConsumerAccess
+[2021-07-12T07:47:38.147Z] unknown file: Failure
+[2021-07-12T07:47:38.147Z] C++ exception with description "Select bucket [default] failed: Rate limit: Max Connections (50)" thrown in the test body.
+[2021-07-12T07:47:38.147Z] [  FAILED  ] RbacTest.DcpOpenWithConsumerAccess (4 ms)
+RbacTest.DcpOpenWithConsumerAccess
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/11111/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/12532/ : FAILURE
+
+Failure of GoogleTest "RbacTest.DcpOpenWithConsumerAccess":
+
+<pre>
+[ RUN      ] RbacTest.DcpOpenWithConsumerAccess
+[2021-07-12T07:45:58.634Z] unknown file: Failure
+[2021-07-12T07:45:58.634Z] C++ exception with description "Select bucket [default] failed: Rate limit: Max Connections (50)" thrown in the test body.
+[2021-07-12T07:45:58.634Z] [  FAILED  ] RbacTest.DcpOpenWithConsumerAccess (30 ms)
+RbacTest.DcpOpenWithConsumerAccess
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/12532/ )
+
+ThreadSanitizer issue: data race on vptr (ctor/dtor vs virtual call) /home/couchbase/jenkins/workspace/kv_engine.threadsanitizer_master/platform/src/process_monitor.cc:93 in ProcessMonitorImpl::~ProcessMonitorImpl()  ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/12532/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/20079/ : FAILURE
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/9092/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/10453/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/32053/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/63/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2021-07-12 07:59:29.000000000
+Message: 
+Removed reviewer Dave Rigby.
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2021-07-12 07:59:31.000000000
+Message: 
+Removed reviewer Jim Walker.
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2021-07-12 07:59:32.000000000
+Message: 
+Removed reviewer Daniel Owen.
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2021-07-12 07:59:34.000000000
+Message: 
+Removed reviewer Dave Finlay.
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2021-07-12 07:59:37.000000000
+Message: 
+Removed reviewer Matt Carabine.
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2021-07-12 07:59:39.000000000
+Message: 
+Removed reviewer James H.
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2021-07-12 07:59:40.000000000
+Message: 
+Removed reviewer Paolo Cocchi.
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2021-07-12 07:59:42.000000000
+Message: 
+Removed reviewer Ben Huddleston.
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2021-07-12 07:59:44.000000000
+Message: 
+Removed reviewer Richard de Mellow.
+----------------------------------------------------------------------------------------------------------------------

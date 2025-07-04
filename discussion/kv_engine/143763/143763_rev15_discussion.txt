@@ -1,0 +1,123 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-43550 Get specific stats in bulk from KVBucket, KVStore
+
+Currently we gather kvstore stats for engine stats reporting by calling
+KVStore individually for each stat. This is inefficient for MagmaKVStore
+since for every such call, it fetches all its stats and only returns the
+one asked for. It has to do this because Magma only supports getting all
+stats at once and has no provision to get individual stats.
+
+To help with such cases, this change adds a method to KVBucket and
+KVStore to get specific stats in bulk.
+
+Change-Id: I1c17f672bbf1ac45959354cb1e970cce65953f61
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Rohan Suri
+Date: 2021-01-29 15:13:31.000000000
+Message: 
+Uploaded patch set 15.
+----------------------------------------------------------------------------------------------------------------------
+Author: Rohan Suri
+Date: 2021-01-29 16:27:47.000000000
+Message: 
+Patch Set 15:
+
+(3 comments)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-01-29 16:52:54.000000000
+Message: 
+Patch Set 15: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/5365/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/6829/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/33277/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/28626/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/8370/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/8495/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/8751/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/7454/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/16300/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-01-29 17:29:51.000000000
+Message: 
+Patch Set 15: Code-Review-1
+
+(2 comments)
+Line:394, engines/ep/src/kvstore.cc -> Ah - so string_view isn't guaranteed to be null-terminated; which means it's not safe to call .data() and pass to something taking `const char*`.
+
+I see two options:
+
+1) change the various std::string_view to `const char*`, or 
+2) change getStat (and possibly some code under it) to take std::string_view.
+
+1) is the simpler option and technically given we never need sub-strings or similar is sufficient for the current use-case 2) is arguably a nicer, more flexible API, but it's even more feature-creep on this patch. 
+
+I'll let you decide, but if (2) ends up quite large you might want to split into it's own patch beforehand.
+
+Line:2386, engines/ep/src/magma-kvstore/magma-kvstore.cc -> Not sure this is going to work / be safe in the general-case. gsl::span is non-owning (it's basically just a pointer and a size internally), so you don't have the ability to modify it - including rearranging items.
+
+If you need to sort I think you need to create your own storage here - which somewhat negates the other changes made to minimise temporaries etc. Given theres's only ~30 or so actual stats it might be fine to just perform a liner search of `keys` then checking if the user requested that key.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Rohan Suri
+Date: 2021-01-29 20:37:19.000000000
+Message: 
+Patch Set 15:
+
+(2 comments)
+Line:394, engines/ep/src/kvstore.cc -> Good catch! 
+
+Let's go ahead with the 2nd suggestion. Another benefit would be in faster string comparisons. Since string_view knows its size, it can terminate quickly if the other string doesn't equal its size.
+
+Here you go: http://review.couchbase.org/c/kv_engine/+/144764
+
+Line:2386, engines/ep/src/magma-kvstore/magma-kvstore.cc -> > so you don't have the ability to modify it - including rearranging items
+
+I think gsl::span allows for modification of the elements since operator[], data() return non-const references? Sorting using such a mutable view seems fine, just like old C style qsort would work with base pointer and size? Also the iterators meet std::sort requirements.
+
+> If you need to sort I think you need to create your own storage here - which somewhat negates the other changes made to minimise temporaries
+
+Good point. Though I believe std::sort (implemented as IntroSort) is in-place not needing any dynamic allocations.
+
+> Given theres's only ~30 or so actual stats it might be fine to just perform a liner search of `keys` then checking if the user requested that key.
+
+Sure, will remove the sorting. I was in two minds, but wondered if sorting routines have special handling for smaller array sizes, it might be beneficial.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-02-01 13:49:09.000000000
+Message: 
+Patch Set 15:
+
+(1 comment)
+Line:2386, engines/ep/src/magma-kvstore/magma-kvstore.cc -> > I think gsl::span allows for modification of the elements since operator[], data() return non-const references? Sorting using such a mutable view seems fine, just like old C style qsort would work with base pointer and size? Also the iterators meet std::sort requirements.
+
+You're correct, gsl::span (and std::span) does allow modification in general, but in our use-case here we cannot assume modification is allowed - the actual sequence of  strings could be read-only; for example something like:
+
+ constexpr std::array<std::string_view, N> = {...};
+
+Could end up in read-only memory in the binary. As such, we should ideally change the argument type to gsl::span<const std::string_view>
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Rohan Suri
+Date: 2021-02-01 17:01:26.000000000
+MISMATCHED INLINE COMMENT
+Line:2386, engines/ep/src/magma-kvstore/magma-kvstore.cc -> Done
+----------------------------------------------------------------------------------------------------------------------

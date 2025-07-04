@@ -1,0 +1,121 @@
+======================================================================================================================
+DESCRIPTION:
+
+NCBC-2755: Use ThrowHelper to improve inlining
+
+Motivation
+----------
+Many more methods could be inlined to improve performance by not
+directly throwing exceptions.
+
+Modifications
+-------------
+Create ThrowHelper as an internal static class to contain helpers that
+throw common exceptions.
+
+Replace throw statements with calls to ThrowHelper along a lot of hot
+paths which are likely to be inlined.
+
+Results
+-------
+The JIT compiler has a lot more options to inline a variety of methods
+and therefore improve performance. Heuristics may not cause them to all
+be inlined, but many of them will be.
+
+Change-Id: I2afb42ac8b5ee47b27c218f800fe15b2d4078bf9
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Brant Burnett
+Date: 2020-12-13 23:47:04.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-12-13 23:47:11.000000000
+Message: 
+Patch Set 1:
+
+Build Started http://sdk.jenkins.couchbase.com/job/dotnet/job/sdk/job/couchbase-net-client-cv-trigger/2136/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-12-13 23:50:15.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+http://sdk.jenkins.couchbase.com/job/dotnet/job/sdk/job/couchbase-net-client-cv-trigger/2136/ : success
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard Ponton
+Date: 2020-12-14 16:17:27.000000000
+Message: 
+Patch Set 1:
+
+(7 comments)
+
+Inlining methods is a tradeoff between library size and possible execution speed.
+
+I'm not convinced this is a tradeoff we want to make.  Library size correlates to load time and baseline memory usage.
+Line:64, src/Couchbase/Core/ClusterNodeCollection.cs -> Might as well include the check variable as the first parameter, and we can eliminate the IF statement.
+
+Line:66, src/Couchbase/Core/IO/AsyncState.cs -> Extra whitespace
+
+Line:23, src/Couchbase/Core/IO/Operations/SubDocument/DocumentFragment'.cs -> Extra whitespace
+
+Line:28, src/Couchbase/Core/IO/Serializers/NewtonsoftJsonToken.cs -> Is it making it a method that lets it be inlined, or the DoesNotReturn attribute?  
+
+I'd prefer the null check to be a single line, so it distracts from the actual code as possible.
+
+Line:29, src/Couchbase/Core/Sharding/VBucket.cs -> extra whitespace
+
+Line:35, src/Couchbase/HostEndpoint.cs -> whitespace
+
+Line:29, src/Couchbase/KeyValue/LookupInResult.cs -> whitespace
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Brant Burnett
+Date: 2020-12-14 17:48:01.000000000
+Message: 
+Patch Set 1:
+
+(7 comments)
+
+> Patch Set 1:
+> 
+> (7 comments)
+> 
+> Inlining methods is a tradeoff between library size and possible execution speed.
+> 
+> I'm not convinced this is a tradeoff we want to make.  Library size correlates to load time and baseline memory usage.
+
+This concern is why I approached it the way I did, and didn't use [MethodImpl(MethodImplOptions.AggressiveInlining)]. This way the .NET heuristics will be applied that decide if inlining is worth the tradeoff, based on things like method size, if the method is called within a loop, etc. Moving the throw statements to a separate method simply allows the heuristics to be applied, rather than .NET simply never inlining at all.
+
+Ironically, it can actually reduce the code size once JITed, because the method call to the single throw method is actually smaller than the throw logic being repeated over and over again.
+
+There is a small tradeoff in load/JIT time, but is negligible. Considering the savings on paths that are called repeatedly in key/value versus a small bootstrap cost, it seems well worth it to me.
+
+Note that this is also the standard approach used internally within the .NET framework: https://github.com/dotnet/runtime/blob/31062e4ec6b248b709095e13947400b49d507e53/src/libraries/System.Private.CoreLib/src/System/ThrowHelper.cs
+Line:64, src/Couchbase/Core/ClusterNodeCollection.cs -> Sending the value to the helper method would actually remove the advantage, and perhaps be slower than the current approach, as then a method call is required to check the value for null. This approach allows the common path (not null) to live in this method and be inlined into the caller, and the only time call stack framing is required is when an exception is actually being thrown (the uncommon path).
+
+Line:66, src/Couchbase/Core/IO/AsyncState.cs -> Ack
+
+Line:23, src/Couchbase/Core/IO/Operations/SubDocument/DocumentFragment'.cs -> Ack
+
+Line:28, src/Couchbase/Core/IO/Serializers/NewtonsoftJsonToken.cs -> It's moving the throw statement to a separate method that allows it to be inlined. Methods with a throw statement are not allowed to be inlined. The DoesNotReturn attribute provides a hint for nullable reference types that indicates to the compiler that an exception is always being thrown so it knows that token is not null lower in the method.
+
+https://docs.microsoft.com/en-us/dotnet/csharp/language-reference/attributes/nullable-analysis#verify-unreachable-code
+
+Line:29, src/Couchbase/Core/Sharding/VBucket.cs -> Ack
+
+Line:35, src/Couchbase/HostEndpoint.cs -> Ack
+
+Line:29, src/Couchbase/KeyValue/LookupInResult.cs -> Ack
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jeffry Morris
+Date: 2020-12-14 19:40:47.000000000
+MISMATCHED INLINE COMMENT
+Line:66, src/Couchbase/Core/IO/AsyncState.cs -> whitespace
+----------------------------------------------------------------------------------------------------------------------

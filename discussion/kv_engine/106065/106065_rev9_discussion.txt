@@ -1,0 +1,119 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-33298 [SR]: Ensure seqno-invariant in DurabilityMonitor
+
+At Vucket::queueDirty we do 2 things:
+1) we queue an item into the BackfillQueue/CheckpointManager
+2) and we add durable items into the DurabilityMonitor
+
+While every structure ensures internal synchronization, it could happen
+that we queue e.g. seqno:1 and seqno:2 into the CM, but seqno:2 first
+and then seqno:1 into the DM for tracking, which is wrong.
+Given that VBucket::queueDirty requires only a HashBucketLock, that
+issue may arise when multiple threads issue durable-writes that fall
+into different HashTable partitions.
+
+This patch ensures that:
+a) a proper exception is thrown if any actor tries to break
+  seqno-invariant when queueing a new item into the DM
+b) at VBucket::queueDirty we treat enqueueing in Bakcfill/CM and DM as
+  an atomic operation. That ensures that items are queued into all
+  structures with the same seqno-order.
+
+Change-Id: Ibe589925d676ed90940d1dae3a3b3f3fdd9c9f8a
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2019-03-14 08:11:13.000000000
+Message: 
+Uploaded patch set 9.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-03-14 08:33:57.000000000
+Message: 
+Patch Set 9: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/9514/ : FAILURE
+
+Failure of a CTest test 156/173 Test #154: memcached_testapp.ep.CleanOrUnclean/PersistToTest ............................ ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/9514/ )
+
+Failure of a GoogleTest  ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/9514/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/18373/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/18373/ )
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/9075/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/16270/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/17697/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/15721/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/2236/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-03-14 09:09:35.000000000
+Message: 
+Patch Set 9: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/9515/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/9075/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/16270/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/17697/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/15721/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/2236/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/18376/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-03-14 09:27:58.000000000
+Message: 
+Patch Set 9: Code-Review-1
+
+(3 comments)
+Line:569, engines/ep/tests/module_tests/vbucket_durability_test.cc -> What's the runtime of this new test (under TSan / UBSan etc)? If it's significant then consider some of the below suggestions to speed it up.
+
+Line:574, engines/ep/tests/module_tests/vbucket_durability_test.cc -> You don't really need different keys for each iteration - if you pre-select two keys which don't hash to the same bucket you can avoid them both locking on the same hashbucket lock.
+
+You might also want to commit the items to avoid growing the DM / HashTable (and making the test run slowly).
+
+Line:597, engines/ep/tests/module_tests/vbucket_durability_test.cc -> You can increase the number of HTlocks when you configure this test to increase the chance of hitting the issue.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-03-14 12:28:32.000000000
+Message: 
+Patch Set 9:
+
+(1 comment)
+Line:569, engines/ep/tests/module_tests/vbucket_durability_test.cc -> ~3/4 secs, long actually
+I'll got with both solutions below for increasing the chance of failure at race-condition (possibly) with less iterations, thanks
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-03-14 14:41:42.000000000
+Message: 
+Patch Set 9:
+
+(3 comments)
+Line:569, engines/ep/tests/module_tests/vbucket_durability_test.cc -> Managed to drop the TSan/UBsan runtime to ~300ms by increasing parallelism to 4 front-end theads, while keeping the chance of failure (before fix) very high (actually no false negative at build=Rel on mancouch).
+
+Line:574, engines/ep/tests/module_tests/vbucket_durability_test.cc -> Unfortunately re-using the same key prevents queueing (isPendingItem status from the HT) until we commit the write. I could add the commit-step, but that would slow down front-end operations, which doesn't help in increasing the chance of race-condition.
+
+Line:597, engines/ep/tests/module_tests/vbucket_durability_test.cc -> Interestingly enough, even setting the numLocks=1000 doesn't change too much. That suggests that our hash function is doing well with the default numLocks.
+
+----------------------------------------------------------------------------------------------------------------------

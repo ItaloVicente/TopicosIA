@@ -1,0 +1,240 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-30302: Update bespoke loggers in EP Engine to use BucketLogger
+
+Update the code that uses bespoke instances of the old Logger
+to the new BucketLogger. This includes Couch-KVStore, DCP,
+KVStore, and RocksDB-KVStore.
+
+Add BucketLogger functionality to prepend given prefix messages
+and ids to logs messages.
+
+Create MockBucketLogger for kvstore_test
+
+Change-Id: Ib25444cf1effa875ce632189d33b0a134c5287cc
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Ben Huddleston
+Date: 2018-07-19 11:34:32.000000000
+Message: 
+Uploaded patch set 4.
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2018-07-19 11:42:00.000000000
+Message: 
+Patch Set 4:
+
+Not 100% about the approach on this, but didn't want to create a new spdlogger for each message logged after a connection dies (see the old log messages at the end of the active, notifier, and passive stream files). 
+
+Couple notes, .c_str() calls in these changes are required, as strings cannot be passed through variadic templates. Removed incorrect %.*s conversions to {}*s which would make log calls have incorrect number of params.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-07-19 11:42:06.000000000
+Message: 
+Patch Set 4: Well-Formed+1
+
+Permission granted to commit: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/96972/artifact/restricted.html : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-07-19 12:06:39.000000000
+Message: 
+Patch Set 4: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/2359/ : FAILURE
+
+Failure of a CTest test  68/173 Test  #68: ep_testsuite_xdcr.full_eviction.comp_active .................................. ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/2359/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/10495/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/9340/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/10625/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/211/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/9478/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-07-19 12:24:27.000000000
+Message: 
+Patch Set 4: Code-Review-1
+
+(18 comments)
+
+General approach looks good - big simplification of the logging. However, this patch has got pretty large and wide in scope.
+
+Consider splitting this patch into two (or more) sub-patches - one which introduces the new functionality in the bucket logger; and then subsequent patches which switch over to using that for chunks of the areas in the code - ConnHandler; Couchstore, etc.
+
+Some more specific comments below:
+Line:76, engines/ep/src/bucket_logger.cc -> This seems like an overly-complex API - given the prefix is an arbitrary string; why not just have the caller just specify the complex prefix ("ID : name") they want to use?
+
+Line:88, engines/ep/src/bucket_logger.cc -> Can you check the ordering of this - I think we currently have the bucket name in front of everything.
+
+Line:119, engines/ep/src/bucket_logger.cc -> I suggest you re-strucuture this - this class shouldn't be mangaging multiple "global" objects (one is "ok" but even then not ideal).
+
+For example, if the ActiveStream class needs a global (static) logger; than have /it/ own that logger; and initialise it on the first creation of an ActiveStream object - similarly for Notifier / Passive Streams.
+
+Line:46, engines/ep/src/bucket_logger.h -> I'd probably drop this sentence - while it might reflect the current usage, given this is a generic helper class; documenting the current usage is only likely to become outdated as other callers use it / existing usage changes.
+
+(Your IDE can generally tell you all the places which call a method / constructor.)
+
+Line:47, engines/ep/src/bucket_logger.h -> Prefer to use a plain std::string here; and then move it into the prefix member variable. That way we don't have to pay for a copy of the string if it's an rvalue.
+
+Also consider if we have a simpler API by removing this constructor; and just exposing a setPrefix() method.
+
+Line:49, engines/ep/src/bucket_logger.h -> Nit: This line is redundant.
+
+Line:55, engines/ep/src/bucket_logger.h -> Style: List constructors in order; with default first.
+
+Line:61, engines/ep/src/bucket_logger.h -> Abstraction is a bit unclean here - why is this public?
+
+If it should be, public members should be listed after methods.
+
+Line:39, engines/ep/src/connhandler.cc -> Much terser to use `bucketLogger.warn()` instead.
+
+Line:233, engines/ep/src/connhandler.cc -> The caller probably doesn't care that much about the type of the logger - suggest you just change the implementation of the existing `getLogger()` method to return a BucketLogger; and update callers as appropriate.
+
+Line:201, engines/ep/src/connhandler.h -> Would be nice to remove all the old usages as part of the same change; so we don't have the complexity of two types of logging at the same time.
+
+Line:276, engines/ep/src/dcp/consumer.cc -> Here and elsewhere - we can just change to use bucketLogger directly; and have it manage the prefix.
+
+Line:20, engines/ep/src/dcp/notifier_stream.h -> The notifier stream class shouldn't need to include the active stream header (we try to minimise as much as possible how many headers are included - especially from .h files as that bloats the build time).
+
+See how you can restructure this to avoid the need for this.
+
+Line:129, engines/ep/src/dcp/passive_stream.cc -> Style (here and elsewhere, but only just spotted it here) - this is a good place to use `auto` to simplify the code (given the type is implied by the RHS):
+
+ auto logLevel = spdlog::level::level_enum::info;
+
+You could also consider a `using namespace spdlog::level::level_enum` or similar in the .cc files to simplify the code.
+
+Line:19, engines/ep/src/dcp/passive_stream.h -> Similary here - the header shouldn't need to know about the consumer class.
+
+Line:4046, engines/ep/src/ep_engine.cc -> Note `stat_key` isn't guaranteed to be null-terminated; so you need to do something like construct a const_char_buffer; or in fact use the `statKey` which is assigned a couple of lines below.
+
+Line:139, engines/ep/src/executorthread.cc -> This is a std::string so you can remove .data()
+
+Line:22, engines/ep/src/kvstore.h -> Again, you don't need this header. prefer a forward declaration here.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-07-19 13:17:36.000000000
+Message: 
+Patch Set 4:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/2361/ : FAILURE
+
+Timeout of a CTest test 173/173 Test #165: memcached_testapp.ep.Transport/McdTestappTest ................................} ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/2361/ )
+
+Failure of a CTest test  28/173 Test  #28: ep_testsuite.full_eviction.comp_off .......................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/2361/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/10495/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/9340/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/10625/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/211/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/9478/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2018-07-23 11:34:01.000000000
+Message: 
+Patch Set 4:
+
+(8 comments)
+Line:76, engines/ep/src/bucket_logger.cc -> Current order is ID, Engine name, Prefix so would be more complicated to split these for printing
+
+Line:88, engines/ep/src/bucket_logger.cc -> Checked ordering, we currently do ID - Engine - Prefix so corrected to this
+
+Line:119, engines/ep/src/bucket_logger.cc -> Done
+
+Line:46, engines/ep/src/bucket_logger.h -> Done
+
+Line:47, engines/ep/src/bucket_logger.h -> Done. Removed and made call setPrefix
+
+Line:49, engines/ep/src/bucket_logger.h -> Done
+
+Line:55, engines/ep/src/bucket_logger.h -> Done
+
+Line:61, engines/ep/src/bucket_logger.h -> Done
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2018-07-23 11:34:31.000000000
+Message: 
+Patch Set 4:
+
+> (8 comments)
+
+Bucket Logger Changes - http://review.couchbase.org/#/c/97261/
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2018-07-23 14:36:08.000000000
+Message: 
+Patch Set 4:
+
+(2 comments)
+
+Misc BucketLogger macro updates - http://review.couchbase.org/#/c/97267/
+Line:4046, engines/ep/src/ep_engine.cc -> Done
+
+Line:139, engines/ep/src/executorthread.cc -> Done
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2018-07-23 14:37:01.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+
+KVStore BucketLogger changes - http://review.couchbase.org/#/c/97262/
+Line:22, engines/ep/src/kvstore.h -> Done
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2018-07-23 14:39:31.000000000
+Message: 
+Patch Set 4:
+
+(6 comments)
+
+DCP BucketLogger changes - http://review.couchbase.org/#/c/97271/
+
+As ActiveStream exposed the log method publicly, and was being used, restructured this to a single include of ConnHandler.h in Stream.h as DcpProducer and DcpConsumer both inherit from ConnHandler
+Line:39, engines/ep/src/connhandler.cc -> Done
+
+Line:233, engines/ep/src/connhandler.cc -> Done
+
+Line:276, engines/ep/src/dcp/consumer.cc -> Done
+
+Line:20, engines/ep/src/dcp/notifier_stream.h -> Done
+
+Line:129, engines/ep/src/dcp/passive_stream.cc -> Done
+
+Line:19, engines/ep/src/dcp/passive_stream.h -> Done
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2018-07-23 14:41:41.000000000
+Message: 
+Abandoned
+
+Abandoning due to splitting this patch set into multiple smaller ones.
+
+http://review.couchbase.org/#/c/97261/
+http://review.couchbase.org/#/c/97262/
+http://review.couchbase.org/#/c/97267/
+http://review.couchbase.org/#/c/97271/
+----------------------------------------------------------------------------------------------------------------------

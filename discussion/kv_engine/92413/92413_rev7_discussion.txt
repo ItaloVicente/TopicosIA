@@ -1,0 +1,93 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-29184 CouchRocks: Expose new stats to debug the 'scan' function
+
+R-0 Rebalance tests show poor performance on disk Backfill.
+As we never delete the old Seqno->Key mappings from the SeqnoCF, the
+execution of 'RocksDBKVStore::scan()' may lead to reading the same
+document multiple times from disk.
+
+In the 'scan()' function we perform two main steps:
+
+1) For every Seqno, we retrieve the Key from the SeqnoCF (Seqno->Key
+    mapping);
+2) For every Key, we retrieve the document Body from the DefaultCF
+    (Key->Body mapping).
+
+Currently we never delete old seqnos from the SeqnoCF, so we
+may end up performing a full Document read multiple times for a
+single document. That happens for all the document that have been
+updated at least once. E.g. (note that Body=Metadata+Value):
+
+1) document A is created:
+    SeqnoCF:    {(Seqno_A1, Key_A)}
+    DefaultCF:   {(Key_A, Body_A1)}
+2) document A is updated:
+    SeqnoCF:    {(Seqno_A1, Key_A), (Seqno_A2, Key_A)}
+    DefaultCF:   {(Key_A, Body_A2)}
+
+So essentially we may have multiple entries in the SeqnoCF (the last
+seqno plus all the previous seqnos of previous mutations), all
+pointing to the same latest entry in the DefaultCF.
+
+Also, the current implementation of 'scan' is sub-optimal. Using the
+example above:
+1) we start iterating through the SeqnoCF
+2) we find (Seqno_A1, Key_A)
+3) we perform a point lookup from the DefaultCF for Key_A
+4) now we have Body_A2. We retrieve the seqno, which is Seqno_A2.
+    Note: under RocksDB we always need to get the entire document for
+        retrieving Metadata (e.g., seqno) as Metadata are stored in
+        a single Slice together with the Value into the DefaultCF.
+5) we compare the seqnos and find that (Seqno_A2 > Seqno_A1)
+6) as we always want the latest seqno, we go to step 1) and repeat.
+
+In the example above we end up performing a point lookup for Key_A
+twice.
+
+We want to measure the impact of keeping old seqnos when performing
+a Backfill, so we add new scan-stats for accounting:
+
+1) 'scan_totalSeqnoHits': the number of total hits in the SeqnoCF
+    (which is equal to number of times we perform a point lookup
+    from the DefaultCF)
+2) 'scan_oldSeqnoHits': the number of "useless" point lookups caused
+    by old seqnos in the SeqnoCF
+
+Change-Id: I71602967503f64963408c5a59bfa94a37742781c
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2018-04-10 08:46:33.000000000
+Message: 
+Patch Set 7: Patch Set 6 was rebased
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-04-10 09:14:57.000000000
+Message: 
+Patch Set 7: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master-gcc7/747/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/7935/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/7171/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/8990/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/8812/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master-gcc7/697/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/2350/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Tim Bradgate
+Date: 2018-04-10 09:58:54.000000000
+Message: 
+Patch Set 7: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------

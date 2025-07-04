@@ -1,0 +1,135 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-26255[4]: Add stat for total data size to be sent over the wire
+
+Add a stat for total_data_size. This should be the number of bytes
+that needs to be sent over the wire. This is different from the
+total bytes sent stat which could be a lot less if compression
+is enabled.
+
+Change-Id: I50328ff93a034852c19cb9330ba8cc56622fc394
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Sriram Ganesan
+Date: 2017-10-12 14:28:20.000000000
+Message: 
+Uploaded patch set 15: Patch Set 14 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2017-10-12 14:52:55.000000000
+Message: 
+Patch Set 15: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master/2911/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/3058/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/1584/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/2742/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/3035/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/3100/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2017-10-12 15:11:35.000000000
+Message: 
+Patch Set 15: Code-Review-1
+
+(6 comments)
+
+I know this was initially a stats only patch, but it's highlighted some issues with buffer log handling - see below.
+Line:603, engines/ep/docs/stats.org -> Just thought of this reading this patch - I think it's worth adding a similar stat for `compression_enabled: {false / snappy}` in a follow up patch.
+
+Line:613, engines/ep/docs/stats.org -> Maybe it's just me being fussy, but the "should have been sent" implies that this is some kind of expected value, not the actual value.
+
+How about re-phrasing to something like "Size of data before compression sent to the consumer. Only present if compression is enabled."
+
+What do you think?
+
+Line:529, engines/ep/src/dcp/producer.cc -> I think you're double counting here - you add the original size of the message here, but at line 568 you again add the compressed size).
+
+Suggest you just calculate the uncompressed size once - if compression is enabled (i.e. in the `else` case of line 564).
+
+Line:690, engines/ep/src/dcp/producer.cc -> I think it would be simpler / cleaner if we just keep the original code here; and instead update `resp` when we compress the item (around line 558) to replace the original item with a compressed item. That way you don't need a special check for a particular type of message, and don't need to add extra state variables (sizeBefore & sizeAfter). 
+
+Another thing to check (paging Dan Owen) is that the accounting of the message sizes (for the noop / buffer asking) is correct here  as I think it might be wrong:
+
+Note that the bufferLog is updated in ActiveStream::nextQueuedItem(), which is called as part of getNextItem() at line 518. As such, we have already accounted for the original size of the DCP mutation. If we change the size here and then send it, we'll be accounting incorrectly.
+
+I think you need to look at restructuring how the buffering works.
+
+Line:916, engines/ep/src/dcp/producer.cc -> I suggest we only include this if compression is enabled; otherwise it's just noise for other (non-compression) connections.
+
+Line:266, engines/ep/tests/module_tests/dcp_test.cc -> Please could you also add tests for buffer accounting - might be as simple as creating a new variant of the existing buffering tests.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Sriram Ganesan
+Date: 2017-10-12 21:51:50.000000000
+Message: 
+Patch Set 15:
+
+(1 comment)
+Line:690, engines/ep/src/dcp/producer.cc -> I will look into restructuring the code. But, don't the lines at 560-561 handle the buffering issue that you guys are talking about? The difference in the message size after compression seems to be acknowledged there, thus taking care of the accounting.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Daniel Owen
+Date: 2017-10-13 16:23:28.000000000
+Message: 
+Patch Set 15:
+
+(1 comment)
+Line:690, engines/ep/src/dcp/producer.cc -> Hi Sriram, I think your correct.  Although doing an acknowledge here is a hack - as we never sent that size.
+I think it would be better to replace the use of the acknowledge function with a new update function which updates the buffer so it is has the correct message size in it.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Sriram Ganesan
+Date: 2017-10-14 02:32:34.000000000
+Message: 
+Patch Set 15:
+
+(1 comment)
+Line:690, engines/ep/src/dcp/producer.cc -> Dave,
+
+Although updating the response with the compressed item seems like the cleaner way of doing this, there is a weird problem in implementing it. Lets assume resp is updated with itmCpy. itmCpy gets freed while sending the mutation callback and the stale pointer will sit in the resp and will cause problems trying to ultimately free resp. A way to circumvent that would be to create a copy of itmCpy itself to store in resp. This would incur an extra memory allocation, which in my opinion, could be expensive. Any suggestions?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Sriram Ganesan
+Date: 2017-10-15 17:54:48.000000000
+Message: 
+Patch Set 15:
+
+(4 comments)
+Line:613, engines/ep/docs/stats.org -> Done
+
+Line:529, engines/ep/src/dcp/producer.cc -> Done
+
+Line:916, engines/ep/src/dcp/producer.cc -> Done
+
+Line:266, engines/ep/tests/module_tests/dcp_test.cc -> Done
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2017-10-16 09:57:00.000000000
+Message: 
+Patch Set 15:
+
+(1 comment)
+Line:690, engines/ep/src/dcp/producer.cc -> Hmm, true. The ownership semantics aren't very clear here :( Let's leave the stat update here, however we still have the buffer ack issue to fix; but that can be done in a different patch (this one was about just adding a new statistics :)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Sriram Ganesan
+Date: 2017-10-16 18:50:15.000000000
+Message: 
+Patch Set 15:
+
+(1 comment)
+Line:690, engines/ep/src/dcp/producer.cc -> Done
+
+----------------------------------------------------------------------------------------------------------------------

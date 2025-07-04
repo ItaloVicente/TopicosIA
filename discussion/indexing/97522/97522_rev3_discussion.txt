@@ -1,0 +1,61 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-30663 moi: Fix race condition in throttling persistence
+
+On rare occasions, multiple go routines would end up testing
+the semaphore flag and we end up with an incorrect
+semaphore count, causing a hang in persistence.
+To prevent this serialize the threads locally, then serialize them
+globally.
+
+Change-Id: Iea60b8baa456c580899a5246096b752e52ae72a8
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Sundar Sridharan
+Date: 2018-07-28 01:01:55.000000000
+Message: 
+Uploaded patch set 3.
+----------------------------------------------------------------------------------------------------------------------
+Author: John Liang
+Date: 2018-07-28 04:37:47.000000000
+Message: 
+Patch Set 3: Code-Review+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Sarath Lakshman
+Date: 2018-07-30 03:08:43.000000000
+Message: 
+Patch Set 3: Code-Review-1
+
+(1 comment)
+Line:781, secondary/indexer/memdb_slice_impl.go -> This still could cause a race condition. We are assuming that internallly it would invoke limitWriterThreads `concurrency` times. But will be always <= concurrency.  If it is invoked only < concurrency, this would block forever right ?
+
+Eg: total number of items < concurrency.
+
+I beleive the race condition is because of not protecting firstItem variable. Will the following approach work ?
+
+Use an atomic counter count.
+
+limitWriterThreads := func(itm *memdb.ItemEntry) {
+if atomic.AddInt64(&count, 1) == 1 {
+    firstItem = true
+}
+
+}
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Sundar Sridharan
+Date: 2018-07-30 22:31:56.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+
+Hi Sarath, given that we are close to the release, I'll revert to patchset 1 which just fixes the atomic race condition like you indicated and make this change a separate one for mad-hatter. thanks
+Line:781, secondary/indexer/memdb_slice_impl.go -> Currently, the memdb's StoreToDisk (Visitor) spawns exactly concurrency go routines to do persistence. In the code today we do not have a case where fewer than concurrency threads are spawned. Also the first item that each visitor worker go routines processes, it will get blocked, so aren't we guaranteed that this callback will be invoked at least "concurrency" times?
+
+As for the atomic counter count approach, that was patchset 1. The reason I did this is because, it does not really throttle any persister go routines. All the threads still run in parallel.
+
+----------------------------------------------------------------------------------------------------------------------

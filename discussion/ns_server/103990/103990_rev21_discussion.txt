@@ -1,0 +1,125 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-32776: Retry rebalance upon failure.
+
+Change-Id: Iee10d6d4bdc20f5b011ee88d8446651c6f7dbc84
+Reviewed-on: http://review.couchbase.org/103990
+Well-Formed: Build Bot <build@couchbase.com>
+Tested-by: Build Bot <build@couchbase.com>
+Tested-by: Poonam Dhavale <poonam@couchbase.com>
+Reviewed-by: Aliaksey Artamonau <aliaksey.artamonau@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Aliaksey Artamonau
+Date: 2019-04-09 07:39:58.000000000
+Message: 
+Change has been successfully cherry-picked as c1df4c76c7943c5d174498762989768fbca8bccf by Aliaksey Artamonau
+----------------------------------------------------------------------------------------------------------------------
+Author: Poonam Dhavale
+Date: 2019-04-09 20:07:36.000000000
+Message: 
+Patch Set 21:
+
+Thanks Aliaksey, for reviewing and merging the changes. 
+
+My comments in-line.
+
+> (1 comment)
+ > 
+ > 1. There might not be a user. People do write automation scripts.
+
+Yes.
+
+Whether it is the user or a user who has written automated scripts, there are several lines of defense: 
+- As mentioned earlier, the default will be changed to off. That way it is a conscious decision by the user to enable the feature. 
+We will provide necessary warnings when they are enabling the feature.
+ E.g. After rebalance failure, they should make sure a retry is not pending before running any commands.
+ We will also advise them NOT enable the feature if they are running automated scripts or running in environments with external orchestrator like K8. 
+Because then the external orchestrator/automated scripts can retry the rebalance.
+
+- But, users may not heed the warnings, read the documentation.
+
+- So, there is a 2nd line of defense. When a retry is pending, a banner will 
+be displayed on the UI. It will ask users to cancel the retry before 
+performing any manual operations.
+
+- But, manual operations could be happening via automated scripts, or the 
+user is not at the UI console to see the banner or is distracted or 
+maybe some other reason why they are not aware of the retry.
+
+- So, there is a 3rd line of defense. Some commands which change the cluster in significant way such as rebalance and failover (all 3 types) cancel the retry themselves.
+
+- But, the user may runs some other commands that also need to be taken care of.
+
+- So, there is a 4th line of defense. 
+The orchestrator checks for certain things to verify that retry is allowed. 
+The idea here is to capture operations that are “most likely” to occur 
+that will affect the retry.
+ E.g. Add node, new failed nodes, nodes which were ejected thru some other means, server group changes, certain bucket changes.
+
+- But, it is not possible to check for each and every thing a user could do on the cluster while a retry is pending. That list is almost unbounded.
+
+- And, it is also not necessary to check for all of them because some (most) do not affect rebalance at all. 
+
+- And, in some other scenarios, it is OK to retry. 
+E.g. The ABA membership change. User changes the node membership back and forth using commands that do not go thru the common paths (e.g. rebalance, failover,  …) such that final membership is same as the one before.
+ In this case, it is OK to retry.
+
+- But, even with all of the above lines of defense, it is possible that user does some thing which makes the retry catastrophic. 
+But, then that could happen even without the automated retry. 
+The user could run the rebalance command themselves. 
+Or the automated scripts could issue the rebalance.
+
+ > 2. The user might not see the pending retry because the
+ > orchestrator node is temporary unavailable, moved to a different
+ > node, or the user is a human and (like many other humans) does not
+ > read documentation or is simply distracted.
+
+Covered in response to 1 above. 
+
+Also, auto_rebalance is a singleton process. And, the retry status is only
+ stored in memory. If the orchestrator moves to some other node, 
+there will be no retry. 
+
+ > 3. Nodes can be removed from the cluster without rebalance:
+ > failover + /controller/ejectNodes will do it. Failover may be
+ > orchestrated by a node different from the one holding a rebalance
+ > retry.
+
+If a user removes a node from the cluster when retry is pending 
+using "failover + /controller/ejectNodes”, then the existing rebalance
+ check which compares KnownNodes to nodes_wanted will fail. 
+Retry will be cancelled.
+
+If a user removes  a node from the cluster when retry is pending using 
+"failover + /controller/ejectNodes” and adds the same node back before
+ the retry, then it is OK to retry. 
+They probably added the node back in to rebalance it in anyway.
+
+Also, say there are two orchestrators such that one is holding the retry and another orchestrator is performing the failover: 
+How likely is this with leader activities? Would the need for majority quorum prevent either the failover or the rebalance retry? 
+But, say that is possible. Then a situation like this is a problem even if there was no retry.
+ A user or an automated script/external orchestrator could run rebalace on the first orchestrator.
+
+ > 4. Best-effort is a fine strategy when the consequences of it
+ > failing are not catastrophic. A rebalance appearing out of nowhere
+ > couple of hours after some unfortunate (and probably already pretty
+ > bad) circumstances that led to it being lost track of can be very
+ > problematic.
+
+Covered in response to 1 above. Best effort is the last line of defense.
+
+Also, the default retry period is 5mins (max 1 hour) and retry count is 1 (max 3).  If the user changes the period to the max of 1 hour and the count to 3, then the retry could occur max 3 times every 1 hour. 
+
+A retry won’t show up out of a blue after couple of hours. But, if there are concerns, then we can reduce the max retry period to something lower e.g. 10 mins. So, that the retry will be attempted at most for 30mins.
+
+
+ > 
+ > That all said, I'm merging the changes since I don't see this
+ > getting anywhere.
+
+I have handled almost all suggestions/comments in the last 3 reviews of this patch. The one that is not handled is the rearrangement of code so that we do not extend “maybe_start_rebalance”. I tried to do this twice but each time felt the rearrangement looked ugly.
+----------------------------------------------------------------------------------------------------------------------

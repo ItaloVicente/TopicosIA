@@ -1,0 +1,232 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-32880: Set topology during rebalance/vbuckets move.
+
+Set the current and future topology during rebalance/vbucket move, as we set the
+state through the set_vbucket command.
+
+No attempt is made to,
+1. Remove undefined from the map during failover.
+2. Handle a case where increase in replica count adds an undefined in the map.
+
+Expectations from KV:
+KV engine should understand the undefined set in the topology and ignore them.
+
+Change-Id: I369aa95a2fb85c9d65819762c158a66ab5314003
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Abhijeeth Nuthan
+Date: 2019-03-04 20:03:06.000000000
+Message: 
+Uploaded patch set 8: Patch Set 7 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-03-04 20:03:14.000000000
+Message: 
+Patch Set 8: -Well-Formed
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-test/8784/
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2019-03-04 20:04:40.000000000
+Message: 
+Patch Set 8: Verified+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2019-03-04 20:04:59.000000000
+Message: 
+Patch Set 8:
+
+run simple-test
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-03-04 20:05:08.000000000
+Message: 
+Patch Set 8:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-simple-test/532/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-03-04 20:13:09.000000000
+Message: 
+Patch Set 8: Well-Formed+1
+
+Permission granted to commit to restricted branch
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-03-04 20:48:40.000000000
+Message: 
+Patch Set 8: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/ns-server-simple-test/532/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Poonam Dhavale
+Date: 2019-03-04 23:56:40.000000000
+Message: 
+Patch Set 8:
+
+(2 comments)
+
+I have not completed review of this patch. But, here are couple of comments I have so far.
+Line:196, src/ns_single_vbucket_mover.erl -> It is not needed to delay the backfill for this. 
+This code block should be after line 205 below where we notify parent that the backfill is done. 
+
+The seq# is already persisted on all new replicas and new master by 
+wait_master_seqno_persisted_on_replicas() at line 188 above.
+
+Line:250, src/ns_single_vbucket_mover.erl -> As indicated in the doc, we should not update the topology on the master here. The update in move_done should be enough.
+
+Here is the problem if we do this.
+Consider this vBucket move.
+First chain: {A, B, C}
+Second Chain: {C, B, D}.
+
+This step will set the topology on node C as 
+[{A, B, C}, {C, B, D}].
+
+The vBucket is in a dead state at this point on Node A. 
+Also, it could confuse KV. 
+Normally, the node where the vBucket is active is also the first node in the first chain. In this case, it is not.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2019-03-05 19:18:25.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:250, src/ns_single_vbucket_mover.erl -> I think we should have,
+
+if Oldmaster == newmaster then do nothing 
+else set topology according to NewChain , since we don't set the map clients do not know who the new active is and thereby the newactive cannot receive sync writes.
+
+The reason why we need to set the new master to active here is because we have done all the work and if rebalance were to fail before we set the vbucket map, we wouldn't use the fastforward Chain i.e., the new chain. 
+
+Will you be ok if I do that?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Poonam Dhavale
+Date: 2019-03-05 20:54:17.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:250, src/ns_single_vbucket_mover.erl -> It's not about setting the state - we should leave that existing code as is.
+It's about setting the topology on the new master.
+Even if the topology is set on the new master, there are no replication streams from the new master. 
+Those will get established towards the end of the vBucket move and only to the replicas that are in the new chain (2nd chain in this case).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Artamonau
+Date: 2019-03-12 21:08:55.000000000
+Message: 
+Patch Set 8:
+
+(10 comments)
+Line:17, /COMMIT_MSG -> 70 columns please.
+
+Line:54, src/janitor_agent.erl -> I'm not sold on changing the names. set_vbucket_state seems equally (if not more) appropriate to me.
+
+Line:415, src/janitor_agent.erl -> Just like I commented on one of the preceding patches, I think it's not a good interface to accept some piece of information (VBucketInfo in this case) and then ignore it. Bugs may get hidden: somebody passes VBucketInfo in mixed cluster while not realizing it will silently get ignored. The caller needs to make an explicit decision as to which API version to call, the new one or the old one.
+
+Line:58, src/ns_single_vbucket_mover.erl -> There's no point in setting the topology here since there are no replications.
+
+Line:196, src/ns_single_vbucket_mover.erl -> I agree that this should be done later. Couple more thoughts:
+
+- There's no need to wait for seqno to be persisted on all replicas. It's seemingly enough to wait only for the new set of replicas to persist it: old replicas are handled by the topology that was set before rebalance.
+
+- Ideally we want the period of "dual majority" to be as short as possible for better latency. If the customer has view indexes, wait_index_updated below can take a while. So this code should probably be moved to after wait_index_updated call. Since we don't always go through that code path, there needs to be some code refactoring done to get there.
+
+Line:222, src/ns_single_vbucket_mover.erl -> As I pointed out above, I think it's too early to set the new topology here since wait_index_updated can take a while.
+
+Line:250, src/ns_single_vbucket_mover.erl -> Agree with Poonam here.
+
+Line:374, src/ns_single_vbucket_mover.erl -> Bad indentation.
+
+Line:396, src/ns_single_vbucket_mover.erl -> Bad indentation.
+
+Line:271, src/ns_vbucket_mover.erl -> ns_single_vbucket_mover should do this as part of establishing new replications from new master instead.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Artamonau
+Date: 2019-03-12 21:50:41.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:196, src/ns_single_vbucket_mover.erl -> Ignore the first bullet point, that's what the code's already doing.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Artamonau
+Date: 2019-03-13 00:07:32.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:271, src/ns_vbucket_mover.erl -> Disregard for now. Need to think more about what (and if we can do anything) to do if config sync fails.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Artamonau
+Date: 2019-03-14 20:29:50.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:243, src/ns_single_vbucket_mover.erl -> One more problem. As far as I understand it, dcp takeover may never succeed if some of the replications that we set up crash for some reason. We need to devise a way to abort the rebalance if replications these replications die. We might have to monitor replicator pids (similarly to what janitor_agent's wait_seqno_persisted does). But there also might be a better solution.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2019-03-25 21:35:52.000000000
+MISMATCHED INLINE COMMENT
+Line:17, /COMMIT_MSG -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2019-03-25 21:35:52.000000000
+MISMATCHED INLINE COMMENT
+Line:54, src/janitor_agent.erl -> Changed it back
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2019-03-25 21:35:52.000000000
+MISMATCHED INLINE COMMENT
+Line:415, src/janitor_agent.erl -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2019-03-25 21:35:52.000000000
+MISMATCHED INLINE COMMENT
+Line:58, src/ns_single_vbucket_mover.erl -> ok
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2019-03-25 21:35:52.000000000
+MISMATCHED INLINE COMMENT
+Line:196, src/ns_single_vbucket_mover.erl -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2019-03-25 21:35:52.000000000
+MISMATCHED INLINE COMMENT
+Line:222, src/ns_single_vbucket_mover.erl -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2019-03-25 21:35:52.000000000
+MISMATCHED INLINE COMMENT
+Line:243, src/ns_single_vbucket_mover.erl -> Will fix it in a separate changeset. I'm yet to write that though.
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2019-03-25 21:35:52.000000000
+MISMATCHED INLINE COMMENT
+Line:250, src/ns_single_vbucket_mover.erl -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2019-03-25 21:35:52.000000000
+MISMATCHED INLINE COMMENT
+Line:374, src/ns_single_vbucket_mover.erl -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2019-03-25 21:35:52.000000000
+MISMATCHED INLINE COMMENT
+Line:396, src/ns_single_vbucket_mover.erl -> Done
+----------------------------------------------------------------------------------------------------------------------

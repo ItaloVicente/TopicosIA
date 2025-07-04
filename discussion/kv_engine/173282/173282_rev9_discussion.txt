@@ -1,0 +1,212 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-51715: Timeout SeqnoPersistenceRequests when no data is flushed
+
+Prior to this change, a SeqnoPersistenceRequest would wait 'forever'
+if no data is moving through the vbucket and never timeout. This is
+because execution into the code managing the SeqnoPersistenceRequests
+only occurs from a successful flush of an item.
+
+This is addressed in this commit by the addition of a new task which
+will run when there are SeqnoPersistenceRequests to expire. This new
+task runs for persistent and ephemeral (replacing
+EphemeralBucket::NotifyHighPriorityReqTask) and aims to only run when
+notifications might need expiring.
+
+The configuration is updated so that 0 is a legal value for
+"seqno_persistence_timeout", enabling tests with minimal real run-time.
+
+Change-Id: I603ad4c8f62e496d5d6bea80bc5ef4f196714989
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jim Walker
+Date: 2022-04-08 09:58:26.000000000
+Message: 
+Uploaded patch set 9.
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2022-04-08 09:59:04.000000000
+Message: 
+Patch Set 9:
+
+(1 comment)
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2022-04-08 09:59:13.000000000
+Message: 
+Patch Set 9:
+
+(1 comment)
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-04-08 11:00:31.000000000
+Message: 
+Patch Set 9: Code-Review-1
+
+(15 comments)
+File Comment: /PATCHSET_LEVEL -> General approach looks good. Few specific comments below - testing as per your comment also probably wants expanding (esp around concurrency...)
+Line:29, engines/ep/src/ephemeral_bucket.h -> Note we probably don't want the compiler to generate a dtor every time we include this header - suggest leaving the declaration here and just changing the definition in the .cc file to be `... = default;`.
+
+Line:3066, engines/ep/src/kv_bucket.cc -> Exposing the wakeTime in the general case is pretty racy (it can obviously change between calls in a full multi-threaded setup). 
+
+Perhaps make this protected so only allow a test helper / introspection class can access it - to avoid anyone accidentally trying to read it (and do something with it) from production code?
+
+Line:921, engines/ep/src/kv_bucket.h -> "expiry" is possibly a little ambiguous given our normal use of the term. Perhaps re-phrase to "request timeout" or similar?
+
+Line:1188, engines/ep/src/kv_bucket.h -> and ... ?
+
+Line:51, engines/ep/src/seqno_persistence_notify_task.cc -> "... and the re-snoozing of the task"? (if we dropped the lock before snoozeAndWait() then two different threads could end up updating wakeTime correctly but the "wrong" thread ends up calling snoozeAndWait first)
+
+Line:61, engines/ep/src/seqno_persistence_notify_task.cc -> Might be worth highlighting that snoozeAndWait (as opposed to plain snooze()) is required here to avoid lost wakeup.
+
+Line:69, engines/ep/src/seqno_persistence_notify_task.cc -> Nit: Do we need this? If empty wouldn't iterations be set to 0 and hence for() loop is never entered?
+
+Line:93, engines/ep/src/seqno_persistence_notify_task.cc -> Note that the first vBucket which still has a deadline will cause the check at line 57 to be true (given snooze() at line 67 sets wakeTime to INT_MAX). As such, you'll call snoozeAndWait _inside_ the running task which is somewhat inefficient as you'll be blocking this (NonIO?) thread while the main scheduler thread processes the task update time.
+
+I think what you would ideally do is track the new sleepTime value to use for this task (initially set to INT_MAX, tracking minimum as new deadlines found), then just call setWakeTime once at the end of this function - and then let the ExecutorPool reschedule once without serialising threads when run() returns.
+
+Line:36, engines/ep/src/seqno_persistence_notify_task.h -> I expect this will need some further calibration.
+
+Line:110, engines/ep/src/vbucket.h -> Given these are all public members, can we make any / all of them const if they cannot be changed after construction?
+
+Line:110, engines/ep/src/vbucket.h -> Please document timeout?
+
+Line:115, engines/ep/src/vbucket.h -> Do we need order here? If not unordered_map is cheaper.
+
+Line:613, engines/ep/src/vbucket.h -> Perhaps document what happens if the timeout is exceeded?
+
+Line:653, engines/ep/src/vbucket.h -> Please document this method.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-04-08 11:05:24.000000000
+Message: 
+Patch Set 9: Verified-1 Code-Review-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/37913/ : FAILURE
+
+Compile error at /home/couchbase/jenkins/workspace/kv_engine-clang_analyzer-master/kv_engine/engines/ep/src/ephemeral_vb.cc:278:11:
+error: member access into incomplete type "KVBucket"
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/37913/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/16546/ : FAILURE
+
+clang-tidy found the following problems:
+
+<pre>
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy-master/kv_engine/engines/ep/src/ephemeral_vb.cc:278:11: error: member access into incomplete type "KVBucket" [clang-diagnostic-error]
+    bucket->addVbucketWithSeqnoPersistenceRequest(
+          ^
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy-master/kv_engine/engines/ep/src/vbucket.h:51:7: note: forward declaration of "KVBucket"
+class KVBucket;
+      ^
+
+</pre> ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/16546/ )
+
+Compile error at /home/couchbase/jenkins/workspace/kv_engine-clang_tidy-master/kv_engine/engines/ep/src/ephemeral_vb.cc:278:11:
+error: member access into incomplete type "KVBucket" [clang-diagnostic-error]
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/16546/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/45137/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/15477/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/6198/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/19347/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/18317/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/18650/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/26725/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/17413/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/6257/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2022-04-14 14:59:53.000000000
+MISMATCHED INLINE COMMENT
+Line:29, engines/ep/src/ephemeral_bucket.h -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2022-04-19 14:48:11.000000000
+MISMATCHED INLINE COMMENT
+Line:3066, engines/ep/src/kv_bucket.cc -> Ack
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2022-04-14 14:59:53.000000000
+MISMATCHED INLINE COMMENT
+Line:3066, engines/ep/src/kv_bucket.cc -> We don't currently have a suitable mock I can see, we have a MockEP and MockEphemeral... the test code i'm using is for both types 😭
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2022-04-14 14:59:53.000000000
+MISMATCHED INLINE COMMENT
+Line:921, engines/ep/src/kv_bucket.h -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2022-04-14 14:59:53.000000000
+MISMATCHED INLINE COMMENT
+Line:1188, engines/ep/src/kv_bucket.h -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2022-04-19 14:48:11.000000000
+MISMATCHED INLINE COMMENT
+Line:51, engines/ep/src/seqno_persistence_notify_task.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-04-20 08:44:20.000000000
+MISMATCHED INLINE COMMENT
+Line:61, engines/ep/src/seqno_persistence_notify_task.cc -> You might still have problems with using the non-waiting Snooze(); as the actual task isn't guaranteed to be rescheduled before this function returns, so if/when a other thread decides to update the sleep time you could end up updating snooze() out of order...
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2022-04-19 14:48:11.000000000
+MISMATCHED INLINE COMMENT
+Line:61, engines/ep/src/seqno_persistence_notify_task.cc -> I've changed this to snooze - I don't think there's a difference for this case - my original confusion was that calling task->snooze has no affect on making a sleeping task run, ExecutorPool::snooze works
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2022-04-19 14:48:11.000000000
+MISMATCHED INLINE COMMENT
+Line:69, engines/ep/src/seqno_persistence_notify_task.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2022-04-19 14:48:11.000000000
+MISMATCHED INLINE COMMENT
+Line:93, engines/ep/src/seqno_persistence_notify_task.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2022-04-19 14:48:11.000000000
+MISMATCHED INLINE COMMENT
+Line:36, engines/ep/src/seqno_persistence_notify_task.h -> yep (1 second came from the removed ephemeral task) i suspect 1 second is overkill here
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2022-04-14 14:59:53.000000000
+MISMATCHED INLINE COMMENT
+Line:110, engines/ep/src/vbucket.h -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2022-04-14 14:59:53.000000000
+MISMATCHED INLINE COMMENT
+Line:110, engines/ep/src/vbucket.h -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2022-04-14 14:59:53.000000000
+MISMATCHED INLINE COMMENT
+Line:115, engines/ep/src/vbucket.h -> yeah I don't think we need ordered - but this is the type returned by existing functions 😞 - i can expand the change to switch away from ordered
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2022-04-14 14:59:53.000000000
+MISMATCHED INLINE COMMENT
+Line:613, engines/ep/src/vbucket.h -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2022-04-14 14:59:53.000000000
+MISMATCHED INLINE COMMENT
+Line:653, engines/ep/src/vbucket.h -> Done
+----------------------------------------------------------------------------------------------------------------------

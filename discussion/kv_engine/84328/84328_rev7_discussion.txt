@@ -1,0 +1,118 @@
+======================================================================================================================
+DESCRIPTION:
+
+[MB-26220]: Add support for request tracing
+
+Adds support for tracing/timing different block of code in a
+specific request. Currently does not use phospor.
+
+Change-Id: I3ce23b91e62648b5ab223a3f1f47bb575eb5a81f
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Premkumar
+Date: 2017-10-18 19:25:18.000000000
+Message: 
+Uploaded patch set 7.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2017-10-18 19:53:07.000000000
+Message: 
+Patch Set 7: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/3221/ : FAILURE
+
+Compile error at C:\Jenkins\workspace\kv_engine-windows-master\kv_engine\utilities/tracer.h(30): error C2332: "class": missing tag name ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/3221/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/1752/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/2901/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master/3072/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/3206/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/3276/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2017-10-19 11:48:55.000000000
+Message: 
+Patch Set 7: Code-Review-1
+
+(19 comments)
+Line:39, daemon/cookie.h -> Missing `override` specifier.
+
+File Comment: daemon/cookieiface.h -> Style: prefer `cookie_iface` - e.g. compare to kv_bucket_iface.h
+Line:46, daemon/cookieiface.h -> The interface shouldn't include the tracer (or enabled flag) - it should be stateless and not dictate a specific interface.
+
+Line:47, daemon/protocol/mcbp/hello_packet_executor.cc -> You also need to add tracing here, so it is assumed to be off unless the user enables it.
+
+Line:58, include/mcbp/protocol/feature.h -> Any reason we are skipping 0xf here?
+
+Line:81, programs/engine_testapp/mock_server.cc -> Debug code? Please remove.
+
+Line:28, utilities/trace_helpers.h -> Please use braces for all if statements (even single line) - here and below.
+
+Line:95, utilities/trace_helpers.h -> Might be useful to explain the purpose of this (i.e. used by the TRACE_BLOCK_CK macro to implement TRACE_BLOCK).
+
+Line:98, utilities/trace_helpers.h -> Remove hungarian notation.
+
+Line:24, utilities/tracer.cc -> Prefer a function (or lambda) to a macro.
+
+Line:37, utilities/tracer.cc -> I'd probably look at changing the structure of this so you return a vector of Spans, where a span has a name, start and duration.
+
+As soon as we have more than just two points in time we want to record; Spans will be nearly as efficient as durations, but they also have the advantage they can be measured relative to each other (and hence you can infer the relative times).
+
+For example, consider a simple trace where record 2 spans:
+
+    Start                                                         End
+      A-------------B----------------------------------C-----------D
+      ^             ^                                  ^           ^
+      | <------------------ MCBP Read/Write ---------------------> |
+      |             | <-------- Command Execution ---> |           |
+    header        body                              response     response
+    parsed        parsed                             known        sent
+
+One Span is the entire server start-> end, the second is the time spent executing the command. This is just two spans (so 2x start, 2x duration) but allows us to measure the relative time when they ran.
+
+An alternative encoding using durations (recording durations A->B, B->C and C->D) would require 3 instead of 4 measurements, but would no longer allow us to correlate when a request arrived relative to some other server event; and would also make it impossible to view / aggregate multiple slow operations on a single timeline.
+
+Line:42, utilities/tracer.cc -> what does `fort` refer to here?
+
+Line:50, utilities/tracer.cc -> Prefer emplace_back() - can save the copy / temporary.
+
+Line:65, utilities/tracer.cc -> We don't print errors to the stderr. Either use the LOG() functions, or throw an exception (which is probably preferred here).
+
+Line:120, utilities/tracer.cc -> Style: don't use else after return (see https://github.com/couchbase/memcached/blob/master/docs/CodingStandards.rst#don-t-use-else-after-a-return )
+
+Line:45, utilities/tracer.h -> Style: Enums should be named with just an initial uppercase latter (Begin, End).
+
+Line:75, utilities/tracer.h -> Prefer returning the result as the return value, not an out param (see http://isocpp.github.io/CppCoreGuidelines/CppCoreGuidelines#Rf-out
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2017-10-19 18:51:26.000000000
+Message: 
+Patch Set 7:
+
+(3 comments)
+File Comment: daemon/cookieiface.h -> I'm tempted to say drop the entire class and put it the cookie object itself and have the tests extend the "real" cookie... that allows us to put more logic in the cookies itself. 
+
+To me it seems like just making stuff more complicated to create an extra layer here. It is only during our unit tests we'll ever want to just test this.. We're currently able to mock the existing cookie interface by providing a mock connection object if we want to..
+Line:29, daemon/cookieiface.h -> I don't think this belongs in the cookie, but in the connection itself. The cookie represents single command, and I'm working on allowing multiple commands to be executed in parallell (which means that we'll have multiple cookies connected to the same connection)...
+
+Line:149, daemon/protocol/mcbp/hello_packet_executor.cc -> This should be in the connection
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Premkumar
+Date: 2017-10-25 17:39:31.000000000
+Message: 
+Patch Set 7:
+
+Trond, Rigby: I've tried to accommodate all the changes as suggested. Some code has been marked as //DEBUGCODE, which will be removed before the final push. Some more work is pending..
+
+Trond, it seems to be difficult to modify tests to derive from Cookie class as it has MbcpConnection (which most of the test cases don't have).
+----------------------------------------------------------------------------------------------------------------------

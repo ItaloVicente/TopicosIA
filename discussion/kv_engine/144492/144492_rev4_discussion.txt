@@ -1,0 +1,142 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-39292: 2/n Add a 'SharedMetaDataTable'
+
+To be able to correctly identify legal or illegal changes to a
+collection's metadata we need a location to store and access
+the metadata (primarily the name, but other metadata will be included).
+
+To avoid unnecessary memory increases, we need a place in memory where
+the VB::ManifestEntry objects will be able to 'reference' the and not
+own it.
+
+This patch introduces a custom container type for the storage and
+retrieval of the metadata to be associated with collections (and
+scopes).
+
+The intention is that the name, scope-id and ttl of a collection will
+not be stored in the VB::ManifestEntry, but referenced.
+
+This container deliberately does not make use of std::shared_ptr as
+memory profiling during the development already highlights that
+collections/scopes can give a noticeable increase to mem_used. With
+shared_ptr holding two pointers and a desire to decrease the
+collections mem_used foot-print the container uses our own
+SingleThreadedRCPtr. The use of SingleThreadedRCPtr allows
+VB::ManifestEntry to reduce in-size by scope-id/ttl, benefit from
+the later inclusion of the name and only then increase by 1 pointer.
+This result in a net reduction memory required to store each
+vbucket's collection data.
+
+The container uses a multimap for storage because we need to support
+the possibility that different id->meta mappings are permitted.
+
+E.g.
+* vbucket 0 has collection:x with name:fruit
+* vbucket 1 has collection:x with name:vegetable
+
+This can happen in failure circumstances when the vbuckets see
+different state time-lines (which is intended to be later force
+corrected).
+
+Note the SharedMetaDataTable will be used by VB::Manifest for scope
+name storage too, hence the full templating of key and value allow
+the container to be reused.
+
+Change-Id: I7c7ded00827bf4fa1978668a1ffaebe908749dc6
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jim Walker
+Date: 2021-02-01 13:49:11.000000000
+Message: 
+Uploaded patch set 4.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-02-01 14:02:05.000000000
+Message: 
+Patch Set 4: Code-Review-1
+
+(1 comment)
+Line:88, engines/ep/src/collections/shared_metadata_table.h -> Not sure this API is the best choice now we are using ref-counted ptr, given the RCPtr object itself will manage reference counts and trigger the dtor of the Value when it reaches zero. Do we actually need this method at all now?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-02-01 16:46:39.000000000
+Message: 
+Patch Set 4: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/33308/ : FAILURE
+
+Failure of GoogleTest "ExecutorPoolEpEngineTest/0.TaskStats_MemAccounting":
+
+<pre>
+[ RUN      ] ExecutorPoolEpEngineTest/0.TaskStats_MemAccounting
+..\kv_engine\engines\ep\tests\module_tests\executorpool_test.cc(1631): error: Expected equality of these values:
+  0
+  memoryPostCancel - memoryInitial
+    Which is: 192
+mem_used has not returned to initial value after cancelling task
+[  FAILED  ] ExecutorPoolEpEngineTest/0.TaskStats_MemAccounting, where TypeParam = class TestExecutorPool (10 ms)
+ExecutorPoolEpEngineTest/0.TaskStats_MemAccounting
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/33308/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/8404/ : FAILURE
+
+Failure of GoogleTest "ExecutorPoolEpEngineTest/0.TaskStats_MemAccounting":
+
+<pre>
+[ RUN      ] ExecutorPoolEpEngineTest/0.TaskStats_MemAccounting
+[2021-02-01T16:19:07.439Z] ../kv_engine/engines/ep/tests/module_tests/executorpool_test.cc:1631: Failure
+[2021-02-01T16:19:07.439Z] Expected equality of these values:
+[2021-02-01T16:19:07.439Z]   0
+[2021-02-01T16:19:07.439Z]   memoryPostCancel - memoryInitial
+[2021-02-01T16:19:07.439Z]     Which is: 160
+[2021-02-01T16:19:07.439Z] mem_used has not returned to initial value after cancelling task
+[2021-02-01T16:19:07.439Z] [  FAILED  ] ExecutorPoolEpEngineTest/0.TaskStats_MemAccounting, where TypeParam = TestExecutorPool (4 ms)
+ExecutorPoolEpEngineTest/0.TaskStats_MemAccounting
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/8404/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/8780/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/5394/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/6858/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/28655/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/8536/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/16329/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/7485/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-02-01 15:54:29.000000000
+MISMATCHED INLINE COMMENT
+Line:88, engines/ep/src/collections/shared_metadata_table.h -> Makes sense.
+
+If we supported weak ownership with STRCPtr, I think that would (mostly) automatically handle it; given the actual owned object (Manifest?) would be deleted on last strong owner. We'd still have the actual element in the map + the shared_ptr control block; but that would probably be livable with - assuing the next time the metadata table is updated it would be cleaned up.
+
+How much does a full-on std::shared_ptr actually cost us here? I believe it's only going to be ~2 words per item in the SharedMetaDataTable, i.e. 32Bytes per collection (across all vbuckets). An upper limit of 32.000Bytes per bucket assuming 1000 collections doesn't sound _that_ bad...
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2021-02-01 15:33:50.000000000
+MISMATCHED INLINE COMMENT
+Line:88, engines/ep/src/collections/shared_metadata_table.h -> I think we do, there has to be some way to get the table's multimap to erase stale items.
+
+This container is destined to store *all* of the collection-id to meta mappings. Overtime calls to createOrRefernce populate the map, and begin returning new data or reused data, over time a collection X in vb:0..n all refer to the same object. T
+
+without making this call, as collections come and go (and so do vbuckets) the container begins to gather stale data (with it being the only owner), so deference is the trigger for the container to check "am i the sole owner" and then erase if so.
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2021-02-02 14:03:03.000000000
+MISMATCHED INLINE COMMENT
+Line:88, engines/ep/src/collections/shared_metadata_table.h -> It wasn't the sizeof this table I was concerned with, it's the resulting sizeof VB::ManifestEntry (which in general i was trying to shrink down), and that object is 1 per collection per VB, then we have the scope map which also needs a similar pattern, again 1 per scope per VB. It all became quite noticable when deploying the max config, and even going from 88 bytes for VB::ManifestEntry (current) to 72 (this patch series with STRCPtr) it could be seen. Switching to shared_ptr keeps us at 88, but I like the 72
+----------------------------------------------------------------------------------------------------------------------

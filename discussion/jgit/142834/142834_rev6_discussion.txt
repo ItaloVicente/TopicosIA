@@ -1,0 +1,122 @@
+======================================================================================================================
+DESCRIPTION:
+
+PackFileSnapshot with checksum sensitive isModified()
+
+If the attributes of FileSnapshot don't detect modification of a
+packfile read the packfile's checksum and compare it against the cached
+checksum in order to reduce IO overhead to detect modifications. Since
+reading the checksum needs less IO than reloading the complete packfile
+this may help to reduce the overhead to detect modficiations when a gc
+completes while ObjectDirectory scans for packfiles in another thread.
+
+Bug: 546891
+Change-Id: I9811b497eb11b8a85ae689081dc5d949ca8c4be5
+Signed-off-by: Matthias Sohn <matthias.sohn@sap.com>
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Matthias Sohn
+Date: 2019-05-27 08:50:32.000000000
+Message: 
+Uploaded patch set 6: Patch Set 5 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2019-05-27 08:50:44.000000000
+Message: 
+Patch Set 6:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit/16261/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2019-05-27 08:51:12.000000000
+Message: 
+Patch Set 6:
+
+Build Started https://ci-staging.eclipse.org/jgit/job/stable/job/jgit.gerrit/16115/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2019-05-27 08:54:44.000000000
+Message: 
+Patch Set 6: Verified-1
+
+Build Failed 
+
+https://ci-staging.eclipse.org/jgit/job/stable/job/jgit.gerrit/16115/ : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2019-05-27 09:09:54.000000000
+Message: 
+Patch Set 6: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit/16261/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2019-05-27 09:52:39.000000000
+Message: 
+Removed Verified-1 by JGit Bot <jgit-bot@eclipse.org>
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Halstrick
+Date: 2019-05-27 10:02:48.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+Line:84, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/PackFileSnapshot.java -> You are using checksum checking to return a more accurate return value but not to improve performance. I hoped we are (also?) improving performance.
+
+What you are doing here is adding a check which only gets executed when super.isModified() has returned false. In the majority of the calls to this function the packfile will be unchanged, isModified will return false and we are adding a performance penality to this dominating use case.
+
+I hoped that we use the checksum check to improve the situation of false positives returned by isModified: the situation where isModified() returns true where it should return false. We saw that isModified() returns too often true because of the racy git situation. All the metadata tell the file is unchanged but if the lastReadTime and lastModificationTime are too close we do return true to force a reread of the content. And instead of that re-read and re-parse of all content I hoped we can just read the checksum to find out: "The packfile is indeed unchanged because the checksum is still the same. No need to read all content."
+
+I suggest to do something like:
+
+		boolean modified = super.isModified(packFile);
+		if (!modified) {
+			return modified;
+		}
+		// super.isModified() return true. Check the checksum first before
+		// really returning that the file is modified
+		if (checksum != MISSING_CHECKSUM
+				&& getModificationReason().lastModifiedChanged
+				&& checksum.equals(readChecksum(packFile))) {
+			return false;
+		}
+		return modified;
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc Strapetz
+Date: 2019-05-27 14:22:34.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+Line:84, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/PackFileSnapshot.java -> I agree with Christian. When experimenting with the current fix, following test was helpful to check/reproduce the performance problem:
+
+	@Test
+	public void testTimestamps() throws IOException, ParseException {
+		for (int index = 0; index < 10000; index++) {
+			System.out.println(index);
+			ObjectId id = commitFile("file.txt", "test " + index, "master").getId();
+
+			GC gc = new GC(db);
+			gc.setExpireAgeMillis(0);
+			gc.setPackExpireAgeMillis(0);
+			gc.gc();
+
+			final ObjectDirectory database = db.getObjectDatabase();
+			assertTrue(database.hasPackedObject(id));
+		}
+	}
+
+In combination with following temporary change to FS:
+
+				if (1 == 1 || !dir.toFile().canWrite()) {
+					// can not determine FileStore of an unborn directory or in
+					// a read-only directory
+					return FALLBACK_TIMESTAMP_RESOLUTION;
+				}
+
+----------------------------------------------------------------------------------------------------------------------

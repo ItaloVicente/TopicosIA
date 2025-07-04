@@ -1,0 +1,157 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-29822: Log when closing a connection for unexpected errors
+
+Except for when a connection is closed after a clean shutdown (i.e.,
+connection closed by peer), we always want to log the reason why a
+connection is being disconnected. It is very useful for debugging /
+diagnostic.
+
+Change-Id: Iacf37896bb9c7ca49073cdebd32f1cbc38659bef
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2018-05-25 15:15:50.000000000
+Message: 
+Uploaded patch set 6: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-05-25 15:36:43.000000000
+Message: 
+Patch Set 6: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-vulcan/568/ : FAILURE
+
+Failure of a GoogleTest  ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-vulcan/568/ )
+
+Failure of a CTest test 135/145 Test #138: memcached_testapp.ep.Transport/McdTestappTest ................................ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-vulcan/568/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/8246/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-vulcan/460/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-vulcan/424/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-vulcan/411/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-undefinedsanitizer-vulcan/451/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-vulcan/518/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Daniel Owen
+Date: 2018-05-25 15:53:41.000000000
+Message: 
+Patch Set 6: Code-Review-1
+
+(3 comments)
+Line:425, daemon/connection.h -> should we not use a reference?
+
+Line:939, daemon/memcached.cc -> is this not normal behaviour - and hence should not be a WARNING?
+
+Line:35, daemon/protocol/mcbp/cluster_config_executor.cc -> Don't think these should be warning? ( maybe NOTICE) - as they are not necessary a logic error
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-05-25 16:04:32.000000000
+Message: 
+Patch Set 6:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-vulcan/569/ : FAILURE
+
+Failure of a GoogleTest  ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-vulcan/569/ )
+
+Failure of a CTest test 143/145 Test #122: memcached_testapp.ep.TransportProtocols/GetSetTest ........................... ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-vulcan/569/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/8246/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-vulcan/460/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-vulcan/424/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-vulcan/411/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-undefinedsanitizer-vulcan/451/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-vulcan/518/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2018-05-28 05:32:46.000000000
+Message: 
+Patch Set 6: Code-Review-1
+
+(3 comments)
+
+It would be better if we wrapped the DCP code the same way we have wrappers in engine_wrapper.h and perform the logging there if the engine returned disconnect. That way we'll have a single module where we deal with the error mapping.
+
+With the current implementation we'll end up logging the same disconnect multiple times, and I'm not a super-fan of having the "reason" default argument there which is only used iff we're doing close (and with a default parameter we won't have a failure if a reason wasn't provided, so we'll soon end up in the situation where we enter the close state and didn't provide a reason).
+Line:1402, daemon/connection.cc -> We've already performed logging above
+
+Line:150, daemon/mcbp_executors.cc -> already logged
+
+Line:1000, daemon/subdocument.cc -> From looking at the code it looks like it is remapErrorCode which may cause this to be engine disconnect which will return in logging the same info twice.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2018-05-28 16:58:00.000000000
+Message: 
+Patch Set 6:
+
+(4 comments)
+
+> It would be better if we wrapped the DCP code the same way we have wrappers in engine_wrapper.h and perform the logging there if the engine returned disconnect. That way we'll have a single module where we deal with the error mapping.
+
+Not all the missing logs are on DCP command execution. So we still have to manage all the other cases.
+
+> With the current implementation we'll end up logging the same disconnect multiple times, and I'm not a super-fan of having the "reason" default argument there which is only used iff we're doing close (and with a default parameter we won't have a failure if a reason wasn't provided, so we'll soon end up in the situation where we enter the close state and didn't provide a reason).
+
+This was an attempt (far from being optimum) to manage the logging of closing connection in a single function (I decided for Connection::setState).
+
+Do we just prefer to:
+1) wrap the DCP calls into engine_wrapper.h
+2) manually log before calling Connection::setState(closing) (as we already do) in the missing places
+?
+Line:1402, daemon/connection.cc -> Done
+
+Line:425, daemon/connection.h -> enum class is a integral type underneath, it should be ok to pass is by value, isn't it?
+
+Line:939, daemon/memcached.cc -> I considered to upgrade to Warning every disconnection not caused by a clean shutdown by the peer, so that we can have a clear understanding of the disconnection even if the minimum log level is Warning.
+Is that too aggressive?
+
+Line:35, daemon/protocol/mcbp/cluster_config_executor.cc -> Same as the other comment, I considered to upgrade all the disconnection to Warning, so that we have the message even if the log-level is > Info.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2018-05-28 17:16:22.000000000
+Message: 
+Patch Set 6:
+
+> This was an attempt (far from being optimum) to manage the logging
+ > of closing connection in a single function (I decided for
+ > Connection::setState).
+ > 
+ > Do we just prefer to:
+ > 1) wrap the DCP calls into engine_wrapper.h
+
+That is what we do for the other calls interfacing the engine, so by doing it for these functions as well we'll keep that consistent.
+
+ > 2) manually log before calling Connection::setState(closing) (as we
+ > already do) in the missing places
+
+I think that's the best solution. Given that this is state just like all of the other states we've got it's hard to enforce logging the shutdown / disconnect case. 
+
+ > ?
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2018-05-29 15:32:11.000000000
+Message: 
+Abandoned
+
+Re-implementing this as agreed, splitting in multiple patches.
+----------------------------------------------------------------------------------------------------------------------

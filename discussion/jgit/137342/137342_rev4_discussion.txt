@@ -1,0 +1,153 @@
+======================================================================================================================
+DESCRIPTION:
+
+RebaseCommand: compatibility with native git for merging rebase
+
+After a plain JGit rebase stopped on a conflict, it was not possible
+to continue it via native git rebase --continue. JGit implements only
+the cherry-picking back-end. It implements native git rebase --merge
+via cherry-picking, and always uses the to-do list known from
+interactive rebase. Native git uses different files for its merging
+back-end.
+
+Make sure that JGit writes and updates the files native git expects
+in that case in addition to the to-do and done lists. This enables
+native git to continue such rebases started by JGit.
+
+Also enable JGit to continue after native git rebase --merge. When a
+JGit continue or skip doesn't find a to-do list but does find the
+msgnum, end, and cmt.N files native git writes, create a to-do and a
+done list from that information.
+
+Additionally check the size of the done list against the msgnum as
+recorded in the file. If msgnum is larger, a non-interactive merging
+rebase was continued via native git and then stopped again. In this
+case catch up in JGit by moving the appropriate number of steps from
+the to-do list to the done list before continuing.
+
+With these changes, JGit rebase and native git's rebase should be fully
+interoperable for all interactive or merging rebases. Unfortunately the
+default native rebase is based on git-am (repeated patch application),
+for which JGit has no implementation at all. Trying to continue in JGit
+such a rebase started via native git leads to an exception.
+
+Bug: 511487
+Change-Id: I9905797249e54f84cf294e7099584099eea199c7
+Signed-off-by: Thomas Wolf <thomas.wolf@paranor.ch>
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Thomas Wolf
+Date: 2019-02-27 08:39:30.000000000
+Message: 
+Uploaded patch set 4.
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2019-02-27 08:40:37.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2019-02-27 08:40:45.000000000
+Message: 
+Patch Set 4:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit/15658/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2019-02-27 09:27:09.000000000
+Message: 
+Patch Set 4: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit/15658/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: David Pursehouse
+Date: 2019-02-28 04:19:41.000000000
+Message: 
+Patch Set 4: Code-Review+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2019-06-10 10:45:35.000000000
+Message: 
+Patch Set 4: Verified-1
+
+I tried to continue a conflicting rebase started in JGit with native git and this fails with an error in native git:
+
+Using EGit (master) and JGit built from this change:
+* clone the repository https://github.com/msohn/rebase-test
+* import the contained project into Eclipse
+* rebase master on origin/b (in EGit)
+* resolve the conflict and stage the conflicting file (in EGit)
+* try to continue the rebase using native git (I used git 2.22.0 on Mac), this fails:
+
+ rebase-test (master +|REBASE-m 1/2)]$ git rebase --continue
+ BUG: builtin/rebase.c:1165: Unhandled rebase type 1
+ Abort trap: 6
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2019-06-21 19:48:30.000000000
+Message: 
+Patch Set 4:
+
+Which git version? Cannot reproduce with 2.18.0. But I see that there've been many changes in canonical git in this area, moving more stuff from shell scripts into builtin/rebase.c.
+
+But I see other problems in EGit and JGit. Bug 548528 is particularly annoying.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2019-06-24 14:19:22.000000000
+Message: 
+Patch Set 4:
+
+> Which git version? Cannot reproduce with 2.18.0. But I see that
+ > there've been many changes in canonical git in this area, moving
+ > more stuff from shell scripts into builtin/rebase.c.
+
+I am using git 2.22.0
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2019-06-24 14:35:05.000000000
+Message: 
+Patch Set 4:
+
+> > Which git version? Cannot reproduce with 2.18.0. But I see that
+ > > there've been many changes in canonical git in this area, moving
+ > > more stuff from shell scripts into builtin/rebase.c.
+ > 
+ > I am using git 2.22.0
+
+Ah. And indeed this is a problem with stuff moved from bash into C. rebase.c correctly identifies the rebase as a REBASE_MERGE, but then still falls into code that tries to shell out to a shell script for REBASE_AM and REBASE_PRESERVE_MERGES. REBASE_MERGE has been removed from that code branch.
+
+So now I can figure out why it doesn't use the newly built-in rebase/merge, and then see if there's something we can do. Maybe not; having both sets of files is perhaps flaky.
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2019-06-24 14:47:55.000000000
+Message: 
+Patch Set 4:
+
+Hmmmm. Looks like they chose to do it the JGit way: make rebase --merge use the rebase --interactive machinery, i.e., the cherry-picking back-end! https://github.com/git/git/commit/68aa495b59 I wonder if git 2.22 can continue with your use case if instead of EGit git 2.18 is used. Perhaps some checks for the old files used by rebase --merge are still in place and throw git 2.22 off.
+
+With git 2.22, can you continue a JGit rebase stopped on a conflict *without* this change?
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2019-06-24 15:19:46.000000000
+Message: 
+Patch Set 4:
+
+> Hmmmm. Looks like they chose to do it the JGit way: make rebase
+ > --merge use the rebase --interactive machinery, i.e., the
+ > cherry-picking back-end! https://github.com/git/git/commit/68aa495b59
+ > I wonder if git 2.22 can continue with your use case if instead of
+ > EGit git 2.18 is used. Perhaps some checks for the old files used
+ > by rebase --merge are still in place and throw git 2.22 off.
+ > 
+ > With git 2.22, can you continue a JGit rebase stopped on a conflict
+ > *without* this change?
+
+I can try this later today
+
+Maybe we should ask on the git mailing list which direction they are heading for with the reimplementation of rebase
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,238 @@
+======================================================================================================================
+DESCRIPTION:
+
+[WIP] Add InMemoryRefDatabase to be used as a Ref cache
+
+- wraps another RefDatabase which persists refs
+- loads all refs from the wrapped RefDatabase into a TernarySearchTree
+to enable fast prefix searches
+- reloads all refs when it's notified via a RefsChangedEvent
+- incremental updates aren't implemented yet
+
+Bug: 576165
+Change-Id: Ic9bb57576847500f5b0c1a68956749be3ba80f6d
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Matthias Sohn
+Date: 2021-10-06 06:52:30.000000000
+Message: 
+Uploaded patch set 4: New patch set was added with same tree, parent, and commit message as Patch Set 3.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2021-10-06 06:52:39.000000000
+Message: 
+Patch Set 4:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline.java11/137/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2021-10-06 07:18:05.000000000
+Message: 
+Patch Set 4: Verified-1
+
+Build Failed 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline.java11/137/ : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2021-10-06 07:23:33.000000000
+Message: 
+Patch Set 4: -Verified
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline.java11/139/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2021-10-06 07:37:58.000000000
+Message: 
+Patch Set 4: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline.java11/139/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Han-Wen NIenhuys
+Date: 2021-10-06 10:45:03.000000000
+Message: 
+Patch Set 4:
+
+(6 comments)
+----------------------------------------------------------------------------------------------------------------------
+Author: Patrick Hiesel
+Date: 2021-10-06 11:13:21.000000000
+Message: 
+Patch Set 4:
+
+This looks nice!
+
+How are users of the JGit API going to hold on to this RefDatabase so that they get the caching?
+
+The JGit API is not thread-safe, so we can't keep a repo open and reuse it across requests.
+----------------------------------------------------------------------------------------------------------------------
+Author: Han-Wen NIenhuys
+Date: 2021-10-06 11:19:30.000000000
+Message: 
+Patch Set 4:
+
+> Patch Set 4:
+> 
+> This looks nice!
+> 
+> How are users of the JGit API going to hold on to this RefDatabase so that they get the caching?
+> 
+
+> The JGit API is not thread-safe, so we can't keep a repo open and reuse it across requests.
+
+I think we can? We just can't use it from two threads simultaneously.
+
+Also, the threading characteristics are different between DfsRefDatabase and RefDirectory. I see locks and atomics in the latter, which suggests thread-safety.
+----------------------------------------------------------------------------------------------------------------------
+Author: Patrick Hiesel
+Date: 2021-10-06 11:29:04.000000000
+Message: 
+Patch Set 4:
+
+> We just can't use it from two threads simultaneously.
+
+So it's not thread-safe :-)
+
+> Also, the threading characteristics are different between DfsRefDatabase and RefDirectory.
+
+That's one more argument why it's not thread-safe and we can't just pass open repos around. IMO: Either the API and it's implementations guarantee that or they don't and I think they don't today and it would be a larger effort to make it so (please correct me).
+
+Making the whole API thread safe just from the outside is not feasible IMO, that would have to happen from code changes within the implementations.
+
+However, I think we might be able to solve this by passing in just a shared RefCache instance when opening a repo, making that thread-safe and have callers hold onto that as they want. WDYT?
+----------------------------------------------------------------------------------------------------------------------
+Author: Sasa Zivkov
+Date: 2021-10-06 11:57:03.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:120, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/memory/InMemoryRefDatabase.java -> There is a race here. If the event says that "foo was deleted" then for the time until the
+newRefCache is being populated and before the replace is called in the line 120, all the concurrent searches are done in the existing refCache. This will find "foo" although it doesn't exist.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2021-10-06 13:00:30.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2021-10-06 21:45:02.000000000
+Message: 
+Patch Set 4:
+
+(3 comments)
+Line:36, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/memory/InMemoryRefDatabase.java -> Why is Constants.REVERT_HEAD not needed? (I see it's also missing in RefDirectory...)
+
+Line:57, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/memory/InMemoryRefDatabase.java -> This relies on this RefsChangedListener being called before any other RefsChangedListener on the repo, otherwise those other listeners might not see the update. Probably this is true with the current implementation of the ListenerList, but it looks fragile.
+
+Line:63, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/memory/InMemoryRefDatabase.java -> Detach the listener?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2021-10-07 08:56:51.000000000
+Message: 
+Patch Set 4:
+
+(2 comments)
+
+Thanks @Matthias, that's a very encouraging first step 👍
+Line:12, /COMMIT_MSG -> This is going to be problematic for Gerrit use-case. Gerrit uses the Git repository for storing the review meta-data *and* also draft comments. That makes the repository highly volatile and refs are updated all the times.
+
+Refreshing the *whole refs* of a large mono-repo (e.g. up to millions of refs) isn't practical.
+
+Why not just refreshing the refs that have actually changed?
+
+P.S. The cache could also be write-through, so that you do not necessarily need to reload it because you can do update it as you write to disk.
+
+Line:13, /COMMIT_MSG -> Is that just a WIP of the current status? Or do you see blocking issues for being able to get that implemented?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Han-Wen NIenhuys
+Date: 2021-10-07 14:43:51.000000000
+Message: 
+Patch Set 4:
+
+(2 comments)
+Line:12, /COMMIT_MSG -> Do you have numbers on write load vs. read load?
+
+it's true that refreshing the whole thing is slow, but if reads outnumber writes by a large enough margin, it's still going to be a win. I think the refresh will be done by the writer thread, so it's the writer that pays the cost.
+
+The JGit RefChangedEvent doesn't include a list of which refs were updated, so incremental updates need a different approach.  
+
+I looked for a bit at making a full delegate, but it looks hairy; if you want incremental updates, we'd probably need to add a API surface to (Batch)RefUpdate to register a callback on execute()
+
+Line:120, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/memory/InMemoryRefDatabase.java -> but that is working as intended, no? The whole point of this exercise is to avoid that concurrent processes check the filesystem to see if they are up-to-date all the time.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Patrick Hiesel
+Date: 2021-10-07 15:04:16.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:29, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/memory/InMemoryRefDatabase.java -> I took an AI to look into if Google's own Repository/RefDb implementation is thread-safe. It's not and can't be shared across requests because it encodes ACL information in the Repository object.
+
+That's OK, though. Open-source Gerrit through LocalDiskRepositoryManager already uses JGit's RepositoryCache. As far as I understand, this caches repos across requests - if configured - and will allow the new InMemoryRefDatabase to just work. It works with time-based eviction if a repo is no longer open. For busy instances, All-Users should be opened often enough so that when the expiryTime is reasonably configured, we actually retrain the cached Repo.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2021-10-07 17:14:09.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:116, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/memory/InMemoryRefDatabase.java -> Shouldn't refCache be volatile?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2021-10-30 21:20:05.000000000
+MISMATCHED INLINE COMMENT
+Line:12, /COMMIT_MSG -> added API for incremental updates
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2021-10-30 21:20:05.000000000
+MISMATCHED INLINE COMMENT
+Line:13, /COMMIT_MSG -> added API for incremental updates
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2021-10-09 01:00:07.000000000
+MISMATCHED INLINE COMMENT
+Line:36, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/memory/InMemoryRefDatabase.java -> done
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2021-10-30 21:20:05.000000000
+MISMATCHED INLINE COMMENT
+Line:57, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/memory/InMemoryRefDatabase.java -> added RefCache to fix this
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2021-10-09 01:00:07.000000000
+MISMATCHED INLINE COMMENT
+Line:63, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/memory/InMemoryRefDatabase.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Patrick Hiesel
+Date: 2021-10-20 11:50:13.000000000
+MISMATCHED INLINE COMMENT
+Line:116, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/memory/InMemoryRefDatabase.java -> Or an AtomicReference?
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2021-10-09 01:00:07.000000000
+MISMATCHED INLINE COMMENT
+Line:116, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/memory/InMemoryRefDatabase.java -> not anymore since it's now final
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2021-10-30 21:20:05.000000000
+MISMATCHED INLINE COMMENT
+Line:116, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/memory/InMemoryRefDatabase.java -> it's final now
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2021-10-09 01:00:07.000000000
+MISMATCHED INLINE COMMENT
+Line:120, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/memory/InMemoryRefDatabase.java -> - fixed the race
+- RefsChangedEvent doesn't provide any details, it just says "some refs changed". If we want to update the cache incrementally we need to improve these events to provide details
+----------------------------------------------------------------------------------------------------------------------

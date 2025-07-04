@@ -1,0 +1,200 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-37330: Correct expelling logic for items with same seqno
+
+The checkpoint expelling code can fail to expel an item from a
+Checkpoint if there's only 1 candidate item to expel.
+
+The issue is the logic in the expel code which attempts to ensure that
+items with the same seqno are not partially expelled - i.e. we should
+expel either all or none of items sharing the same seqno.  This is
+done by adjusting the chosen expel cursor backwards (initially set to
+the earliest cursor) if it points to an invalid position - from the
+code:
+
+    /*
+     * Walk backwards over the checkpoint if not yet reached the dummy item,
+     * and pointing to an item that either:
+     * 1. has a seqno equal to the checkpoint's high seqno, or
+     * 2. has a previous entry with the same seqno, or
+     * 3. is pointing to a metadata item.
+     */
+    while ((iterator != oldestCheckpoint->begin()) &&
+            (((*iterator)->getBySeqno() ==
+              int64_t(oldestCheckpoint->getHighSeqno())) ||
+             ((*std::prev(iterator))->getBySeqno() ==
+              (*iterator)->getBySeqno()) ||
+             ((*iterator)->isCheckPointMetaItem()))) {
+        --iterator;
+    }
+
+The intent here is correct, however the specifics are slightly wrong.
+Consider the following example - note the oldest (only) cursor is pointing at mutation:1002:
+
+    empty  checkpoint_start  mutation  mutation
+    1001   1001              1001      1002
+                                       ^
+                                       Cursor
+
+The while loop is executed and the first clause is true - Cursor is
+pointing at the high seqno (we cannot expel the last item in a
+checkpoint, must always leave at least one item). The cursor is
+correctly decremented:
+
+    empty  checkpoint_start  mutation  mutation
+    1001   1001              1001      1002
+                             ^
+                             Cursor
+
+This should be where the cursor stops - it is safe to expel everything
+from the Cursor backwards (inclusive), given that wouldn't leave some
+items with the same seqno expelled.
+
+However, clause (2) checks if the previous item
+(checkpoint_start:1001) shares the same seqno as the current item
+(mutation:1001). This is true, and the cursor _is_ decremented.  The
+same thing happens again for the next position (empty:1001 and
+checkpoint_start:1001) and hence the cursor ends up at the start of
+the checkpoint and nothing is expelled:
+
+    empty  checkpoint_start  mutation  mutation
+    1001   1001              1001      1002
+    ^
+    Cursor
+
+What should have happened is the seqno of the current item should be
+compared with the next item (mutation:1001 and mutation:1002), which
+is false and hence the iterator should have stopped when pointing at
+mutation:1001.
+
+Fix by adjusting the clause in the while loop to compare current with
+next.
+
+However, doing so exposes a previously benign bug in the oldest cursor
+selection.
+
+The oldest cursor is found by using std::min_element() on the list of
+cursors, comparing their checkpointId and seqno:
+
+    const auto compareByCkptAndSeqno = [](const auto& a, const auto& b) {
+        return a.second->getCkptIdAndSeqno() <
+               b.second->getCkptIdAndSeqno();
+    };
+
+    auto earliestCursor = std::min_element(
+            cursors.begin(), cursors.end(), compareByCkptAndSeqno);
+
+The bug is that two cursors which have the same CkptId and Seqno are
+not ordered, so the wrong (not earliest) one could be selected. This
+was benign due to the above next/prev bug - the cursor would be moved
+backwards to the earliest item with the same seqno and so the bug was
+harmless. Howver with the expel issue fixed, that is no longer the case.
+
+Address this by additionally sorting on the cursors' distance from the
+start of the container if their ckptId and seqnos are identical.
+
+Change-Id: I8a12f6018b10aae40a4c6af682b14fe3668e8647
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2019-12-20 10:24:45.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-12-20 11:01:37.000000000
+Message: 
+Patch Set 1: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/676/ : FAILURE
+
+Failure of a CTest test [2019-12-20T10:48:48.243Z]  43/193 Test  #44: ep_testsuite_dcp.ephemeral.comp_passive ...................................... ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/676/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/665/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/674/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/448/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/604/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/23349/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/660/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-12-20 13:45:45.000000000
+Message: 
+Patch Set 1: Code-Review+1
+
+(1 comment)
+
+Seems all good to me, letting Dan to give a look.
+
+What I get is:
+  1) We don't want to expel some items but not others with the same seqno
+  2) We used to solve it by /not/ expelling anything when some items share the same seqno
+  3) Now with this change we solve it by the opposite way, ie we ensure that we expel /all/ the items that share the same seqno
+
+It appears that point (2) was the only reason for not expelling metaitems.
+Is my understanding correct?
+Was there any other reason for not expelling metaitems? I cannot think of any..
+Line:1968, engines/ep/tests/module_tests/checkpoint_test.cc -> It would be nice to check what exactly we are expelling, ie checking the content of the checkpoint-list before/after the expel.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-12-20 13:48:01.000000000
+Message: 
+Patch Set 1:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/677/ : FAILURE
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/665/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/674/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/448/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/604/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/23349/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/660/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-12-20 14:09:40.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/665/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/674/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/448/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/604/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/23349/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/660/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/678/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-12-20 16:59:54.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:1968, engines/ep/tests/module_tests/checkpoint_test.cc -> True, but I think for this simple test it's of limited value - we know there's only 4 things in the checkpoint, and we know we always expel from the beginning, so if we expelled 2 things then it's obvious what they are.
+
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,136 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-37546: Early-return if no items for persistence cursor
+
+Before this change, the logic in EPBucket::flushVBucket() is:
+
+  if (some-items-for-persistence-cursor) {
+    <many lines of code for flushing to disk>
+  }
+  <epilogue>
+
+The epilogue, which is executed regardless of whether we have flushed
+or not, performs:
+  - KVStore::pendingTasks()
+  - Notify satisfied SeqnoPersistence requests
+  - Checkpoint related operations:
+    - Wakeup CheckpointRemover if CM has checkpoints that can be removed
+    - Notify satisfied CheckpointPersistence requests
+
+With this change we remove the extra indentation of many lines of code:
+
+  if (no-items-for-persistence-cursor) {
+    return;
+  }
+  <many lines of code for flushing to disk>
+  <epilogue>
+
+The side effect of this is that we do /not/ execute the <epilogue> if we
+early-return. But:
+  - KVStore::pendingTasks() does not need to be executed as by
+    definition "is called after persisting a batch of data to perform
+    any pending tasks on the underlying store"
+  - There is definitely no SeqnoPersistence requests to notify as we
+    have not persisted anything
+So that is fine.
+
+Now about the Checkpoint related operations:
+  - Wakeup CheckpointRemover
+      I am keeping this by executing it unconditionally just after the
+      call to VB::getItemsForPersistence(), as the persistence cursor
+      may have just moved to the beginning of a new checkpoint, which
+      may make the previous checkpoint eligible for removal.
+      Also, it is safe to execute this step regardless of whether (1)
+      no-items-for-pcursor or (2) flush-success or (3) flush-failure.
+      Note that before this change we missed to execute this step before
+      some nested return statement. Which is fixed here.
+  - Notify satisfied CheckpointPersistence request
+      This step must still be executed if we early-return because
+      (again) the persistence cursor may have moved.
+      But, we cannot execute this step unconditionally because we cannot
+      notify if the flush fails.
+      So, this step is executed if (1) no-items-for-pcursor or (2)
+      flush-success, but not executed if (3) flush-failure.
+
+For reference, the CheckpointPersistence command seems to be just legacy
+from TAP, so we can probably remove it in a follow-up.
+
+Change-Id: I12fb3f0afffcfca2db768d3179592f0eda2a2f18
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2020-02-11 09:48:48.000000000
+Message: 
+Uploaded patch set 16.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-02-11 09:48:57.000000000
+Message: 
+Patch Set 16: Well-Formed+1
+
+Permission granted to commit: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/167794/artifact/restricted.html : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-02-11 10:46:59.000000000
+Message: 
+Patch Set 16: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/811/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/811/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/899/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/899/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/891/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/891/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/886/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/886/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/24346/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/884/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/666/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/mad-hatter/235/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-02-11 15:39:38.000000000
+Message: 
+Patch Set 16: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/905/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/825/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/24364/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/894/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/912/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/679/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/mad-hatter/248/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/899/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-02-12 14:20:57.000000000
+Message: 
+Patch Set 16: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------

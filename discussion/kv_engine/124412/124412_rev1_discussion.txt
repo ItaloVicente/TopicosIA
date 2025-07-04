@@ -1,0 +1,97 @@
+======================================================================================================================
+DESCRIPTION:
+
+WIP MB-38326: Allow failed IORequests to be requeued
+
+The magma code was not allowing failed IORequests to be requeued as part
+of commitCallback.
+
+Ben... I think the original problem stems from this...
+getMutationStatus returns DocNotFound for the following cases:
+COUCHSTORE_ERROR_NO_HEADER: I believe this would be corruption of the
+file. Since magma doesn't have this situation, not quite sure what the
+equivalent is.
+COUCHSTORE_ERROR_NO_SUCH_FILE: I don't see how this error can occur. An
+insert into the vbucket implicitly creates the vbucket if it does not
+exists.
+COUCHSTORE_ERROR_DOC_NOT_FOUND: No idea how this gets returned for the
+entire set of operations but I don't think there is a magma equivalent.
+
+Since the above 3 errors don't really exist in magma, there really is no
+situation where magma would NOT requeue the item. But, as I mentioned in
+the defect comments, if magma continues to requeue the item, it ends up
+looping forever.
+
+Change-Id: I13c0b5f699d888d2479d79b2daf8c7f2119e5657
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Scott Lashley
+Date: 2020-03-27 22:55:33.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-03-27 23:35:06.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/27168/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/23233/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/25532/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/1415/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/2810/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/2813/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/10670/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/1859/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/2861/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2020-03-30 08:19:24.000000000
+Message: 
+Patch Set 1: Code-Review-1
+
+(4 comments)
+
+Fix looks fine, but we need a test for the issue (and also one for the numSetFailure stat which was also changed I think).
+Line:691, engines/ep/src/magma-kvstore/magma-kvstore.cc -> should probably add a test for this (as it was wrong before)
+
+Line:693, engines/ep/src/magma-kvstore/magma-kvstore.cc -> Remove
+
+Line:695, engines/ep/src/magma-kvstore/magma-kvstore.cc -> Having this extra status is a bit confusing given we need another status in the if (req.IsDelete())... blocks below as we have two different types. Could you just refactor this so there is only one in each of the if/else blocks below.
+
+Line:701, engines/ep/src/magma-kvstore/magma-kvstore.cc -> rename to deleteStatus please
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Scott Lashley
+Date: 2020-03-31 01:21:28.000000000
+Message: 
+Patch Set 1:
+
+(3 comments)
+
+There are 2 issues that need further attention.
+1. How to test failed commit requests?
+Is there any KV or couchbase testing infrastructure that allows a test to inject an error into the runtime code path? We are not talking about injecting IO errors but rather simple error injections. For instance, if I want to mark a request as failed, how would I do that? 
+Note: magma does support error injections for io but it is quite a bit different than couchstore's io error injections and I think trying to make them compatible would be a difficult task. 
+2. The flush pattern for magma is significantly different in magma than in couchstore and its different between magma testing and normal magma. 
+Normal magma will flush the WAL which guarantees that the IORequest (item) is persisted and it guarantees it readable from memory. But it does not guarantee that the item has been persisted to index once the commit returns success. Let's assume we are able to flush the WAL but there is insufficient space to flush the writeCache and create the LSM indexes. What should the storage engine do? 
+For magma testing, we force the flush of the WAL, the flush of the indexes (key & seq) and the flush of the state tables for every commit. But they are separate writes and flushes.
+Line:693, engines/ep/src/magma-kvstore/magma-kvstore.cc -> Done
+
+Line:695, engines/ep/src/magma-kvstore/magma-kvstore.cc -> Done
+
+Line:701, engines/ep/src/magma-kvstore/magma-kvstore.cc -> Done
+
+----------------------------------------------------------------------------------------------------------------------

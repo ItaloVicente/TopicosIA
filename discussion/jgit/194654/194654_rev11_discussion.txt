@@ -1,0 +1,190 @@
+======================================================================================================================
+DESCRIPTION:
+
+Create util class for handling both local and remote repositories IO, to make future support in remote repositories easier.
+
+This class currently extracts some logic from ResolveMerger. Logic related to StreamSupplier was copied from ApplyCommand, which will be integrated in a following change.
+
+Change-Id: I8dc5a582433fc9891038c628385d3970b5a8984b
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Nitzan Gur-Furman
+Date: 2022-07-19 18:14:26.000000000
+Message: 
+Uploaded patch set 11.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2022-07-19 18:14:38.000000000
+Message: 
+Patch Set 11:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline.java11/1538/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2022-07-19 18:27:38.000000000
+Message: 
+Patch Set 11: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline.java11/1538/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Han-Wen NIenhuys
+Date: 2022-07-20 17:50:54.000000000
+Message: 
+Patch Set 11:
+
+(13 comments)
+Line:65, org.eclipse.jgit/src/org/eclipse/jgit/util/RepoIOHandler.java -> use AutoClosable. Then you can use this with 
+
+```
+try (RepoIOHandler io =  .. ) {
+}
+```
+
+block.
+
+Line:82, org.eclipse.jgit/src/org/eclipse/jgit/util/RepoIOHandler.java -> can you do s/cache/dircache/ throughout? (or do I misunderstand?) Cache is a fairly generic term.
+
+Line:114, org.eclipse.jgit/src/org/eclipse/jgit/util/RepoIOHandler.java -> s/Paths/Files/ ?
+
+(it doesn't have directories)
+
+Line:245, org.eclipse.jgit/src/org/eclipse/jgit/util/RepoIOHandler.java -> SIze  -> Size
+
+Line:326, org.eclipse.jgit/src/org/eclipse/jgit/util/RepoIOHandler.java -> it would be nice if you could simply do `modifiedFiles.clear()`, to avoid the spurious boolean, but not sure if that works for the control flow.
+
+Speaking of control-flow, could this class look like
+
+```
+ class RepoIOHandler {
+    static class Result {
+       List<String> modified;
+       List<String> failedToDelete;
+       ObjectId treeId;
+       .. 
+    }
+ 
+    deleteFile(String path);
+    checkoutFile(...);
+    insertIndex(...); 
+ 
+    Result finish()
+ }
+ ```
+ 
+that would make the class much less stateful, and easier to understand. It seems that the accessors are only needed to inspect the results of the merge, not to see state of the merge while it is being constructed?
+
+Line:467, org.eclipse.jgit/src/org/eclipse/jgit/util/RepoIOHandler.java -> unsuccessful or not is determined by the caller.
+
+Line:469, org.eclipse.jgit/src/org/eclipse/jgit/util/RepoIOHandler.java -> update comment? We don't do anything for inCore=true.
+
+Line:473, org.eclipse.jgit/src/org/eclipse/jgit/util/RepoIOHandler.java -> cleanUpChanges -> revertModifiedFiles ?
+
+Line:478, org.eclipse.jgit/src/org/eclipse/jgit/util/RepoIOHandler.java -> stupid question: 
+
+why can't this be 
+
+```
+  for (String path : modifiedFiles)  
+```
+
+Line:657, org.eclipse.jgit/src/org/eclipse/jgit/util/RepoIOHandler.java -> these are a bit weird. The repo is supplied by the caller, so the caller doesn't need these methods to get access to the repository.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Nitzan Gur-Furman
+Date: 2022-07-21 14:02:57.000000000
+MISMATCHED INLINE COMMENT
+Line:65, org.eclipse.jgit/src/org/eclipse/jgit/util/RepoIOHandler.java -> This is actually messy, because-
+A. the ioHandler instance is currently a class member, and try() must create a new var. The instanse is used by a lot of methods, so I'm not sure passing it around is better.
+B. As mentioned above - we should allow access to modifiedFiles even if no writeChanges() was never called. I think the finally() block is the best place for that (in the current design).
+----------------------------------------------------------------------------------------------------------------------
+Author: Nitzan Gur-Furman
+Date: 2022-07-21 14:02:57.000000000
+MISMATCHED INLINE COMMENT
+Line:82, org.eclipse.jgit/src/org/eclipse/jgit/util/RepoIOHandler.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Nitzan Gur-Furman
+Date: 2022-07-21 14:02:57.000000000
+MISMATCHED INLINE COMMENT
+Line:114, org.eclipse.jgit/src/org/eclipse/jgit/util/RepoIOHandler.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Nitzan Gur-Furman
+Date: 2022-07-21 14:02:57.000000000
+MISMATCHED INLINE COMMENT
+Line:245, org.eclipse.jgit/src/org/eclipse/jgit/util/RepoIOHandler.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Nitzan Gur-Furman
+Date: 2022-07-21 14:02:57.000000000
+MISMATCHED INLINE COMMENT
+Line:326, org.eclipse.jgit/src/org/eclipse/jgit/util/RepoIOHandler.java -> modfiedFiles are accessed both mid-way (for example, by CherryPickCommand), and after the operation is completed, *even if writeChanges() was never called*.
+I tried applying the Result approach, but allowing modified files access is now even dirtier. LMK what you think is the better option.
+
+As for the boolean - I couldn't find a clearer way given modifiedFiles can't be cleaned here.
+
+Also, note that some flows require finishBuilding() to be called without writeChanges(), so we can't combine them.
+----------------------------------------------------------------------------------------------------------------------
+Author: Han-Wen NIenhuys
+Date: 2022-07-25 10:27:22.000000000
+MISMATCHED INLINE COMMENT
+Line:326, org.eclipse.jgit/src/org/eclipse/jgit/util/RepoIOHandler.java -> I didn't look very closely, so you're probably right.
+----------------------------------------------------------------------------------------------------------------------
+Author: Nitzan Gur-Furman
+Date: 2022-07-24 07:53:55.000000000
+MISMATCHED INLINE COMMENT
+Line:326, org.eclipse.jgit/src/org/eclipse/jgit/util/RepoIOHandler.java -> I actually understand it the other way around:
+
+From DirCache#writeTree() documentations:
+"Write all index trees to the object store, returning the root tree."
+IIUC, meaning writeChanges writes the index.
+
+DirCacheBuilder#finish() says:
+"Finish this builder and update the destination DirCache."
+Which is, AFAIU, the worktree update, called in finishBuilding.
+
+I've updated the names according to that, LMK if I need to switch them.
+----------------------------------------------------------------------------------------------------------------------
+Author: Han-Wen NIenhuys
+Date: 2022-07-21 15:09:38.000000000
+MISMATCHED INLINE COMMENT
+Line:326, org.eclipse.jgit/src/org/eclipse/jgit/util/RepoIOHandler.java -> > I tried applying the Result approach, but allowing modified files access is now even dirtier. LMK what you think is the better option.
+
+Yeah, but at least it's obvious that something weird is going on there. I think I prefer the 'Result' approach.
+
+> Also, note that some flows require finishBuilding() to be called without writeChanges(), so we can't combine them.
+
+sigh.  
+maybe rename the methods to clarify what is actually happening.
+
+finishBuilding -> writeIndex
+writeChanges -> writeTree 
+
+(at least, that's how I understand it.)
+----------------------------------------------------------------------------------------------------------------------
+Author: Nitzan Gur-Furman
+Date: 2022-07-21 14:02:57.000000000
+MISMATCHED INLINE COMMENT
+Line:467, org.eclipse.jgit/src/org/eclipse/jgit/util/RepoIOHandler.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Nitzan Gur-Furman
+Date: 2022-07-21 14:02:57.000000000
+MISMATCHED INLINE COMMENT
+Line:469, org.eclipse.jgit/src/org/eclipse/jgit/util/RepoIOHandler.java -> Apparently, we can't call this from close() since some flows expect the working tree to stay dirty. So I brought back the inCore cleanup.
+----------------------------------------------------------------------------------------------------------------------
+Author: Nitzan Gur-Furman
+Date: 2022-07-21 14:02:57.000000000
+MISMATCHED INLINE COMMENT
+Line:473, org.eclipse.jgit/src/org/eclipse/jgit/util/RepoIOHandler.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Nitzan Gur-Furman
+Date: 2022-07-21 14:02:57.000000000
+MISMATCHED INLINE COMMENT
+Line:478, org.eclipse.jgit/src/org/eclipse/jgit/util/RepoIOHandler.java -> No reason that I can see (copied from the merger). Changed.
+----------------------------------------------------------------------------------------------------------------------
+Author: Nitzan Gur-Furman
+Date: 2022-07-21 14:02:57.000000000
+MISMATCHED INLINE COMMENT
+Line:657, org.eclipse.jgit/src/org/eclipse/jgit/util/RepoIOHandler.java -> Made private. These are needed to avoid "repo can be null" errors.
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,196 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-35049: Release StreamContainer rlock before calling Stream::setDead
+
+TSan found lock inversion as DcpProducer::setDisconnect holds
+`StreamContainer->rlock()` and then acquires `vb->getStateLock()`
+whereas `VBucket::set()` acquires them in the opposite order.
+
+Release the stream container lock before calling `Stream::setDead()` to
+avoid holding both in the `setDisconnect` path.
+
+TSan report:
+
+ [ RUN      ] DurabilityTest.MB34780
+ ==================
+ WARNING: ThreadSanitizer: lock-order-inversion (potential deadlock) (pid=10424)
+   Cycle in lock order graph: M4054 (0x7b68000308f8) => M201671426334441480 (0x000000000000) => M4054
+
+   Mutex M201671426334441480 acquired here while holding mutex M4054 in thread T7:
+     #0 pthread_rwlock_rdlock <null> (libtsan.so.0+0x00000002953b)
+     #1 cb_rw_reader_enter(pthread_rwlock_t*) .../platform/src/cb_pthreads.cc:195 (libplatform_so.so.0.1.0+0x000000009cfa)
+     #2 cb::RWLock::readerLock() .../platform/include/platform/rwlock.h:87 (ep.so+0x0000000f4326)
+     #3 cb::RWLock::lock_shared() .../platform/include/platform/rwlock.h:67 (ep.so+0x00000012f2ba)
+     #4 std::shared_lock<cb::RWLock>::shared_lock(cb::RWLock&) /usr/local/include/c++/7.3.0/shared_mutex:553 (ep.so+0x00000012f2ba)
+     #5 StreamContainer<std::shared_ptr<Stream> >::ReadLockedHandle::ReadLockedHandle(StreamContainer<std::shared_ptr<Stream> > const&) .../kv_engine/engines/ep/src/dcp/stream_container.h:213 (ep.so+0x00000012f2ba)
+     #6 StreamContainer<std::shared_ptr<Stream> >::rlock() const .../kv_engine/engines/ep/src/dcp/stream_container.h:273 (ep.so+0x000000122ad5)
+     #7 DcpProducer::notifySeqnoAvailable(Vbid, unsigned long) .../kv_engine/engines/ep/src/dcp/producer.cc:1312 (ep.so+0x000000122ad5)
+     #8 DcpConnMap::notifyVBConnections(Vbid, unsigned long) .../kv_engine/engines/ep/src/dcp/dcpconnmap.cc:424 (ep.so+0x0000000fa0af)
+     #9 KVBucket::notifyReplication(Vbid, long) .../kv_engine/engines/ep/src/kv_bucket.cc:2570 (ep.so+0x00000020ed03)
+     #10 EPBucket::notifyNewSeqno(Vbid, VBNotifyCtx const&) .../kv_engine/engines/ep/src/ep_bucket.cc:1327 (ep.so+0x000000160a95)
+     #11 NotifyNewSeqnoCB::callback(Vbid const&, VBNotifyCtx const&) .../kv_engine/engines/ep/src/kv_bucket.h:837 (ep.so+0x000000224dcb)
+     #12 VBucket::notifyNewSeqno(VBNotifyCtx const&) .../kv_engine/engines/ep/src/vbucket.cc:3579 (ep.so+0x000000262f6b)
+     #13 VBucket::set(Item&, void const*, EventuallyPersistentEngine&, std::function<cb::StoreIfStatus (boost::optional<item_info> const&, cb::vbucket_info)>, Collections::VB::Manifest::CachingReadHandle const&) .../kv_engine/engines/ep/src/vbucket.cc:1569 (ep.so+0x00000026af3f)
+     #14 KVBucket::set(Item&, void const*, std::function<cb::StoreIfStatus (boost::optional<item_info> const&, cb::vbucket_info)>) .../kv_engine/engines/ep/src/kv_bucket.cc:692 (ep.so+0x00000021ee48)
+     #15 EventuallyPersistentEngine::storeIfInner(void const*, Item&, unsigned long, ENGINE_STORE_OPERATION, std::function<cb::StoreIfStatus (boost::optional<item_info> const&, cb::vbucket_info)> const&) .../kv_engine/engines/ep/src/ep_engine.cc:2440 (ep.so+0x00000018071f)
+     #16 EventuallyPersistentEngine::store_if(gsl::not_null<void const*>, gsl::not_null<void*>, unsigned long, ENGINE_STORE_OPERATION, std::function<cb::StoreIfStatus (boost::optional<item_info> const&, cb::vbucket_info)> const&, boost::optional<cb::durability::Requirements> const&, DocumentState) .../kv_engine/engines/ep/src/ep_engine.cc:376 (ep.so+0x000000180d02)
+     #17 bucket_store_if(Cookie&, gsl::not_null<void*>, unsigned long, ENGINE_STORE_OPERATION, std::function<cb::StoreIfStatus (boost::optional<item_info> const&, cb::vbucket_info)>, boost::optional<cb::durability::Requirements>, DocumentState) .../kv_engine/daemon/protocol/mcbp/engine_wrapper.cc:139 (memcached+0x00000048ab2e)
+     #18 MutationCommandContext::storeItem() .../kv_engine/daemon/protocol/mcbp/mutation_context.cc:296 (memcached+0x00000053bea1)
+     #19 MutationCommandContext::step() .../kv_engine/daemon/protocol/mcbp/mutation_context.cc:63 (memcached+0x00000053c124)
+     #20 SteppableCommandContext::drive() .../kv_engine/daemon/protocol/mcbp/steppable_command_context.cc:37 (memcached+0x00000054b362)
+     #21 add_set_replace_executor .../kv_engine/daemon/mcbp_executors.cc:170 (memcached+0x000000518375)
+     #22 set_executor .../kv_engine/daemon/mcbp_executors.cc:178 (memcached+0x0000005185d8)
+     #23 std::_Function_handler<void (Cookie&), void (*)(Cookie&)>::_M_invoke(std::_Any_data const&, Cookie&) /usr/local/include/c++/7.3.0/bits/std_function.h:316 (memcached+0x00000051da87)
+     #24 std::function<void (Cookie&)>::operator()(Cookie&) const /usr/local/include/c++/7.3.0/bits/std_function.h:706 (memcached+0x00000051de2d)
+     #25 execute_client_request_packet(Cookie&, cb::mcbp::Request const&) .../kv_engine/daemon/mcbp_executors.cc:850 (memcached+0x00000051d34c)
+     #26 execute_request_packet(Cookie&, cb::mcbp::Request const&) .../kv_engine/daemon/mcbp_executors.cc:874 (memcached+0x00000051d474)
+     #27 Cookie::execute() .../kv_engine/daemon/cookie.cc:124 (memcached+0x000000501ec2)
+     #28 StateMachine::conn_execute() .../kv_engine/daemon/statemachine.cc:410 (memcached+0x000000550b4f)
+     #29 StateMachine::execute() .../kv_engine/daemon/statemachine.cc:137 (memcached+0x000000552974)
+     #30 Connection::runStateMachinery() .../kv_engine/daemon/connection.cc:1340 (memcached+0x0000004e9ca5)
+     #31 Connection::runEventLoop(short) .../kv_engine/daemon/connection.cc:1414 (memcached+0x0000004e9d34)
+     #32 run_event_loop(Connection*, short) .../kv_engine/daemon/connections.cc:148 (memcached+0x0000004ffdca)
+     #33 event_handler(int, short, void*) .../kv_engine/daemon/memcached.cc:848 (memcached+0x00000043b328)
+     #34 event_persist_closure /home/couchbase/jenkins/workspace/cbdeps-platform-build-old/deps/packages/build/libevent/libevent-prefix/src/libevent/event.c:1580 (libevent_core.so.2.1.8+0x000000017086)
+     #35 event_process_active_single_queue /home/couchbase/jenkins/workspace/cbdeps-platform-build-old/deps/packages/build/libevent/libevent-prefix/src/libevent/event.c:1639 (libevent_core.so.2.1.8+0x000000017086)
+     #36 CouchbaseThread::run() .../platform/src/cb_pthreads.cc:58 (libplatform_so.so.0.1.0+0x000000009ad7)
+     #37 platform_thread_wrap .../platform/src/cb_pthreads.cc:71 (libplatform_so.so.0.1.0+0x000000009ad7)
+     #38 <null> <null> (libtsan.so.0+0x000000024feb)
+
+   Mutex M4054 previously acquired by the same thread here:
+     #0 AnnotateRWLockAcquired <null> (libtsan.so.0+0x00000005b63d)
+     #1 folly::detail::annotate_rwlock_acquired_impl(void const volatile*, folly::annotate_rwlock_level, char const*, int) /home/couchbase/jenkins/workspace/cbdeps-platform-build-old/deps/packages/build/folly/follytsan-prefix/src/follytsan/folly/synchronization/SanitizeThread.cpp:91 (memcached+0x0000006463de)
+     #2 annotate_rwlock_acquired .../build/tlm/deps/folly.exploded/include/folly/synchronization/SanitizeThread.h:99 (ep.so+0x00000021e932)
+     #3 folly::SharedMutexImpl<false, void, std::atomic, false, true>::annotateAcquired(folly::annotate_rwlock_level) .../build/tlm/deps/folly.exploded/include/folly/SharedMutex.h:696 (ep.so+0x00000021e932)
+     #4 folly::SharedMutexImpl<false, void, std::atomic, false, true>::lock_shared(folly::SharedMutexToken&) .../build/tlm/deps/folly.exploded/include/folly/SharedMutex.h:376 (ep.so+0x00000021e932)
+     #5 folly::SharedMutexImpl<false, void, std::atomic, false, true>::ReadHolder::ReadHolder(folly::SharedMutexImpl<false, void, std::atomic, false, true> const&) .../build/tlm/deps/folly.exploded/include/folly/SharedMutex.h:1315 (ep.so+0x00000021e932)
+     #6 KVBucket::set(Item&, void const*, std::function<cb::StoreIfStatus (boost::optional<item_info> const&, cb::vbucket_info)>) .../kv_engine/engines/ep/src/kv_bucket.cc:659 (ep.so+0x00000021e932)
+     #7 EventuallyPersistentEngine::storeIfInner(void const*, Item&, unsigned long, ENGINE_STORE_OPERATION, std::function<cb::StoreIfStatus (boost::optional<item_info> const&, cb::vbucket_info)> const&) .../kv_engine/engines/ep/src/ep_engine.cc:2440 (ep.so+0x00000018071f)
+     #8 EventuallyPersistentEngine::store_if(gsl::not_null<void const*>, gsl::not_null<void*>, unsigned long, ENGINE_STORE_OPERATION, std::function<cb::StoreIfStatus (boost::optional<item_info> const&, cb::vbucket_info)> const&, boost::optional<cb::durability::Requirements> const&, DocumentState) .../kv_engine/engines/ep/src/ep_engine.cc:376 (ep.so+0x000000180d02)
+     #9 bucket_store_if(Cookie&, gsl::not_null<void*>, unsigned long, ENGINE_STORE_OPERATION, std::function<cb::StoreIfStatus (boost::optional<item_info> const&, cb::vbucket_info)>, boost::optional<cb::durability::Requirements>, DocumentState) .../kv_engine/daemon/protocol/mcbp/engine_wrapper.cc:139 (memcached+0x00000048ab2e)
+     #10 MutationCommandContext::storeItem() .../kv_engine/daemon/protocol/mcbp/mutation_context.cc:296 (memcached+0x00000053bea1)
+     #11 MutationCommandContext::step() .../kv_engine/daemon/protocol/mcbp/mutation_context.cc:63 (memcached+0x00000053c124)
+     #12 SteppableCommandContext::drive() .../kv_engine/daemon/protocol/mcbp/steppable_command_context.cc:37 (memcached+0x00000054b362)
+     #13 add_set_replace_executor .../kv_engine/daemon/mcbp_executors.cc:170 (memcached+0x000000518375)
+     #14 set_executor .../kv_engine/daemon/mcbp_executors.cc:178 (memcached+0x0000005185d8)
+     #15 std::_Function_handler<void (Cookie&), void (*)(Cookie&)>::_M_invoke(std::_Any_data const&, Cookie&) /usr/local/include/c++/7.3.0/bits/std_function.h:316 (memcached+0x00000051da87)
+     #16 std::function<void (Cookie&)>::operator()(Cookie&) const /usr/local/include/c++/7.3.0/bits/std_function.h:706 (memcached+0x00000051de2d)
+     #17 execute_client_request_packet(Cookie&, cb::mcbp::Request const&) .../kv_engine/daemon/mcbp_executors.cc:850 (memcached+0x00000051d34c)
+     #18 execute_request_packet(Cookie&, cb::mcbp::Request const&) .../kv_engine/daemon/mcbp_executors.cc:874 (memcached+0x00000051d474)
+     #19 Cookie::execute() .../kv_engine/daemon/cookie.cc:124 (memcached+0x000000501ec2)
+     #20 StateMachine::conn_execute() .../kv_engine/daemon/statemachine.cc:410 (memcached+0x000000550b4f)
+     #21 StateMachine::execute() .../kv_engine/daemon/statemachine.cc:137 (memcached+0x000000552974)
+     #22 Connection::runStateMachinery() .../kv_engine/daemon/connection.cc:1340 (memcached+0x0000004e9ca5)
+     #23 Connection::runEventLoop(short) .../kv_engine/daemon/connection.cc:1414 (memcached+0x0000004e9d34)
+     #24 run_event_loop(Connection*, short) .../kv_engine/daemon/connections.cc:148 (memcached+0x0000004ffdca)
+     #25 event_handler(int, short, void*) .../kv_engine/daemon/memcached.cc:848 (memcached+0x00000043b328)
+     #26 event_persist_closure /home/couchbase/jenkins/workspace/cbdeps-platform-build-old/deps/packages/build/libevent/libevent-prefix/src/libevent/event.c:1580 (libevent_core.so.2.1.8+0x000000017086)
+     #27 event_process_active_single_queue /home/couchbase/jenkins/workspace/cbdeps-platform-build-old/deps/packages/build/libevent/libevent-prefix/src/libevent/event.c:1639 (libevent_core.so.2.1.8+0x000000017086)
+     #28 CouchbaseThread::run() .../platform/src/cb_pthreads.cc:58 (libplatform_so.so.0.1.0+0x000000009ad7)
+     #29 platform_thread_wrap .../platform/src/cb_pthreads.cc:71 (libplatform_so.so.0.1.0+0x000000009ad7)
+     #30 <null> <null> (libtsan.so.0+0x000000024feb)
+
+   Mutex M4054 acquired here while holding mutex M201671426334441480 in thread T5:
+     #0 AnnotateRWLockAcquired <null> (libtsan.so.0+0x00000005b63d)
+     #1 folly::detail::annotate_rwlock_acquired_impl(void const volatile*, folly::annotate_rwlock_level, char const*, int) /home/couchbase/jenkins/workspace/cbdeps-platform-build-old/deps/packages/build/folly/follytsan-prefix/src/follytsan/folly/synchronization/SanitizeThread.cpp:91 (memcached+0x0000006463de)
+     #2 annotate_rwlock_acquired .../build/tlm/deps/folly.exploded/include/folly/synchronization/SanitizeThread.h:99 (ep.so+0x0000000bb5b6)
+     #3 folly::SharedMutexImpl<false, void, std::atomic, false, true>::annotateAcquired(folly::annotate_rwlock_level) .../build/tlm/deps/folly.exploded/include/folly/SharedMutex.h:696 (ep.so+0x0000000bb5b6)
+     #4 folly::SharedMutexImpl<false, void, std::atomic, false, true>::lock_shared(folly::SharedMutexToken&) .../build/tlm/deps/folly.exploded/include/folly/SharedMutex.h:376 (ep.so+0x0000000bb5b6)
+     #5 folly::SharedMutexImpl<false, void, std::atomic, false, true>::ReadHolder::ReadHolder(folly::SharedMutexImpl<false, void, std::atomic, false, true> const&) .../build/tlm/deps/folly.exploded/include/folly/SharedMutex.h:1315 (ep.so+0x0000000bb5b6)
+     #6 ActiveStream::setDead(end_stream_status_t) .../kv_engine/engines/ep/src/dcp/active_stream.cc:1181 (ep.so+0x0000000bb5b6)
+     #7 operator() .../kv_engine/engines/ep/src/dcp/producer.cc:1491 (ep.so+0x0000001207df)
+     #8 for_each<folly::AtomicHashMap<short unsigned int, std::shared_ptr<StreamContainer<std::shared_ptr<Stream> > > >::ahm_iterator<folly::AtomicHashMap<short unsigned int, std::shared_ptr<StreamContainer<std::shared_ptr<Stream> > > >, std::pair<short unsigned int const, std::shared_ptr<StreamContainer<std::shared_ptr<Stream> > > >, folly::AtomicHashArray<short unsigned int, std::shared_ptr<StreamContainer<std::shared_ptr<Stream> > >, std::hash<short unsigned int>, std::equal_to<short unsigned int>, std::allocator<char>, folly::AtomicHashArrayLinearProbeFcn, folly::Identity>::aha_iterator<folly::AtomicHashArray<short unsigned int, std::shared_ptr<StreamContainer<std::shared_ptr<Stream> > >, std::hash<short unsigned int>, std::equal_to<short unsigned int>, std::allocator<char>, folly::AtomicHashArrayLinearProbeFcn, folly::Identity>, std::pair<short unsigned int const, std::shared_ptr<StreamContainer<std::shared_ptr<Stream> > > > > >, DcpProducer::setDisconnect()::<lambda(folly::AtomicHashMap<short unsigned int, std::shared_ptr<StreamContainer<std::shared_ptr<Stream> > > >::value_type&)> > /usr/local/include/c++/7.3.0/bits/stl_algo.h:3884 (ep.so+0x0000001207df)
+     #9 DcpProducer::setDisconnect() .../kv_engine/engines/ep/src/dcp/producer.cc:1493 (ep.so+0x000000120b08)
+     #10 DcpConnMap::disconnect(void const*) .../kv_engine/engines/ep/src/dcp/dcpconnmap.cc:316 (ep.so+0x0000000fcc7d)
+     #11 EventuallyPersistentEngine::handleDisconnect(void const*) .../kv_engine/engines/ep/src/ep_engine.cc:5794 (ep.so+0x00000017e91a)
+     #12 EvpHandleDisconnect .../kv_engine/engines/ep/src/ep_engine.cc:1670 (ep.so+0x000000186682)
+     #13 perform_callbacks(ENGINE_EVENT_TYPE, void const*, void const*) .../kv_engine/daemon/memcached.cc:301 (memcached+0x0000004338d0)
+     #14 Connection::propagateDisconnect() const .../kv_engine/daemon/connection.cc:1534 (memcached+0x0000004d8d03)
+     #15 Connection::close() .../kv_engine/daemon/connection.cc:1515 (memcached+0x0000004e344f)
+     #16 StateMachine::conn_closing() .../kv_engine/daemon/statemachine.cc:572 (memcached+0x000000550aa1)
+     #17 StateMachine::execute() .../kv_engine/daemon/statemachine.cc:127 (memcached+0x000000552938)
+     #18 Connection::runStateMachinery() .../kv_engine/daemon/connection.cc:1340 (memcached+0x0000004e9ca5)
+     #19 Connection::runEventLoop(short) .../kv_engine/daemon/connection.cc:1414 (memcached+0x0000004e9d34)
+     #20 run_event_loop(Connection*, short) .../kv_engine/daemon/connections.cc:148 (memcached+0x0000004ffdca)
+     #21 thread_libevent_process .../kv_engine/daemon/thread.cc:340 (memcached+0x0000004b9424)
+     #22 event_persist_closure /home/couchbase/jenkins/workspace/cbdeps-platform-build-old/deps/packages/build/libevent/libevent-prefix/src/libevent/event.c:1580 (libevent_core.so.2.1.8+0x000000017086)
+     #23 event_process_active_single_queue /home/couchbase/jenkins/workspace/cbdeps-platform-build-old/deps/packages/build/libevent/libevent-prefix/src/libevent/event.c:1639 (libevent_core.so.2.1.8+0x000000017086)
+     #24 CouchbaseThread::run() .../platform/src/cb_pthreads.cc:58 (libplatform_so.so.0.1.0+0x000000009ad7)
+     #25 platform_thread_wrap .../platform/src/cb_pthreads.cc:71 (libplatform_so.so.0.1.0+0x000000009ad7)
+     #26 <null> <null> (libtsan.so.0+0x000000024feb)
+
+   Mutex M201671426334441480 previously acquired by the same thread here:
+     #0 pthread_rwlock_rdlock <null> (libtsan.so.0+0x00000002953b)
+     #1 cb_rw_reader_enter(pthread_rwlock_t*) .../platform/src/cb_pthreads.cc:195 (libplatform_so.so.0.1.0+0x000000009cfa)
+     #2 cb::RWLock::readerLock() .../platform/include/platform/rwlock.h:87 (ep.so+0x0000001205e9)
+     #3 cb::RWLock::lock_shared() .../platform/include/platform/rwlock.h:67 (ep.so+0x0000001205e9)
+     #4 std::shared_lock<cb::RWLock>::shared_lock(cb::RWLock&) /usr/local/include/c++/7.3.0/shared_mutex:553 (ep.so+0x0000001205e9)
+     #5 StreamContainer<std::shared_ptr<Stream> >::ReadLockedHandle::ReadLockedHandle(StreamContainer<std::shared_ptr<Stream> > const&) .../kv_engine/engines/ep/src/dcp/stream_container.h:213 (ep.so+0x0000001205e9)
+     #6 StreamContainer<std::shared_ptr<Stream> >::rlock() const .../kv_engine/engines/ep/src/dcp/stream_container.h:273 (ep.so+0x0000001205e9)
+     #7 operator() .../kv_engine/engines/ep/src/dcp/producer.cc:1490 (ep.so+0x0000001205e9)
+     #8 for_each<folly::AtomicHashMap<short unsigned int, std::shared_ptr<StreamContainer<std::shared_ptr<Stream> > > >::ahm_iterator<folly::AtomicHashMap<short unsigned int, std::shared_ptr<StreamContainer<std::shared_ptr<Stream> > > >, std::pair<short unsigned int const, std::shared_ptr<StreamContainer<std::shared_ptr<Stream> > > >, folly::AtomicHashArray<short unsigned int, std::shared_ptr<StreamContainer<std::shared_ptr<Stream> > >, std::hash<short unsigned int>, std::equal_to<short unsigned int>, std::allocator<char>, folly::AtomicHashArrayLinearProbeFcn, folly::Identity>::aha_iterator<folly::AtomicHashArray<short unsigned int, std::shared_ptr<StreamContainer<std::shared_ptr<Stream> > >, std::hash<short unsigned int>, std::equal_to<short unsigned int>, std::allocator<char>, folly::AtomicHashArrayLinearProbeFcn, folly::Identity>, std::pair<short unsigned int const, std::shared_ptr<StreamContainer<std::shared_ptr<Stream> > > > > >, DcpProducer::setDisconnect()::<lambda(folly::AtomicHashMap<short unsigned int, std::shared_ptr<StreamContainer<std::shared_ptr<Stream> > > >::value_type&)> > /usr/local/include/c++/7.3.0/bits/stl_algo.h:3884 (ep.so+0x0000001205e9)
+     #9 DcpProducer::setDisconnect() .../kv_engine/engines/ep/src/dcp/producer.cc:1493 (ep.so+0x000000120b08)
+     #10 DcpConnMap::disconnect(void const*) .../kv_engine/engines/ep/src/dcp/dcpconnmap.cc:316 (ep.so+0x0000000fcc7d)
+     #11 EventuallyPersistentEngine::handleDisconnect(void const*) .../kv_engine/engines/ep/src/ep_engine.cc:5794 (ep.so+0x00000017e91a)
+     #12 EvpHandleDisconnect .../kv_engine/engines/ep/src/ep_engine.cc:1670 (ep.so+0x000000186682)
+     #13 perform_callbacks(ENGINE_EVENT_TYPE, void const*, void const*) .../kv_engine/daemon/memcached.cc:301 (memcached+0x0000004338d0)
+     #14 Connection::propagateDisconnect() const .../kv_engine/daemon/connection.cc:1534 (memcached+0x0000004d8d03)
+     #15 Connection::close() .../kv_engine/daemon/connection.cc:1515 (memcached+0x0000004e344f)
+     #16 StateMachine::conn_closing() .../kv_engine/daemon/statemachine.cc:572 (memcached+0x000000550aa1)
+     #17 StateMachine::execute() .../kv_engine/daemon/statemachine.cc:127 (memcached+0x000000552938)
+     #18 Connection::runStateMachinery() .../kv_engine/daemon/connection.cc:1340 (memcached+0x0000004e9ca5)
+     #19 Connection::runEventLoop(short) .../kv_engine/daemon/connection.cc:1414 (memcached+0x0000004e9d34)
+     #20 run_event_loop(Connection*, short) .../kv_engine/daemon/connections.cc:148 (memcached+0x0000004ffdca)
+     #21 thread_libevent_process .../kv_engine/daemon/thread.cc:340 (memcached+0x0000004b9424)
+     #22 event_persist_closure /home/couchbase/jenkins/workspace/cbdeps-platform-build-old/deps/packages/build/libevent/libevent-prefix/src/libevent/event.c:1580 (libevent_core.so.2.1.8+0x000000017086)
+     #23 event_process_active_single_queue /home/couchbase/jenkins/workspace/cbdeps-platform-build-old/deps/packages/build/libevent/libevent-prefix/src/libevent/event.c:1639 (libevent_core.so.2.1.8+0x000000017086)
+     #24 CouchbaseThread::run() .../platform/src/cb_pthreads.cc:58 (libplatform_so.so.0.1.0+0x000000009ad7)
+     #25 platform_thread_wrap .../platform/src/cb_pthreads.cc:71 (libplatform_so.so.0.1.0+0x000000009ad7)
+     #26 <null> <null> (libtsan.so.0+0x000000024feb)
+
+   Thread T7 'mc:worker_3' (tid=10435, running) created by main thread at:
+     #0 pthread_create <null> (libtsan.so.0+0x0000000282a0)
+     #1 cb_create_named_thread(unsigned long*, void (*)(void*), void*, int, char const*) .../platform/src/cb_pthreads.cc:109 (libplatform_so.so.0.1.0+0x000000009885)
+     #2 create_worker .../kv_engine/daemon/thread.cc:111 (memcached+0x0000004b7660)
+     #3 thread_init(unsigned long, event_base*, void (*)(int, short, void*)) .../kv_engine/daemon/thread.cc:460 (memcached+0x0000004b87f3)
+     #4 memcached_main .../kv_engine/daemon/memcached.cc:2479 (memcached+0x0000004405c2)
+     #5 main .../kv_engine/daemon/main.cc:33 (memcached+0x0000004314f5)
+
+   Thread T5 'mc:worker_1' (tid=10433, running) created by main thread at:
+     #0 pthread_create <null> (libtsan.so.0+0x0000000282a0)
+     #1 cb_create_named_thread(unsigned long*, void (*)(void*), void*, int, char const*) .../platform/src/cb_pthreads.cc:109 (libplatform_so.so.0.1.0+0x000000009885)
+     #2 create_worker .../kv_engine/daemon/thread.cc:111 (memcached+0x0000004b7660)
+     #3 thread_init(unsigned long, event_base*, void (*)(int, short, void*)) .../kv_engine/daemon/thread.cc:460 (memcached+0x0000004b87f3)
+     #4 memcached_main .../kv_engine/daemon/memcached.cc:2479 (memcached+0x0000004405c2)
+     #5 main .../kv_engine/daemon/main.cc:33 (memcached+0x0000004314f5)
+
+ SUMMARY: ThreadSanitizer: lock-order-inversion (potential deadlock) (.../install/lib/libtsan.so.0+0x2953b) in pthread_rwlock_rdlock
+
+Change-Id: Ibb2ae11498c7226514bc18788778878bd6c87363
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: James H
+Date: 2019-07-12 11:06:04.000000000
+Message: 
+Uploaded patch set 2: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-07-12 11:17:50.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:38, /COMMIT_MSG -> Suggest cropping this a bit to aid the reader :)
+
+For example the stack frames are the same up to KVBucket::set (if I'm reading in Gerrit correctly) - as could the outer frames (15..38) arn't really of relevance to the issue, you can remove them from this backtrace and the one below.
+
+We also don't need the backtraces for where the threads were created.
+
+You can also remove the arguments from the functions with long argument lists, replacing with `(...)` so it's more readable.
+
+Essentially you just want to highlight how the two locks being acquired relate to each other; giving the reader something they can follow so they can verify your fix is correct.
+
+----------------------------------------------------------------------------------------------------------------------

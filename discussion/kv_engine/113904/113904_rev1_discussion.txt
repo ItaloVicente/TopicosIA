@@ -1,0 +1,95 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-35331: Update vbucket_state from the flusher items only
+
+In MB-35331 we see a test fail because a vbucket state change appears
+to be lost. This occurs because two set_vbucket_state operations occur
+in quick succession. The first state transition also happens to allow
+the flusher to run (because of changes in 96baa3b3 that open a new
+checkpoint). The flusher runs and reads the vbucket's state and
+happens to update the KVStore cache with the new vbucket state. The
+real set_vbucket_state transition is later flushed and now has no
+affect because the cache says that no state change occured.
+
+This is just one problem that occurs because flushVBucket reads state
+from the VBucket object and reacts to it. This is now changed so that
+flushVBucket only reacts to data that it can derive from the flusher
+batch, fixing the MB and many other potential 'race' conditions.
+
+The majority of the persisted vbucket state is already derived from
+the item's of the flushed batch, only the state, failover table and
+replication topology were read from vbucket state. This commit now
+"serialises" these bits of VBucket state into a JSON document during
+a vbucket state change (with the state change lock held), the JSON
+document becomes the value of the queued set_vbucket_state Item
+allowing the flusher to derive the persisted state from the Item
+value and not from current VBucket state.
+
+The following lists each vbucket_state field and describes its source.
+
+* highSeqno and purgeSeqno were not stored by the vbstate document,
+  couch-kvstore removes these fields during CouchKVStore::saveVBState.
+* state, replicationTopology and failover table are updated only when
+  the flusher encounters a set_vbucket_state Item, the value of the
+  Item stores a JSON document containing the values for these fields. A
+  new structure called vbucket_transition_state owns these fields.
+* maxDeletedSeqno - no change, this field was always set from item's
+  of the flushed batch.
+* lastSnapStart, lastSnapEnd - no change, these fields were always set
+  from the checkpoint(s) that the flushed batch is derived from.
+* maxCas - no change, always derived by scanning the item's of the flush
+* hlcCasEpochSeqno - no change, this field was always set a seqno of
+  the flushed batch.
+* mightContainXattrs - this now set during the flush, if an xattr item
+  is flushed, this field is set (and stays set forever).
+* supportNamespaces - no change, this is never anything other than true
+* version - no change, this is a constant value
+* highCompletedSeqno and highPreparedSeqno - no change, derived by
+  scanning the item's of the flushed batch
+* onDiskPrepares - this is set by the flusher from the items, but is
+  actually set by CouchKVStore::saveDocs
+
+Change-Id: I9df00a13b4ee829badb560b874add39cdce8deb1
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jim Walker
+Date: 2019-08-27 14:23:36.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-08-27 15:08:41.000000000
+Message: 
+Patch Set 1: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/22916/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/22916/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/13858/ : FAILURE
+
+Failure of a GoogleTest test:
+
+CheckpointRemoverEPTest.CursorDropMemoryFreed (5304 ms) ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/13858/ )
+
+Failure of a CTest test  36/179 Test  #23: ep-engine_ep_unit_tests ...................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/13858/ )
+
+ThreadSanitizer issue: lock-order-inversion (potential deadlock) (/home/couchbase/jenkins/workspace/kv_engine-threadsanitizer-master/install/lib/libtsan.so.0+0x5b63d) in AnnotateRWLockAcquired  ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/13858/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/19575/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/21965/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/3638/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/20578/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/12877/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/6591/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

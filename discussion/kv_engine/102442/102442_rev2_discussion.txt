@@ -1,0 +1,168 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-31810: HashTableVisitors HashBucketLock wrapping functions
+
+To implement an in memory collection high seqno we need to set a
+variable that will be stored in a Collections ManifestEntry on
+every new high senqo for that particular collection. To do so, we
+must wrap every operation that may update the high seqno in a
+Collections::VB::Manifest::ReadHandle/CachingReadHandle. We should do
+so before acquiring any HashBucketLocks to minimise HashTable
+contention and abort operations early on non-valid collections.
+
+This presents an interesting case for Ephemeral buckets as the
+pageOut() function can modify a collection high seqno (we update the
+high seqno on deletion of an item). To prevent lock order inversions
+we still need to acquire a Collections::VB::Manifest::ReadHandle
+before we acquire the HashBucketLock. As the HashTableVisitors iterate
+over HashBuckets and only acquire a HashBucketLock once (at the start
+of iteration) we need to modify HashTable::pauseResumeVisit to allow
+us to take aquire a Collections::VB::Manifest::ReadHandle lock before
+doing so, and dispose of it after the HashBucketLock.
+
+To implement this functionality with requiring that every
+HashTableVisitor locks HashBucket visits in a
+Collections::VB::Manifest::ReadHandle we can introduce two virtual
+functions that a HashTableVisitor can override. These functions,
+setUp and tearDown, will allow a visitor to set any required state
+or acquire any locks before the HashBucketLock is acquired, and then
+dispose of them appropriately after the HashBucketLock has been released.
+
+Currently the PagingVisitor does not use the added readHandle, it was
+added to demonstrate functionality, but the use will be added in a
+following patch.
+
+Change-Id: I7f06ff5f3f097d6ccc76ef9f020420a866f24802
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Ben Huddleston
+Date: 2018-12-05 09:31:29.000000000
+Message: 
+Uploaded patch set 2: Patch Set 1 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-12-05 10:32:46.000000000
+Message: 
+Patch Set 2: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/3877/ : FAILURE
+
+One of more core files found at the end of the build. Data for post-mortem saved to archived_core_dumps.tar.bz2 under "Build Artifacts". ( http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/3877/ )
+
+Failure of a CTest test  53/169 Test  #32: ep_testsuite.full_eviction.comp_active .......................................Child aborted ( http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/3877/ )
+
+AddressSanitizer issue: 1329296 byte(s) leaked in 13566 allocation(s). ( http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/3877/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/14171/ : FAILURE
+
+Failure of a CTest test 172/189 Test #170: memcached_testapp.ep.CleanOrUnclean/PersistToTest ............................ ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/14171/ )
+
+Failure of a GoogleTest  ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/14171/ )
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/6324/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/14746/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/6168/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/13141/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/12798/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-12-05 15:56:33.000000000
+Message: 
+Patch Set 2:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/14269/ : FAILURE
+
+Timeout of a CTest test 189/189 Test #136: memcached_testapp.default.Subdoc/SubdocTestappTest ...........................} ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/14269/ )
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/6324/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/14746/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/6168/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/3907/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/13141/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/12798/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-12-06 10:06:44.000000000
+Message: 
+Patch Set 2: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/6324/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/14746/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/6168/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/3907/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/13141/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/12798/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/14320/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-12-06 10:10:27.000000000
+Message: 
+Patch Set 2: Code-Review-1
+
+(3 comments)
+Line:411, engines/ep/src/paging_visitor.cc -> Note you're forcing a memory-allocation here (make_unique). Is it possible to have an empty ReadHandle object (which doesn't own anything) - if so that would be more efficient.
+
+Line:20, engines/ep/src/paging_visitor.h -> Given the ReadHandle is inside a unique_ptr it should be possible to forward-declare instead.
+
+Line:89, engines/ep/src/paging_visitor.h -> Probably worth documenting why these are needed, esp given the default implementation is empty.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2018-12-06 12:26:54.000000000
+Message: 
+Patch Set 2:
+
+(3 comments)
+Line:411, engines/ep/src/paging_visitor.cc -> Done with the addition of the ability to lock and unlock the lock inside the ReadHandle
+
+Line:20, engines/ep/src/paging_visitor.h -> I thought so too, but because ReadHandle is declared inside Manifest the only fwd declare that works in this file appears to be
+
+... omitted namespaces
+namespace Manifest {
+class ReadHandle;
+}
+... omitted namespaces
+
+however this throws up errors when I redeclare Manifest as a class in other files.
+
+Not sure if this is possible in a way I don't know about. Perhaps ReadHandle should be declared outside Manifest.
+
+Line:89, engines/ep/src/paging_visitor.h -> Done
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2018-12-07 15:24:02.000000000
+MISMATCHED INLINE COMMENT
+Line:411, engines/ep/src/paging_visitor.cc -> Had to mess about with ReadHandle a bit, but I think this is right now
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-12-06 14:39:09.000000000
+MISMATCHED INLINE COMMENT
+Line:411, engines/ep/src/paging_visitor.cc -> Not sure if this is that clean - we are keeping an RAII object around for a longer duration in a potentially locked / unlocked form...
+
+I was more thing you change the unique_ptr-managed ReadHandle to a concrete one (which would need it to be default-constructible in the unlocked state); then keep the previous code you had where you'd assign the ReadHandle in setUpHashBucketVisit() / call reset() in tearDown.
+----------------------------------------------------------------------------------------------------------------------

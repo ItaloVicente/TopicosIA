@@ -1,0 +1,183 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-48010: lastReadSeqno monotonic exception for disk/memory snapshot
+
+Another case of MB-48010 can occur when a merged disk/memory snapshot
+generates the memory part of the snapshot from multiple runs of
+ActiveStream processor task. This applies only to filtered collection
+streams where we have to inject seqno-advances at various points of
+the stream.
+
+In this case at least two invocations of the task are required where
+both end on an item that is to be streamed.
+
+An example could be where ActiveStream generates a single merged
+snapshot that spans 0 to 4.
+
+Items 1 and 2 come from disk.
+Items 3 and 4 come from memory (in two runs of the task).
+
+The bug occurs when we process item 3, ActiveStream::processItems
+retrieves Item 3 only from the CheckpointManager and determines it must
+be transmitted, so calls ActiveStream::snapshot, pushing the item on to
+the readyQ. At the end of this function we check if a SeqnoAdvanced is
+required and the bug occurs - as isSeqnoGapAtEndOfSnapshot returns true
+due to lastSentSnapEndSeqno:4 > lastReadSeqno:3 queue a SeqnoAdvance{4}
+at this point effectively closing the snapshot and setting lastReadSeqno
+to 4.
+
+Now when the task runs again and picks up Item 4, the monotonic
+violation occurs because we assign lastReadSeqno to 4, when it already
+is 4.
+
+The bug occurs because isSeqnoGapAtEndOfSnapshot doesn't have
+enough information, it is only comparing lastSentSnapEndSeqno and
+lastReadSeqno, it doesn't know that the ActiveStream has yet to reach
+Item 4.
+
+The fix is to give isSeqnoGapAtEndOfSnapshot the information it needs,
+the seqno that the stream has reached (it may of discarded the Item)
+but in the memory case we need to know that we have reached Item 4 to
+correctly consider if a SeqnoAdvance is required.
+
+Change-Id: I2df0032724271c2e56da3a8ee4050652affad2fe
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jim Walker
+Date: 2021-09-08 13:22:55.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: Restriction Checker
+Date: 2021-09-08 13:23:09.000000000
+Message: 
+Patch Set 2: Well-Formed+1
+
+Permission granted to commit: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/260114/artifact/restricted.html : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2021-09-08 13:25:20.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:2220, engines/ep/src/dcp/active_stream.cc -> This works for our test coverage and for some extended code reviews - but note I did consider to be overly defensive and write <=
+
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2021-09-08 13:33:51.000000000
+Message: 
+Patch Set 2: Code-Review+1
+
+(1 comment)
+Line:2569, engines/ep/tests/module_tests/collections/evp_store_collections_dcp_test.cc -> feels like a bit of an odd name at first glance (vs say writeMutation with a seqno arg), but in the context of the tests it seems reasonable 👍
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-09-08 13:37:52.000000000
+Message: 
+Patch Set 2: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2021-09-08 13:38:14.000000000
+Message: 
+Patch Set 2: Code-Review+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-09-08 14:14:33.000000000
+Message: 
+Patch Set 2: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-cheshire-cat/371/ : FAILURE
+
+Timeout of a CTest test 413/413 Test #410: cluster_test ..................................................................................................................} ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-cheshire-cat/371/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-cheshire-cat/252/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-cheshire-cat/245/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/10886/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/cheshire-cat/256/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/cheshire-cat/250/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/cheshire-cat/171/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/cheshire-cat/256/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/cheshire-cat/267/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/cheshire-cat/254/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-09-08 14:43:28.000000000
+Message: 
+Patch Set 2:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-cheshire-cat/372/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [0000/0158]: expiry pager settings.....\kv_engine\engines\ep\tests\ep_testsuite.cc:714 Test failed: `" (Expected `2021-09-08 15:08:59" to be less than or equal to `2021-09-08 15:08:58" - Unexpected task time range, expect: 2021-09-08 15:08:59 <= 2021-09-08 15:08:58 <= 2021-09-08 15:08:59)
+(2110 ms) FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-cheshire-cat/372/ )
+
+Timeout of a CTest test 412/413 Test  #70: ep-engine_ep_unit_tests.DurabilityRespondAmbiguousTest ........................................................................} ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-cheshire-cat/372/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-cheshire-cat/252/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-cheshire-cat/245/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/10886/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/cheshire-cat/256/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/cheshire-cat/250/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/cheshire-cat/171/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/cheshire-cat/256/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/cheshire-cat/267/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/cheshire-cat/254/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-09-08 15:15:25.000000000
+Message: 
+Patch Set 2: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-cheshire-cat/252/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-cheshire-cat/245/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/10886/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/cheshire-cat/256/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/cheshire-cat/250/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/cheshire-cat/171/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/cheshire-cat/256/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/cheshire-cat/267/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/cheshire-cat/254/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-cheshire-cat/373/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

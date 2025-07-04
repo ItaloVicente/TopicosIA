@@ -1,0 +1,58 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-42743 Update waitPersist logic based on flushDone messages from flusher
+
+The total slice writers in indexer equals num_indexes * num_cores. With
+large number of indexes on high cores machine, this number can be quite
+high. E.g., 1000 indexes on 80 core machine would have 80000 slice
+writers
+
+When incremental build happens for most of these indexes, the
+waitPersist method would wake-up all these slice writers as waitPersist
+writes to workerDone ch and expects a response from them. This happens
+every 10ms adding significant overhead to golang runtime.
+
+To reduce this overhead, this patch proposes a new "flushDone" message
+from flusher to each of the slices that processed mutations. The check
+for waitPersist now happens based on the number of flushDone messages
+received.
+
+The protocol followed is:
+
+a. Whenever flusher finishes flushing the vbucket, it sends a message to
+each slice that it has finished flush for that vbucket
+b. This message also includes the total number of such flush done
+messages to expect from flusher - as flusher will attempt a flush only
+if there is any change to vbucket seqnos
+c. Each slice up-on receiving this message will increment it's counter
+and compares it with the expected number of such flushDone messages it
+has to receive. Once both these counters match, then flush is considered
+done i.e. slice has processed all mutations send by the flusher
+
+These counters get reset at the start of every flush. To enable this
+reset, slice keeps a track of two timestamps:
+lastMutProcessedTime - The time at
+which last mutation has been processed by a slice and
+lastFlushDoneProcessedTime - Time time at which last flush done message
+has been processed by a slice.
+
+As per the protocol, the flushDone message has to be the last message
+that can be processed by a slice for every flush. If flusher has received
+all such flushDone messages and if a mutation is processed after the
+last flush done message is received, it marks the start of a new flush.
+
+With this patch, the incremental index build performance has been
+increased from 36 min to 25min for 3000 indexes on a node. The CPU
+utilisation has come down as well
+
+Change-Id: Id1eb92335135ce2d011ece7d16e9113ab05fc63d
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: VarunVelamuri
+Date: 2021-01-12 14:23:06.000000000
+Message: 
+Patch Set 5: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------

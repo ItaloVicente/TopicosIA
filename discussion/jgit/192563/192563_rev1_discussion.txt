@@ -1,0 +1,151 @@
+======================================================================================================================
+DESCRIPTION:
+
+ensure SAVE_RUNNER is cleanup when the process exits via System.exit()
+
+Change-Id: Ie27aca1fdaddfa487ebe072c3913d78355910df8
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: James Gao
+Date: 2022-04-07 16:40:54.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2022-04-07 16:41:04.000000000
+Message: 
+Patch Set 1:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline.java11/1184/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2022-04-07 16:52:47.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline.java11/1184/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: James Gao
+Date: 2022-04-07 16:53:15.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> Hi, this commit tries to fix the bug described at https://bugs.eclipse.org/bugs/show_bug.cgi?id=579445
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2022-04-30 14:11:00.000000000
+Message: 
+Patch Set 1:
+
+(2 comments)
+Line:8, /COMMIT_MSG -> Please follow the commit message guidelines[1]. In particular, please link the bugzilla entry in a footer:
+
+  Bug: 579445
+  
+[1] https://wiki.eclipse.org/EGit/Contributor_Guide#Commit_message_guidelines
+
+Line:310, org.eclipse.jgit/src/org/eclipse/jgit/util/FS.java -> This should not be necessary. You wrote in bug 579445 that a config lock and a probe file were left behind.
+
+I think the problem with the config.lock is in FileBasedConfig.save(). This should call lf.lock() inside the try-catch block, not before. FS_Posix.createNewFileAtomic() probably should ensure that it cleans up correctly if it can't get the FileStore or create the link after having created the file. Not sure if lf.unlock() also would need to be improved.
+
+As for the left-over probe file: it's probably not a good idea to create files in a daemon thread (FUTURE_RUNNER).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: James Gao
+Date: 2022-04-30 15:33:13.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:310, org.eclipse.jgit/src/org/eclipse/jgit/util/FS.java -> the daemon thread (SAVE_RUNNER) is blocked at lf.commit() in the try-catch block. This can be proved by the correct content of config.lock file and the debug logs. Even in the try-catch block, the finally block (lf.unlock()) is still not executed, because the JVM is shutdown via System.exit().
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2022-04-30 21:14:05.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:310, org.eclipse.jgit/src/org/eclipse/jgit/util/FS.java -> SAVE_RUNNER doesn't use a daemon thread. FUTURE_RUNNER does use daemon threads.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: James Gao
+Date: 2022-05-01 02:59:03.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:310, org.eclipse.jgit/src/org/eclipse/jgit/util/FS.java -> SAVE_RUNNER is indeed a non-daemon thread, while the previous description is still valid.
+
+The root cause should be two:
+1. the 'finally' block for cleaning up lf.commit() is skipped when JVM is shutdown by System.exit().
+2. when writing config on the non-daemon SAVE_RUNNER thread, 'lf.commit()' has to wait the result of snapshot (run on a daemon FUTURE_RUNNER thread) which takes 3 seconds for detecting FS attributes.
+
+With a addShutdownHook to kill SAVE_RUNNER gracefully, the skipped 'finally' block can be guaranteed to execute.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2022-05-01 07:06:07.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:310, org.eclipse.jgit/src/org/eclipse/jgit/util/FS.java -> OK, now I see. So if we
+
+* don't use daemon threads for the FUTURE_RUNNER
+* also shut down the FUTURE_RUNNER properly
+* handle InterruptedException properly in the future determining the FS properties
+* make sure the LockFile code properly cleans up when interrupted
+
+we should be able to avoid having stray files (probes or lock files) being left and at the same time avoid any (noticeable) delay when shutting down.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: James Gao
+Date: 2022-05-01 08:58:24.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:310, org.eclipse.jgit/src/org/eclipse/jgit/util/FS.java -> > OK, now I see. So if we
+> 
+> * don't use daemon threads for the FUTURE_RUNNER
+> * also shut down the FUTURE_RUNNER properly
+> * handle InterruptedException properly in the future determining the FS properties
+> * make sure the LockFile code properly cleans up when interrupted
+> 
+> we should be able to avoid having stray files (probes or lock files) being left and at the same time avoid any (noticeable) delay when shutting down.
+
+Yes. To shut down FUTURE_RUNNER, it should be done in a addShutdownHook() and wait a reasonable short time (e.g. 100ms) for the threads cleaning up themselves. This also requires that we change some logic in the current busy-loop body of measureMinimalRacyInterval() to throw and catch InterruptedException.
+
+Without shutting down FUTURE_RUNNER, like the implements in the current patch, the stray probes will also be removed. This is not guaranteed by JVM, but removing the stray probes should be done just soon before the JVM shutting down with high probability.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2022-05-01 14:54:07.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:310, org.eclipse.jgit/src/org/eclipse/jgit/util/FS.java -> Maybe for the FUTURE_RUNNER it is even good enough to register the probes, before creating them, with File.deleteOnExit(). (Leaving the runner as is, using daemon threads.) Then indeed we'd have to deal only with the SAVE_RUNNER, and making sure the config lock gets properly removed when that thread is interrupted.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: James Gao
+Date: 2022-05-01 17:40:41.000000000
+MISMATCHED INLINE COMMENT
+Line:8, /COMMIT_MSG -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2022-05-01 18:16:32.000000000
+MISMATCHED INLINE COMMENT
+Line:310, org.eclipse.jgit/src/org/eclipse/jgit/util/FS.java -> Ack
+----------------------------------------------------------------------------------------------------------------------
+Author: James Gao
+Date: 2022-05-01 17:40:41.000000000
+MISMATCHED INLINE COMMENT
+Line:310, org.eclipse.jgit/src/org/eclipse/jgit/util/FS.java -> I upload a new patch, call File.deleteOnExit() before creating the probe files.
+----------------------------------------------------------------------------------------------------------------------

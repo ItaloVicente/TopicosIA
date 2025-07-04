@@ -1,0 +1,93 @@
+======================================================================================================================
+DESCRIPTION:
+
+HashTable: Refactor find...() logic to findFor{Read,Write}
+
++Summary+
+
+Restructure the various find...() methods in HashTable to support
+accessing Committed items even if Pending items are present.
+
++Background+
+
+After warmup / failover, Pending SyncWrites (which are not complete)
+may already have been observed as Committed by clients:
+
+- In the case of warmup - the same node _may_ have already notified
+  the client of Commit, but the Commit may not have been persisted
+  before the node restarted.
+
+- In the case of failover - the previous active node may have already
+  notified the client of Commit, but the DCP_COMMIT message never made
+  it to the replica (which has subsequently been promoted).
+
+In these cases we cannot allow clients to read the existing Committed
+value - as that could result in a client seeing an old value after the
+new and breaking Sequential Consistency.
+
+To handle this, we mark those Pending (but incomplete) SyncWrites as
+"ReCommitting". Any attempt to read a key where a PendingReCommitting
+SV exists should block access to the previous Committed SV with
+status:ReCommittingInProgress.
+
+This requires that the HashTable::findForRead() method is modified to
+also check for a PendingReCommitting item, and return that instead of
+the Committed item as it normally does. The caller must then check
+that it found a PendingReCommitting and explicitly block the
+access. Note this is different to not finding an item at all - it
+would be invalid to even tell the client ENOENT.
+
+However, some other uses-cases - notably warmup itself - _do_ need to
+be able to call find...() and locate the Committed item (if present),
+and not be re-directed to the PreparedReCommitted item. As a result we
+essenitally need a 3rd way to find items, skipping the normal
+ReCommitting checks.
+
++Changes+
+
+Modify HashTable::find() to only perform the find of the given key -
+it now returns two StoreValue*, one for each of the Pending and/or
+Committed item found. Rename it to findInner() to make more explicit
+this is an internal function used by other (public) find methods.
+
+Modify HashTable::findForRead() & findForWrite() to perform the extra
+logic which find used to do - checking if the user wants a deleted
+item returns, and updating reference tracking if required.
+
+This allows HashTable::insertFromWarmup() to call findInner() and
+access pending and committed items directly, regardless of any extra
+checks in findFor{Read,Write}.
+
+Note this patch _doesn't_ yet peform any checks based on ReCommitted
+status - they will follow in a subsequent patch.
+
+Change-Id: I3ada8c85f4234db591ff5897d3985b4a1b19a32d
+Reviewed-on: http://review.couchbase.org/109320
+Tested-by: Build Bot <build@couchbase.com>
+Reviewed-by: Ben Huddleston <ben.huddleston@couchbase.com>
+Reviewed-by: Paolo Cocchi <paolo.cocchi@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2019-05-17 15:24:51.000000000
+Message: 
+Change has been successfully cherry-picked as c1605e16470cd93e05b2615cf3f88b1d623a4927 by Dave Rigby
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-05-17 15:26:07.000000000
+Message: 
+Patch Set 4:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/1209/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-05-17 16:14:05.000000000
+Message: 
+Patch Set 4:
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/1209/ : SUCCESS'
+----------------------------------------------------------------------------------------------------------------------

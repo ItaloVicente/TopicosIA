@@ -1,0 +1,134 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-31410: Fix lock lifetime in PassiveStream::processBufferedMessages
+
+On a DcpConsumer, when we hit the replication threshold we buffer the
+following incoming mutations for deferred processing in the
+DcpConsumerTask.
+The Consumer cannot process new incoming mutations until the buffer has
+been completely drained. That is for ensuring the seqno-invariant.
+
+In MB-20649 we have modified the way we synchronize the Consumer
+front-end thread and the bg-thread that runs the DcpConsumerTask. That
+makes possible that the front-end thread processes new incoming
+mutations before the DcpConsumerTask has drained the buffer. That may
+break seqno-invariant.
+
+With this change I fix the synchronization issue and I ensure that
+MB-20649 stays fixed as well.
+
+Change-Id: Ib40f0998cdb8f4182e2c97c39bfc0c2969a4ab35
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2018-10-09 16:05:33.000000000
+Message: 
+Uploaded patch set 7.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2018-10-09 16:11:02.000000000
+Message: 
+Patch Set 7: Code-Review-1
+
+Still looking at the coverage for MB-20649
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-10-09 16:20:22.000000000
+Message: 
+Patch Set 7: Code-Review-1
+
+(5 comments)
+Line:356, engines/ep/src/dcp/passive_stream.cc -> This is a bit opaque without reading the MBs themselves. If you want to add a comment here, then add one which describes the reason for this code.
+
+Line:412, engines/ep/src/dcp/passive_stream.cc -> I'm not keen on the manual unlock / relock - it's still overall complex and error-prone.
+
+Can we not solve this with a different approach - for example what about:
+
+# Acquire lock
+# Removing /all/ the messages we plan to process (up to the batch count) from the buffer.
+# Release lock.
+# Process messages. If we error (have any we cannot process); then re-acquire lock; add leftover messages to front of the buffer (i.e. before any new ones which have been added) and return.
+
+This avoids any fancy manual locking / unlocking; and I think also simplifies the notification.
+
+Would this (or something similar) work?
+
+Line:711, engines/ep/src/dcp/passive_stream.cc -> Probably simpler to just have a single method which takes a notify::Yes/No argument
+
+Line:158, engines/ep/src/dcp/passive_stream.h -> I think the accessor is overkill - just make the member variable (processBufferedMessages_postPopFront_Hook) protected.
+
+Line:212, engines/ep/src/dcp/passive_stream.h -> Might be worth at least documenting what it is for (hook executed during function ...)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2018-10-09 16:40:55.000000000
+Message: 
+Patch Set 7:
+
+(1 comment)
+Line:412, engines/ep/src/dcp/passive_stream.cc -> So I still hope to solve this in a cleaner way, that's the reason of my -1.
+I'm investigating on the old MB-20649 (ie, the change that introduced this issue), and I'm not really sure that the original bug still exists. Obviously I have to be very careful on that, because it was a case of deadlock by lock inversion.
+
+In particular about your example: we cannot do
+# Release lock
+# Process messages
+because that allows the front-end to process new incoming mutations.
+Given how the code is today, we /must/ process messages here under lock
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-10-09 17:01:05.000000000
+Message: 
+Patch Set 7:
+
+(1 comment)
+Line:412, engines/ep/src/dcp/passive_stream.cc -> So if the front end is still processing messages (even when buffer processing still occurring), I think we should stop that.
+
+I.e. once we start to buffer messages, we continue to buffer until it’s explciitly disabled - i.e. when last buffered message is processed (and not just popped from the buffer Q).
+
+That /should/ allow something like what I proposed. 
+
+Ideally we’d have a simpler approach where we always (or never!) buffer - hence we avoid the complexity/potential bugs when we try to switch between the two modes.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-10-09 17:29:15.000000000
+Message: 
+Patch Set 7: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/4301/ : FAILURE
+
+ThreadSanitizer issue: heap-use-after-free /home/couchbase/jenkins/workspace/kv_engine-threadsanitizer-master/kv_engine/programs/engine_testapp/mock_server.cc:480 in disconnect_mock_connection(mock_connstruct*)  ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/4301/ )
+
+Failure of a CTest test  27/161 Test  #24: ep-engine_ep_unit_tests ...................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/4301/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/2086/ : FAILURE
+
+One of more core files found at the end of the build. Data for post-mortem saved to archived_core_dumps.tar.bz2 under "Build Artifacts". ( http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/2086/ )
+
+Failure of a CTest test  27/162 Test  #26: ep-engine_ep_unit_tests ...................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/2086/ )
+
+AddressSanitizer issue: heap-use-after-free /home/couchbase/jenkins/workspace/kv_engine-ASan-UBSan-master/kv_engine/programs/engine_testapp/mock_server.cc:480 in disconnect_mock_connection(mock_connstruct*) ( http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/2086/ )
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/4648/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/12757/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/11443/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/12398/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/11136/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2018-10-11 16:40:31.000000000
+Message: 
+Abandoned
+
+Proceeding with the alternative at http://review.couchbase.org/#/c/100497/
+----------------------------------------------------------------------------------------------------------------------

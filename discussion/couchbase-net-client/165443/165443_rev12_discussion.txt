@@ -1,0 +1,88 @@
+======================================================================================================================
+DESCRIPTION:
+
+NCBC-3079: Improve logging performance in hot paths
+
+Motivation
+----------
+Our current approach to logging is adding a lot of heap allocation and
+boxing costs, even for log levels that are disabled.
+
+Modifications
+-------------
+Upgrade to Microsoft.Extensions.Logging.Abstractions 6.0.0. This also
+requires upgrading some related packages to 6.0.0.
+
+Rewrite the log redaction system to use a generic structure instead of a
+heap-allocated class. Keep IRedactor the same as a forwarder since it is
+a public API used by Transactions.
+
+Convert logging in ClusterNode, BucketBase, and RetryOrchestrator to use
+the new C# 9 source generator logging pattern.
+
+Add ISpanFormattable to HostEndpointWithPort in .NET 6 to allow it to be
+included in a string format without an intermediate string.
+
+Results
+-------
+Logging in ClusterNode, BucketBase, and RetryOrchestrator now avoid
+unnecessary array allocations and boxing. Unique event IDs per context
+are now applied to all events as well. Note: ClusterNode was already
+avoiding the allocations/boxing in some places with an IsEnabled check,
+but this approach is much cleaner.
+
+Redaction now completely avoids extra heap allocations, even when
+redaction is enabled, for any call site using the new pattern. Call
+sites using the old pattern will box `Redacted<T>` onto the heap. On
+.NET 6 it will also avoid allocating intermediate strings when redaction
+is enabled.
+
+Strong-typing around redaction helps avoid accidental redaction misses,
+several of which were fixed as part of this changeset.
+
+The following is an example benchmark for a typical LogDebug call with
+debug logging disabled but redaction enabled. It includes a string
+parameter and a redacted long parameter. The logger is the NullLogger,
+so this only shows the cost of the call site, not any additional gains
+rendering if logging was enabled.
+
+BenchmarkDotNet=v0.13.1, OS=Windows 10.0.22000
+Intel Core i7-10850H CPU 2.70GHz, 1 CPU, 12 logical and 6 physical cores
+.NET SDK=6.0.101
+  [Host]     : .NET 6.0.1 (6.0.121.56705), X64 RyuJIT
+  Job-THXTUF : .NET 6.0.1 (6.0.121.56705), X64 RyuJIT
+  Job-GTZOER : .NET Core 3.1.22 (CoreCLR 4.700.21.56803, CoreFX 4.700.21.57101), X64 RyuJIT
+
+| Method |        Job |       Runtime |     Toolchain |      Mean |     Error |    StdDev | Ratio | RatioSD | Rank |  Gen 0 | Allocated |
+|------- |----------- |-------------- |-------------- |----------:|----------:|----------:|------:|--------:|-----:|-------:|----------:|
+| Legacy | Job-THXTUF |      .NET 6.0 |        net6.0 | 63.301 ns | 1.2848 ns | 1.2018 ns |  1.00 |    0.00 |    3 | 0.0153 |      96 B |
+|    New | Job-THXTUF |      .NET 6.0 |        net6.0 |  9.958 ns | 0.0318 ns | 0.0282 ns |  0.16 |    0.00 |    1 |      - |         - |
+| Legacy | Job-GTZOER | .NET Core 3.1 | netcoreapp3.1 | 73.727 ns | 0.1712 ns | 0.1517 ns |  1.16 |    0.02 |    4 | 0.0153 |      96 B |
+|    New | Job-GTZOER | .NET Core 3.1 | netcoreapp3.1 | 10.494 ns | 0.0483 ns | 0.0452 ns |  0.17 |    0.00 |    2 |      - |         - |
+
+Change-Id: I6b0725bd864c7bcefd21773316a14eb44606ee54
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Brant Burnett
+Date: 2022-01-29 16:04:37.000000000
+Message: 
+Uploaded patch set 12.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-01-29 16:07:06.000000000
+Message: 
+Patch Set 12:
+
+Build Started http://sdk.jenkins.couchbase.com/job/dotnet/job/sdk/job/couchbase-net-client-cv-trigger/3196/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-01-29 16:13:56.000000000
+Message: 
+Patch Set 12: Verified+1
+
+Build Successful 
+
+http://sdk.jenkins.couchbase.com/job/dotnet/job/sdk/job/couchbase-net-client-cv-trigger/3196/ : success
+----------------------------------------------------------------------------------------------------------------------

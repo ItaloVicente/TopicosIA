@@ -1,0 +1,135 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-35604: Add ssl_cipher_suite for TLS>=1.3
+
+OpenSSL use a separate API to configure ciphers for TLS 1.3.
+For TLS < 1.3 you may use SSL_CTX_set_cipher_list which scans
+the list of provided ciphers and selects the ones it supports
+and ignores unknown ciphers. The method is considered as
+successful if at least one cipher is selected. For TLS 1.3 one
+needs to use SSL_CTX_set_ciphersuites and it will _fail_ if
+it encounters unknown ciphers.
+
+To work around this ns_server will provide two list of chiphers:
+
+    ssl_cipher_list - list of ciphers to use for TLS < 1.3
+    ssl_cipher_suites - ciphersuites to use for TLS >= 1.3
+
+This patch also change the logic for what an empty string means.
+Previously an empty string indicated that you wanted to use
+whatever OpenSSL provided as default. With this patch an empty
+string means: no ciphers.
+
+Change-Id: If426ed8b02ecb7820851f795e2e2593fa9591a36
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Trond Norbye
+Date: 2019-08-27 09:14:07.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-08-27 09:44:28.000000000
+Message: 
+Patch Set 2: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/13846/ : FAILURE
+
+Failure of a GoogleTest test:
+
+0 tests, listed below: ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/13846/ )
+
+Failure of a CTest test  77/179 Test  #79: memcached_testapp.default.SslCertTest ........................................ ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/13846/ )
+
+ThreadSanitizer issue: data race /usr/local/include/c++/7.3.0/bits/shared_ptr_base.h:1121 in std::__shared_ptr<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const, (__gnu_cxx::_Lock_policy)2>::__shared_ptr(std::__shared_ptr<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const, (__gnu_cxx::_Lock_policy)2> const&)  ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/13846/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/19563/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/22902/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/21953/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/3625/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/20556/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/12865/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/6578/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-08-27 10:06:19.000000000
+Message: 
+Patch Set 2: Code-Review-1
+
+(2 comments)
+Line:497, daemon/settings.h -> Can I suggest we name this method (and the associated config param) something like `ssl_cipher_suites_1_3` - it's going to be hard for ourselves / users to remember which one of `list` & `suites` is <1.3 and which is >=1.3
+
+Line:37, daemon/ssl_utils.h -> Given neither of these is modified via the shared_ptr, prefer just passing a `const std::string*` - see http://isocpp.github.io/CppCoreGuidelines/CppCoreGuidelines#Rr-smartptrparam
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2019-08-27 10:18:26.000000000
+Message: 
+Patch Set 2:
+
+(2 comments)
+Line:497, daemon/settings.h -> With the current naming it maps to what openssl calls them (including the command line of the openssl binary)... Adding 1.3 in the name will make it harder to figure out which one to use once we have TLS 1.4... is that ssl_cipher_suites_1_3? or...
+
+Line:37, daemon/ssl_utils.h -> The "problem" with that is that then they _have_ to be set... ifyou look in the method they may be "empty". If not set you'd get the "default" value set by openssl (I don't think it offers a lot of extra value converting to a boost::optional every time calling into here...)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-08-27 10:21:15.000000000
+Message: 
+Patch Set 2:
+
+(2 comments)
+Line:497, daemon/settings.h -> Well, I think _something_ other  than `list` & `suites` would be preferable - there's no indication at *all* which is the newer / older one.
+
+Line:37, daemon/ssl_utils.h -> Sure, so can't you just pass a `const std::string*`, extracted by calling `.get()` on the shared_ptr ?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2019-08-27 10:45:47.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:497, daemon/settings.h -> That would end up in different naming than the openssl, which would lead to even more confusion?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-08-27 10:47:30.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:497, daemon/settings.h -> I think our users probably care more about a explicit, easy-to-use API for Couchbase than exactly matching OpenSSL's API naming (which IMHO is very unclear) - having a pair of methods which you basically have to go to the man page every time to know which one is for TLS 1.2 and which is for TLS 1.3+ is Bad Design!
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2019-08-27 10:58:24.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:497, daemon/settings.h -> In this case the "user" is ns_server (as it will calculate this list). It is the one providing the API to the end user allowing it to specify the mix of ciphers. 
+
+We can alternatively add:
+
+"ssl_ciphers" : {
+    "tls_1_2" : "list:of:ciphers:for:old", 
+    "tls_1_3" : "list:of:ciphersuites:for:1.3"
+}
+
+That should be prepared for dealing with an API change for 1.4
+
+(I could have added separate entries for tls_1[.1], but then I'd loose the preferred ordering).
+
+----------------------------------------------------------------------------------------------------------------------

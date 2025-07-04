@@ -1,0 +1,92 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-38999: Handle transition from OSO backfill to memory
+
+A bug exists which is easier to see when compared with the seqno
+backfill 'setup'.
+
+Common to both backfill types is the registration of a cursor with
+the checkpoint manager at the highest non-persisted seqno, which
+in the MBs case was something that didn't exist, i.e. all data exists
+on disk (but we need a cursor...)
+
+A seqno backfill which always has a start-seqno and end-seqno always
+sets the end to be the cursor's seqno - 1, it will not send from disk
+the item @ the same seqno as the cursor.
+
+However OSO backfill doesn't do that, it has to iterate the entire
+by-id index, it cannot stop based on a seqno.
+
+In the crash after the cursor has been registered, a new mutation arrives
+in-memory and takes up the cursor's seqno, it also flushes to disk.
+
+Example.
+
+1) On disk exists 3 items. seqnos 1, 2 and 3.
+2) backfill schedule, start 0 and registered cursor is seqno 4 (no item
+   exists for seqno 4)
+   a) Note that a seqno ordered backfill would set its end point to be 3
+     (inclusive)
+3) an item is written to seqno 4 and is flushed.
+   a) On disk exists 4 items. seqnos 1, 2, 3 and 4.
+4) OSO runs over the by-id index and returns seqnos 1 to 4 (in id order)
+   a) A seqno ordered backfill would not of returned seq 4
+5) Backfill completes and now sends items from memory from seqno 4
+6) Exception occurs - seqno 4 is being sent twice.
+
+The fix is to check that items returned from disk are skipped if they
+match the in-memory transition point, e.g. seqno 4 would of been skipped
+from the disk items.
+
+Change-Id: Icf229ff7e8b0b93b33e14cb7c09fab27a11ca42f
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jim Walker
+Date: 2020-04-28 19:29:38.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-04-28 20:16:24.000000000
+Message: 
+Patch Set 1: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/27863/ : FAILURE
+
+Failure of a CTest test  39/386 Test  #33: ep-engine_ep_unit_tests.CollectionsOSODcpTest ................................................................................. ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/27863/ )
+
+Failure of a GoogleTest test:
+
+CollectionsOSODcpTest.dropped_collection (910 ms) ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/27863/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/3499/ : FAILURE
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/3421/ : FAILURE
+
+Failure of a CTest test [2020-04-28T19:32:33.084Z]  30/392 Test  #36: ep-engine_ep_unit_tests.CollectionsOSODcpTest ..................................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/3421/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/2497/ : FAILURE
+
+Failure of a CTest test [2020-04-28T19:34:43.315Z]  31/400 Test  #33: ep-engine_ep_unit_tests.CollectionsOSODcpTest ..................................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/2497/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/3441/ : FAILURE
+
+Failure of a CTest test [2020-04-28T19:49:03.280Z]  34/403 Test  #36: ep-engine_ep_unit_tests.CollectionsOSODcpTest ..................................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/3441/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/11289/ : FAILURE
+
+Failure of a CTest test [2020-04-28T19:35:22.129Z]  43/386 Test  #35: ep-engine_ep_unit_tests.CollectionsOSODcpTest ..................................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/11289/ )
+
+AddressSanitizer issue: 16046 byte(s) leaked in 376 allocation(s). ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/11289/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/23830/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/1996/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/514/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

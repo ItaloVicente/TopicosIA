@@ -1,0 +1,136 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-46279 make sure that file:rename doesn't happen when we wait
+
+...for memcached to complete configuration request
+
+This is needed because memcached configuration request might lock
+the file causing simultaneous rename to fail
+
+Change-Id: I4d853273f959eb7f9f14b5503ef03412baff4210
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Artem Stemkovski
+Date: 2021-06-23 23:31:53.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-06-23 23:32:03.000000000
+Message: 
+Patch Set 2:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-test/24284/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-06-23 23:36:45.000000000
+Message: 
+Patch Set 2: Well-Formed+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/ns-server-test/24284/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2021-06-23 23:38:11.000000000
+Message: 
+Patch Set 2:
+
+make simple-test
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-06-23 23:38:18.000000000
+Message: 
+Patch Set 2:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-simple-test/2478/
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-06-23 23:45:22.000000000
+Message: 
+Patch Set 2:
+
+(2 comments)
+Line:166, src/memcached_cfg.erl -> I don't see where this improves on the current code. If memcached has the file open (e.g. it's bootstrapping) then the file:rename is going to fail whether it is done here or by memcached_refresh.
+
+Line:168, src/memcached_cfg.erl -> This is an asynchronous operation which may retry even while memcached_cfg continues on to the next writing/renaming.
+
+The intent of making the refresh synchronous is that we know the file is potentially open and being used by memcached until it responds to the refresh. That way the file:rename will only fail if memcached is bootstrapping and accessing the file without a refresh.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2021-06-23 23:48:31.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:166, src/memcached_cfg.erl -> memcached refresh is done by memcached_refresh, and file rename is done by memcached_refresh. one process is not able to do two things simultaneously. If apply_to_file is called at the moment when refresh is being done, the call will wait in the memcached_refresh until all previous messages are fully processed and therefore all refreshes are completed.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2021-06-23 23:51:28.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:168, src/memcached_cfg.erl -> Again, per comment above, the file rename request will wait in the queue until all refreshes are completed.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2021-06-24 00:19:02.000000000
+Message: 
+Patch Set 2: Verified+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-06-24 00:19:33.000000000
+Message: 
+Patch Set 2: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/ns-server-simple-test/2478/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-06-24 00:20:14.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+
+Some useful slack messages
+
+Steve: memcached may be bootstrapping and accessing the file even without ns_server sending it a refresh command. And so when we decide to do file:rename the rename will fail.
+
+Artem: for that we have retry logic in rename_and_refresh
+we do currently have limited retried for rename failure (in rename_and_refresh) and unlimited retries for refresh failure (in memcached_refresh). I don't see any reason to add even more retries
+
+Steve: I'm trying to decrease the chances the file:rename gets an error. Here was some feedback from Dave on this review: http://review.couchbase.org/c/ns_server/+/152816
+
+"In a side conversation, Aliaksey pointed out that the fact that we asynchronously notify memcached probably plays a massive role in the fact that we get eacces errors in the first place. If it's a synchronous refresh (and synchronous in memcached too) then almost always when memcached is reading the file, we are blocked and not writing to it. This maybe doesn't solve all the cases as perhaps memcached reads the file at times when ns_server isn't asking memcached to refresh. And certainly during startup memcached will read the file on its own schedule and this could conflict with when ns_server is writing. But it's almost certainly a big reason why. 
+I think we should file a small improvement to change to use a synchronous notification. "
+
+Artem: Aliaksey is right. And my patch addresses just that. Now file renames and synchronous memcached refreshes are done in the same queue. So they won't clash, at least if memcached will not do something without request
+
+Steve: But memcached does access the file without a refresh request
+
+Artem: Yes, that's why we keep retry logic
+
+Steve: In handle_info(refresh, ToRefresh) if a ToRetry has to be done then there's an outstanding flush that will arrive at some point in the future. During this time another file:rename could come in....but I guess that doesn't do any harm...
+
+Artem: Here's the queue: [refresh], [refresh], [rename], [refresh], [rename], [refresh] and so on in any sequence 
+since memcached_refresh doesn't spawn any processes to do rename or refresh, they never can happan at the same time no matter what
+We totally don't care if just another rename will happen after unsuccesful retry, all we care about is that rename is not done during mc_client_binary:RefreshFun(Sock) being performed
+This is the classic erlang coding pattern: If you want things to be serialized - do them in the same gen_server
+
+Steve: I was thinking too orderly... [rename], [refresh], [rename], [refresh], ...
+Line:166, src/memcached_cfg.erl -> Ok, I see...this prevents a concurrent file:rename in this process from interacting with the fresh done by memcached_refresh.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-06-24 00:20:49.000000000
+Message: 
+Patch Set 2: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------

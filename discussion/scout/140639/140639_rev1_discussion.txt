@@ -1,0 +1,182 @@
+======================================================================================================================
+DESCRIPTION:
+
+JMS/MOM: connection failover
+
+Add connection failover
+Add MOM.subscribe wait-for-ready
+
+Connection failover is achieved using a connection wrapper and a session
+wrapper around the real jms connection and session. Connection loss is
+discovered with (jms)connection.setExceptionListener. J2EE jms providers
+are excluded since those do failover themselves.
+
+The main goal of connection failover is to maintain subscription
+listeners. All session wrapper methods do a one-time retry in case of
+failure. Default connection failover tries to reconnect 15 times every 2
+seconds.
+
+Subscription listeners are not stopped when the connection is dropped.
+However they try to receive messages again and again until the
+connection
+is restored or the session is closed by custom code.
+
+Another improvement with similar scope is the subscription process
+itself. When calling MOM.subscribe the call is blocked at maximum for 30
+seconds in order to wait for the subscription event loop to effectively
+start waiting and receiving messages. That way it cannot happen anymore
+that in the snippet
+MOM.subscribe(...) -> schedules a event loop job
+MOM.publish(message)
+the message is published BEFORE being received from the subscriber due
+to latency in starting the background job.
+
+Added new parameter receiveTimeout to constructor of
+MessageConsumerJobs.
+Value 0: no wait on jms session.receive().
+Value millis>0: use jms session.receive(receiveTimeout)
+
+Subscriber listener jobs: make sure that the jms transaction is also
+rollbacked on failure if the scout transaction member is not yet
+attached.
+
+added protected receive timeout fields in order for custom code to
+override
+- JmsMomImplementor.m_messageConsumerJobReceiveTimeout = 0L
+- JmsMomImplementor.m_replyMessageConsumerJobReceiveTimeout = 0L
+- JmsMomImplementor.m_requestCancellationMessageConsumerJobReceiveTimeout
+= 0L
+
+added protected methods to JmsMomImplementor in order for custom code to
+override the creation of subscriber listener jobs:
+- JmsMomImplementor.createMessageConsumerJob
+- JmsMomImplementor.createReplyMessageConsumerJob
+- JmsMomImplementor.createRequestCancellationMessageConsumerJob
+
+added non-blocking connection up/down check method, can be used for
+alive-check of jms connection
+JmsMomImplementor.isConnected()
+
+Configuration:
+There are 3 new config.properties defined in IMom and IMomImplementor
+- scout.mom.failover.connectionRetryCount default 15
+- scout.mom.failover.connectionRetryIntervalMillis default 2000
+- scout.mom.failover.sessionRetryIntervalMillis default 5000
+
+Migration:
+The interfaces and api are still stable, however customized jms code
+must check if some of the following old types/methods are being used or
+accessed:
+- method with IJmsSessionProvider.getSession() now throws JMSException
+- check override of JmsMomImplementor.createConnection() and
+postCreateConnection() so they do not call
+connection.setExceptionListener(...)
+- check override of IJmsSessionProvider, JmsSessionProvider since these
+are wrapped in the new JmsSessionProviderWrapper
+- do not use JmsMomImplementor.m_connection directly since during
+reconnect the member gets null and changes
+
+Test:
+JmsMomImplementorTest.testSubscribeFailover (242253)
+
+Change-Id: I02f5b3e8ef2bbb3dd74c9033aeda9d19446bce49
+Signed-off-by: Ivan Motsch <ivan.motsch@bsiag.com>
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Ivan Motsch
+Date: 2019-04-15 22:03:07.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2019-04-15 22:09:44.000000000
+Message: 
+Patch Set 1:
+
+Build Started https://ci.eclipse.org/scout/job/org.eclipse.scout.rt_5_2_and_higher_gerrit/4332/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2019-04-15 22:24:11.000000000
+Message: 
+Patch Set 1: Verified-1
+
+Build Failed 
+
+https://ci.eclipse.org/scout/job/org.eclipse.scout.rt_5_2_and_higher_gerrit/4332/ : ABORTED
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2019-04-15 22:36:14.000000000
+Message: 
+Patch Set 1: -Verified
+
+Build Started https://ci.eclipse.org/scout/job/org.eclipse.scout.rt_5_2_and_higher_gerrit/4333/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2019-04-15 22:50:39.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/scout/job/org.eclipse.scout.rt_5_2_and_higher_gerrit/4333/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Bruno  Koeferli
+Date: 2019-04-16 05:22:24.000000000
+Message: 
+Patch Set 1:
+
+(4 comments)
+Line:107, org.eclipse.scout.rt.mom.jms/src/main/java/org/eclipse/scout/rt/mom/jms/AbstractMessageConsumerJob.java -> This line can be deleted. With the JMS message feature (9.0.x) this logging statement was moved into the LogJmsMessageHandler.
+
+Line:115, org.eclipse.scout.rt.mom.jms/src/main/java/org/eclipse/scout/rt/mom/jms/AbstractMessageConsumerJob.java -> This causes a connection retry with 2x 15 retries, in case the JMS connection is not available. Afterwards the complete connection retry mechanism suddenly stops.
+
+I think this should only be done when the JMS connection was available during JMS message receive or is still available, otherwise no rollback should be done.
+
+Line:148, org.eclipse.scout.rt.mom.jms/src/main/java/org/eclipse/scout/rt/mom/jms/JmsMomImplementor.java -> Shouldn't it be possible to set these values through the MOM environment properties (likethe JMS_CLIENT_ID)?
+
+Line:59, org.eclipse.scout.rt.mom.jms/src/main/java/org/eclipse/scout/rt/mom/jms/JmsSessionProvider.java -> Should it be possible to extend this Stats-class? If yes, this instance creation should be extracted into a method.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Bruno  Koeferli
+Date: 2019-04-16 05:24:24.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:124, org.eclipse.scout.rt.mom.jms/src/main/java/org/eclipse/scout/rt/mom/jms/AbstractMessageConsumerJob.java -> This empty line brings no added value and could be removed.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Bruno  Koeferli
+Date: 2019-04-16 05:55:21.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:200, org.eclipse.scout.rt.mom.jms/src/main/java/org/eclipse/scout/rt/mom/jms/internal/JmsConnectionWrapper.java -> This placeholder is not used because there is only one log argument which in fact is an exception. So an empty placeholder and the exception details (message, stacktrace) is being logged at the end of the log message.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Bruno  Koeferli
+Date: 2019-04-16 07:35:08.000000000
+Message: 
+Patch Set 1:
+
+(2 comments)
+Line:102, org.eclipse.scout.rt.mom.jms/src/main/java/org/eclipse/scout/rt/mom/jms/AbstractMessageConsumerJob.java -> In case of a connection error, this causes "false-positive" error log statements after each 2x15 retries.
+
+e.g. 2019-04-16 09:17:54,512 ERROR [scout-thread-6 JMS subscriber] org.eclipse.scout.rt.platform.exception.ExceptionHandler.handleThrowable(ExceptionHandler.java:135) - XxxxException ....
+
+Line:115, org.eclipse.scout.rt.mom.jms/src/main/java/org/eclipse/scout/rt/mom/jms/AbstractMessageConsumerJob.java -> Ok, now I see the difference. You can ignore my point, it is not an issue anymore.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Bruno  Koeferli
+Date: 2019-04-16 09:09:20.000000000
+Message: 
+Patch Set 1:
+
+(2 comments)
+Line:115, org.eclipse.scout.rt.mom.jms/src/main/java/org/eclipse/scout/rt/mom/jms/AbstractMessageConsumerJob.java -> Done
+
+Line:115, org.eclipse.scout.rt.mom.jms/src/main/java/org/eclipse/scout/rt/mom/jms/AbstractMessageConsumerJob.java -> Done
+
+----------------------------------------------------------------------------------------------------------------------

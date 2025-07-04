@@ -1,0 +1,195 @@
+======================================================================================================================
+DESCRIPTION:
+
+RefDirectory: Create a snapshot in scanRef only if ref is loose
+
+Consider the use-case where an atomic 'BatchRefUpdate' creates
+new sharded refs. The newly created refs are packed, however
+'BatchRefUpdate' leaves behind empty dirs corresponding to the
+newly created refs in the 'refs/' namespace. 'exactRef' calls
+on such refs are slow (because of these empty dirs) as a
+'getFileStore' call happens on each of the dir paths. This
+change creates a snapshot (thereby avoiding the 'getFileStore'
+call) only if the ref is loose.
+
+For example, consider the case where we create 50k sharded refs in
+a new namespace called 'new-refs' using an atomic 'BatchRefUpdate'.
+The refs are named like 'refs/new-refs/01/1/1', 'refs/new-refs/01/1/2',
+'refs/new-refs/01/1/3' and so on. After the refs are created, the
+'new-refs' namespace looks like below:
+
+$ find refs/new-refs -type f | wc -l
+0
+
+$ find refs/new-refs -type d | wc -l
+5101
+
+At this point, an 'exactRef' call on each of the 50k refs without
+this change takes ~30s, where as with this change it takes ~3s.
+
+Change-Id: I4a5d4c6a652dbeed1f4bc3b4f2b2f1416f7ca0e7
+Signed-off-by: Kaushik Lingarkar <quic_kaushikl@quicinc.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Kaushik Lingarkar
+Date: 2021-11-19 16:53:06.000000000
+Message: 
+Uploaded patch set 4.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2021-11-19 16:53:20.000000000
+Message: 
+Patch Set 4:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/5581/
+----------------------------------------------------------------------------------------------------------------------
+Author: Kaushik Lingarkar
+Date: 2021-11-19 16:53:44.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2021-11-19 17:08:24.000000000
+Message: 
+Patch Set 4: Verified-1
+
+Build Failed 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/5581/ : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2021-11-20 23:42:33.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:1112, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/RefDirectory.java -> What if some other thread or process modifies the file between the read above and the snapshot creation below? To me this looks like a race condition.
+
+Can't we handle this inside FileSnapshot? Seems to me one could gain something there by calling FS.getFileStoreAttributes() more lazily: it's not needed if the file does not exist.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2021-11-21 15:08:45.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:31, /COMMIT_MSG -> I cannot reproduce this on master. I do see some speed improvement, but nowhere near a factor of 10. Perhaps because in my tests the repo is on a fast disk. Creating 100k refs with that pattern:
+
+  final int numberOfShards = 50000;
+  final int numberOfPatchsets = 2;
+  BatchRefUpdate bu = diskRepo.getRefDatabase().newBatchUpdate();
+  bu.setAtomic(true);
+  for (int i = 0; i < numberOfShards; i++) {
+    for (int j = 1; j <= numberOfPatchsets; j++) {
+      String name = String.format("refs/new-refs/%02d/%d/%d", i % 100,
+          i, j);
+      ReceiveCommand c = new ReceiveCommand(ObjectId.zeroId(), A,
+          name);
+      bu.addCommand(c);
+    }
+  }
+  try (RevWalk rw = new RevWalk(diskRepo)) {
+    bu.execute(rw, NullProgressMonitor.INSTANCE);
+  }
+  List<ReceiveCommand> cmds = bu.getCommands();
+  assertEquals(numberOfPatchsets * numberOfShards, cmds.size());
+  assertTrue(cmds.stream()
+      .allMatch(c -> ReceiveCommand.Result.OK.equals(c.getResult())));
+
+  long start = System.currentTimeMillis();
+  for (ReceiveCommand c : cmds) {
+    Ref ref = diskRepo.exactRef(c.getRefName());
+    assertNotNull(ref);
+  }
+  System.err
+      .println("Took " + (System.currentTimeMillis() - start) + "ms");
+
+I get about 7.2s for the 100000 exactRef calls. (In a non-bare repo with non-dangling head.)
+
+With this change here I get about 3.1 s.
+
+With making FileSnapshot do the FS.getFileStoreAttributes() call lazily, I get about 4.3s.
+
+Adding in FileSnapshot
+
+  public boolean exists() {
+    return !MISSING_FILEKEY.equals(this.fileKey);
+  }
+
+and using it in RefDirectory:
+
+  FileSnapshot otherSnapshot = FileSnapshot.save(path);
+  if (!otherSnapshot.exists()) {
+    return null;
+  }
+  try {
+    buf = IO.readSome(path, limit);
+  ...
+
+I get about 2.5s.
+
+So for me on master:
+
+* 7.2s as is
+* 3.1s with this change
+* 4.3s without this change, loading FS resolution lazily
+* 2.5s without this change, loading FS resolution lazily, plus exists()
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Nasser Grainawi
+Date: 2021-11-29 20:14:52.000000000
+Message: 
+Patch Set 4: Code-Review-1
+
+(2 comments)
+Line:31, /COMMIT_MSG -> > I get about 7.2s for the 100000 exactRef calls. (In a non-bare repo with non-dangling head.)
+
+Hmm, our test setup is a bare repo I think, but I wouldn't expect that to matter much. Do you see the same kind of output from those 'find' commands?
+
+> So for me on master:
+> 
+> * 7.2s as is
+> * 3.1s with this change
+> * 4.3s without this change, loading FS resolution lazily
+> * 2.5s without this change, loading FS resolution lazily, plus exists()
+
++1 for doing the lazy FS resolution and exists(), but we need it on this stable branch for Gerrit 2.16 to use. Will that be ok? I think it will help to have these two changes backported too:
+
+https://git.eclipse.org/r/c/jgit/jgit/+/174188/1
+https://git.eclipse.org/r/c/jgit/jgit/+/174191/1
+
+Line:1112, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/RefDirectory.java -> > What if some other thread or process modifies the file between the read above and the snapshot creation below? To me this looks like a race condition.
+
+I agree. We need to fix.
+
+> 
+> Can't we handle this inside FileSnapshot? Seems to me one could gain something there by calling FS.getFileStoreAttributes() more lazily: it's not needed if the file does not exist.
+
+Yes, this makes sense to me too. We'll try it out following the ideas you have in your other comment.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2021-11-29 21:19:44.000000000
+MISMATCHED INLINE COMMENT
+Line:31, /COMMIT_MSG -> > Hmm, our test setup is a bare repo I think, but I wouldn't expect that to matter much. Do you see the same kind of output from those 'find' commands?
+
+Yes. I double-checked when I couldn't reproduce your numbers :-) But there's a few factors that can influence this:
+
+* I was running on master, with Java 11. Java 11 reports file timestamps with a finer granularity than Java 8 on Linux/OS X, so one has to wait much less long to resolve a racy state.
+* My repo was in the system tempdir on my Mac. I didn't check where that is actually, but I'd guess it's on the SSD (my mac has a hybrid drive). If you tested in a container or with a repo on NFS or even only on a spinning disk, that might explain the timing differences.
+----------------------------------------------------------------------------------------------------------------------
+Author: Kaushik Lingarkar
+Date: 2021-11-29 20:57:21.000000000
+MISMATCHED INLINE COMMENT
+Line:31, /COMMIT_MSG -> Thanks Thomas for the review and detailed analysis. We have attempted to incorporate your suggestions. Please do take a look at patchset#5 of this change and its child change 188290.
+----------------------------------------------------------------------------------------------------------------------
+Author: Kaushik Lingarkar
+Date: 2021-11-29 20:57:21.000000000
+MISMATCHED INLINE COMMENT
+Line:1112, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/RefDirectory.java -> Done
+----------------------------------------------------------------------------------------------------------------------

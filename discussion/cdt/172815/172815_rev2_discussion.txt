@@ -1,0 +1,183 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 383348 - Fix invalid menu extensions in org.eclipse.cdt.ui
+
+This change adjusts adds a menu to action set
+'org.eclipse.cdt.ui.buildConfigActionSet', so that actions
+'org.eclipse.cdt.ui.manageConfigsAction2',
+'org.eclipse.cdt.ui.buildConfigMenuAction' and
+'org.eclipse.cdt.ui.wsselection' do not cause invalid menu extension
+errors on perspective customization.
+
+Change-Id: I3ecb036250e2ed5d7150faf2fd0d74d80d3d7593
+Signed-off-by: Simeon Andreev <simeon.danailov.andreev@gmail.com>
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Simeon Andreev
+Date: 2020-11-26 10:22:26.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: Simeon Andreev
+Date: 2020-11-26 10:34:45.000000000
+Message: 
+Patch Set 2:
+
+With patch set 2 I don't see the errors any more and the buttons are where they usually are. Unfortunately there is an extra separator under main menu -> Project.
+
+What I see during debug, is that there is no menu for the action set in question during this stack trace:
+
+"main" #1 prio=6 os_prio=0 cpu=6887.48ms elapsed=290.71s tid=0x00007ffff0017800 nid=0x15bf9 runnable  [0x00007ffff7fc9000]
+   java.lang.Thread.State: RUNNABLE
+        at org.eclipse.ui.internal.ActionSetMenuManager.find(ActionSetMenuManager.java:43)
+        at org.eclipse.jface.action.SubMenuManager.findUsingPath(SubMenuManager.java:203)
+        at org.eclipse.jface.action.SubMenuManager.findUsingPath(SubMenuManager.java:206)
+        at org.eclipse.jface.action.SubMenuManager.findMenuUsingPath(SubMenuManager.java:175)
+        at org.eclipse.ui.internal.PluginActionBuilder$BasicContribution.contributeMenuAction(PluginActionBuilder.java:345)
+        at org.eclipse.ui.internal.PluginActionSetBuilder$ActionSetContribution.contribute(PluginActionSetBuilder.java:342)
+        at org.eclipse.ui.internal.PluginActionSetBuilder.buildMenuAndToolBarStructure(PluginActionSetBuilder.java:95)
+        at org.eclipse.ui.internal.dialogs.cpd.CustomizePerspectiveDialog.buildMenusAndToolbarsFor(CustomizePerspectiveDialog.java:1575)
+        at org.eclipse.ui.internal.dialogs.cpd.CustomizePerspectiveDialog.loadMenuAndToolbarStructure(CustomizePerspectiveDialog.java:1527)
+        at org.eclipse.ui.internal.dialogs.cpd.CustomizePerspectiveDialog.<init>(CustomizePerspectiveDialog.java:539)
+        at org.eclipse.ui.internal.WorkbenchWindow.createCustomizePerspectiveDialog(WorkbenchWindow.java:3163)
+        at org.eclipse.ui.internal.WorkbenchPage.editActionSets(WorkbenchPage.java:1934)
+        at org.eclipse.ui.internal.handlers.EditActionSetsHandler.execute(EditActionSetsHandler.java:38)
+        at org.eclipse.ui.internal.handlers.HandlerProxy.execute(HandlerProxy.java:283)
+
+I.e. during the call to PluginActionSetBuilder.ActionSetContribution.contribute(), PluginActionBuilder.BasicContribution.menus is null. Which causes the menu path to be invalid.
+
+Switching the perspective to the CDT perspective (which causes no errors and correct action placement in the respective submenu) is done on this stack trace:
+
+"main" #1 prio=6 os_prio=0 cpu=6557.91ms elapsed=56.23s tid=0x00007ffff0017800 nid=0x1646c at breakpoint [0x00007ffff7fca000]
+   java.lang.Thread.State: RUNNABLE
+        at org.eclipse.jface.action.SubMenuManager.findMenuUsingPath(SubMenuManager.java:177)
+        at org.eclipse.ui.internal.PluginActionBuilder$BasicContribution.contributeMenuAction(PluginActionBuilder.java:345)
+        at org.eclipse.ui.internal.PluginActionSetBuilder$ActionSetContribution.contribute(PluginActionSetBuilder.java:342)
+        at org.eclipse.ui.internal.PluginActionSetBuilder.readActionExtensions(PluginActionSetBuilder.java:256)
+        at org.eclipse.ui.internal.PluginActionSetBuilder.processActionSets(PluginActionSetBuilder.java:213)
+        at org.eclipse.ui.internal.ActionPresentation.setActionSets(ActionPresentation.java:190)
+        at org.eclipse.ui.internal.WorkbenchWindow.updateActionSets(WorkbenchWindow.java:2573)
+
+I'll check what that code does, maybe there is some discrepancy introduced with e4 menus/commands code, that causes (deprecated but still supported) actions to be mishandled during perspective customization.
+----------------------------------------------------------------------------------------------------------------------
+Author: CDT Bot
+Date: 2020-11-26 10:45:40.000000000
+Message: 
+Patch Set 2: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-ui-only-pipeline/2730/ : SUCCESS
+
+https://ci.eclipse.org/cdt/job/cdt-verify-code-cleanliness-pipeline/2400/ : SUCCESS. Formatting, whitespace, version numbers and other checks appear to be correct. See https://github.com/eclipse-cdt/cdt-infra/tree/master/jenkins/pipelines/cdt/verify#cdt-verify-code-cleanliness for documentation on what is checked.
+
+https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-other-pipeline/2914/ : SUCCESS. p2 repository available on https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-other-pipeline/2914/artifact/releng/org.eclipse.cdt.repo/target/repository/ - please mark build as "Keep this build forever" if the p2 repo is needed for testing. Otherwise it will be deleted shortly.
+----------------------------------------------------------------------------------------------------------------------
+Author: Simeon Andreev
+Date: 2020-11-26 14:07:05.000000000
+Message: 
+Patch Set 2: Code-Review-1
+
+> Patch Set 2:
+
+Looking at the documentation of actionSet, a menu child is actually meant to add a new menu. So I don't think we should be doing that either.
+
+I've debugged more now, here is what I see:
+
+1. When the workbench is created, the Project main menu "tab" is filled with whatever submenus are defined in CDT;  those are not visible at first. When the CDT perspective is open, the CDT actions (for which errors are logged on perspective switch) find their menu paths; the submenus become visible (I guess due to having visible children).
+
+2. When customize perspective is called, a dummy Project main menu  with default contents is created. Then the CDT actions are processed, finding no submenu for their specified path, resulting in logged errors. Then, the Project main menu is populated with submenus ("too late").
+
+The (seemingly buggy) code in question is in CustomizePerspectiveDialog.loadMenuAndToolbarStructure():
+
+	private void loadMenuAndToolbarStructure() {
+		...
+
+		// Fill fake action bars with static menu information.
+		window.fillActionBars(customizeActionBars,
+				ActionBarAdvisor.FILL_PROXY | ActionBarAdvisor.FILL_MENU_BAR | ActionBarAdvisor.FILL_COOL_BAR); // <--- This creates a "skeleton" Project main menu, without CDT submenu contributions
+
+		// Populate the action bars with the action sets' data
+		for (ActionSet actionSet : actionSets) {
+			ActionSetDescriptor descriptor = actionSet.descriptor;
+			PluginActionSet pluginActionSet = buildMenusAndToolbarsFor(customizeActionBars, descriptor); // <--- this is called "too early"
+                        ...
+		}
+
+		// Add actionSet MenuManagers to menu
+		...
+
+		// Make all menu items visible so they are included in the list.
+		...
+
+		IPresentationEngine engine = context.get(IPresentationEngine.class);
+		engine.createGui(customizeActionBars.mainMenu, customizeActionBars.windowModel.getWidget(),
+				customizeActionBars.windowModel.getContext()); // <--- this results in adding submenus to Project main menu
+
+		...
+	}
+
+From my perspective this is a platform bug in CustomizePerspectiveDialog, though I wouldn't want to touch that code. Who knows what will break; I have very little understanding of e4 code.
+
+So our options would be:
+
+1. Try to replace the actions with menus and commands, as actions are deprecated. I'm not sure how this affects the existing action set though. I'm not sure how big of an undertaking this is.
+2. Try to fix the code in CustomizePerspectiveDialog.loadMenuAndToolbarStructure(). Maybe there are calls we can make to populate the main menu children with actual contributions (though this seems to be done by the MenuManagerRenderer, on widget creation).
+3. Ignore the bug; CDT functionality itself works. Likely the extent of the bug is that customize perspective misses the CDT menu entries (I've not checked).
+
+Andrey WDYT?
+----------------------------------------------------------------------------------------------------------------------
+Author: Andrey Loskutov
+Date: 2020-11-26 14:19:15.000000000
+Message: 
+Patch Set 2:
+
+Rolf, you are the master of e4 menus - do you have some time to look at this issue?
+----------------------------------------------------------------------------------------------------------------------
+Author: Rolf Theunissen
+Date: 2020-11-26 19:30:38.000000000
+Message: 
+Patch Set 2:
+
+The conclusion that the CustomizePerspectiveDialog is broken is correct. If everything was well, we would be just queering the E4 model instead of this complex population. We already do that for the toolbar items, see Bug 549898.
+
+However, the E4 model and the items that are showed via the MenuManagers are not in sync. So just changing the CPD code to query the model will most likely result in an incorrect contents of the CPD. I have been working to get the menu in sync, however that is a complex task with many side effects and corner cases. I expect that a major redesign in how the E3 and E4 menu items are handled is needed. I don't expect a fix here soon, just don't have enough spare time to look into that.
+
+So either chose for option 1 or 3. In case of option 1, you are not really going to E4 menus (that would mean u use a model fragment). You would be using the org.eclipse.ui.menus extension point introduced in 3.3. Although, if I remember correctly, some functionality might still be missing see e.g. Bug 414612.
+----------------------------------------------------------------------------------------------------------------------
+Author: Simeon Andreev
+Date: 2020-11-27 14:29:03.000000000
+Message: 
+Patch Set 2:
+
+OK, talked to Andrey. I'll try to replace the 3 actions with commands/menus (one of the actions has a submenu I believe). Might take a bit of time though.
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonah Graham
+Date: 2020-11-27 14:48:33.000000000
+Message: 
+Patch Set 2:
+
+> Patch Set 2:
+> 
+> OK, talked to Andrey. I'll try to replace the 3 actions with commands/menus (one of the actions has a submenu I believe). Might take a bit of time though.
+
+Thanks to all of you for investing time so far into the investigation.
+
+I assume that this is no longer in the 2020-12 time frame? Can you move this change to work in progress state please? Or abandon it if it is not relevant.
+----------------------------------------------------------------------------------------------------------------------
+Author: Simeon Andreev
+Date: 2020-11-27 15:05:59.000000000
+Message: 
+Abandoned
+----------------------------------------------------------------------------------------------------------------------
+Author: Simeon Andreev
+Date: 2020-11-27 15:09:17.000000000
+Message: 
+Patch Set 2:
+
+> I assume that this is no longer in the 2020-12 time frame?
+
+Yes.
+----------------------------------------------------------------------------------------------------------------------

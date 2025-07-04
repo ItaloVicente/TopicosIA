@@ -1,0 +1,110 @@
+======================================================================================================================
+DESCRIPTION:
+
+NCBC-2989: Use transient HttpClient instances
+
+Motivation
+----------
+We currently use a singleton CouchbaseHttpClient which inherits from
+HttpClient. Using a singleton HttpClient is common practice and known to
+A) improve performance by allowing HTTP keep-alives and reducing DNS
+requests and B) avoid problems with TCP port depletion.
+
+However, the common practice is misunderstood. In fact, it is the
+HttpClientHandler within the HttpClient that should be reused, more so
+than the HttpClient itself. Additionally, it should only be reused for a
+limited period of time. Failure to replace the HttpClientHandler
+occasionally can cause unexpected network failures if DNS names are
+changed to refer to new IP addresses.
+
+More importantly, our current pattern of a singleton CouchbaseHttpClient
+introduces side effects. There are multiple places in the codebase where
+we are setting properties on this client as if it was transient when it
+is in fact a singleton. Setting these properties is affecting other
+usages of the singleton by other internal services. Examples include
+setting the Timeout to infinite or setting a per-connection ID on
+DefaultRequestHeaders.
+
+Modifications
+-------------
+Drop CouchbaseHttpClient in favor of CouchbaseHttpClientFactory, and
+replace all usages of CouchbaseHttpClient with transient, short-lived
+HttpClient instances created by CouchbaseHttpClientFactory.
+
+Within the factory, reuse the same HttpMessageHandler stack for each
+HttpClient created. On supported platforms, also use SocketsHttpHandler
+with a 2 minute connection lifetime.
+
+Change AuthenticatingHttpMessageHandler to a DelegatingHandler.
+
+Results
+-------
+Each consuming service may safely manipulate the HttpClient with
+values such as timeouts and connection ID headers without affecting
+other services.
+
+For .NET Core 3.1 and later, if DNS addresses change to refer to a new
+Couchbase node IP, the HttpClient will switch to the new servers within
+2 minutes rather than continuing to reuse the same connection to the old
+IP indefinitely.
+
+Note: The above doesn't apply to the legacy .NET Framework, which
+doesn't support SocketsHttpHandler. These frameworks will still not
+refresh DNS, though they will get the other benefits of this change.
+
+Change-Id: Ifd77d34288b29206634259bd34bcc271642a7983
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Brant Burnett
+Date: 2021-10-26 21:33:18.000000000
+Message: 
+Uploaded patch set 4.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-10-26 21:33:28.000000000
+Message: 
+Patch Set 4:
+
+Build Started http://sdk.jenkins.couchbase.com/job/dotnet/job/sdk/job/couchbase-net-client-cv-trigger/2803/
+----------------------------------------------------------------------------------------------------------------------
+Author: Brant Burnett
+Date: 2021-10-26 21:34:54.000000000
+Message: 
+Patch Set 4:
+
+Jeff/Richard,
+
+Here is the changeset, updated to use SocketsHttpHandler with a PooledConnectionLifetime. Other than the fact this doesn't completely fix .NET legacy, I think I agree it's a much cleaner solution overall.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-10-26 21:37:36.000000000
+Message: 
+Patch Set 4: Verified-1
+
+Build Failed 
+
+http://sdk.jenkins.couchbase.com/job/dotnet/job/sdk/job/couchbase-net-client-cv-trigger/2803/ : failed
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-10-27 01:31:53.000000000
+Message: 
+Patch Set 4: -Verified
+
+Build Started http://sdk.jenkins.couchbase.com/job/dotnet/job/sdk/job/couchbase-net-client-cv-trigger/2804/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-10-27 02:01:19.000000000
+Message: 
+Patch Set 4: Verified+1
+
+Build Successful 
+
+http://sdk.jenkins.couchbase.com/job/dotnet/job/sdk/job/couchbase-net-client-cv-trigger/2804/ : success
+----------------------------------------------------------------------------------------------------------------------
+Author: Jeffry Morris
+Date: 2021-10-28 03:17:29.000000000
+Message: 
+Patch Set 4: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------

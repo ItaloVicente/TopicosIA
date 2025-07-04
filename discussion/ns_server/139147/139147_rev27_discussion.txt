@@ -1,0 +1,154 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-41730 Prune prometheus stats
+
+As prometheus stats age they should be pruned in order to save storage.
+
+For low-cardinality stats we'll increase their coarseness as they
+get older.
+
+For high-cardinality stats we'll truncate any stats older than a
+specified age.
+
+Change-Id: I227399c94e754f143f5aecd3f31140c65f61ac10
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Steve Watanabe
+Date: 2020-12-22 01:11:28.000000000
+Message: 
+Uploaded patch set 27.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-12-22 01:11:36.000000000
+Message: 
+Patch Set 27:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-test/20924/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-12-22 01:16:50.000000000
+Message: 
+Patch Set 27: Well-Formed+1
+
+Permission granted to commit to restricted branch
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2020-12-22 01:48:38.000000000
+Message: 
+Patch Set 27:
+
+(2 comments)
+Line:1213, src/prometheus_cfg.erl -> After thinking about it I realized that the decimation algorithm is probably not correct.
+The problem is that it allows you to have holes between levels, which means that it will not always remove all the datapoints it is supposed to remove. This is caused by the fact that StartTS of one level does not always match the EndTS of the previous level.
+In most cases next decimation will remove what wasn't remove before, but still in some cases it may lead to artifacts on graphs.
+
+In order to fix that, we should guarantee that levels start and end intervals always connect to each other without any holes. Which leads to another interesting fact: no need to keep LastTime for each level. It should be enough to save single LastTime for the whole decimation (this could be last decimation start time). All other Last times can be calculated.
+
+What do you think?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2020-12-22 17:23:03.000000000
+Message: 
+Patch Set 27:
+
+(1 comment)
+Line:1213, src/prometheus_cfg.erl -> If the decimations for all levels occur on the same boundary (start of a minute) then the algorithm should be ok...all levels keep seconds :00 - :09 no matter what the duration interval is (minute, 5-minutes, 10-minutes, 6-hours) then it should be ok.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2020-12-22 21:08:27.000000000
+Message: 
+Patch Set 27:
+
+(1 comment)
+Line:1213, src/prometheus_cfg.erl -> The intervals would also have to be multiples of each other. For example if decimation at one level was 1 per 3-minutes and the next level was 1 per 5-minutes there would not be samples in certain intervals.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2020-12-22 21:33:48.000000000
+Message: 
+Patch Set 27:
+
+(6 comments)
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2020-12-22 22:19:53.000000000
+Message: 
+Patch Set 27: Code-Review-2
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2021-01-04 20:05:14.000000000
+Message: 
+Patch Set 27:
+
+(2 comments)
+Line:1213, src/prometheus_cfg.erl -> I'm ok to have the "intervals would also have to be multiples of each other" requirement. It simplifies some scenarios indeed, but in your case it should not help because you shift intervals by using max(LastTime, EndTime - LevelDuration), right? If (EndTime - LevelDuration) is the max, the "start point" shifts for this decimation level and all next decimations will not be aligned with other levels.
+
+This will lead to 2 problems: you will have holes between intervals and different levels will remove samples of each other (because they are not aligned anymore).
+
+I suggest we align all the deletion intervals explicitly using something like floor(Timestamp / Interval) * Interval, it will guarantee all the deletion intervals are aligned with with each other (including the deletion intervals from previous decimations). But you have to be careful on level borders in this case, it's very easy to leave a hole between levels.
+
+Here is I wrote an example (I didn't test it well, it is just to demonstrate the approach):
+
+decimate_stats(Levels, LastDecimationTime, Now, Gap) ->
+    TimeSinceLastDecimation = Now - LastDecimationTime,
+    {_, Intervals} =
+        lists:foldl(
+          fun ({_, Duration, skip}, {LevelEnd, DeleteIntervals}) ->
+                  {LevelEnd - Duration, DeleteIntervals};
+              ({_, Duration, Interval}, {LevelEnd, DeleteIntervals}) ->
+                  PrevDecLevelEnd = LevelEnd - TimeSinceLastDecimation,
+                  LevelStart = max(PrevDecLevelEnd, LevelEnd - Duration),
+                  ToDelete = deletion_intervals(LevelStart, LevelEnd, Interval, Gap),
+                  {LevelEnd - Duration, ToDelete ++ DeleteIntervals}
+          end, {Now, []}, Levels),
+    Intervals.
+
+deletion_intervals(Start, End, Interval, Gap) ->
+    StartAligned = floor(Start / Interval) * Interval,
+    EndAligned = floor(End / Interval) * Interval,
+    Num = (EndAligned - StartAligned) div Interval,
+    ToDelete = [{max(StartAligned + N * Interval + Gap, Start),
+                 StartAligned + (N + 1) * Interval}
+                   || N <- lists:seq(0, Num - 1)],
+    LastDeletionInterval = case max(EndAligned + Gap, Start) < End  of
+                               true -> [{max(EndAligned + Gap, Start), End}];
+                               false -> []
+                           end,
+    ToDelete ++ LastDeletionInterval.
+
+Also note that it uses single LastDecimationTime
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-01-04 22:32:33.000000000
+Message: 
+Patch Set 27:
+
+(1 comment)
+Line:1213, src/prometheus_cfg.erl -> > but in your case it should not help because you shift intervals by using max(LastTime, EndTime - LevelDuration), right?
+
+Yes, I too came to that conclusion during the break. So we should always use LastTime.
+
+I'm still digesting the rest of your suggestion.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-01-05 00:25:51.000000000
+Message: 
+Patch Set 27:
+
+(1 comment)
+Line:1213, src/prometheus_cfg.erl -> Timofey and I had a zoom call and we're not aligned on the approach. In my implementation I was saving stats during the interval and once that interval was reached I'd keep only the single stat. A side effect of this is that when saving 1 per 6 hours (and assuming the prior level was 1 per hour) I'd be keeping all five samples until the decimation occurs.
+In Timofey's algorithm we decimate during the period up to 6 hours and then save a sample when six hours is reached.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-01-05 19:10:52.000000000
+MISMATCHED INLINE COMMENT
+Line:1213, src/prometheus_cfg.erl -> In the above I meant to say "now aligned"....huge difference
+----------------------------------------------------------------------------------------------------------------------

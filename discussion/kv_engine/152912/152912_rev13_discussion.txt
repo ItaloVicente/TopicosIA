@@ -1,0 +1,221 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-45756: Persist stats at end of EventuallyPersistentEngine::destroy()
+
+Currently during the destruction of an ep-engine bucket we persist a
+key "ep_force_shutdown" to stats.json, this value is set to false when
+we've had a clean shutdown and true if the shutdown was forced.
+
+This value effects when we decide to generate a new failover table
+entry during warmup in Warmup::createVBuckets(), when we've had a
+forced shutdown or if the key isn't present in the document. Which is
+used to help us identify differing seqno histories between kv nodes.
+
+MB-45756 showed that this wasn't always working in the way it should
+have. This would occur if memcached is killed using SIGKILL while it's
+in EventuallyPersistentEngine::~EventuallyPersistentEngine().
+As ~EventuallyPersistentEngine() is responsible for shutting the
+flusher it takes a non insignificant amount of time to complete and if
+killed when flushing could leave the node in an inconsistent state with
+its replica. As in the case of MB-45756, where the active was at
+seqno:Y when it was killed but only persisted to X. So when it came
+back up the at seqno:X it was behind replica at seqno:Y. But due to
+expiry we generated enough seqnos to have a high seqno > Y. Causing us
+to having differing histories but not causing us to roll back the
+replica.
+
+To fix this we have refactored
+EventuallyPersistentEngine::destroyInner() &
+~EventuallyPersistentEngine(), so that destroyInner() takes over the
+responsibility of deinitialize() the KVBucket and freeing its memory.
+Which intern will insure we shutdown the flushers safely.
+destroyInner() collects the stats to be persisted before we
+shutdown the flushers and DCP connections. But will now persist the
+stats to stats.json after the flushers have finished and we have a
+consistent state on disk. That way if we crash at any point before
+we'll have never inserted a "ep_force_shutdown" key in the document (as
+ep_force_shutdown is only ever written during shutdown).
+
+This patch also covers a case where we crash during Warmup after we
+modify the state on disk, but before the StatSnap task runs (which
+removes the 'ep_force_shutdown' from stats.log). As the next time we
+Warmup we want to create a new failover table entry as we didn't
+shutdown cleanly and our history could have diverged from our replicas.
+To cover this case we set 'ep_force_shutdown=true' in
+Warmup::populateVBucketMap() as we may flush items to disk during this
+phase of warmup and also allow streaming from active vbuckets. This flag
+with then be removed once StatSnap task runs at the end of warmup.
+
+Change-Id: Ia05cafcbcc0c225fe373d0ccfebf135a5c012c6e
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Richard de Mellow
+Date: 2021-05-11 09:33:15.000000000
+Message: 
+Uploaded patch set 13.
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2021-05-11 09:56:13.000000000
+Message: 
+Patch Set 13: Code-Review-1
+
+(2 comments)
+Line:2119, engines/ep/src/ep_engine.cc -> probably worth commenting this to mention that this is where the flusher is getting stopped as we comment on it later when we write stats
+
+Line:1304, engines/ep/src/warmup.cc -> I know Dave suggested this so not saying it should be changed... personally think the original style of writing the stats without force_shutdown after we read them was simpler and isolated the stats doc changes making it easier to reason about.
+
+
+Actual question(s) though: Is snapshotting stats thread safe? You'll be calling this from from multiple threads. Does the stats snapshot code not need to change? It just logs on failure at the moment which would leave us open to issues if it did fail and subsequent flushes worked.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-05-11 10:30:03.000000000
+Message: 
+Patch Set 13: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/35764/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [0016/0096]: test dcp replica stream one collection...(153 ms) OK
+
+404/406 Test #287: ep_perfsuite.value_eviction ...................................................................................................   Passed  144.44 sec
+405/406 Test #391: memcached_testapp.ep.SDPerf/SubdocPerfTest ....................................................................................   Passed   38.20 sec
+406/406 Test #403: cluster_test ..................................................................................................................   Passed   34.13 sec
+
+99% tests passed, 2 tests failed out of 406
+
+Total Test time (real) = 444.44 sec
+
+The following tests FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/35764/ )
+
+Timeout of a CTest test 374/406 Test #286: ep_testsuite_xdcr.full_eviction.magma .........................................................................................} ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/35764/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/18428/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [0015/0096]: test dcp replica stream one collection with mutations just from disk...Uncaught std::exception. what():ThrowExceptionUnderflowPolicy current:497 arg:521
+[2021-05-11T09:59:17.686Z] (21517 ms) DIED
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/18428/ )
+
+One of more core files found at the end of the build. Data for post-mortem saved to archived_core_dumps.tar.bz2 under "Build Artifacts". ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/18428/ )
+
+AddressSanitizer issue: 672 byte(s) leaked in 2 allocation(s). ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/18428/ )
+
+Test exceeded the timeout:
+[2021-05-11T09:59:17.687Z] /usr/bin/timeout: the monitored command dumped core ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/18428/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/8924/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/7476/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/30581/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/9545/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/10477/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/10618/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/10871/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-05-11 10:32:49.000000000
+Message: 
+Patch Set 13: Code-Review-1
+
+(9 comments)
+Line:2120, engines/ep/src/ep_engine.cc -> As per call, I think we can just move this down to here, and revert all the getSnapshotStats / writeSnapshotStats changes:
+
+    if (kvBucket) {
+        kvBucket->snapshotStats();
+        snapStats = kvBucket->getSnapshotStats();
+    }
+
+Line:1304, engines/ep/src/warmup.cc -> Discussed with Richard - agree it's better to do this in ::initialise() - that also avoids any threading issues.
+
+Line:2487, engines/ep/tests/module_tests/evp_store_durability_test.cc -> Comment at line 2489 should be moved to refer to this line now.
+
+Line:437, engines/ep/tests/module_tests/evp_store_single_threaded_test.cc -> Suggest making this std::optional.
+
+Line:2519, engines/ep/tests/module_tests/evp_store_warmup_test.cc -> ASSERT... (as they are checking preconditions for the test, not the actual test itself)
+
+(and below).
+
+Line:2526, engines/ep/tests/module_tests/evp_store_warmup_test.cc -> Nit: can be const.
+
+Line:2539, engines/ep/tests/module_tests/evp_store_warmup_test.cc -> .. "forced shutdown"?
+
+Line:2576, engines/ep/tests/module_tests/evp_store_warmup_test.cc -> Should also check it's not the same one at step 4 - i.e. create a second 'secondFailoverEntry' var; and check it's not the same as either.
+
+Line:2590, engines/ep/tests/module_tests/evp_store_warmup_test.cc -> ASSERT also.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2021-05-11 11:09:32.000000000
+Message: 
+Patch Set 13:
+
+(1 comment)
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2021-05-11 15:12:28.000000000
+MISMATCHED INLINE COMMENT
+Line:2119, engines/ep/src/ep_engine.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2021-05-11 15:12:28.000000000
+MISMATCHED INLINE COMMENT
+Line:2120, engines/ep/src/ep_engine.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2021-05-11 15:12:28.000000000
+MISMATCHED INLINE COMMENT
+Line:1304, engines/ep/src/warmup.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2021-05-11 15:12:28.000000000
+MISMATCHED INLINE COMMENT
+Line:2487, engines/ep/tests/module_tests/evp_store_durability_test.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2021-05-11 15:12:28.000000000
+MISMATCHED INLINE COMMENT
+Line:437, engines/ep/tests/module_tests/evp_store_single_threaded_test.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2021-05-11 15:12:28.000000000
+MISMATCHED INLINE COMMENT
+Line:2519, engines/ep/tests/module_tests/evp_store_warmup_test.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2021-05-11 15:12:28.000000000
+MISMATCHED INLINE COMMENT
+Line:2526, engines/ep/tests/module_tests/evp_store_warmup_test.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2021-05-11 15:12:28.000000000
+MISMATCHED INLINE COMMENT
+Line:2539, engines/ep/tests/module_tests/evp_store_warmup_test.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2021-05-11 15:12:28.000000000
+MISMATCHED INLINE COMMENT
+Line:2576, engines/ep/tests/module_tests/evp_store_warmup_test.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2021-05-11 15:12:28.000000000
+MISMATCHED INLINE COMMENT
+Line:2590, engines/ep/tests/module_tests/evp_store_warmup_test.cc -> Done
+----------------------------------------------------------------------------------------------------------------------

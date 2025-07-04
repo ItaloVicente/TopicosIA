@@ -1,0 +1,172 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 473441: Fix concurrency issue in ThreadedHistoryTreeBackend
+
+We add a blockingPeek() method to the BBQ, which allows blocking
+on the queue without removing elements from it. This allows
+iterating threads doing query to continue seeing the element
+while it is being inserted.
+
+The implementation is changed so that the output buffer remains in the
+inner queue until it is empty. Only then is it removed from the inner
+queue and the next head of the queue becomes the output buffer.
+
+The iterator is fixed to be a true descending iterator without
+duplications and that is protected against concurrent modification of
+the inner queue.
+
+Change-Id: I9e708824748a625010aded82a3198f096c1fc427
+Signed-off-by: Bernd Hufmann <Bernd.Hufmann@ericsson.com>
+Signed-off-by: Alexandre Montplaisir <alexmonthy@voxpopuli.im>
+Signed-off-by: Patrick Tasse <patrick.tasse@gmail.com>
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Patrick Tasse
+Date: 2015-08-04 17:09:49.000000000
+Message: 
+Uploaded patch set 9.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2015-08-04 17:09:55.000000000
+Message: 
+Patch Set 9:
+
+Build Started https://hudson.eclipse.org/tracecompass/job/tracecompass-gerrit/3349/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2015-08-04 17:39:55.000000000
+Message: 
+Patch Set 9: Code-Review+1
+
+Build Successful 
+
+https://hudson.eclipse.org/tracecompass/job/tracecompass-gerrit/3349/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthew Khouzam
+Date: 2015-08-06 17:06:59.000000000
+Message: 
+Patch Set 9: Code-Review+1
+
+(1 comment)
+
+This looks good to me!
+Line:306, common/org.eclipse.tracecompass.common.core/src/org/eclipse/tracecompass/common/core/collect/BufferedBlockingQueue.java -> me gusta!
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2015-08-06 19:30:50.000000000
+Message: 
+Patch Set 9: Code-Review-1
+
+I'm taking a look at this right now, comments coming.
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2015-08-06 20:54:31.000000000
+Message: 
+Patch Set 9:
+
+(6 comments)
+
+> In the end, I changed the implementation so that the output buffer remains in the inner queue until it is completely empty.
+
+Very clever! We could also apply this on the input side, it should even simplify the code a bit.
+
+Some comments, mainly minor style issues, but the signalAll() one I think is important.
+
+Also, it would be *very* useful to have a unit test that can reproduce the failure mode that was experienced to motivate this patch. Right now I would feel very weary in touching anything in this class because it could bring back the bug. This is not good for maintainability.
+Line:67, common/org.eclipse.tracecompass.common.core/src/org/eclipse/tracecompass/common/core/collect/BufferedBlockingQueue.java -> can be final.
+
+It's also slightly clearer to explicitly pass "0" to the constructor.
+
+Line:106, common/org.eclipse.tracecompass.common.core/src/org/eclipse/tracecompass/common/core/collect/BufferedBlockingQueue.java -> Shouldn't the increment happen after the element was actually inserted?
+
+Line:150, common/org.eclipse.tracecompass.common.core/src/org/eclipse/tracecompass/common/core/collect/BufferedBlockingQueue.java -> If you have more than one thread waiting in take() or blockingPeek(), this will wake up only one of them. Shouldn't it be signalAll() ?
+
+Line:229, common/org.eclipse.tracecompass.common.core/src/org/eclipse/tracecompass/common/core/collect/BufferedBlockingQueue.java -> Add parentheses, helps readability:
+  return (fQueueSize.get() == 0);
+
+Line:269, common/org.eclipse.tracecompass.common.core/src/org/eclipse/tracecompass/common/core/collect/BufferedBlockingQueue.java -> Is it really required to take this lock here?
+
+Line:295, common/org.eclipse.tracecompass.common.core/src/org/eclipse/tracecompass/common/core/collect/BufferedBlockingQueue.java -> You should return a @Nullable T since we don't check the value here. This will remove a warning below.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2015-08-06 21:07:03.000000000
+Message: 
+Patch Set 9:
+
+Also, we could easily add a size() method now that we track the number of elements that are inserted/removed. This will help Matthew's MXBeans patch.
+----------------------------------------------------------------------------------------------------------------------
+Author: Patrick Tasse
+Date: 2015-08-06 22:30:15.000000000
+Message: 
+Patch Set 9:
+
+(6 comments)
+
+> We could also apply this on the input side, it should even simplify the code a bit.
+
+Not sure, then instead of blocking on 'not empty', we'd have to block on 'at least two', and make sure we stop reading before the tail, so I think it would make it harder to understand.
+
+> we could easily add a size() method
+
+Done
+Line:67, common/org.eclipse.tracecompass.common.core/src/org/eclipse/tracecompass/common/core/collect/BufferedBlockingQueue.java -> Done
+
+Line:106, common/org.eclipse.tracecompass.common.core/src/org/eclipse/tracecompass/common/core/collect/BufferedBlockingQueue.java -> OK, I was wondering the same thing about take(). I'll update both.
+
+Line:150, common/org.eclipse.tracecompass.common.core/src/org/eclipse/tracecompass/common/core/collect/BufferedBlockingQueue.java -> Good catch! I based on LinkedBloquingDeque implementation. But in that class, if you have two threads waiting on the lock for take(), when one of them wakes up it removes that new item from the queue which is empty again. So the other thread has to wait for another put().
+
+But in our case:
+
+1. flushInputBuffer() can make more than one element available to take() at the same time, and
+
+2. blockingPeek() doesn't remove the element which is then available for another thread to take().
+
+Line:229, common/org.eclipse.tracecompass.common.core/src/org/eclipse/tracecompass/common/core/collect/BufferedBlockingQueue.java -> Done
+
+Line:269, common/org.eclipse.tracecompass.common.core/src/org/eclipse/tracecompass/common/core/collect/BufferedBlockingQueue.java -> Yes, otherwise the input buffer could have been filled and added to the inner queue in between calls and then it will be iterated on twice.
+
+Line:295, common/org.eclipse.tracecompass.common.core/src/org/eclipse/tracecompass/common/core/collect/BufferedBlockingQueue.java -> I don't see any warning? next() should not return null in our implementation.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2015-08-06 22:55:47.000000000
+Message: 
+Patch Set 9:
+
+(1 comment)
+Line:295, common/org.eclipse.tracecompass.common.core/src/org/eclipse/tracecompass/common/core/collect/BufferedBlockingQueue.java -> Hmm, maybe it's because I'm using an integration build with a more recent JDT. It's true that it should not happen, but since fNext is @Nullable and we return it without checking, the compiler can't know about its state.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Patrick Tasse
+Date: 2015-08-07 13:43:14.000000000
+Message: 
+Patch Set 9:
+
+(4 comments)
+Line:35, common/org.eclipse.tracecompass.common.core/src/org/eclipse/tracecompass/common/core/collect/BufferedBlockingQueue.java -> I'm going to reword a bit. I think with the latest changes it's more an output queue than an inner queue.
+
+Line:67, common/org.eclipse.tracecompass.common.core/src/org/eclipse/tracecompass/common/core/collect/BufferedBlockingQueue.java -> It could be confused with the constructor parameter. I'll rename to fSize.
+
+Line:160, common/org.eclipse.tracecompass.common.core/src/org/eclipse/tracecompass/common/core/collect/BufferedBlockingQueue.java -> I'll make this more specific.
+
+Line:295, common/org.eclipse.tracecompass.common.core/src/org/eclipse/tracecompass/common/core/collect/BufferedBlockingQueue.java -> Well maybe it can be null if the iterator is shared between threads (which would be a stupid thing to do). In any case, if there's a warning we can fix it. I won't use checkNotNull() because I think what we really want is a NoSuchElementException.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2015-08-07 20:33:08.000000000
+Message: 
+Patch Set 9:
+
+(1 comment)
+Line:269, common/org.eclipse.tracecompass.common.core/src/org/eclipse/tracecompass/common/core/collect/BufferedBlockingQueue.java -> Ok I see, instantiating the iterator must point it to its starting element. If subsequent modifications of the queue add new elements, they will arrive "before" that starting element of the iterator, so the iterator won't see them. Which is what we want.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Gerrit Code Review
+Date: 2015-08-10 19:17:23.000000000
+Message: 
+Change has been successfully cherry-picked as 49698f83d53b1c99ff8cea7eb8b27066cfa30d3a by Patrick Tasse
+----------------------------------------------------------------------------------------------------------------------

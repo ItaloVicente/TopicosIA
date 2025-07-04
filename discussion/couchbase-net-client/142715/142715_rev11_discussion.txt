@@ -1,0 +1,112 @@
+======================================================================================================================
+DESCRIPTION:
+
+NCBC-2722: Refactor K/V cancellation tokens and timeouts
+
+Motivation
+----------
+Currently, cancellation tokens are registered to set the IOperation to
+canceled in multiple spots, which is inefficient, disorganized, and
+causes excess heap allocations.
+
+Additionally, some of the registrations related to bootstrapping are
+linked to the CancellationTokenSource of the DataFlowConnectionPool,
+preventing garbage collection of the the registrations and the boostrap
+operations.
+
+It is also conceivable that a cancellation token from a previous
+operation attempt could be triggered while in a subsequent attempt, and
+it would then mark the operation cancelled. This probably isn't an issue
+now given the retry structure but could cause problems in future design
+iterations.
+
+Timeouts are not currently handled in a way that matches the RFC, and
+there is some inconsistency in how exceptions are bubbled up for
+externally requested cancellations versus timeouts. There is also the
+possibility of creating unnecessary ambiguity in mutation state when
+requesting external cancellation of a mutation operation.
+
+Modifications
+-------------
+Change cancellation token logic for sending operations to be defined as
+only cancelling the send, not the IOperation. This removes token
+registration from both the DataFlowConnectionPool
+and OperationBase.SendAsync.
+
+Pass the CancellationToken through to IConnection.SendAsync so the
+actual send may be cancelled if it is still queued on the Socket,
+rather than only being cancellable while in the connection pool queue.
+
+Instead, register the cancellation token, if any, wherever
+IOperation.Completed is being awaited. That way it may dispose of the
+registration after the operation is completed, regardless of how it
+completes. There are two such locations in ClusterNode and in
+SaslMechanismBase.
+
+Make the logic in AsyncState a bit smarter so that it may not be
+completed more than once from multiple threads.
+
+For K/V operations, pass CancellationTokenPair from CouchbaseCollection
+down the stack through to ClusterNode.ExecuteAsync. This allows smart
+behaviors in ClusterNode.ExecuteAsync and RetryOrchestrator so that
+internal timeout OperationCanceledExceptions can be differentiated from
+exceptions triggered by external cancellation.
+
+Results
+-------
+Cleaner and easier to understand cancellation logic for operations,
+which is also more efficient.
+
+Bootstrap operations aren't left dangling and holding heap space.
+
+Retries won't accidentally get marked cancelled if a previous attempt's
+token is cancelled.
+
+Externally requested cancellation will trigger generally bubble up the
+OperationCanceledException. However, if a mutation operation has already
+been sent on the wire it will instead ignore the cancellation, wait for
+the result, and bubble that exception.
+
+Timeout based cancellations will now correctly bubble up Ambiguious or
+Unambiguous timeout exceptions based on whether the operation was a
+mutation and if the operation has been sent on the wire.
+
+CouchbaseCollection now correctly applies timeouts when an external
+cancellation token is supplied. Previously, the external token
+superceded timeouts.
+
+Timeout/cancellation behavior: https://gist.github.com/brantburnett/7a562876b1d53015310ce38b69da18d7
+
+Change-Id: Icf181739354409df389f173dc542c663b03d66d0
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Brant Burnett
+Date: 2021-01-17 18:54:41.000000000
+Message: 
+Uploaded patch set 11.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-01-17 18:54:54.000000000
+Message: 
+Patch Set 11:
+
+Build Started http://sdk.jenkins.couchbase.com/job/dotnet/job/sdk/job/couchbase-net-client-cv-trigger/2211/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-01-17 18:58:11.000000000
+Message: 
+Patch Set 11: Verified+1
+
+Build Successful 
+
+http://sdk.jenkins.couchbase.com/job/dotnet/job/sdk/job/couchbase-net-client-cv-trigger/2211/ : success
+----------------------------------------------------------------------------------------------------------------------
+Author: Brant Burnett
+Date: 2021-01-17 18:59:27.000000000
+Message: 
+Patch Set 11:
+
+This whopper is ready for review
+----------------------------------------------------------------------------------------------------------------------

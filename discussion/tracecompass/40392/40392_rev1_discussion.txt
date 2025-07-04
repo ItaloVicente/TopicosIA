@@ -1,0 +1,181 @@
+======================================================================================================================
+DESCRIPTION:
+
+os.linux: Use the class rather than the ID for accessing the Kernel Analysis
+
+Also remove the temptation of using the ID by entirely removing the constant.
+
+That repairs the Control Flow View and the Resources View for Test XML Stub
+traces who support it.
+
+Change-Id: I83dae6be556ef06755494ec72078739c2b19f837
+Signed-off-by: Geneviève Bastien <gbastien+lttng@versatic.net>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Genevieve Bastien
+Date: 2015-01-26 19:51:41.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2015-01-26 19:51:47.000000000
+Message: 
+Patch Set 1:
+
+Build Started https://hudson.eclipse.org/tracecompass/job/tracecompass-gerrit/930/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2015-01-26 20:24:43.000000000
+Message: 
+Patch Set 1: Code-Review+1
+
+Build Successful 
+
+https://hudson.eclipse.org/tracecompass/job/tracecompass-gerrit/930/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Patrick Tasse
+Date: 2015-01-27 21:41:37.000000000
+Message: 
+Patch Set 1: Code-Review-1
+
+I would be more inclined to remove the temptation of using the class and keeping the ID.
+
+As it's been explained to me, the issue is that stub traces that otherwise behave the same as the real trace with regards to a particular analysis, and uses the same analysis class, cannot reuse the same analysis ID. This is because the analysis manager has a map from analysis ID to analysis helper. Perhaps it should be a multi map (one key to many values).
+
+It doesn't feel right that the same analysis class has to have a different ID when defined in a different extension element.
+
+Using the class as the key to find an analysis module has some issues:
+
+- If you have two different analyses for the same trace type where one is a subclass of the other, then looking for the parent analysis will return one of the two, at random. I'm not sure that it practice this situation would occur, though. And you could probably recreate the same problem using analysis ID if it supported many helpers.
+
+- You can't have a trace type that implements the same analysis using a completely different class (that is not a subclass of the parent analysis), or else you wouldn't be able to find it.
+
+Having said that, if we consider that the analysis class is an interface class instead of an implementation class, a bit similar to how IAdaptable is used, then it can make sense to use the interface class as a key. But in that case we should remove the analysis ID concept completely. And the analysis manager should still support many analysis helpers (each attached to different trace types) per interface class.
+
+It would be undefined behavior to mistakenly define two different helpers for the same interface class and the same trace type.
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2015-01-28 00:31:03.000000000
+Message: 
+Patch Set 1:
+
+> If you have two different analyses [...] where one is a subclass of the other
+
+That's a very good point, I hadn't thought of that in fact. We're hitting the other edge of the double-edged sword that is polymorphism. Even though right now we don't have sub-analysis (other than abstract->implementation), we can't enforce all implemented ones to be final.
+
+We really do need to clean up the mess of getAnalysis(id, class), getFirstAnalysis(id), getOneRandomAnalysis(class), etc. Perhaps we could keep IDs, but that would be the ONLY way of accessing analyses. And we would always use ClassName.ID, so that the "id" of the extension point wouldn't matter.
+----------------------------------------------------------------------------------------------------------------------
+Author: Genevieve Bastien
+Date: 2015-01-28 14:44:00.000000000
+Message: 
+Patch Set 1:
+
+Indeed, if a concrete analysis extends another concrete one, we might run into problems here.
+
+I guess we could make it so that the ID of the analysis itself it unique, no matter the ID of the helper that created it, that would be a first step.
+
+Besides, when requirements come back, it may not be necessary to have the tracetype element in the extension point anymore, so we won't have 2 kernel analysis helper but only one who will check the requirements for any trace type.
+
+We still need to get modules by class though, we cannot get rid of that, it's necessary for example for the state system explorer. Anyway, I'll review this patch, but in the meantime, this version is there is anyone needs to see the Control Flow or Resources View for the Test XML Stub trace.
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2015-01-28 20:03:25.000000000
+Message: 
+Patch Set 1:
+
+> We still need to get modules by class though, we cannot get
+> rid of that, it's necessary for example for the state system
+> explorer.
+
+Hmm, at that point maybe instead the utility method should be "getStateSystemAnalysisModules", which does the isAssignable check, but we don't offer a generic Class parameter in the API?
+----------------------------------------------------------------------------------------------------------------------
+Author: Patrick Tasse
+Date: 2015-01-28 22:10:28.000000000
+Message: 
+Patch Set 1:
+
+> We still need to get modules by class though, we cannot get rid of that, it's necessary for example for the state system explorer.
+
+How about getting all the modules for the trace and doing an instanceof check?
+
+>> If you have two different analyses [...] where one is a subclass of the other
+>That's a very good point, I hadn't thought of that in fact. We're hitting the other edge of the double-edged sword that is polymorphism. Even though right now we don't have sub-analysis (other than abstract->implementation), we can't enforce all implemented ones to be final.
+
+Maybe this is a non-issue. If you get the sub-analysis instance when you're looking for the base analysis, it should do the job?
+
+Let's see how it works with the current problem of XML stubs. What I think should be allowed and currently doesn't work is (in different extensions):
+
+[KERNEL_ANALYSIS_ID, KernelAnalysis.class, tracetype.kernel]
+[KERNEL_ANALYSIS_ID, KernelAnalysis.class, tracetype.kernelstub]
+[KERNEL_ANALYSIS_ID, MyKernelAnalysis.class, tracetype.mykernel]
+
+That can be achieved by having a multimap of helpers per analysis ID, or some other rearrangement of the collections. Whether MyKernelAnalysis is a subclass of KernelAnalysis or not doesn't matter if you're getting the analysis by ID. I don't see a need to enforce the implementation to be final.
+
+If you have a (optional?) sub-analysis, you could have an implementation sub-class that covers both:
+
+[KERNEL_ANALYSIS_ID, KernelSubAnalysis.class, tracetype.kernel]
+[KERNEL_SUB_ANALYSIS_ID, KernelSubAnalysis.class, tracetype.kernel]
+
+(maybe that would mean that the same analysis executes twice, though?)
+
+This should not be allowed, or otherwise considered undefined behavior:
+
+[KERNEL_ANALYSIS_ID, KernelAnalysis.class, tracetype.kernel]
+[KERNEL_ANALYSIS_ID, OtherKernelAnalysis.class, tracetype.kernel]
+
+Now if we consider the suggestion of using an interface as analysis key, let's say IKernelAnalysis.class. Then if we remove the ID:
+
+[KernelAnalysis.class, tracetype.kernel]
+[KernelAnalysis.class, tracetype.kernelstub]
+
+Then when you want that specific analysis you return the module that is an instanceof IKernelAnalysis.class.
+
+One minor point is that it's not obvious looking at the extension point what is the interface class the module is implementing.
+
+For the sub-analysis case you would just do:
+
+[KernelSubAnalysis.class, tracetype.kernel]
+
+So whether you need IKernelAnalyis.class or IKernelSubAnalysis.class, they return the same thing and there is only one module instance that implements both interfaces.
+
+What happens if IKernelSubAnalysis.class is defined in a separate extension? You might end up with two modules:
+
+[KernelAnalysis.class, tracetype.kernel]
+[KernelSubAnalysis.class, tracetype.kernel]
+
+Is there a way to override the base one? Does it matter? Are sub-analyses a realistic use case?
+
+Hope this rambling helps the discussion and is not too confusing ;)
+----------------------------------------------------------------------------------------------------------------------
+Author: Genevieve Bastien
+Date: 2015-01-29 15:29:25.000000000
+Message: 
+Patch Set 1:
+
+omg one of those patches... I just wanted to see the Control Flow View and Resources View with an XML trace stub! :p
+
+One first step would be to make sure the helper ID is meaningless (it's in the plugin.xml anyway, and we have no way of enforcing anything there). The analysis would use the helper ID by default, but may override it freely.
+
+One use case we support now [in unit tests] and may still want to support, is to have many instances of the same analysis class, each executed with different parameters, that may produce different results. For example, there could be different types of statistics analysis using the same base class with parameters, or eventually, many critical path could use different algorithm and their results can be compared. Those analysis of same class could have the same ID, in which case, what is the ID's purpose if you can't differentiate 2 analyses with it?
+
+I'd say we keep the utils methods as they are now and let the analyses decide how they implement themselves wrt that. In the case of the KernelAnalysis and CPU analysis, it makes sense to have one ID only, since you won't have 2 such analyses, but we can't extrapolate to all analyses.
+----------------------------------------------------------------------------------------------------------------------
+Author: Patrick Tasse
+Date: 2015-01-30 21:48:05.000000000
+Message: 
+Patch Set 1:
+
+It seems like the analysis module ID is initialized to the module class canonical name (by the abstract module), then the ID from the extension point is used as a key in the manager and pushed to the module. Then seekers of the module use a public ID constant defined in the concrete module.
+
+Should we remove any default implementation of getId() in the abstract module? Then the concrete class must implement it, return a constant if applicable, or perhaps a different string that depends on analysis parameters. Maybe the module should then provide a public static method to create the ID so that seekers could use it to know the correct ID to look for.
+
+Then the key in the manager can be the ID provided by the module, and we can remove it from the extension point.
+
+Regardless of this change, I would think that the most pressing fix is to allow the manager to support more than one module helper per ID (e.g. map to multimap? or just a list?) so that an extension (or other source) can provide an analysis module for an existing analysis ID for a new trace type.
+
+The key in the manager is only used by the UI to get helper info for an analysis element (for example the icon), how do we deal with that if there are more than one helper per ID, can we figure out which one is the correct one for an analysis element in the Project Explorer, if the trace is closed?
+
+If the same module can provide different analysis from different parameters, I think this invalidates the use of an interface class as a key.
+----------------------------------------------------------------------------------------------------------------------

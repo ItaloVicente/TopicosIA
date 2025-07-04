@@ -1,0 +1,171 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-53848 do not delete rbac_upgrade key until cluster compat version is
+
+...changed. This is needed to make sure that rbac mutations and memcached
+rbac files update are not enabled before the cluster is in consistent state
+
+Change-Id: I009ea7f9e197a12f6020011e5d834ea77ec7bef2
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Artem Stemkovski
+Date: 2022-09-28 05:25:54.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Restriction Checker
+Date: 2022-09-28 05:26:05.000000000
+Message: 
+Patch Set 1: Well-Formed+1
+
+Permission granted to commit: 
+
+https://server.jenkins.couchbase.com/job/restricted-branch-check/317186/artifact/restricted.html : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-09-28 05:26:08.000000000
+Message: 
+Patch Set 1:
+
+Build Started https://cv.jenkins.couchbase.com/job/ns-server-test/31726/
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2022-09-28 05:27:10.000000000
+Message: 
+Patch Set 1: Verified+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-09-28 05:32:07.000000000
+Message: 
+Patch Set 1: Well-Formed+1
+
+Build Successful 
+
+https://cv.jenkins.couchbase.com/job/ns-server-test/31726/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2022-09-28 15:32:26.000000000
+Message: 
+Patch Set 1: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2022-09-28 18:14:01.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:87, src/ns_online_config_upgrader.erl -> I was trying to fix this in the exact same way in this patch: https://review.couchbase.org/c/ns_server/+/176750 and while testing that patch I found making this change doesn't help. 
+
+Here's why that's the case: 
+
+1. We call ns_config:upgrade_config_explicitly/1 in upgrade_config/1 to which we pass do_upgrade_config/2 as the Upgrade fun.
+2. do_upgrade_config/2 goes over each of the version transitions and updates the cluster_compat_version.
+3. But these intermediate cluster_compat_version changes are not propagated to other nodes because ns_config:upgrade_config_explicitly/1 replaces any previously set key via a call to ns_config:upgrade_config/2 -> 
+https://src.couchbase.org/source/xref/trunk/ns_server/src/ns_config.erl?r=df78c23c#1061
+4. Previously touched keys (like cluster_compat_version) are replaced here -> https://src.couchbase.org/source/xref/trunk/ns_server/src/ns_config.erl?r=df78c23c#759
+
+So effectively only the final cluster_compat_version is propagated to all the node - unless I have missed read the above code.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2022-09-28 18:33:16.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:87, src/ns_online_config_upgrader.erl -> Minor addition: What I meant to say with the reasoning above was that the "rbac_ugprade" key is deleted in the same transaction as when the cluster_compat_version is set to the FinalVersion. It doesn't get deleted and propagated to other nodes per-maturely.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2022-09-28 18:50:27.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:87, src/ns_online_config_upgrader.erl -> The problem is that ns_config:upgrade_config_explicitly/1 is called twice. This patch prevents the first call from removing the key
+
+do_switch_compat_mode(NewVersion, NodesWanted) ->
+    functools:sequence_(
+      [?cut(upgrade_ns_config(min(NewVersion, ?VERSION_70), NodesWanted)),
+       ?cut(chronicle_upgrade:upgrade(NewVersion, NodesWanted)),
+       ?cut(upgrade_ns_config(NewVersion, NodesWanted))]).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2022-09-28 19:43:34.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:87, src/ns_online_config_upgrader.erl -> Ah interesting! Looks like there weren't two calls to upgrade_ns_config in CC when I had looked at this last ->  https://src.couchbase.org/source/xref/cheshire-cat/ns_server/src/cluster_compat_mode.erl?r=e53e53f8#252
+
+But I am still curious how this would have prevented the crash in the Royal Caribbean case - do we see the cluster_compat_mode was < [7,0] and that the rbac_upgrade key was deleted, while the users were already upgraded to [7,0] roles? 
+
+Because I don't see how the cluster_compat mode can be less than [7,0] and also that the rbac_upgrade key was deleted.
+
+Also I don't see we are doing any user roles upgrade between [7,0] to [7,1] so even if we had two separate calls we shouldn't crashed no?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2022-09-28 20:09:36.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:87, src/ns_online_config_upgrader.erl -> This didn't cause the crash. But in my fix I rely on rbac_upgrade flag and I do want to eliminate the window when rbac_upgrade flag is deleted, but compat version is still not updated.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2022-09-29 01:57:52.000000000
+MISMATCHED INLINE COMMENT
+Line:75, src/ns_online_config_upgrader.erl -> ah this feels scary - What if this node is a version higher than the cluster_compat_mode at the end of this upgrade? Won't we miss deleting the rbac_upgrade key? Maybe it is ok for Neo but wouldn't this be a bug in Elixir?
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2022-09-29 02:33:10.000000000
+MISMATCHED INLINE COMMENT
+Line:75, src/ns_online_config_upgrader.erl -> Theoretically you are absolutely right here. In practice this never happens. But needs to be fixed nevertheless.
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2022-09-29 16:27:05.000000000
+MISMATCHED INLINE COMMENT
+Line:75, src/ns_online_config_upgrader.erl -> On thinking a bit more - the above issue might happen on Neo too not just Elixir. If master node in on [7,1] and if the cluster_compat_mode moves to [7,0] the rbac_upgrade key will not be deleted. 
+
+Which might causing interesting problems at different places. Like for example in memcached_permissions(https://src.couchbase.org/source/xref/trunk/ns_server/src/memcached_permissions.erl?r=bc137687#357), we rely on the rbac_upgrade key being deleted, before we update I am guessing the permissions for users towards memcached.
+
+I feel we should pass down the "ActualFinalVersion" to upgrade_config (since we have 2 calls to upgrade_config) and remove the rbac_key when cluster_compat_mode reaches "ActualFinalVersion".
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2022-09-29 21:32:24.000000000
+MISMATCHED INLINE COMMENT
+Line:75, src/ns_online_config_upgrader.erl -> >> On thinking a bit more - the above issue might happen on Neo too not just 
+>> Elixir. If master node in on [7,1] and if the cluster_compat_mode moves to [7,0]
+>> the rbac_upgrade key will not be deleted.
+
+Fixed via: https://review.couchbase.org/c/ns_server/+/180614/2
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2022-09-29 17:17:49.000000000
+MISMATCHED INLINE COMMENT
+Line:75, src/ns_online_config_upgrader.erl -> Hareen, What was the issue with your change https://review.couchbase.org/c/ns_server/+/176750 ?
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2022-09-29 21:27:00.000000000
+MISMATCHED INLINE COMMENT
+Line:75, src/ns_online_config_upgrader.erl -> @Steve: The issue I was fixing was in CC and in CC we were only doing one ns_online_upgrade_config:upgrade_config/1 -> https://src.couchbase.org/source/xref/cheshire-cat/ns_server/src/cluster_compat_mode.erl?r=e53e53f8#252.
+
+In that case the customer was upgrading from [6,5] to [7,0]:
+1. User got upgraded from [6,5] to [7,0].
+2. The config got upgraded from [6,5] -> [6,6] and [6,6] -> [7,0] and all the keys should have been updated in a single transaction in ns_config ({set, cluster_compat_mode, [7,0]} and {delete, rbac_upgrade}). 
+3. But the remote node was seeing “cluster_compat_mode” as [6,6] and the rbac_upgrade key was deleted.
+4. we end up in the same scenario as the Royal Caribbean issue where the users are in [7,0] format but the definitions we are picking is for [6,6] in memcached_permissions.
+
+That fix didn't help because ns_config:update_explicitly/2 updates all those keys as an transaction and we shouldn't have seen this partial set and partially unset config on remote nodes. My read of the CBSE and/or code be wrong - but that was the conclusion I came to when I looked at it a few months ago.
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2022-09-29 01:57:52.000000000
+MISMATCHED INLINE COMMENT
+Line:87, src/ns_online_config_upgrader.erl -> Ack. Makes sense. Thanks.
+----------------------------------------------------------------------------------------------------------------------

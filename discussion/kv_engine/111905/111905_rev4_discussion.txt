@@ -1,0 +1,108 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-35049: Release StreamContainer rlock before calling Stream::setDead
+
+TSan found lock inversion as DcpProducer::setDisconnect holds
+`StreamContainer->rlock()` and then acquires `vb->getStateLock()`
+whereas `VBucket::set()` acquires them in the opposite order.
+
+Release the stream container lock before calling `Stream::setDead()` to
+avoid holding both in the `setDisconnect` path.
+
+TSan report:
+
+ [ RUN      ] DurabilityTest.MB34780
+ ==================
+ WARNING: ThreadSanitizer: lock-order-inversion (potential deadlock) (pid=10424)
+   Cycle in lock order graph: M4054 (0x7b68000308f8) => M201671426334441480 (0x000000000000) => M4054
+
+   Mutex M201671426334441480 acquired here while holding mutex M4054 in thread T7:
+     #0 pthread_rwlock_rdlock <null> (libtsan.so.0+0x00000002953b)
+     #1 cb_rw_reader_enter(pthread_rwlock_t*) .../platform/src/cb_pthreads.cc:195 (libplatform_so.so.0.1.0+0x000000009cfa)
+     #2 cb::RWLock::readerLock() .../platform/include/platform/rwlock.h:87 (ep.so+0x0000000f4326)
+     #3 cb::RWLock::lock_shared() .../platform/include/platform/rwlock.h:67 (ep.so+0x00000012f2ba)
+     #4 std::shared_lock<cb::RWLock>::shared_lock(cb::RWLock&) /usr/local/include/c++/7.3.0/shared_mutex:553 (ep.so+0x00000012f2ba)
+     #5 StreamContainer<std::shared_ptr<Stream> >::ReadLockedHandle::ReadLockedHandle(...) .../kv_engine/engines/ep/src/dcp/stream_container.h:213 (ep.so+0x00000012f2ba)
+     #6 StreamContainer<std::shared_ptr<Stream> >::rlock() const .../kv_engine/engines/ep/src/dcp/stream_container.h:273 (ep.so+0x000000122ad5)
+     #7 DcpProducer::notifySeqnoAvailable(Vbid, unsigned long) .../kv_engine/engines/ep/src/dcp/producer.cc:1312 (ep.so+0x000000122ad5)
+     #8 DcpConnMap::notifyVBConnections(Vbid, unsigned long) .../kv_engine/engines/ep/src/dcp/dcpconnmap.cc:424 (ep.so+0x0000000fa0af)
+     #9 KVBucket::notifyReplication(Vbid, long) .../kv_engine/engines/ep/src/kv_bucket.cc:2570 (ep.so+0x00000020ed03)
+     #10 EPBucket::notifyNewSeqno(Vbid, VBNotifyCtx const&) .../kv_engine/engines/ep/src/ep_bucket.cc:1327 (ep.so+0x000000160a95)
+     #11 NotifyNewSeqnoCB::callback(Vbid const&, VBNotifyCtx const&) .../kv_engine/engines/ep/src/kv_bucket.h:837 (ep.so+0x000000224dcb)
+     #12 VBucket::notifyNewSeqno(VBNotifyCtx const&) .../kv_engine/engines/ep/src/vbucket.cc:3579 (ep.so+0x000000262f6b)
+     #13 VBucket::set(...) .../kv_engine/engines/ep/src/vbucket.cc:1569 (ep.so+0x00000026af3f)
+     #14 KVBucket::set(...) .../kv_engine/engines/ep/src/kv_bucket.cc:692 (ep.so+0x00000021ee48)
+     #15 EventuallyPersistentEngine::storeIfInner(...) .../kv_engine/engines/ep/src/ep_engine.cc:2440 (ep.so+0x00000018071f)
+
+   Mutex M4054 previously acquired by the same thread here:
+     #0 AnnotateRWLockAcquired <null> (libtsan.so.0+0x00000005b63d)
+     #1 folly::detail::annotate_rwlock_acquired_impl(...) .../follytsan/folly/synchronization/SanitizeThread.cpp:91 (memcached+0x0000006463de)
+     #2 annotate_rwlock_acquired .../build/tlm/deps/folly.exploded/include/folly/synchronization/SanitizeThread.h:99 (ep.so+0x00000021e932)
+     #3 folly::SharedMutexImpl<false, void, std::atomic, false, true>::annotateAcquired(folly::annotate_rwlock_level) .../build/tlm/deps/folly.exploded/include/folly/SharedMutex.h:696 (ep.so+0x00000021e932)
+     #4 folly::SharedMutexImpl<false, void, std::atomic, false, true>::lock_shared(folly::SharedMutexToken&) .../build/tlm/deps/folly.exploded/include/folly/SharedMutex.h:376 (ep.so+0x00000021e932)
+     #5 folly::SharedMutexImpl<false, void, std::atomic, false, true>::ReadHolder::ReadHolder(folly::SharedMutexImpl<false, void, std::atomic, false, true> const&) .../build/tlm/deps/folly.exploded/include/folly/SharedMutex.h:1315 (ep.so+0x00000021e932)
+     #6 KVBucket::set(...) .../kv_engine/engines/ep/src/kv_bucket.cc:659 (ep.so+0x00000021e932)
+     #7 EventuallyPersistentEngine::storeIfInner(...)> const&) .../kv_engine/engines/ep/src/ep_engine.cc:2440 (ep.so+0x00000018071f)
+
+   Mutex M4054 acquired here while holding mutex M201671426334441480 in thread T5:
+     #0 AnnotateRWLockAcquired <null> (libtsan.so.0+0x00000005b63d)
+     #1 folly::detail::annotate_rwlock_acquired_impl(void const volatile*, folly::annotate_rwlock_level, char const*, int) .../follytsan/folly/synchronization/SanitizeThread.cpp:91 (memcached+0x0000006463de)
+     #2 annotate_rwlock_acquired .../build/tlm/deps/folly.exploded/include/folly/synchronization/SanitizeThread.h:99 (ep.so+0x0000000bb5b6)
+     #3 folly::SharedMutexImpl<false, void, std::atomic, false, true>::annotateAcquired(folly::annotate_rwlock_level) .../build/tlm/deps/folly.exploded/include/folly/SharedMutex.h:696 (ep.so+0x0000000bb5b6)
+     #4 folly::SharedMutexImpl<false, void, std::atomic, false, true>::lock_shared(folly::SharedMutexToken&) .../build/tlm/deps/folly.exploded/include/folly/SharedMutex.h:376 (ep.so+0x0000000bb5b6)
+     #5 folly::SharedMutexImpl<false, void, std::atomic, false, true>::ReadHolder::ReadHolder(...) .../build/tlm/deps/folly.exploded/include/folly/SharedMutex.h:1315 (ep.so+0x0000000bb5b6)
+     #6 ActiveStream::setDead(end_stream_status_t) .../kv_engine/engines/ep/src/dcp/active_stream.cc:1181 (ep.so+0x0000000bb5b6)
+     #7 operator() .../kv_engine/engines/ep/src/dcp/producer.cc:1491 (ep.so+0x0000001207df)
+     #8 for_each<..., DcpProducer::setDisconnect()::<lambda(folly::AtomicHashMap<...>::value_type&)> > /usr/local/include/c++/7.3.0/bits/stl_algo.h:3884 (ep.so+0x0000001207df)
+     #9 DcpProducer::setDisconnect() .../kv_engine/engines/ep/src/dcp/producer.cc:1493 (ep.so+0x000000120b08)
+
+   Mutex M201671426334441480 previously acquired by the same thread here:
+     #0 pthread_rwlock_rdlock <null> (libtsan.so.0+0x00000002953b)
+     #1 cb_rw_reader_enter(pthread_rwlock_t*) .../platform/src/cb_pthreads.cc:195 (libplatform_so.so.0.1.0+0x000000009cfa)
+     #2 cb::RWLock::readerLock() .../platform/include/platform/rwlock.h:87 (ep.so+0x0000001205e9)
+     #3 cb::RWLock::lock_shared() .../platform/include/platform/rwlock.h:67 (ep.so+0x0000001205e9)
+     #4 std::shared_lock<cb::RWLock>::shared_lock(cb::RWLock&) /usr/local/include/c++/7.3.0/shared_mutex:553 (ep.so+0x0000001205e9)
+     #5 StreamContainer<std::shared_ptr<Stream> >::ReadLockedHandle::ReadLockedHandle(StreamContainer<std::shared_ptr<Stream> > const&) .../kv_engine/engines/ep/src/dcp/stream_container.h:213 (ep.so+0x0000001205e9)
+     #6 StreamContainer<std::shared_ptr<Stream> >::rlock() const .../kv_engine/engines/ep/src/dcp/stream_container.h:273 (ep.so+0x0000001205e9)
+     #7 operator() .../kv_engine/engines/ep/src/dcp/producer.cc:1490 (ep.so+0x0000001205e9)
+     #8 for_each<..., DcpProducer::setDisconnect()::<lambda(folly::AtomicHashMap<...>::value_type&)> > /usr/local/include/c++/7.3.0/bits/stl_algo.h:3884 (ep.so+0x0000001207df)
+     #9 DcpProducer::setDisconnect() .../kv_engine/engines/ep/src/dcp/producer.cc:1493 (ep.so+0x000000120b08)
+
+Change-Id: Ibb2ae11498c7226514bc18788778878bd6c87363
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: James H
+Date: 2019-07-12 11:40:54.000000000
+Message: 
+Uploaded patch set 4: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-07-12 12:36:28.000000000
+Message: 
+Patch Set 4: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2019-07-12 12:54:59.000000000
+Message: 
+Patch Set 4:
+
+Buildbot voted +1 on the first patch and won't be retriggered with just a message change?
+might verified+1 manually on patch set 4; there's no code change from 1 to 4
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-07-12 13:08:04.000000000
+Message: 
+Patch Set 4:
+
+> Buildbot voted +1 on the first patch and won't be retriggered with
+ > just a message change?
+ > might verified+1 manually on patch set 4; there's no code change
+ > from 1 to 4
+
+Yeah, there's a "feature" where if just the commit message has changed the votes are kept (and it won't retrigger CV). However if you change the commit message before the Verified vote is in; it doesn't get "fast-forwarded" to the current commit.
+
+If you want a proper Jenkins vote; I'd just rebase; or you can manually apply the Verified:+1.
+----------------------------------------------------------------------------------------------------------------------

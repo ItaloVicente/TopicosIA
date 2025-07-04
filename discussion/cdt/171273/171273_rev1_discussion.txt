@@ -1,0 +1,323 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 568228: Add a way for DSF Data Model to initiate refresh all
+
+Change-Id: I193445f95e19361f55d7ca855f5109e024b2f673
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jonah Graham
+Date: 2020-10-26 01:09:51.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: CDT Bot
+Date: 2020-10-26 01:32:57.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-ui-only-pipeline/2524/ : SUCCESS
+
+https://ci.eclipse.org/cdt/job/cdt-verify-test-dsf-gdb-only-pipeline/304/ : SUCCESS
+
+https://ci.eclipse.org/cdt/job/cdt-verify-code-cleanliness-pipeline/2189/ : SUCCESS. Formatting, whitespace, version numbers and other checks appear to be correct. See https://github.com/eclipse-cdt/cdt-infra/tree/master/jenkins/pipelines/cdt/verify#cdt-verify-code-cleanliness for documentation on what is checked.
+
+https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-other-pipeline/2686/ : SUCCESS. p2 repository available on https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-other-pipeline/2686/artifact/releng/org.eclipse.cdt.repo/target/repository/ - please mark build as "Keep this build forever" if the p2 repo is needed for testing. Otherwise it will be deleted shortly.
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexander Fedorov
+Date: 2020-10-26 06:44:04.000000000
+Message: 
+Patch Set 1: Code-Review-1
+
+(9 comments)
+
+The DsfServiceTracker implementation looks questinable from platform perspective, even without the suggested patch.
+I would recommend to reimplement the desired functionality to operate the services using `org.eclipse.core.runtime.ServiceCaller<Service>`
+
+Another question is the added method `flushAllCachesAndRefresh`. It is clear why we need this functionality, but I have doubts that it belongs to ICommandControlService interface, it looks a bit artificial there.
+Line:97, dsf/org.eclipse.cdt.dsf.ui/src/org/eclipse/cdt/dsf/debug/ui/viewmodel/AbstractDebugVMAdapter.java -> Perhaps just returninh in the case of null can reduce complexity
+
+Line:101, dsf/org.eclipse.cdt.dsf.ui/src/org/eclipse/cdt/dsf/debug/ui/viewmodel/AbstractDebugVMAdapter.java -> This is potential ClassCastException as the assumption is too strong
+
+Line:110, dsf/org.eclipse.cdt.dsf.ui/src/org/eclipse/cdt/dsf/debug/ui/viewmodel/AbstractDebugVMAdapter.java -> We are loosing a lot of info here from the initial CoreException, we can just log `e.getStatus()` or construct another one using fields of the `e.getStatus()`
+
+Line:59, dsf/org.eclipse.cdt.dsf/src/org/eclipse/cdt/dsf/debug/service/command/ICommandControlService.java -> Shoundn't we call it `ICommandControlRefreshAllDMEvent`? The name is not perfect but looks similar to sibling names.
+
+Line:87, dsf/org.eclipse.cdt.dsf/src/org/eclipse/cdt/dsf/debug/service/command/ICommandControlService.java -> Does it mean that we have another entity that is smart enough to control the control service?
+I'm not sure that this method belongs to this interface, do you think we can extract it to a separate one?
+
+Line:216, dsf/org.eclipse.cdt.dsf/src/org/eclipse/cdt/dsf/service/DsfServicesTracker.java -> Why not to return just an empty array?
+
+Line:255, dsf/org.eclipse.cdt.dsf/src/org/eclipse/cdt/dsf/service/DsfServicesTracker.java -> Why not to return just an empty array?
+
+Line:259, dsf/org.eclipse.cdt.dsf/src/org/eclipse/cdt/dsf/service/DsfServicesTracker.java -> We have `fServiceFilter` for default case, let's use it
+
+Line:289, dsf/org.eclipse.cdt.dsf/src/org/eclipse/cdt/dsf/service/DsfServicesTracker.java -> Why not to return just an empty array?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonah Graham
+Date: 2020-10-26 13:26:45.000000000
+MISMATCHED INLINE COMMENT
+Line:97, dsf/org.eclipse.cdt.dsf.ui/src/org/eclipse/cdt/dsf/debug/ui/viewmodel/AbstractDebugVMAdapter.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonah Graham
+Date: 2020-10-26 13:26:45.000000000
+MISMATCHED INLINE COMMENT
+Line:101, dsf/org.eclipse.cdt.dsf.ui/src/org/eclipse/cdt/dsf/debug/ui/viewmodel/AbstractDebugVMAdapter.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonah Graham
+Date: 2020-10-26 13:26:45.000000000
+MISMATCHED INLINE COMMENT
+Line:110, dsf/org.eclipse.cdt.dsf.ui/src/org/eclipse/cdt/dsf/debug/ui/viewmodel/AbstractDebugVMAdapter.java -> Are you sure we are losing info - I am creating a new status containing the existing e (and its status) as a child. This is the code pattern used throughout DSF.
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonah Graham
+Date: 2020-10-27 13:29:54.000000000
+MISMATCHED INLINE COMMENT
+Line:110, dsf/org.eclipse.cdt.dsf.ui/src/org/eclipse/cdt/dsf/debug/ui/viewmodel/AbstractDebugVMAdapter.java -> By discarding the stack trace of e (and not adding a message to the status) you are losing critical information. Let me compare the results of the two log entries for you:
+
+I changed refresh to do this:
+
+    throw new CoreException(new Status(IStatus.WARNING, DsfPlugin.PLUGIN_ID, "Inner Exception Occurred",
+            new NullPointerException("inner NPE")));
+
+this results in my version of the code having the extra information and not losing any information as so:
+
+
+    DsfUIPlugin.log(new Status(IStatus.ERROR, DsfUIPlugin.PLUGIN_ID,
+            "Failed to refresh following receipt of a Refresh All Event.", e)); //$NON-NLS-1$
+
+produces:
+
+    !ENTRY org.eclipse.cdt.dsf.ui 4 0 2020-10-27 08:59:29.641
+    !MESSAGE Failed to refresh following receipt of a Refresh All Event.
+    !STACK 1
+    org.eclipse.core.runtime.CoreException: Inner Exception Occurred
+        at org.eclipse.cdt.dsf.debug.ui.viewmodel.actions.DefaultRefreshAllTarget.refresh(DefaultRefreshAllTarget.java:47)
+        at org.eclipse.cdt.dsf.debug.ui.viewmodel.AbstractDebugVMAdapter.eventDispatched(AbstractDebugVMAdapter.java:111)
+        at java.base/jdk.internal.reflect.NativeMethodAccessorImpl.invoke0(Native Method)
+        at java.base/jdk.internal.reflect.NativeMethodAccessorImpl.invoke(NativeMethodAccessorImpl.java:62)
+        at java.base/jdk.internal.reflect.DelegatingMethodAccessorImpl.invoke(DelegatingMethodAccessorImpl.java:43)
+        at java.base/java.lang.reflect.Method.invoke(Method.java:566)
+        at org.eclipse.cdt.dsf.service.DsfSession.doDispatchEvent(DsfSession.java:541)
+        at org.eclipse.cdt.dsf.service.DsfSession$3.run(DsfSession.java:408)
+        at java.base/java.util.concurrent.Executors$RunnableAdapter.call(Executors.java:515)
+        at java.base/java.util.concurrent.FutureTask.run(FutureTask.java:264)
+        at java.base/java.util.concurrent.ScheduledThreadPoolExecutor$ScheduledFutureTask.run(ScheduledThreadPoolExecutor.java:304)
+        at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1128)
+        at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:628)
+        at java.base/java.lang.Thread.run(Thread.java:834)
+    Caused by: java.lang.NullPointerException: inner NPE
+        at org.eclipse.cdt.dsf.debug.ui.viewmodel.actions.DefaultRefreshAllTarget.refresh(DefaultRefreshAllTarget.java:48)
+        ... 13 more
+    !SUBENTRY 1 org.eclipse.cdt.dsf 2 0 2020-10-27 08:59:29.642
+    !MESSAGE Inner Exception Occurred
+    !STACK 0
+    java.lang.NullPointerException: inner NPE
+        at org.eclipse.cdt.dsf.debug.ui.viewmodel.actions.DefaultRefreshAllTarget.refresh(DefaultRefreshAllTarget.java:48)
+        at org.eclipse.cdt.dsf.debug.ui.viewmodel.AbstractDebugVMAdapter.eventDispatched(AbstractDebugVMAdapter.java:111)
+        at java.base/jdk.internal.reflect.NativeMethodAccessorImpl.invoke0(Native Method)
+        at java.base/jdk.internal.reflect.NativeMethodAccessorImpl.invoke(NativeMethodAccessorImpl.java:62)
+        at java.base/jdk.internal.reflect.DelegatingMethodAccessorImpl.invoke(DelegatingMethodAccessorImpl.java:43)
+        at java.base/java.lang.reflect.Method.invoke(Method.java:566)
+        at org.eclipse.cdt.dsf.service.DsfSession.doDispatchEvent(DsfSession.java:541)
+        at org.eclipse.cdt.dsf.service.DsfSession$3.run(DsfSession.java:408)
+        at java.base/java.util.concurrent.Executors$RunnableAdapter.call(Executors.java:515)
+        at java.base/java.util.concurrent.FutureTask.run(FutureTask.java:264)
+        at java.base/java.util.concurrent.ScheduledThreadPoolExecutor$ScheduledFutureTask.run(ScheduledThreadPoolExecutor.java:304)
+        at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1128)
+        at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:628)
+        at java.base/java.lang.Thread.run(Thread.java:834)
+
+
+While the reduced version:
+
+        DsfUIPlugin.log(e.getStatus()); 
+
+has the inner exception, but not the outer exception.
+
+    !ENTRY org.eclipse.cdt.dsf 2 0 2020-10-27 08:59:29.643
+    !MESSAGE Inner Exception Occurred
+    !STACK 0
+    java.lang.NullPointerException: inner NPE
+        at org.eclipse.cdt.dsf.debug.ui.viewmodel.actions.DefaultRefreshAllTarget.refresh(DefaultRefreshAllTarget.java:48)
+        at org.eclipse.cdt.dsf.debug.ui.viewmodel.AbstractDebugVMAdapter.eventDispatched(AbstractDebugVMAdapter.java:111)
+        at java.base/jdk.internal.reflect.NativeMethodAccessorImpl.invoke0(Native Method)
+        at java.base/jdk.internal.reflect.NativeMethodAccessorImpl.invoke(NativeMethodAccessorImpl.java:62)
+        at java.base/jdk.internal.reflect.DelegatingMethodAccessorImpl.invoke(DelegatingMethodAccessorImpl.java:43)
+        at java.base/java.lang.reflect.Method.invoke(Method.java:566)
+        at org.eclipse.cdt.dsf.service.DsfSession.doDispatchEvent(DsfSession.java:541)
+        at org.eclipse.cdt.dsf.service.DsfSession$3.run(DsfSession.java:408)
+        at java.base/java.util.concurrent.Executors$RunnableAdapter.call(Executors.java:515)
+        at java.base/java.util.concurrent.FutureTask.run(FutureTask.java:264)
+        at java.base/java.util.concurrent.ScheduledThreadPoolExecutor$ScheduledFutureTask.run(ScheduledThreadPoolExecutor.java:304)
+        at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1128)
+        at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:628)
+        at java.base/java.lang.Thread.run(Thread.java:834)
+
+Now, for cases where there is a exception attached to the status there is only a minor difference, arguably the doubling of stack traces is even annoying. However, you don't know who or how the status was created. If the inner status was created on a different thread, or didn't include an exception lets see how they compare.
+
+Here is an example of an inner exception on a different thread - note this case is common in the executor flow common in asynchronous programming, like that used in DSF (see RequestMonitor for more info). Here is what I added to DefaultRefreshAllTarget which is an over simplification about how much of the executor and request monitors report back errors.
+
+    private final class RunnableImplementation implements Runnable {
+        private IStatus result = null;
+
+        @Override
+        public void run() {
+            result = new Status(IStatus.WARNING, DsfPlugin.PLUGIN_ID, "Something in a thread",
+                    new NullPointerException("npe in a thread"));
+        }
+    }
+
+    @Override
+    public void refresh(ISelection debugContext) throws CoreException {
+        RunnableImplementation runnable = new RunnableImplementation();
+        Thread thread = new Thread(runnable);
+        thread.start();
+        try {
+            thread.join();
+        } catch (InterruptedException e) {
+        }
+        if (runnable.result != null) {
+            throw new CoreException(runnable.result);
+        }
+
+With the version where we make a new status, this is what is in the log:
+
+    !ENTRY org.eclipse.cdt.dsf.ui 4 0 2020-10-27 09:13:46.741
+    !MESSAGE Failed to refresh following receipt of a Refresh All Event.
+    !STACK 1
+    org.eclipse.core.runtime.CoreException: Something in a thread
+        at org.eclipse.cdt.dsf.debug.ui.viewmodel.actions.DefaultRefreshAllTarget.refresh(DefaultRefreshAllTarget.java:67)
+        at org.eclipse.cdt.dsf.debug.ui.viewmodel.AbstractDebugVMAdapter.eventDispatched(AbstractDebugVMAdapter.java:111)
+        at java.base/jdk.internal.reflect.NativeMethodAccessorImpl.invoke0(Native Method)
+        at java.base/jdk.internal.reflect.NativeMethodAccessorImpl.invoke(NativeMethodAccessorImpl.java:62)
+        at java.base/jdk.internal.reflect.DelegatingMethodAccessorImpl.invoke(DelegatingMethodAccessorImpl.java:43)
+        at java.base/java.lang.reflect.Method.invoke(Method.java:566)
+        at org.eclipse.cdt.dsf.service.DsfSession.doDispatchEvent(DsfSession.java:541)
+        at org.eclipse.cdt.dsf.service.DsfSession$3.run(DsfSession.java:408)
+        at java.base/java.util.concurrent.Executors$RunnableAdapter.call(Executors.java:515)
+        at java.base/java.util.concurrent.FutureTask.run(FutureTask.java:264)
+        at java.base/java.util.concurrent.ScheduledThreadPoolExecutor$ScheduledFutureTask.run(ScheduledThreadPoolExecutor.java:304)
+        at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1128)
+        at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:628)
+        at java.base/java.lang.Thread.run(Thread.java:834)
+    Caused by: java.lang.NullPointerException: npe in a thread
+        at org.eclipse.cdt.dsf.debug.ui.viewmodel.actions.DefaultRefreshAllTarget$RunnableImplementation.run(DefaultRefreshAllTarget.java:41)
+        ... 1 more
+    !SUBENTRY 1 org.eclipse.cdt.dsf 2 0 2020-10-27 09:13:46.742
+    !MESSAGE Something in a thread
+    !STACK 0
+    java.lang.NullPointerException: npe in a thread
+        at org.eclipse.cdt.dsf.debug.ui.viewmodel.actions.DefaultRefreshAllTarget$RunnableImplementation.run(DefaultRefreshAllTarget.java:41)
+        at java.base/java.lang.Thread.run(Thread.java:834)
+
+However, if you discard the stack exception in the CoreException you get this in the log, which can be pretty hard to figure out where it came from:
+
+    !ENTRY org.eclipse.cdt.dsf 2 0 2020-10-27 09:13:46.743
+    !MESSAGE Something in a thread
+    !STACK 0
+    java.lang.NullPointerException: npe in a thread
+        at org.eclipse.cdt.dsf.debug.ui.viewmodel.actions.DefaultRefreshAllTarget$RunnableImplementation.run(DefaultRefreshAllTarget.java:41)
+        at java.base/java.lang.Thread.run(Thread.java:834)
+
+Finally, the no exception in a status case, I put this in refresh:
+
+    throw new CoreException(new Status(IStatus.WARNING, DsfPlugin.PLUGIN_ID, "Something in a status"));
+
+With full code I see:
+
+
+    !ENTRY org.eclipse.cdt.dsf.ui 4 0 2020-10-27 09:05:25.601
+    !MESSAGE Failed to refresh following receipt of a Refresh All Event.
+    !STACK 1
+    org.eclipse.core.runtime.CoreException: Something in a status
+        at org.eclipse.cdt.dsf.debug.ui.viewmodel.actions.DefaultRefreshAllTarget.refresh(DefaultRefreshAllTarget.java:47)
+        at org.eclipse.cdt.dsf.debug.ui.viewmodel.AbstractDebugVMAdapter.eventDispatched(AbstractDebugVMAdapter.java:111)
+        at java.base/jdk.internal.reflect.NativeMethodAccessorImpl.invoke0(Native Method)
+        at java.base/jdk.internal.reflect.NativeMethodAccessorImpl.invoke(NativeMethodAccessorImpl.java:62)
+        at java.base/jdk.internal.reflect.DelegatingMethodAccessorImpl.invoke(DelegatingMethodAccessorImpl.java:43)
+        at java.base/java.lang.reflect.Method.invoke(Method.java:566)
+        at org.eclipse.cdt.dsf.service.DsfSession.doDispatchEvent(DsfSession.java:541)
+        at org.eclipse.cdt.dsf.service.DsfSession$3.run(DsfSession.java:408)
+        at java.base/java.util.concurrent.Executors$RunnableAdapter.call(Executors.java:515)
+        at java.base/java.util.concurrent.FutureTask.run(FutureTask.java:264)
+        at java.base/java.util.concurrent.ScheduledThreadPoolExecutor$ScheduledFutureTask.run(ScheduledThreadPoolExecutor.java:304)
+        at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1128)
+        at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:628)
+        at java.base/java.lang.Thread.run(Thread.java:834)
+    !SUBENTRY 1 org.eclipse.cdt.dsf 2 0 2020-10-27 09:05:25.601
+    !MESSAGE Something in a status
+
+and with just e.getStatus() all you get in the log is this. As the status can even come from a different plug-in (as I simulated in all these examples) you can't even tell which plug-in logged the error.
+
+    !ENTRY org.eclipse.cdt.dsf 2 0 2020-10-27 09:05:25.602
+    !MESSAGE Something in a status
+
+Therefore, when I add something to the log I will err on the side of a bit too much or duplicated information some times for the benefit of having all the information the rest of the time.
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexander Fedorov
+Date: 2020-10-27 19:20:26.000000000
+MISMATCHED INLINE COMMENT
+Line:110, dsf/org.eclipse.cdt.dsf.ui/src/org/eclipse/cdt/dsf/debug/ui/viewmodel/AbstractDebugVMAdapter.java -> I've already admitted that discarding the CoreException was a weak proposal :) BTW, using MultiStatus does not mean "discard CoreException trace", we can pass CoreException to the constructor of MultiStatus to not loose any info.
+
+Normally we wrap the target exception with DebugException (which extends CoreException) at the bottom layer and then our methods has "throws DebugException" until the top layer (like IAction or something similar). At the top layer we can use `StatusManager.getManager().handle(IStatus, style)`, and this could make the error handling even more configurable for downstream products.
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexander Fedorov
+Date: 2020-10-27 09:16:38.000000000
+MISMATCHED INLINE COMMENT
+Line:110, dsf/org.eclipse.cdt.dsf.ui/src/org/eclipse/cdt/dsf/debug/ui/viewmodel/AbstractDebugVMAdapter.java -> Yes, I do, the most important info to loose is:
+* the stacktrace of initial exception (e.getStatus().getException())
+* the code of initial status (e.getStatus().getCode())
+
+It is relatively easy to compare the result of two log entries:
+* DsfUIPlugin.log(new Status(IStatus.ERROR, DsfUIPlugin.PLUGIN_ID, "Failed to refresh following receipt of a Refresh All Event.", e)); 
+* DsfUIPlugin.log(e.getStatus());
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexander Fedorov
+Date: 2020-10-27 18:03:49.000000000
+MISMATCHED INLINE COMMENT
+Line:110, dsf/org.eclipse.cdt.dsf.ui/src/org/eclipse/cdt/dsf/debug/ui/viewmodel/AbstractDebugVMAdapter.java -> Thank you for so detailed answer, Jonah. You are right, if Status used like this - your approach is better.
+When I started this discussion, I tried to say that Status and CoreException was misused in the added code. Now I see that I failed to explain my position and provided weak suggestion to improve.
+Generally CoreException does not work perfect in the chain with "normal" exceptions.
+It is better to use either "normal" exceptions or status hierarchies, i.e. the "cause" Status should be wrapped with `new MultiStatus(...).add' or `new MultiStatus(...).merge`
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonah Graham
+Date: 2020-10-27 18:14:26.000000000
+MISMATCHED INLINE COMMENT
+Line:110, dsf/org.eclipse.cdt.dsf.ui/src/org/eclipse/cdt/dsf/debug/ui/viewmodel/AbstractDebugVMAdapter.java -> > the "cause" Status should be wrapped with `new MultiStatus(...).add' or `new MultiStatus(...).merge`
+
+Please provide an example of when unwrapping and discarding the CoreException is best when logging. The CoreException has the useful stack trace in it. The Status's stack trace is still a different stack trace than the CoreException's one.
+
+This is different than the case where you are presenting the user with a Status or collection of Status (MultiStatus). However even then the UX for user's being presented Status is generally pretty subpar so I have rarely seen the effort worth it except in the GUIs where the designer has spent anytime on error handling (such as refactoring wizards).
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexander Fedorov
+Date: 2020-10-27 09:16:38.000000000
+MISMATCHED INLINE COMMENT
+Line:216, dsf/org.eclipse.cdt.dsf/src/org/eclipse/cdt/dsf/service/DsfServicesTracker.java -> > The existing API in this class and in BundleContext matches this pattern.
+
+BundleContext returns empty collection or throws an Exception while new DsfServiceTracker methods hide the Exception and return `null` instead of empty array. IMO it is not matching. And also returning `null` instead of array/collection is not friendly for callers.
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonah Graham
+Date: 2020-10-26 13:26:45.000000000
+MISMATCHED INLINE COMMENT
+Line:216, dsf/org.eclipse.cdt.dsf/src/org/eclipse/cdt/dsf/service/DsfServicesTracker.java -> DsfServicesTracker is a convenience class that provides similar API to bundle context's methods. The existing API in this class and in BundleContext matches this pattern.
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonah Graham
+Date: 2020-10-26 13:26:45.000000000
+MISMATCHED INLINE COMMENT
+Line:255, dsf/org.eclipse.cdt.dsf/src/org/eclipse/cdt/dsf/service/DsfServicesTracker.java -> ditto.
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonah Graham
+Date: 2020-10-26 13:26:45.000000000
+MISMATCHED INLINE COMMENT
+Line:259, dsf/org.eclipse.cdt.dsf/src/org/eclipse/cdt/dsf/service/DsfServicesTracker.java -> matching existing code style of null for default.
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonah Graham
+Date: 2020-10-26 13:26:45.000000000
+MISMATCHED INLINE COMMENT
+Line:289, dsf/org.eclipse.cdt.dsf/src/org/eclipse/cdt/dsf/service/DsfServicesTracker.java -> ditto.
+----------------------------------------------------------------------------------------------------------------------

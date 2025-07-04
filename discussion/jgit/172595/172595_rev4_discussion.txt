@@ -1,0 +1,165 @@
+======================================================================================================================
+DESCRIPTION:
+
+Client-side protocol V2 support for fetching
+
+Make all transports request protocol V2 when fetching. Depending on
+the transport, set the GIT_PROTOCOL environment variable (file and
+ssh), pass the Git-Protocol header (http), or set the hidden
+"\0version=2\0" (git anon). We'll fall back to V0 if the server
+doesn't reply with a version 2 answer.
+
+A user can control which protocol the client requests via the git
+config protocol.version; if not set, JGit requests protocol V2 for
+fetching. Pushing always uses protocol V0 still.
+
+In the API, there is only a new Transport.openFetch() version that
+takes a collection of RefSpecs plus additional patterns to construct
+the Ref prefixes for the "ls-refs" command in protocol V2. If none
+are given, the server will still advertise all refs, even in protocol
+V2.
+
+BasePackConnection.readAdvertisedRefs() handles falling back to
+protocol V0. It newly returns true if V0 was used and the advertised
+refs were read, and false if V2 is used and an explicit "ls-refs" is
+needed. (This can't be done transparently inside readAdvertisedRefs()
+because a "stateless RPC" transport like TransportHttp may need to
+open a new connection for writing.)
+
+BasePackFetchConnection implements the changes needed for the protocol
+V2 "fetch" command (stateless protocol, simplified ACK handling,
+delimiters, section headers).
+
+In TransportHttp, change readSmartHeaders() to also recognize the
+"version 2" packet line as a valid smart server indication.
+
+Adapt tests, and run all the HTTP tests not only with both HTTP
+connection factories (JDK and Apache HttpClient) but also with both
+protocol V0 and V2. The SSH test are much slower and much more focused
+on the SSH protocol and SSH key handling. Factor out two very simple
+cloning and pulling tests and make those run with protocol V2.
+
+Bug: 553083
+Change-Id: I357c7f5daa7efb2872f1c64ee6f6d54229031ae1
+Signed-off-by: Thomas Wolf <thomas.wolf@paranor.ch>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Thomas Wolf
+Date: 2020-11-21 20:51:28.000000000
+Message: 
+Uploaded patch set 4.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2020-11-21 20:51:37.000000000
+Message: 
+Patch Set 4:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/3892/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2020-11-21 21:37:54.000000000
+Message: 
+Patch Set 4: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/3892/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2020-11-22 17:25:02.000000000
+Message: 
+Patch Set 4:
+
+@David: if I understand right, Gerrit does have protocol V2 integration tests, using C git as client. Can you try to make them run with a JGit pgm built from this commit?
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2020-11-22 21:01:58.000000000
+Message: 
+Patch Set 4:
+
+> @David: if I understand right, Gerrit does have protocol V2 integration tests
+
+If that's com.google.gerrit.integration.git.GitProtocolV2IT then that won't be possible just like that, and won't bring much. I had hoped for more complicated fetch scenarios, but of course the Gerrit tests focus more on ref visibility and use simple fetches or ls-remote for that.
+----------------------------------------------------------------------------------------------------------------------
+Author: David Ostrovsky
+Date: 2020-11-23 07:13:18.000000000
+Message: 
+Patch Set 4:
+
+> Patch Set 4:
+> 
+> @David: if I understand right, Gerrit does have protocol V2 integration tests, using C git as client. Can you try to make them run with a JGit pgm built from this commit?
+
+Yes. This was the idea, to replace git protocol V2 integration tests in Gerrit that using C git with JGit.
+----------------------------------------------------------------------------------------------------------------------
+Author: David Ostrovsky
+Date: 2020-11-23 07:16:50.000000000
+Message: 
+Patch Set 4:
+
+> Patch Set 4:
+> 
+> > @David: if I understand right, Gerrit does have protocol V2 integration tests
+> 
+> If that's com.google.gerrit.integration.git.GitProtocolV2IT then that won't be possible just like that, and won't bring much. I had hoped for more complicated fetch scenarios, but of course the Gerrit tests focus more on ref visibility and use simple fetches or ls-remote for that.
+
+But even very basic git protocol V2 integration tests in JGit would catch broken V2 protocol parsing with JDK 15, fixed in context on bug: 568950.
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2020-11-23 07:37:19.000000000
+Message: 
+Patch Set 4:
+
+> But even very basic git protocol V2 integration tests in JGit would catch broken V2 protocol parsing with JDK 15, fixed in context on bug: 568950.
+
+Well, this change here makes all existing smart server HTTP tests run with with both protocols, and it runs some basic cloning and fetching tests over SSH. So some basic testing is done, and I think if we ran them on a Java 15 VM, they would have also caught that bug. It's just that the existing tests obviously didn't catch the problem that made me revert the first attempt.
+----------------------------------------------------------------------------------------------------------------------
+Author: David Ostrovsky
+Date: 2020-11-23 18:10:58.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:208, org.eclipse.jgit/src/org/eclipse/jgit/transport/BasePackConnection.java -> I'm building this change with Bazel. Error Prone is flagging UnusedException here:
+
+  BasePackConnection.java:208: error: [UnusedException] This catch block catches an exception and re-throws another, but swallows the caught exception rather than setting it as a cause. This can make debugging harder.
+				} catch (EOFException e) {
+				  ^
+    (see https://errorprone.info/bugpattern/UnusedException)
+
+Of course we could demote the severity from error to warning on this bug pattern  by changing in tools/BUILD:
+
+  "-Xep:UnusedException:ERROR"
+
+to:
+
+  "-Xep:UnusedException:WARN"
+
+----------------------------------------------------------------------------------------------------------------------
+Author: David Ostrovsky
+Date: 2020-11-23 18:18:57.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:1198, org.eclipse.jgit/src/org/eclipse/jgit/transport/TransportHttp.java -> Error Prone is flagging: DefaultCharset error on this line:
+
+  TransportHttp.java:1198: error: [DefaultCharset] Implicit use of the platform default charset, which can result in differing behaviour between JVM executions or incorrect behavior if the encoding of the data source doesn't match expectations.
+				"version".getBytes()) && magic[12] >= '1' && magic[12] <= '9') { //$NON-NLS-1$
+				                  ^
+    (see https://errorprone.info/bugpattern/DefaultCharset)
+  Did you mean '"version".getBytes(UTF_8)) && magic[12] >= '1' && magic[12] <= '9') {' or '"version".getBytes(Charset.defaultCharset())) && magic[12] >= '1' && magic[12] <= '9') {'?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2020-11-23 18:33:30.000000000
+MISMATCHED INLINE COMMENT
+Line:208, org.eclipse.jgit/src/org/eclipse/jgit/transport/BasePackConnection.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2020-11-23 18:33:30.000000000
+MISMATCHED INLINE COMMENT
+Line:1198, org.eclipse.jgit/src/org/eclipse/jgit/transport/TransportHttp.java -> Done
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,147 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-53100: Don't register checkpoint cursors in meta only checkpoints
+
+Problem:
+In MB-53100 it was observed that the ActiveStream::curChkSeqno throws
+due to a it's value becoming non weakly monotonic, while it's processing
+times from the checkpoint manager. Just after vbucket became active due
+to a takeover stream.
+
+Cause:
+The reason for this is due an issue in how we register cursors when the
+checkpoint manager contains an checkpoint that only contains meta items.
+A meta only checkpoint can occur during a takeover stream, as the
+initial active node sens a snapshot with just one meta item which is a
+setVbucketState to pending.
+
+This meta only checkpoint is problematic for
+CheckpointManager::registerCursorBySeqno() as it will walk thought the
+meta checkpoint trying to find the seqno X requested for. However, if
+the requested seqno X was the same seqno as setVbucketState, we would
+end up talking though the checkpoint ever finding an item with a seqno
+greater than X. Thus, getting to the checkpoint_end item, who's seqno is
+X. We would then return the registration seqno as X + 1. This would then
+set the value of ActiveStream::curChkSeqno to X + 1 from X.
+
+When the active stream wants to process items using the cursor it will
+then receive the items from the point where the cursor currently sits,
+including the vbucket item but also importantly it will see a non-meta
+item with seqno X. This then caused curChkSeqno to from (X + 1) to X
+which a violation and thus we throw.
+
+Fix:
+Before we walk though a checkpoint trying to find the right place to put
+the cursor we should consider if the next checkpoint might contain the
+non-meta item with the seqno looking for. We can do this by checking if
+the min cursor seqno of the next checkpoint is the same as the one we're
+looking for. If so, then we should just skip to the next checkpoint.
+
+Change-Id: I2fb89a81f506be71991b2a58a9f9a9144d75cad3
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Richard de Mellow
+Date: 2022-08-18 13:30:07.000000000
+Message: 
+Uploaded patch set 4.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-08-18 14:14:08.000000000
+Message: 
+Patch Set 4: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/22596/ : FAILURE
+
+Failure of GoogleTest "MeteringTest.TTL_Expiry_Compaction":
+
+<pre>
+[ RUN      ] MeteringTest.TTL_Expiry_Compaction
+[2022-08-18T13:36:52.257Z] /home/couchbase/jenkins/workspace/kv_engine.threadsanitizer_master/kv_engine/tests/testapp_serverless/metering_test.cc:2732: Failure
+[2022-08-18T13:36:52.257Z] Expected equality of these values:
+[2022-08-18T13:36:52.257Z]   1
+[2022-08-18T13:36:52.257Z]   after["wu"].get<std::size_t>() - before["wu"].get<std::size_t>()
+[2022-08-18T13:36:52.257Z]     Which is: 0
+[2022-08-18T13:36:52.257Z] /home/couchbase/jenkins/workspace/kv_engine.threadsanitizer_master/kv_engine/tests/testapp_serverless/metering_test.cc:2735: Failure
+[2022-08-18T13:36:52.257Z] Expected: (expiredBefore) != (expiredAfter), actual: 1 vs 1
+[2022-08-18T13:36:52.257Z] [  FAILED  ] MeteringTest.TTL_Expiry_Compaction (1487 ms)
+MeteringTest.TTL_Expiry_Compaction
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/22596/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/20785/ : FAILURE
+
+Failure of GoogleTest "EphemeralOrPersistent/BucketQuotaChangeTest.QuotaChangeDownMemoryUsageHigh/persistent_magma_full_eviction":
+
+<pre>
+[ RUN      ] EphemeralOrPersistent/BucketQuotaChangeTest.QuotaChangeDownMemoryUsageHigh/persistent_magma_full_eviction
+[2022-08-18T14:12:32.550Z] ../kv_engine/engines/ep/tests/module_tests/kv_bucket_test.cc:188: Failure
+[2022-08-18T14:12:32.550Z] Expected: (0) != (expectedCount), actual: 0 vs 0
+[2022-08-18T14:12:32.550Z] unexpected error:no memory for key:cid:0x0:diffKey
+[2022-08-18T14:12:32.550Z] Google Test trace:
+[2022-08-18T14:12:32.550Z] ../kv_engine/engines/ep/tests/module_tests/bucket_quota_change_test.cc:301: 
+[2022-08-18T14:12:32.550Z] ../kv_engine/engines/ep/tests/module_tests/kv_bucket_test.cc:272: Failure
+[2022-08-18T14:12:32.550Z] Expected equality of these values:
+[2022-08-18T14:12:32.550Z]   expected
+[2022-08-18T14:12:32.550Z]     Which is: 1
+[2022-08-18T14:12:32.550Z]   actualFlushed
+[2022-08-18T14:12:32.550Z]     Which is: 0
+[2022-08-18T14:12:32.550Z] Unexpected items (0) in flush_vbucket_to_disk(vb:0, 1)
+[2022-08-18T14:12:32.550Z] Google Test trace:
+[2022-08-18T14:12:32.550Z] ../kv_engine/engines/ep/tests/module_tests/bucket_quota_change_test.cc:301: 
+[2022-08-18T14:12:32.550Z] [  FAILED  ] EphemeralOrPersistent/BucketQuotaChangeTest.QuotaChangeDownMemoryUsageHigh/persistent_magma_full_eviction, where GetParam() = "bucket_type=persistent:backend=magma:item_eviction_policy=full_eviction" (58 ms)
+EphemeralOrPersistent/BucketQuotaChangeTest.QuotaChangeDownMemoryUsageHigh/persistent_magma_full_eviction
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/20785/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/18791/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/19579/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/48489/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/40747/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/9272/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/21519/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/21873/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/29901/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/9371/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-08-18 16:54:16.000000000
+Message: 
+Patch Set 4: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/18791/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/19579/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/48489/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/40747/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/9272/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/21519/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/21873/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/22611/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/29901/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/9371/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/20803/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

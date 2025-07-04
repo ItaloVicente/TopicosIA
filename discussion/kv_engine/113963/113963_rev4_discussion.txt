@@ -1,0 +1,156 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-35633: Store unprepared aborts from disk snapshots
+
+Prior to this patch, aborts received as part of a disk snapshot where
+an associated prepare has /not/ been received would be allowed (because
+aborts can dedupe the prepare) but would be ignored.
+
+This was first noticed as a problem during unrelated testing in which
+closing a checkpoint after a snapshot could try to close an /empty/
+checkpoint, if the only item the snapshot contained was an abort which
+had deduped the matching prepare.
+
+More significantly, ignoring aborts if the prepare was unseen can lead
+to a different replica holding a prepare that will never receive a
+completion. Consider one replica connected and received only the abort,
+but a second replica received received the prepare before it was
+deduped, but has not /yet/ received the abort:
+
+Active    : Pre Abort
+Replica 1 : xxx Abort
+Replica 2 : Pre
+
+If the active fails and replica 1 is promoted:
+
+ - R1 knows nothing of the prepare, and discarded the abort.
+ - R2 has the prepare
+ - R2 connects to the active, but the abort will never be sent
+
+This patch avoids this by storing aborts for persistence and
+replication even if the matching prepare has been deduped.
+
+Change-Id: Iaadf1b459cdb4cdb14a56579be6170814fb4e1ed
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: James H
+Date: 2019-08-29 10:47:14.000000000
+Message: 
+Uploaded patch set 4.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-08-29 11:53:38.000000000
+Message: 
+Patch Set 4: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/3694/ : FAILURE
+
+One of more core files found at the end of the build. Data for post-mortem saved to archived_core_dumps.tar.bz2 under "Build Artifacts". ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/3694/ )
+
+Failure of a CTest test 200/200 Test #158: memcached_testapp.ep.TransportProtocols/BucketTest ........................... ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/3694/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/13913/ : FAILURE
+
+Failure of a CTest test  30/179 Test  #23: ep-engine_ep_unit_tests ......................................................Child aborted ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/13913/ )
+
+ThreadSanitizer issue: heap-use-after-free (/home/couchbase/jenkins/workspace/kv_engine-threadsanitizer-master/install/lib/libtsan.so.0+0x5cf6c) in __tsan_atomic8_load  ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/13913/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/6643/ : FAILURE
+
+AddressSanitizer issue: heap-use-after-free /usr/local/include/c++/7.3.0/bits/atomic_base.h:396 in std::__atomic_base<unsigned char>::load(std::memory_order) const ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/6643/ )
+
+Failure of a CTest test [2019-08-29T11:11:21.895Z]  26/181 Test  #25: ep-engine_ep_unit_tests ......................................................Child aborted ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/6643/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/19618/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/22971/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/22008/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/20638/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/12919/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2019-08-29 13:20:37.000000000
+Message: 
+Patch Set 4: Code-Review-1
+
+(2 comments)
+Line:21, /COMMIT_MSG -> nit
+
+Line:2138, engines/ep/src/vbucket.h -> DO DOC
+
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2019-08-29 13:41:11.000000000
+Message: 
+Patch Set 4:
+
+(2 comments)
+Line:21, /COMMIT_MSG -> Done
+
+Line:2138, engines/ep/src/vbucket.h -> DID DAT DANG DOC DONE DAWG
+
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2019-08-30 09:51:11.000000000
+Message: 
+Patch Set 4:
+
+(6 comments)
+Line:21, /COMMIT_MSG -> Does look to be fixed in the later patchsets?
+
+Line:770, engines/ep/src/ephemeral_vb.cc -> Ah - no. We make another getState() check higher up the call stack too, I guess that is a not-good also :sadpanda:
+
+Line:772, engines/ep/src/ephemeral_vb.cc -> moved it as close as possible
+
+Line:791, engines/ep/src/ephemeral_vb.cc -> :indeed:
+
+Line:798, engines/ep/src/ephemeral_vb.cc -> done
+
+Line:851, engines/ep/src/vbucket.cc -> This is the case this patch is for really - an abort appearing in a state /other than/ a nice prepare ready to be aborted.
+
+Will reword the comment - it's not super clear. The intent was to say "if a prepare was ever in the HT, it has since been completed and is not there anymore (in contrast to the ephemeral case where it is there but completed). I am an abort, I expect a prepare before me, therefore I am a special abort which either needs to be told to GTFO or be blessed to add an aborted item without ever seeing the prepare I am aborting ~dedupe jazz hands~"
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-08-29 20:09:26.000000000
+MISMATCHED INLINE COMMENT
+Line:21, /COMMIT_MSG -> ? ?
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-08-29 20:09:26.000000000
+MISMATCHED INLINE COMMENT
+Line:770, engines/ep/src/ephemeral_vb.cc -> Do we hold the vbucket state lock and CheckpointManager lock here? If not then these checks are racy, the vbstate could change or current snapshot change after this check.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-08-29 20:09:26.000000000
+MISMATCHED INLINE COMMENT
+Line:772, engines/ep/src/ephemeral_vb.cc -> This isn't needed until line 789, please move as close to use as possible.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-08-29 20:09:26.000000000
+MISMATCHED INLINE COMMENT
+Line:791, engines/ep/src/ephemeral_vb.cc -> Surely this will always increment the numDeletedItems by one (we've just enqueued conceptually a deleted prepare)?
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-08-29 20:09:26.000000000
+MISMATCHED INLINE COMMENT
+Line:798, engines/ep/src/ephemeral_vb.cc -> Can we generalise the common code in here and abortStoredValue?
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-08-29 20:09:26.000000000
+MISMATCHED INLINE COMMENT
+Line:851, engines/ep/src/vbucket.cc -> If that is the case, why are we processing an abort? Surely that implies the prepare could _not_ have been completed?
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-08-29 20:09:26.000000000
+MISMATCHED INLINE COMMENT
+Line:2138, engines/ep/src/vbucket.h -> :indeed:
+----------------------------------------------------------------------------------------------------------------------

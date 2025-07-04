@@ -1,0 +1,69 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-41844: Avoid data race in FollyExecutorPool::doTaskQStat
+
+As seen in TSan testing with FollyExecutorPool when running
+ep_perfsuite:
+
+    Running [0013/0017]: Stat latency with 100 vbuckets. Also sets & DCP traffic on separate thread...==================
+
+    WARNING: ThreadSanitizer: data race (pid=16435)
+    Read of size 8 at 0x7b24000053f8 by main thread (mutexes: write M386882167168307840):
+    #0 folly::HHWheelTimerBase<>::Callback::isScheduled() const follytsan/folly/io/async/HHWheelTimer.h:121:14 (libep.so+0x5c63b6)
+    #1 FollyExecutorPool::doTaskQStat(...) kv_engine/engines/ep/src/folly_executorpool.cc:839:30 (libep.so+0x34ff85)
+    #2 EventuallyPersistentEngine::doWorkloadStats(...) kv_engine/engines/ep/src/ep_engine.cc:4115:17 (libep.so+0x2e67d6)
+    #3 EventuallyPersistentEngine::getStats(...) kv_engine/engines/ep/src/ep_engine.cc:4670:16 (libep.so+0x2d689a)
+    ...
+
+    Previous write of size 8 at 0x7b24000053f8 by thread T1:
+    #0 memset <null> (ep_perfsuite+0x4b3a42)
+    #1 folly::HHWheelTimerBase<>::Callback::cancelTimeoutImpl() follytsan/folly/io/async/HHWheelTimer.cpp:86:15 (libep.so+0x5c6507)
+    #2 folly::HHWheelTimerBase<>::Callback::cancelTimeout() follytsan/folly/io/async/HHWheelTimer.h:114:7 (libep.so+0x5c6507)
+    #3 FollyExecutorPool::TaskProxy::wake() kv_engine/engines/ep/src/folly_executorpool.cc:239:9 (libep.so+0x35e3e9)
+    #4 FollyExecutorPool::State::wakeTask(unsigned long) kv_engine/engines/ep/src/folly_executorpool.cc:352:29 (libep.so+0x3625cf)
+    #5 FollyExecutorPool::wake(unsigned long)::$_9::operator()() const kv_engine/engines/ep/src/folly_executorpool.cc:731:32 (libep.so+0x3515d1)
+    ...
+
+Issue is how FollyExecutorPool::doTaskQStat() is implemented. It takes
+a copy of the taskOwners map on the eventBase thread to attempt to
+avoid races; however this is a shallow copy - the actual TaskProxy
+objects which the map references via shared_ptr are not copied.  As
+such, when the TaskProxy objects are read by the non-eventBase thread
+a race is seen.
+
+Solution is to instead of taking a (shallow) copy and then
+manipulating the copy, just move the entire work onto the eventBase
+thread.
+
+Change-Id: I19de6911944370e836c9905e99c860ee3d5ccb0b
+Reviewed-on: http://review.couchbase.org/c/kv_engine/+/137406
+Reviewed-by: James Harrison <james.harrison@couchbase.com>
+Tested-by: Build Bot <build@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2020-10-12 14:32:59.000000000
+Message: 
+Change has been successfully cherry-picked as 7d2da18ce92282bc6056ef452737b9478ae2969b by Dave Rigby
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-10-12 14:51:27.000000000
+Message: 
+Patch Set 4:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/5234/ (2/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-10-12 15:51:57.000000000
+Message: 
+Patch Set 4:
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv-engine-master-perf/3885/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/5234/ : SUCCESS'
+----------------------------------------------------------------------------------------------------------------------

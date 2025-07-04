@@ -1,0 +1,194 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-44611: cbcollect direct-to-zip functionality
+
+Optimizes both file collection and log redaction to go direct-to-zip
+where possible and not cache in a temporary location, unless
+absolutely necessary. There are a few files which are still put in the
+temporary directory such as couchbase.log, cbcollect.log, stats.log
+and kv_trace.json. Now it is possible for tasks to keep files open and
+put into the temp directory, or put directly into the zip file.
+
+The majority of the filesize that is used during cbcollect is
+completely removed and limited to the total zip file size + those few
+other files instead of 2x total unzipped size + final zip file size in
+the redacted case and the 1x total unzipped size + final zip file size
+in the non-redacted case.
+
+Change-Id: Ia0d9007c316291845ebae20f8b5c8f2c707c90ad
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Bryan McCoid
+Date: 2022-02-17 04:14:37.000000000
+Message: 
+Uploaded patch set 4.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-02-17 04:14:44.000000000
+Message: 
+Patch Set 4:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-test/29588/
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-02-17 04:16:33.000000000
+Message: 
+Patch Set 4: Verified+1
+
+make simple-test
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-02-17 04:16:39.000000000
+Message: 
+Patch Set 4:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-simple-test/3411/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-02-17 04:18:21.000000000
+Message: 
+Patch Set 4: Well-Formed+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/ns-server-test/29588/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-02-17 04:59:26.000000000
+Message: 
+Patch Set 4: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/ns-server-simple-test/3411/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2022-02-17 20:08:40.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+
+Looking good...
+Line:418, cbcollect_info -> What would happen if there's a file > 2GB?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2022-02-17 20:27:03.000000000
+Message: 
+Patch Set 4:
+
+(2 comments)
+Line:1819, cbcollect_info -> This creates multiple ddocs.log files in the zip....multiple files with the same name in the zip. use_temp?
+
+Line:1831, cbcollect_info -> Same here...multiple files with the same name.
+
+....and possible others where there's
+for ...
+for ...
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-02-17 20:54:53.000000000
+Message: 
+Patch Set 4:
+
+(3 comments)
+Line:418, cbcollect_info -> It would fail.. but this was true of it before as well I think. It basically means it will use a 64bit size integer for the zip header. Meaning that there would be problems for files over 2gb. What do you think we should do? We could waste space and always set it.. but we can't usually know ahead of time (definitely not for the io streams) how large they will be. For some of the files we could thread through the filesize info from their read site.. But this would only be for some of the stuff, definitely not all. Thoughts?
+
+Line:1819, cbcollect_info -> ahh yes good catch, we have to use temp.
+
+Line:1831, cbcollect_info -> good point I will audit a few of the other ones with for's.. it's a shame there's not a good way around this. Because the more files we 'use_temp' on.. the smaller the benefit we get.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2022-02-17 23:14:12.000000000
+MISMATCHED INLINE COMMENT
+Line:418, cbcollect_info -> I was just curious as to the behavior if/when this occurs.  What's the cost/drawbacks of using 64bit size integers in the zip header?
+
+I think folks are sensitive to the size of the cbcollect bundles and if/when we get to 2GB files we should first validate that such large files are needed.
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-02-18 01:42:12.000000000
+MISMATCHED INLINE COMMENT
+Line:418, cbcollect_info -> It's a really good question.. So I tried it out:
+
+In [12]: with open("manjaro-i3-21.1.2-210907-linux513.iso", "rb") as f:
+    ...:     with zippy.open(zinfo, mode="w") as z:
+    ...:         for line in f:
+    ...:             z.write(line)
+
+---------------------------------------------------------------------------
+RuntimeError                              Traceback (most recent call last)
+Input In [12], in <module>
+      1 with open("manjaro-i3-21.1.2-210907-linux513.iso", "rb") as f:
+----> 2     with zippy.open(zinfo, mode="w") as z:
+      3         for line in f:
+      4             z.write(line)
+
+File /usr/local/Cellar/python@3.10/3.10.1/Frameworks/Python.framework/Versions/3.10/lib/python3.10/zipfile.py:1159, in _ZipWriteFile.close(self)
+   1157 if not self._zip64:
+   1158     if self._file_size > ZIP64_LIMIT:
+-> 1159         raise RuntimeError(
+   1160             'File size unexpectedly exceeded ZIP64 limit')
+   1161     if self._compress_size > ZIP64_LIMIT:
+   1162         raise RuntimeError(
+   1163             'Compressed size unexpectedly exceeded ZIP64 limit')
+
+RuntimeError: File size unexpectedly exceeded ZIP64 limit
+
+In [13]:
+
+So it does manage to throw an error instead of just silently creating a bad zip file. Which is good, in a sense.. I am not sure we can easily anticipate this for most things unless I also add a sort of "size hint" that some files can provide. It's just not a generalized solution, and would mean any of the ones where we get output from a process' stdout would still have the issue. Do you think it's worth attempting to handle this for some subset of the files or is this just too complicated? I guess we could literally count how big files get, and if it goes over, reset or change the header (not sure if we have to redo the write or not) but we can't easily "replay" the stream without just buffering the entire amount in memory.. So those are my few ideas on the matter.
+
+As for the downside.. maybe it's very little. Here is what the format entails: https://en.wikipedia.org/wiki/ZIP_(file_format)#ZIP64 
+
+I am gonna test with this enabled to see the impact, though maybe compatibility is a bigger issue than bundle size. It turns out older versions of windows and mac don't naturally support this extension to zip..
+
+File size difference:
+
+Original:
+....
+.rw-r--r--@  18M bryanmccoid 17 Feb 17:33 output_file-redacted.zip
+.rw-r--r--@  18M bryanmccoid 17 Feb 17:33 output_file.zip
+...
+workspace/master/ns_server via △ v3.20.4 via  24.1.6 via 🐍 v3.7.12
+❯ file output_file.zip
+output_file.zip: Zip archive data, at least v2.0 to extract
+
+ZIP_64 extension enabled:
+...
+.rw-r--r--@  18M bryanmccoid 17 Feb 17:38 output_file-redacted.zip
+.rw-r--r--@  18M bryanmccoid 17 Feb 17:38 output_file.zip
+...
+
+workspace/master/ns_server via △ v3.20.4 via  24.1.6 via 🐍 v3.7.12
+❯ file output_file.zip
+output_file.zip: Zip archive data, at least v2.0 to extract
+
+Conclusion:
+So there is negligible difference in file size. Admittedly this is a small collection in general. The bigger issue is compatibility and we did NOT have it enabled before. So that's where the risk is, in my mind. So this would be a change in the format.
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-03-02 02:04:24.000000000
+MISMATCHED INLINE COMMENT
+Line:418, cbcollect_info -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2022-02-18 17:23:48.000000000
+MISMATCHED INLINE COMMENT
+Line:418, cbcollect_info -> Thanks for the detailed answer to my question. It think it's reasonable to not support the zip_64 for now especially as it's not compatible with older mac/windows.
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-02-17 21:52:09.000000000
+MISMATCHED INLINE COMMENT
+Line:1819, cbcollect_info -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-02-17 21:52:09.000000000
+MISMATCHED INLINE COMMENT
+Line:1831, cbcollect_info -> Done
+----------------------------------------------------------------------------------------------------------------------

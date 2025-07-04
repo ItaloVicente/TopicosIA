@@ -1,0 +1,79 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-50291: Eph::getPageableMemHighWatermark - handle zero active VBs
+
+When investigating MB-48070, it was observed that the Ephemeral memory
+recovery tasks (Eph tombstone hashtable cleaner, Eph tombstone stale
+item deleter) are running constantly during a number of
+ep_testsuite_dcp tests.  Investigation found that these tests only
+have a single vBucket in the replica state (no active vBuckets).
+
+When checking to see if memory should be recovered (via
+KVBucket::checkAndMaybeFreeMemory), the lack of any active vBuckets
+causes EphemeralBucket::getPageableMemHighWatermark() to return 0 -
+i.e. indicating that memory recovery should be attempted if there is
+any memory used:
+
+    // Trigger memory reduction (ItemPager) if we've exceeded the pageable high
+    // watermark.
+    void KVBucket::checkAndMaybeFreeMemory() {
+        if (getPageableMemCurrent() > getPageableMemHighWatermark()) {
+            attemptToFreeMemory();
+        }
+    }
+
+When attemptToFreeMemory() is called and the aforementioned memory
+recovery tasks are run, they essentially find nothing to free. However
+the next call to checkAndMaybeFreeMemory results in the same - i.e. we
+end up pointlessly consuming NonIO threads attempting to recover
+memory when there is nothing to do.
+
+Note while this scenario (zero active, >0 replica) vBuckets is
+unlikely to occur in a real system, it is possible during a failover
+scenario. Additionally this scenario occurs frequently in unit tests;
+resulting in tests taking much longer than necessary (particulary
+under sanitizers).
+
+Fix by returning the full quota is no active vBuckets are present, in
+a similar way to how we handle zero vBuckets at all being present.
+
+Change-Id: I7b3728228e74dc773180db240648a290a7143afa
+Reviewed-on: https://review.couchbase.org/c/kv_engine/+/168389
+Tested-by: Build Bot <build@couchbase.com>
+Reviewed-by: Daniel Owen <owend@couchbase.com>
+Reviewed-by: Paolo Cocchi <paolo.cocchi@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2022-01-18 10:50:57.000000000
+Message: 
+Change has been successfully cherry-picked as 13b2f5d4b5ac91844fae4938d19ebc754e4115a7 by Dave Rigby
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-01-18 10:53:45.000000000
+Message: 
+Patch Set 2:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-master/9993/ (1/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-01-18 11:15:44.000000000
+Message: 
+Patch Set 2:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-TSan-master/6586/ (2/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-01-18 11:43:39.000000000
+Message: 
+Patch Set 2:
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-master/9993/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-TSan-master/6586/ : SUCCESS'
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,121 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-34628 [1/2] SR: Avoid recursive locking of collection Manifest lock
+
+When performing mutations with durability requirements (SyncWrites),
+the VBuckets' collection manifest lock is acquired (in shared mode)
+recursively.
+
+This causes lock ordering problems with a forthcoming change to avoid
+SyncWrites being committed in the wrong order, as we end up creating a
+cycle in lock ordering. Current lock ordering (before this patch is):
+
+    * KVBucket:set (also add, replace...):
+      LOCK VB::Manifest
+          * VBucket::set()
+              * ActiveDM::addSyncWrite()
+                LOCK ActiveDM::State
+                ...
+                UNLOCK ActiveDM::State
+              * ActiveDM::checkForCommit()
+                ... get set of SyncWrites to commit...
+                for (item : toCommit) {
+                    LOCK VB::Manfest <=== RECURSIVE LOCK
+                    * VB::commit()
+                    UNLOCK VB::Manifest
+                }
+
+Note that VB::Manifest it locked recursively inside VB::commit() in
+the above sequence.  Currently the above doesn't cause any problems
+(however in general recursive locking can be tricky to debug), but
+with the needed change to commit items in order, the above changes to:
+
+    * KVBucket:set (also add, replace...):
+      LOCK VB::Manifest
+          * VBucket::set()
+              * ActiveDM::addSyncWrite()
+                LOCK ActiveDM::State
+                ...
+                UNLOCK ActiveDM::State
+              * ActiveDM::checkForCommit()
+    NEW         LOCK ActiveDM::completedQueue
+                ... get set of SyncWrites to commit...
+                for (item : toCommit) {
+                    LOCK VB::Manfest <=== LOCK CYCLE with ActiveDM::completedQueue
+                    * VB::commit()
+                    UNLOCK VB::Manifest
+                }
+
+Note how the second lock of VB::Manifest (recursively, in the same
+thread) now forms a cycle with the new ActiveDM::completedQueue lock
+which is needed to serialise the calls to VB::commit.
+
+To avoid this cycle when ActiveDM::completedQueue is introduced,
+remove the recursive locking by moving checkForCommit to outside
+VBucket::set(), after VB::Manifest is unlocked:
+
+    * KVBucket:set (also add, replace...):
+      LOCK VB::Manifest
+          * VBucket::set()
+              * ActiveDM::addSyncWrite()
+                LOCK ActiveDM::State
+                ...
+                UNLOCK ActiveDM::State
+      UNLOCK VB::Manifest
+          * ActiveDM::checkForCommit()
+    NEW     LOCK ActiveDM::completedQueue
+            ... get set of SyncWrites to commit...
+            for (item : toCommit) {
+                UNLOCK VB::Manifest
+                * VB::commit()
+                LOCK VB::Manfest
+            }
+
+Change-Id: I03d8a1bd638aab9547fc08b06fb072e5597399c2
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2019-06-26 16:27:51.000000000
+Message: 
+Uploaded patch set 4.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-06-26 16:31:03.000000000
+Message: 
+Patch Set 4: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/11740/ : ABORTED
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/11740/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/18424/ : ABORTED
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/18424/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/12477/ : ABORTED
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/12477/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/20696/ : ABORTED
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/20696/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/2348/ : ABORTED
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/2348/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/5282/ : ABORTED
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/5282/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/21499/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/21499/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/19317/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

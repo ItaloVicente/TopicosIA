@@ -1,0 +1,279 @@
+======================================================================================================================
+DESCRIPTION:
+
+ss: Bug 454057: Support slash character in attribute names
+
+Change the return type of getFullAttributePath() to return a String
+array instead of a String.
+
+Add StateSystemUtils.pathToString(). It converts a full path array into
+a path string, and escapes '/' and '\' with a preceding '\' in
+attribute names.
+
+Add StateSystemUtils.stringToPath(). It converts a path string into a
+full path array, and unescapes '/' and '\' in attribute names.
+
+The converted path string is written as-is in the attribute tree file
+store, and converted back when read from file store.
+
+The path string is displayed in the State System Explorer view and
+matches what would be expected to be entered by a end-user to
+unambiguously specify the attribute using a slash-separated string.
+
+Change-Id: Ia655fe6153665283fce6bb34ee56d37035cb5d23
+Signed-off-by: Patrick Tasse <patrick.tasse@gmail.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Patrick Tasse
+Date: 2015-03-23 20:07:14.000000000
+Message: 
+Uploaded patch set 11.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2015-03-23 20:07:20.000000000
+Message: 
+Patch Set 11:
+
+Build Started https://hudson.eclipse.org/tracecompass/job/tracecompass-gerrit/1627/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2015-03-23 20:34:04.000000000
+Message: 
+Patch Set 11: Code-Review+1
+
+Build Successful 
+
+https://hudson.eclipse.org/tracecompass/job/tracecompass-gerrit/1627/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2015-03-23 22:44:45.000000000
+Message: 
+Patch Set 11:
+
+(5 comments)
+
+Here's an honest review, so that we don't say I ignored it.
+
+My biggest two problems with this current patch are:
+
+* pathToString/stringToPath are not very obvious, in the sense that it's not obvious what they do, and we don't know where we have to call them and where we don't.
+* Attribute is calling a method from StateSystemUtils, which is in a layer above it (it'd introduce a circular dependency between the packages. Sonar/Findbugs would complain about that, unfortunately Eclipse doesn't (it does for plugins though)).
+Line:137, org.eclipse.tracecompass.statesystem.core.tests/src/org/eclipse/tracecompass/statesystem/core/tests/StateSystemUtilsTest.java -> I like these tests, very exhaustive.
+
+Line:40, org.eclipse.tracecompass.statesystem.core.tests/src/org/eclipse/tracecompass/statesystem/core/tests/backend/HistoryTreeBackendTest.java -> As we were talking about in the previous patchset, the methods that are actually being tested here are AttributeTree.writeSelf and its constructor counterpart. So these could be instead in AttributeTreeTest or such.
+
+The backend has no notion of attribute names, at all. It's handled in a layer above. Which is why I said that these tests should not be here. Not that they are not good or unuseful, they should just be identified correctly.
+
+I'd be glad to have more backend tests too. But that would be unrelated to this patch.
+
+Line:218, org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/internal/statesystem/core/Attribute.java -> There is a layering problem here. Attribute has no knowledge of StateSystem or anything above, it should not be calling StateSystemUtils itself.
+
+Line:250, org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/statesystem/core/ITmfStateSystem.java -> This method was to expose the "slash-separated string" representation. Now it has to go through pathToString() to keep its initial contract. Couldn't we just call the equivalent of pathToString() in here, and keep return a single String?
+
+Having both methods, one for single String and one for String[], at this level would make sense. It would having having to call pathToString() in the other methods.
+
+Line:293, org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/statesystem/core/StateSystemUtils.java -> I don't really like the contract of these methods, they do two different things. First the append strings together to form a path (this is what we would expect from something called 'pathToString'). But they *also* add escaping. The resulting String is still a String, and then it's not obvious where we have to use this unescaped string vs an escaped one.
+
+If it returned, let's say an EscapedString, and then we had methods in ITmfStateSystem that explicitely take EscapedString, then I'd be 100% happy with it. Unfortunately String is final so we can't extend it, and adding a wrapping classes loses many compiler optimizations. I don't know if that is an avenue worth investigating.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2015-03-23 22:46:23.000000000
+Message: 
+Patch Set 11:
+
+Forgot to mention, I'm all for introducing a new method "String[] getFullPath()", but the existing one that returns a String should be kept (different representations, etc.)
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2015-03-23 22:49:23.000000000
+Message: 
+Patch Set 11: Code-Review-1
+
+(1 comment)
+Line:250, org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/statesystem/core/ITmfStateSystem.java -> > It would having having to call
+
+It would *avoid* having to call
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Patrick Tasse
+Date: 2015-03-24 18:12:57.000000000
+Message: 
+Patch Set 11:
+
+(4 comments)
+
+Thanks for the review.
+
+> pathToString/stringToPath are not very obvious, in the sense that
+> it's not obvious what they do, and we don't know where we have to
+> call them and where we don't.
+
+In the file comments I propose pathArrayToString() and pathStringToArray() to make it clearer. You should use the first one if you need a slash-separated path string, and the second one if you have a slash-separated path string. When in doubt, don't use the methods, you don't need them ;)
+
+> Attribute is calling a method from StateSystemUtils, which is in a
+> layer above it (it'd introduce a circular dependency between the
+> packages. Sonar/Findbugs would complain about that, unfortunately
+> Eclipse doesn't (it does for plugins though)).
+
+I have two alternative proposals to fix this:
+1. Move StateSystemUtils to its own package o.e.t.statesystem.util
+2. Move the method implementations to a new util class in o.e.t.internal.statesystem.core and have StateSystemUtils call those methods, and Attribute/Tree can call the internal util directly.
+Line:40, org.eclipse.tracecompass.statesystem.core.tests/src/org/eclipse/tracecompass/statesystem/core/tests/backend/HistoryTreeBackendTest.java -> Hmm. I agree that such exhaustive tests belong with AttributeTree.
+
+But I would also like to test the whole 'what you get is what you put it' at the state system interface level, at least with a few different attribute paths. It should also test some actual state interval values.
+
+As such that part would belong more with StateSystem, however the code to test is very different if you use an InMemoryBackend, or a HistoryTreeBackend closed then reopened.
+
+Would you prefer to have two (or more) test classes at StateSystem level (one per backend), or one test class per backend? We should keep it consistent with the existing InMemoryBackendTest.
+
+Line:218, org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/internal/statesystem/core/Attribute.java -> We could create a util class for this package (org.eclipse.tracecompass.internal.statesystem.core). What should we call it?
+
+Line:250, org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/statesystem/core/ITmfStateSystem.java -> It was part of the cleanup trying to avoid confusion.
+
+I submit for your consideration that the path string is useless for a state system user (except UI code to show it to an end-user).
+
+I only realized this while working on this patch, but:
+
+String fullAttributePath = ss.getFullAttributePath(quark1);
+
+int quark2 = ss.getQuarkAbsolute(fullAttributePath);
+
+where @param attribute Attribute given as its full path in the Attribute Tree
+
+That compiles but is incorrect, quark2 != quark1 (or AttributeNotFoundException).
+
+Well, that was my reasoning to remove it from the interface. We can keep it but then you're not allowed to say that path string and path array are confusing ;)
+
+Line:293, org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/statesystem/core/StateSystemUtils.java -> My reasoning is that there are only two things you should do with a path string: print it, or feed it back to stringToPath(). A bit like Path.toPortableString and Path.fromPortableString.
+
+The way I see the contract is that it takes an attribute path array and converts it to a unique and unambiguous string that represents this attribute.
+
+I'm not sure if your comment had typos, but this is an escaped string. The only method that explicitly takes an escaped string is stringToPath(). The path[] then can be used in the ITmfStateSystem methods.
+
+I saw it as { name | path[] | quark } in the interface with { string } here being outside of the interface. But I see that name is also a String and path[] is also a String... ellipsis.
+
+Do you think it would be clearer as pathArrayToString() and pathStringToArray()?
+
+We could also add @see tags between each other and perhaps also in getFullAttributePath()?
+
+I could also explicitely say
+@return The slash-separated escaped path string
+
+Also @since tag is out-of-order.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2015-03-24 20:29:48.000000000
+Message: 
+Patch Set 11:
+
+(4 comments)
+Line:40, org.eclipse.tracecompass.statesystem.core.tests/src/org/eclipse/tracecompass/statesystem/core/tests/backend/HistoryTreeBackendTest.java -> If we have a class hierarchy with one base class and many subclasses, in most cases it works well to have one base test classes and extended test classes, for each implementation. That way tests that apply to all implementations can go in the base class (and will be run for each sub-test).
+
+The "state system tests" in lttng2.kernel.tests are like this, and it works very well. Ideally these should be brought back in statesystem.core.tests. InMemoryBackendTest is a good start, but it should split the tests that are common to all backends in a base class.
+
+In any case, Backend tests would be great, but it would really be something separate from this patch.
+
+Line:218, org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/internal/statesystem/core/Attribute.java -> This package here is internal. We could add a util class in here, sure. But a util class "under" Attribute and co. would have to be internal too. It would not be part of the public API, so not something external users can use. Starting to see the problem? ;)
+
+The notion of escaping/unescaping has to be done at the same level, to avoid circular dependencies. Here the "unescaping" is done in the Attribute, but the escaping is done by external users. This is the asymmetry I was talking about.
+
+Line:250, org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/statesystem/core/ITmfStateSystem.java -> That's a good concern. In fact I was thinking that we could eventually augment the getQuark*(String...) methods to work exactly like Paths.get(String...), where you can pass *either* one slash-separated string, or a string array of every element in the path. This would give even more flexibility to users : get whatever, pass it back, and you get what you expect.
+
+This of course requires the two "representations" to match, which is why I'm rooting for that!
+
+Line:293, org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/statesystem/core/StateSystemUtils.java -> > Do you think it would be clearer as pathArrayToString() and pathStringToArray()?
+
+It would be clearer yes. But as I mentioned in the previous comment, why not instead aim to support both "one string" and "path array of elements" in the same methods (wouldn't have to be done in *this* patch, but eventually)? Internally it would do the same as what is done here.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2015-03-24 21:48:25.000000000
+Message: 
+Patch Set 11:
+
+(1 comment)
+
+I do notice one change in this patch that is very good and could be extracted as a patch of its own: making Attribute#getFullAttribute (which returns a String[]) public, and exposing it all the way to ITmfStateSystem. I can prepare a patch for that.
+
+With that, we'll have even more possible examples and test cases of different path/one-string representations.
+Line:123, org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/internal/statesystem/core/AttributeTree.java -> Still same problem here, the inner Attribute/AttributeTree method should not call something that is part of StateSystem's API.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Patrick Tasse
+Date: 2015-03-24 22:01:19.000000000
+Message: 
+Patch Set 11:
+
+(2 comments)
+Line:218, org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/internal/statesystem/core/Attribute.java -> > This package here is internal. We could add a util class in
+> here, sure. But a util class "under" Attribute and co.
+> would have to be internal too. It would not be part of the
+> public API, so not something external users can use.
+> Starting to see the problem? ;)
+
+I guess you missed my patch-level comment. This is easy to solve in StateSystemUtils:
+
+public static String pathArrayToString(String[] path) {
+    return InternalStateSystemUtils.pathArrayToString(path);
+}
+
+> The notion of escaping/unescaping has to be done at the
+> same level, to avoid circular dependencies. Here the
+> "unescaping" is done in the Attribute, but the escaping is
+> done by external users. This is the asymmetry I was
+> talking about.
+
+I don't think I understand the concern here, maybe just a misunderstanding. Anybody can depend on StateSystemUtils, and StateSystemUtils depends on no one.
+
+Here (we are talking about toString(), right?) Attribute has a path[] and wants to create a debug string by converting it to a slash-separated path string. There's an 'app' for that.
+
+When an external user has a path[] from the state system and wants to output it as a slash-separated path string (presumably to display to an end-user), it can use the same 'app'.
+
+Just a minor clarification: In this patch, path[] or attribute are always unescaped and path string is always escaped. You can't have an escaped path[] or attribute, and you can't have an unescaped path string.
+
+I don't consider that Attribute or AttributeTree 'own' the slash-separated path string. They own the model Attribute hierarchy and to some extent the path[].
+
+That AttributeTree uses the slash-separated path string for file storage is just a design choice. It could have just as well use: count, { length, name } with ['Threads', 'thread/0'] being written to disk as:
+
+[ 2, 7, 'T', 'h', 'r', 'e', 'a', 'd', 's', 8, 't', 'h', 'r', 'e', 'a', 'd', '/' ,'0' ]
+
+Then this whole bug wouldn't exist ;)
+
+Line:250, org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/statesystem/core/ITmfStateSystem.java -> That's an interesting idea. I have to sleep on that one.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2015-03-24 22:47:25.000000000
+Message: 
+Patch Set 11:
+
+(1 comment)
+Line:218, org.eclipse.tracecompass.statesystem.core/src/org/eclipse/tracecompass/internal/statesystem/core/Attribute.java -> > This is easy to solve in StateSystemUtils:
+
+Ok, external utils calling internal utils is a bit far-fetched, but not as bad as duplicating functionality. If we end up having to do something like that it could be acceptable.
+
+> You can't have an escaped path[] or attribute, and you can't have an unescaped path string.
+
+If this was just internally, it'd be fine. The problems arises when external callers have both representations on their side. I'll update the bug on bugzilla to show some example code.
+
+> I don't consider that Attribute or AttributeTree 'own' the slash-separated path string. They own the model Attribute hierarchy and to some extent the path[].
+
+In fact Attribute has a public getter to get the string, and not the string[] (before my latest patch at least), so I'd argue it owns the concept of the string more! In any case, both are closely coupled together, especially since getString() calls getStringArray() and just does the equivalent of Joiner.join() on it.
+
+It could be possible to move these concepts outside of Attribute though. Attribute could just know itself and its parent, and a separate visitor object takes care of recreating the string or path[]. Maybe this could help anything, not sure.
+
+> It could have just as well use: [...] Then this whole bug wouldn't exist ;)
+
+Oh really?! If it's *only* a problem of storage, then just change AttributeTree.writeSelf() and call it a day! :)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Patrick Tasse
+Date: 2015-04-09 21:16:27.000000000
+Message: 
+Abandoned
+
+Split into smaller patches starting from https://git.eclipse.org/r/44623
+----------------------------------------------------------------------------------------------------------------------

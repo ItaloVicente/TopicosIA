@@ -1,0 +1,145 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-34906: Make PDM seqnoAck at each received snapEnd
+
+Problem:
+The PDM seqnoAcks immediately if only Majority or
+MajorityAndPersistToMaster prepares are encountered, but once a
+PersistToMajority Prepare is found it must wait for the entire snapshot
+to persist.
+
+To do this, the PDM waits for the current persistedSeqno to exceed the
+snapshotEnd, *but* the PDM only tracked the latest snapshotEnd seqno -
+updated each time a snapshot end is received.
+
+If a new snapshotEnd is received before persistence "catches up", the
+PDM will wait until the end of the new snapshot. If this happens
+continuously (i.e., under continuous load), the PDM might never ack.
+
+Rejected Solution:
+Add a "last prepare in snapshot" flag which is set on the last prepare
+when notified of snapshotEnd. Rejected because persistence and
+snapshotEnd notifications both call updateHighPreparedSeqno which would
+have to scan the entire trackedWrites list to determine if a snapshot
+had ended yet - this might lead to poor performance.
+
+Solution:
+Track a queue of snapshotEnd seqnos, and seqnoAck at each one.
+
+Change-Id: Ib59149078e7b61dda20ac46174618a183adb4b61
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: James H
+Date: 2019-07-05 14:32:22.000000000
+Message: 
+Uploaded patch set 6.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-07-05 14:43:19.000000000
+Message: 
+Patch Set 6: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/18596/ : ABORTED
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/18596/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/12675/ : ABORTED
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/12675/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/21712/ : ABORTED
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/21712/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/20880/ : ABORTED
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/20880/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/2546/ : ABORTED
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/2546/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/5464/ : ABORTED
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/5464/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/19534/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/11913/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-07-05 14:55:13.000000000
+Message: 
+Patch Set 6:
+
+(3 comments)
+Line:353, engines/ep/src/durability/passive_durability_monitor.cc -> This is evil - you're capturing (by reference) a non-const variable which is modified throughout the course of the function (and where the lambda is called). 
+
+To the reader looking at the main while loop below it's totally invisible that the (moving) snapshotEndSeqno is being used here.
+
+Just pass it as an argument to the lambda.
+
+Also - you only need trackedWrites.end() from this; simply copy that into a local variable and capture that in the lambda.
+
+Line:363, engines/ep/src/durability/passive_durability_monitor.cc -> This can have much smaller scope (i.e. put it in the block it's used).
+
+Furthermore, once you do that I think you'll see it really doesn't add that much - with all the boilerplate it's arguably less terse than just inlining it:
+
+ advanceHPSWhile([&](auto sw) {
+     return inSnapshot(sw) &&
+     sw->getDurabilityReqs().getLevel() != cb::durability::Level::PersistToMajority;
+ });
+
+Line:367, engines/ep/src/durability/passive_durability_monitor.cc -> This also feels over complex - your two predicates are the same apart from the fact that in case 2 you also check if it's not a persist-to-majority write.
+
+I don't think the added indirection is helping the readability (or potentially perforce - you're coping lambdas all over the place).
+
+Just do something like the following:
+
+ while (...) {
+    const level maxLevelCanAdvance = 
+    (pdm.vb.getPersistenceSeqno() >= snapshotEndSeqno)
+     ? PersistMajority : MajorityAndPersistActive;
+     for (next = getIteratorNext(highPreparedSeqno.it);
+           inSnapshot && next->getDurabilityReqs().getlevel < maxLevelCanAdvance;
+next = getIteratorNext(highPreparedSeqno.it)) {
+          // Now in body of for loop, update highPrepared...
+     }
+ }
+
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2019-07-05 15:03:00.000000000
+Message: 
+Patch Set 6:
+
+(3 comments)
+Line:353, engines/ep/src/durability/passive_durability_monitor.cc -> Agreed, will fix
+
+Line:363, engines/ep/src/durability/passive_durability_monitor.cc -> Definitely - it used to be more widely used, will tidy
+
+Line:367, engines/ep/src/durability/passive_durability_monitor.cc -> roger
+
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2019-07-05 15:24:02.000000000
+Message: 
+Patch Set 6:
+
+I've reigned in the lambda fetish Dave! Definitely an improvement in explicitness/clarity
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-07-05 15:28:56.000000000
+MISMATCHED INLINE COMMENT
+Line:409, engines/ep/src/durability/passive_durability_monitor.cc -> I think it's worth keeping some of the comments you have here - they are certainly useful in explaining the rationale behind what we are doing.
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2019-07-05 15:32:19.000000000
+MISMATCHED INLINE COMMENT
+Line:409, engines/ep/src/durability/passive_durability_monitor.cc -> Added back
+----------------------------------------------------------------------------------------------------------------------

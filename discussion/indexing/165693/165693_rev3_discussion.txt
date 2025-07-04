@@ -1,0 +1,144 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-43886 : Add basic clusterInfoClientLite
+
+Change-Id: I9a87d58a4ffea635e2f8805855d014d4262fb64d
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: SAI KRISHNA TEJA KOMMARAJU
+Date: 2021-11-21 12:53:21.000000000
+Message: 
+Uploaded patch set 3.
+----------------------------------------------------------------------------------------------------------------------
+Author: VarunVelamuri
+Date: 2021-11-22 05:37:43.000000000
+Message: 
+Patch Set 3:
+
+(4 comments)
+
+In dcp_seqno_local.go, there is a pollForDeletedBuckets() call which does bucket.Refresh() every 10 minutes (I believe we made that change in 7.0.2). Can we remove that periodicFetch from ns_server and use the latest cinfoClient light to get the necessary information
+Line:21, secondary/common/cluster_info_lite.go -> Minor: A comment on what this refCount means
+
+Line:64, secondary/common/cluster_info_lite.go -> Should we set valid to false if we see this?
+
+Line:136, secondary/common/cluster_info_lite.go -> Instead of logging lengths, we can log the list of Nodes (Just the hostnames and not the entire structure) so that we know which node is missing
+
+Line:110, secondary/projector/projector.go -> Is this client still required?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: VarunVelamuri
+Date: 2021-11-22 05:48:15.000000000
+Message: 
+Patch Set 3:
+
+(2 comments)
+Line:413, secondary/common/cluster_info_lite.go -> a. All the callers of FetchNodesInfo() seem to ignore the error. Do we require the error (or) should we do error handling?
+
+Line:416, secondary/common/cluster_info_lite.go -> Should we update when there is an error while FetchNodesInfo?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: VarunVelamuri
+Date: 2021-11-22 05:49:57.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:47, secondary/common/cluster_info_lite.go -> Do we require this bool as callers do not seem to make use of this?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: VarunVelamuri
+Date: 2021-11-22 06:11:15.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:353, secondary/common/cluster_info_lite.go -> I think this logic can cause an unwanted requests:
+
+a. Go-routine 1 tries nodesInfoSync(), registers a notifier
+b. Sees, len(poolsStreamingCh) == 0 and then writes to it
+c. handlePoolChangeNotification is empty. So, it reads the ch and makes a query to ns_server. At this point len(poolsStreamingCh is 0
+d. Go-routine 2 comes tries nodesInfoSync(), registers a notifier it self
+e. As  len(poolsStreamingCh) == 0, it writes to the queue again and waits for the notification from event manager
+f. Now, the response for first call to handlePoolChangeNotification will comeback and both the go-routines will be updated - making the second call unnecessary
+
+----------------------------------------------------------------------------------------------------------------------
+Author: VarunVelamuri
+Date: 2021-11-22 06:35:43.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+
+Also, can you please check the number of requests fro projector-cbauth to ns_server (as this code changes projector side callers)
+Line:353, secondary/common/cluster_info_lite.go -> More than unwanted request, please check if this is going to cause any inconsistency in eventMgr logic
+
+----------------------------------------------------------------------------------------------------------------------
+Author: SAI KRISHNA TEJA KOMMARAJU
+Date: 2021-11-22 09:42:51.000000000
+Message: 
+Patch Set 3:
+
+(13 comments)
+Line:21, secondary/common/cluster_info_lite.go -> Will add that thanks Varun.
+
+Line:47, secondary/common/cluster_info_lite.go -> I was unsure what to do here. I kept that bool as this check was there in the old cinfo logic too. 
+We got the pools data and ThisNode is not present in data. Can this happen ?
+No idea if it happened in the past anytime.
+The Cache Manager must take more actions based on if this is valid or not. 
+
+I will set the cache to invalid if thisNode is not found in that data.
+
+Line:64, secondary/common/cluster_info_lite.go -> Yeah we can do that. I left the logic to set the validity to validateNodesAndServices function. 
+
+If we see a node in this other new "clusterMemebership" status here and its data is not in nodeServices too then both nodes and nodeService seem to be in sync saying that the node is not active and hence that data can be used.
+
+If we see the node in nodeServices then our validation will anyways fail, as the len(nodes) != len(nodesExt), setting the cache to invalid.
+
+Line:136, secondary/common/cluster_info_lite.go -> Got that. Will update this. Thanks Varun.
+
+Line:353, secondary/common/cluster_info_lite.go -> Yeah. I added EventCount check for other Notifications in later patches. Will add that check to PoolChangeNotification too. Thanks varun.
+
+I am not seeing a book keeping issue in eventMgr. The client will unregister after it gets the back some data does not matter if that data is fetched for the Forced Notification it sent or not.
+
+Line:413, secondary/common/cluster_info_lite.go -> Yeah looks like that can be removed will remove that.
+
+Line:416, secondary/common/cluster_info_lite.go -> In general the client will always see the valid data and it can be stale if we dont update on failure here. This way client will know that the data is stale and will force fetch the data if needed.
+
+In the specific case of FetchNodesInfo errors we can avoid it.. But i felt that we don't know the updated that when we are not able to reach out ns_server so its better to keep it stale and let the client start the force fetch when needed.
+
+Line:110, secondary/projector/projector.go -> Will skip initiating this client when cinfo lite is used in the config after adding the bucketInfo to the cache in the third patch. 
+
+Also want to keep the client as it is incase we want to disable the cinfolite and fallback to old mechanism. Or if we move to cinfo lite change to next version.
+
+We can simplify that fallback mechanism further in another patch if needed.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: SAI KRISHNA TEJA KOMMARAJU
+Date: 2021-11-23 05:04:26.000000000
+MISMATCHED INLINE COMMENT
+Line:21, secondary/common/cluster_info_lite.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: SAI KRISHNA TEJA KOMMARAJU
+Date: 2021-11-23 05:04:26.000000000
+MISMATCHED INLINE COMMENT
+Line:47, secondary/common/cluster_info_lite.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: SAI KRISHNA TEJA KOMMARAJU
+Date: 2021-11-23 05:04:26.000000000
+MISMATCHED INLINE COMMENT
+Line:136, secondary/common/cluster_info_lite.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: SAI KRISHNA TEJA KOMMARAJU
+Date: 2021-11-23 05:04:26.000000000
+MISMATCHED INLINE COMMENT
+Line:353, secondary/common/cluster_info_lite.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: SAI KRISHNA TEJA KOMMARAJU
+Date: 2021-11-23 05:04:26.000000000
+MISMATCHED INLINE COMMENT
+Line:413, secondary/common/cluster_info_lite.go -> Done
+----------------------------------------------------------------------------------------------------------------------

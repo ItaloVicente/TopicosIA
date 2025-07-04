@@ -1,0 +1,172 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-55391: Don't leave Cursors in CheckpointManager if not moved to ActiveStream
+
+In ActiveStream::scheduleBackfill_UNLOCKED an exception was thrown
+before the result of registerCursor was assigned to
+ActiveStream::cursor. This resulted in the cursor being orphaned - it
+existed in CheckpointManager but was not associated with any Stream,
+and hence was not advanced (via getItemsForCursor) - but also was not
+subject to cursor-dropping so resulted in the CheckpointManager
+getting stuck at the checkpoint high watermark.
+
+Address this problem (and similar issues) by having CursorRegResult
+own the Cursor object, until the user takes ownership of it (via new
+takeCursor() method). If CursorRegResult is destroyed and still owns
+the cursor; then remove it from CheckpointManager.
+
+Note: An alternate approach would be to implement the "auto remove"
+      logic to CheckpointCursor itself (in its dtor); then say have
+      CheckpointManager only hold a weak_ptr to CheckpointCursor
+      (currently holds a shared_ptr). That would solve the problem at
+      a higher level and for all uses of Cursor / CheckpointCursor,
+      even after cursor has been moved from CursorRegResult. For
+      example right now we rely on ActiveStream's dtor "remembering"
+      to remove the cursor from CheckpointManager.
+
+      While such an approach certainly has merit, I feel it's more
+      invasive as we would be changing the ownership model of
+      CheckpointManager / CheckpointCursor, so at this stage in Elixir
+      development, the current approach - while less "complete" is
+      smaller in scope and at lower risk of introducing any
+      regressions.
+
+Change-Id: If292d10d03cbddeb34cd567e7ce5110a5d58db70
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2023-03-01 14:01:31.000000000
+Message: 
+Uploaded patch set 3.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2023-03-01 14:44:50.000000000
+Message: 
+Patch Set 3: Verified-1
+
+Build Failed 
+
+https://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/26184/ : FAILURE
+
+Failure of GoogleTest "TransportProtocols/ExternalAuthTest.TestErrorIncludeLdapInfo/Mcbp":
+
+<pre>
+[ RUN      ] TransportProtocols/ExternalAuthTest.TestErrorIncludeLdapInfo/Mcbp
+[2023-03-01T14:38:28.307Z] /home/couchbase/jenkins/workspace/kv_engine.threadsanitizer_master/kv_engine/tests/testapp/testapp_external_auth.cc:399: Failure
+[2023-03-01T14:38:28.307Z] Value of: json.contains("error") && json["error"].contains("context")
+[2023-03-01T14:38:28.307Z]   Actual: false
+[2023-03-01T14:38:28.307Z] Expected: true
+[2023-03-01T14:38:28.307Z] {
+[2023-03-01T14:38:28.307Z]   "error": {
+[2023-03-01T14:38:28.307Z]     "ref": "8184dc07-0715-4db2-afa9-6119d5fdb327"
+[2023-03-01T14:38:28.307Z]   }
+[2023-03-01T14:38:28.307Z] }
+[2023-03-01T14:38:28.307Z] [  FAILED  ] TransportProtocols/ExternalAuthTest.TestErrorIncludeLdapInfo/Mcbp, where GetParam() = Mcbp (298 ms)
+TransportProtocols/ExternalAuthTest.TestErrorIncludeLdapInfo/Mcbp
+</pre>
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/26184/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/22814/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/43831/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/23027/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-windows-master/52255/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/12546/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux-debug/job/master/1612/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/24876/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/12625/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/25331/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/33293/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/24447/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2023-03-01 16:55:55.000000000
+Message: 
+Patch Set 3: Verified+1
+
+Build Successful 
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/22814/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/43831/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/23027/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-windows-master/52255/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/12546/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux-debug/job/master/1612/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/24876/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/12625/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/25331/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/33293/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/24447/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/26190/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2023-03-07 15:55:36.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> ping for review. 
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2023-03-08 11:22:25.000000000
+Message: 
+Patch Set 3: Code-Review-1
+
+(3 comments)
+Line:14, /COMMIT_MSG -> IIRC that was due to the fact that after the throw the cursor still existed in some Checkpoint, but not "registered" in the CM::cursors map?
+If so, could you mention that detail here please?
+
+File Comment: /PATCHSET_LEVEL -> Minor points
+Line:105, engines/ep/src/checkpoint_manager.h -> I see, not a ref because we have the default CursorRegResult ctor..
+Can't that default ctor be removed and this turned into a ref?
+Given that a CM must exist for the lifetime of a CursorRegResult instance..
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2023-03-08 12:02:37.000000000
+Message: 
+Patch Set 3:
+
+(2 comments)
+Line:14, /COMMIT_MSG -> No, it was still registered in the CM map; the problem was there was no ActiveStream associated with it so when CM attempted to cursor-drop it there was no DcpProducer / ActiveStream present to perform that task.
+
+Line:105, engines/ep/src/checkpoint_manager.h -> I tried removing the default ctor but that broke a bunch of production and test code which default-constructs a CursorRegResult and then assigns to it later.
+
+We _could_ "fix" that code; but in general it's idiomatic to be able to default-construct object (even if they are constructed in an empty / invalid state), otherwise you have to jump through hoops to be able to use them (e.g. how do you conditionally construct a CursorRegResult in different ways depending on say the value of a flag).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2023-03-08 13:17:45.000000000
+Message: 
+Patch Set 3: Code-Review+2
+
+(2 comments)
+Line:14, /COMMIT_MSG -> Oh yes, we go through the ConnMap for dropping the cursors.. so if the Prod/Stream has gone..
+Also, "cursor registered" === "cursor in the CM::cursors map", so I just recalled wrong :)
+
+Line:105, engines/ep/src/checkpoint_manager.h -> Ack
+
+----------------------------------------------------------------------------------------------------------------------

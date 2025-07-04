@@ -1,0 +1,143 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 235747: [registers] Allow user to edit the register groups.
+
+Change-Id: Ife5aefc1a1609309724db01d92a35750e25def24
+Signed-off-by: Alvaro Sanchez-Leon <alvsan09@gmail.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Marc Khouzam
+Date: 2014-08-04 18:41:20.000000000
+Message: 
+Uploaded patch set 13.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2014-08-04 18:41:25.000000000
+Message: 
+Patch Set 13:
+
+Build Started https://hudson.eclipse.org/cdt/job/cdt-verify/1092/
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc Khouzam
+Date: 2014-08-04 18:42:38.000000000
+Message: 
+Patch Set 13:
+
+Patchset 12 was not giving an error when removing all registers from a group, which is a bug I introduced on top of Alvaro's solution.  Patchset 13 fixes it.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2014-08-04 19:22:04.000000000
+Message: 
+Patch Set 13: Verified+1
+
+Build Successful 
+
+https://hudson.eclipse.org/cdt/job/cdt-verify/1092/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc Khouzam
+Date: 2014-08-04 20:27:59.000000000
+Message: 
+Patch Set 13: Verified-1
+
+I did some testing and I found a couple of issues.
+
+1- I don't think a group should not be allowed to be named or renamed to an existing name (although CDI seems to allow it)
+
+2- If the user tries to create a group with no registers, it should not silently fail.  CDI actually creates the empty group.  I'm not set on what we should do.  Options I see are:
+  a) Like CDI allow to create an empty group, which could be filled later by using 'edit'
+  b) Modify the dialog to give an error if nothing is selected, like it does if the name of the group is empty (this will change CDI, which I feel is ok)
+  c) Let the service decide if empty groups are allowed or not; meaning that we ask to create the empty group and handle whatever result the service gives
+  d) Don't allow empty groups as the patch does, but notify user of the error
+  I leave it up to you since you know the design best, although keep in mind it should fit with how the 'edit' behaves in the end.
+
+3- Should the 'restore' action work per container or per session?  Now it works per session, which means that when 'restoring' register groups, all the groups, for all containers get reset, although they were created independently. See point 6 before addressing this.
+
+4- Restore should give a dialog to confirm that all regGroups will be deleted
+
+5- When editing a register group, in the list of register, each entry is followed by the current group name.  This does not seem to add any value; in fact, CDI shows 'main' as the description, which explains that the list of registers comes from the main group.  What should we do?  Either remove that description altogether, or put the Root register group name?
+
+6- Multi-process is working but I don't find it very user-friendly.  When the user creates a new group, it only gets added to the currently selected process and I wonder if that won't be annoying to the user.  On the contrary, when re-launching a session, all previous groups are now created for each new process (see bug 4).  This is tricky.  I wonder if instead of using a Container as a differentiator, we couldn't use the list of available register from the container?  So any process that has the same list of registers as another process, would get the groups created for the other process.  Something like this should fix Bugs 2, 3, and 4.
+
+Bug 1:
+1- add two groups
+2- expand both groups
+3- collapse the default group
+4- remove top group
+5- expand default group
+=> only one element is shown
+
+Bug 2:
+1- launch a session with a 64bit binary and another 32bit binary
+2- create a group for the first binary and a different group for the other binary
+3- terminate the session
+4- re-launch the session (with a single binary is ok)
+=> Both groups are shown for the single binary and if we expand the groups, the one that was created for the other binary, shows errors because the registers it contains don't exist for the current binary (see bug 3 also)
+
+Bug 3:
+1- launch a 64bit binary
+2- create a group with some registers
+3- terminate launch
+4- modify same launch to use a 32bit binary and launch
+=> regGroup is restored but when expanded in shows errors because of registers that don't exist for the new binary
+=> Maybe we need to check in the service if the content of the group are valid and remove invalid registers and if the group is empty handle it properly depending on what we decide for empty groups
+
+Bug 4:
+1- launch a debug session and add a second process
+2- create Group_1 for the first process (which will only apply to that process) and then create Group_1 for the second process
+3- terminate and relaunch the session
+=> Both Group_1 are created for the original process
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc Khouzam
+Date: 2014-08-05 18:14:26.000000000
+Message: 
+Patch Set 13:
+
+(6 comments)
+Line:646, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBRegisters.java -> Here we should trigger an IGroupChangedDMEvent to update the label (name) of the group
+
+Line:659, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBRegisters.java -> Here we should trigger an IRegistersChangedDMEvent to update the children (registers) of the group, instead of doing it below.
+
+Line:665, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBRegisters.java -> So, this one seems to update the name as well, but I think we shouldn't send this, unless the list of registers has changed.
+
+Line:798, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBRegisters.java -> Don't cast without checking.  Please do an instanceof here and an assert if it fails.
+
+Line:824, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBRegisters.java -> I think we should only send the event once per relevant container.  This event causes the view(s) to redraw and should be used only when necessary.
+
+Line:1002, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBRegisters.java -> I wonder if registers are unique per container? We know some registers only exist for a particular container and not another, but could there be a register that is shared between two containers?
+
+Say we debug two 64bit processes. Could changing the value of a register in one process affect the value of a register in the other process?
+
+If not, your solution is better.
+
+If so, we need to refresh all registers, not just the once for the current container. In that case, might as well send a GroupsChangedDMEvent, to refresh all groups.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Alvaro Sanchez-Leon
+Date: 2014-08-06 14:06:42.000000000
+Message: 
+Patch Set 14: Patch Set 13 was rebased
+----------------------------------------------------------------------------------------------------------------------
+Author: Alvaro Sanchez-Leon
+Date: 2014-11-03 21:03:45.000000000
+Message: 
+Patch Set 13:
+
+(6 comments)
+
+Patchset 19, addresses these inline comments
+Line:646, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBRegisters.java -> Done
+
+Line:659, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBRegisters.java -> Done
+
+Line:665, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBRegisters.java -> Done
+
+Line:798, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBRegisters.java -> Done
+
+Line:824, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBRegisters.java -> Done
+
+Line:1002, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBRegisters.java -> The Register Groups and Registers are per container, i.e. not shared.
+
+----------------------------------------------------------------------------------------------------------------------

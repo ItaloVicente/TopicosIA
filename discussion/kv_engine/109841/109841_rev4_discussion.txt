@@ -1,0 +1,113 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-33332: Keep completed prepare in HashTable - Ephemeral
+
+We need to keep the completed prepare in the HashTable so that any
+subsequent prepares can re-use (or chain if there is a range read)
+the same OSV to ensure that we have snapshot with unique keys.
+
+Change-Id: Idcdc3711fc4b183c28bab112e95285869d1041f1
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Ben Huddleston
+Date: 2019-05-30 19:52:47.000000000
+Message: 
+Uploaded patch set 4.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-05-30 20:23:28.000000000
+Message: 
+Patch Set 4: Code-Review-1
+
+(4 comments)
+Line:602, engines/ep/src/hash_table.cc -> I don't think this clause should be necessary  - isPreparedMaybeVisible() should only be true for (in-flight) prepares which either came for warmup or repiica -> active transition. 
+
+As such, when we complete a maybeVisible prepare maybe we need to change it's type away from MaybeVisible?
+
+Line:833, engines/ep/src/stored-value.h -> Nit: "valid" is probably the wrong word here, implies that calling on an SV (which is "invalid") would be an error. Prefer "Only applicable / only necessary..."
+
+Line:835, engines/ep/src/stored-value.h -> Note also that StoredValue / OrderedStored values, while "parent" / "child" classes don't use virtual inheritance to implement that, they use tag dispatch. 
+
+As such (and given we typically access them via a StoredValue* base class ptr) you should do something similar to setValue():
+
+  void StoredValue::setValue(const Item& itm) {
+     if (isOrdered()) {
+         return static_cast<OrderedStoredValue*>(this)->setValueImpl(itm);
+     } else {
+         return this->setValueImpl(itm);
+     }
+ }
+
+(although in this case you can just make the SV case empty).
+
+Line:3136, engines/ep/src/vbucket.cc -> Not sure this is correct - or at least might be unnecessary - _if_ we find that `v` is a completed Prepare in the HashTable (i.e. we get past the InFlight check just above), then we could just directly use `v` as the "new" prepared SyncDelete - and directly call updateStoredValue on it.
+
+(In the case of Ephemeral with an active range-read we'd end up creating a new OSV for the prepared SyncDelete, but otherwise no new item is needed).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-05-31 00:00:14.000000000
+Message: 
+Patch Set 4: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/18464/ : FAILURE
+
+<p>clang-format suggested the following changes:
+
+<pre>
+cat <<"EOF" | patch -p1
+diff --git a/engines/ep/tests/module_tests/vbucket_durability_test.h b/engines/ep/tests/module_tests/vbucket_durability_test.h
+index 8e10605..1bd6381 100644
+--- a/engines/ep/tests/module_tests/vbucket_durability_test.h
++++ b/engines/ep/tests/module_tests/vbucket_durability_test.h
+@@ -124,7 +124,7 @@ protected:
+      * Add a pending SyncDelete to the vBucket for the given key.
+      */
+     void setupPendingDelete(StoredDocKey key);
+-    
++
+     /**
+      * Test a commit of a sync delete
+      */
+
+EOF
+</pre> ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/18464/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/17667/ : FAILURE
+
+The warnings threshold for this job was exceeded - <a href="warningsResult">3 warnings</a> found. ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/17667/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/20620/ : FAILURE
+
+Link error: fatal error LNK1168: cannot open platform\JSON_checker.dll for writing ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/20620/ )
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/10987/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/11653/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/1527/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/19883/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/4449/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2019-05-31 13:15:06.000000000
+MISMATCHED INLINE COMMENT
+Line:602, engines/ep/src/hash_table.cc -> SV state change made this no longer necessary
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2019-05-31 13:15:06.000000000
+MISMATCHED INLINE COMMENT
+Line:833, engines/ep/src/stored-value.h -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2019-05-31 13:15:06.000000000
+MISMATCHED INLINE COMMENT
+Line:3136, engines/ep/src/vbucket.cc -> yeah was unnecessary, just had to manually set the item to deleted
+----------------------------------------------------------------------------------------------------------------------

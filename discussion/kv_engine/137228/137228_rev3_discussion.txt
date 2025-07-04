@@ -1,0 +1,158 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-41510: Fix infinite loop due to HdrHistogram being reset
+
+Currently if a HdrHistogram has its reset() method called by one thread
+(T1) and is being read by another (T2) using an HdrHistoram::Iterator.
+There is the race that could cause the HdrHistoram::Iterator() to enter
+an infinite loop.
+
+This occurs as HdrHistogram's getNextValue() methods use HdrHistogam_c's
+hdr_iter_next() which intern uses the following function:
+static bool has_next(struct hdr_iter* iter)
+{
+        return iter->cumulative_count < iter->total_count;
+}
+Which logically checks that the total count the Iterator was
+initialize with is > than the sum of all the counts its read from the
+buckets in the histogram. The trouble is, that the reset() method
+changes the bucket counts back to 0. Thus, meaning the condition
+cumulative_count >= total_count may never be met.
+
+To fix this wrap the std::unique_ptr<struct hdr_histogram> with a
+folly::Synchronized<>. This allows us to take an exclusive lock on the
+pointer when performing a reset() of the histogram and allows us to
+ensure that no iterator is reading from the histogram, as the iterator
+takes a non exclusive read lock for the lifetime of the
+HdrHistogram::Iterator struct. This also ensures that
+HdrHistogram::resize() is thread safe as we now take a write lock.
+
+Change-Id: I8cf5eeb0ac3107ce20e915463be3db245c68c8b9
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Richard de Mellow
+Date: 2020-09-30 13:20:50.000000000
+Message: 
+Uploaded patch set 3.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-09-30 14:00:35.000000000
+Message: 
+Patch Set 3: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/30749/ : FAILURE
+
+Failure of GoogleTest "FullAndValueEvictionOnReplicaAndPending/RollbackDcpTest.RollbackDeletedPrepareOnTopOfSyncDelete/magma_full_eviction_pending":
+
+<pre>
+[ RUN      ] FullAndValueEvictionOnReplicaAndPending/RollbackDcpTest.RollbackDeletedPrepareOnTopOfSyncDelete/magma_full_eviction_pending
+unknown file: error: C++ exception with description "cb::io::rmrf: remove of file ep_engine_ep_unit_tests.db/test.661701\magma.0\wal\wal.1 under ep_engine_ep_unit_tests.db/test.661701 failed: The data is invalid." thrown in TearDown().
+[  FAILED  ] FullAndValueEvictionOnReplicaAndPending/RollbackDcpTest.RollbackDeletedPrepareOnTopOfSyncDelete/magma_full_eviction_pending, where GetParam() = ("magma", "full_eviction", "pending") (22 ms)
+FullAndValueEvictionOnReplicaAndPending/RollbackDcpTest.RollbackDeletedPrepareOnTopOfSyncDelete/magma_full_eviction_pending
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/30749/ )
+
+Timeout of a CTest test 392/392 Test  #86: ep-engine_ep_unit_tests.HdrHistogramTest ......................................................................................} ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/30749/ )
+
+Failure of a CTest test 206/392 Test #181: ep-engine_ep_unit_tests.FullAndValueEvictionOnReplicaAndPending/RollbackDcpTest ............................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/30749/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/6305/ : FAILURE
+
+ThreadSanitizer issue: data race (/home/couchbase/jenkins/workspace/kv_engine.threadsanitizer_master/build/kv_engine/ep_testsuite_dcp+0x530a7e) in operator delete(void*)  ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/6305/ )
+
+Failure of a CTest test [2020-09-30T13:32:11.648Z]  14/387 Test #245: ep_testsuite_dcp.ephemeral.comp_active ...................................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/6305/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/5155/ : FAILURE
+
+Timeout of a CTest test [2020-09-30T13:40:07.276Z] 406/406 Test #400: memcached_testapp.ep.TransportProtocols/XattrNoDocDurabilityTest ............................................} ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/5155/ )
+
+Failure of a CTest test [2020-09-30T13:34:51.718Z] 109/406 Test #381: memcached_testapp.ep.CleanOrUnclean/PersistToTest ...........................................................Child aborted ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/5155/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/13971/ : FAILURE
+
+Failure of GoogleTest "FullAndValueEvictionOnReplicaAndPending/RollbackTest.RollbackAfterMutation/magma_value_only_pending":
+
+<pre>
+[ RUN      ] FullAndValueEvictionOnReplicaAndPending/RollbackTest.RollbackAfterMutation/magma_value_only_pending
+[2020-09-30T13:49:52.045Z] ../kv_engine/engines/ep/tests/module_tests/evp_store_rollback_test.cc:225: Failure
+[2020-09-30T13:49:52.045Z] Expected equality of these values:
+[2020-09-30T13:49:52.045Z]   FlushResult(MoreAvailable::No, 1, WakeCkptRemover::No)
+[2020-09-30T13:49:52.045Z]     Which is: moreAvailable:{false} numFlushed:{1} wakeupCkptRemover:{false}
+[2020-09-30T13:49:52.045Z]   getEPBucket().flushVBucket(vbid)
+[2020-09-30T13:49:52.045Z]     Which is: moreAvailable:{false} numFlushed:{1} wakeupCkptRemover:{true}
+[2020-09-30T13:49:52.045Z] [  FAILED  ] FullAndValueEvictionOnReplicaAndPending/RollbackTest.RollbackAfterMutation/magma_value_only_pending, where GetParam() = ("magma", "value_only", "pending") (13363 ms)
+FullAndValueEvictionOnReplicaAndPending/RollbackTest.RollbackAfterMutation/magma_value_only_pending
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/13971/ )
+
+Failure of a CTest test [2020-09-30T13:49:52.045Z]  16/392 Test #183: ep-engine_ep_unit_tests.FullAndValueEvictionOnReplicaAndPending/RollbackTest ................................ ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/13971/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/3315/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/4788/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/26585/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/6199/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/6080/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-09-30 15:09:05.000000000
+Message: 
+Patch Set 3:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/13978/ : FAILURE
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/30757/ : FAILURE
+
+Timeout of a CTest test 392/392 Test  #86: ep-engine_ep_unit_tests.HdrHistogramTest ......................................................................................} ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/30757/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/3315/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/4788/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/26585/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/6199/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/6080/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/6312/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/5162/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-09-30 16:21:48.000000000
+Message: 
+Patch Set 3:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/30757/ : FAILURE
+
+Timeout of a CTest test 392/392 Test  #86: ep-engine_ep_unit_tests.HdrHistogramTest ......................................................................................} ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/30757/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/3315/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/4788/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/26585/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/6199/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/6080/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/6312/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/5162/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/13982/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

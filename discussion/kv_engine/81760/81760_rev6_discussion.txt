@@ -1,0 +1,115 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-23622: Use smart pointers for DCP Stream::readyQ
+
+DCP Stream::readyQ was using raw pointers.
+As first patch I just covered the basis (funtions of Stream
+still get in input and return DcpResponse* raw pointers).
+The bigger change in this patch is that Stream::popFromReadyQ()
+now returns 'DcpResponse*' rather than 'void'.
+
+Change-Id: I41d7adc8acfca72fcada5c1befc18e147e10b70f
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2017-08-03 16:11:57.000000000
+Message: 
+Uploaded patch set 6: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2017-08-03 16:29:37.000000000
+Message: 
+Patch Set 6: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master/1710/ : FAILURE
+
+AddressSanitizer issue: 5281 byte(s) leaked in 96 allocation(s). ( http://cv.jenkins.couchbase.com//job/kv_engine-addresssanitizer-master/1710/ )
+
+Failure of a CTest test 16/85 Test #13: ep-engine_ep_unit_tests ........................ ( http://cv.jenkins.couchbase.com//job/kv_engine-addresssanitizer-master/1710/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/1755/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/1752/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/1780/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/1582/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Sriram Ganesan
+Date: 2017-08-03 16:34:33.000000000
+Message: 
+Patch Set 6: Code-Review-1
+
+(3 comments)
+Line:169, engines/ep/src/dcp/stream.cc -> The '*' needs to be closer to the type.
+
+Line:191, engines/ep/src/dcp/stream.cc -> Please remove the extra spaces
+
+Line:2448, engines/ep/src/dcp/stream.cc -> Can't we just do return popFromReadyQ()?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Manu Dhundi
+Date: 2017-08-03 18:57:58.000000000
+Message: 
+Patch Set 6: Code-Review-2
+
+(4 comments)
+Line:13, /COMMIT_MSG -> This should be part of a separate commit.
+1st commit only changes to smart ptrs
+2nd commit, if needed, changes the return type of the pop. I mean 'if needed' because I dont see a reason why pop should return
+
+Line:165, engines/ep/src/dcp/stream.cc -> If you choose to return in popFromReadyQ(), return the ptr of owning type.
+That is return std::unique_ptr<DcpResponse>
+
+Line:169, engines/ep/src/dcp/stream.cc -> i) You should not use .release() if you want the raw pointer. You must use .get().
+ii) I don't get why, do you need a raw pointer ?
+
+Line:857, engines/ep/src/dcp/stream.cc -> popFromReadyQ() should not be used here. In the next if we do not go inside the 'if' condition, then we still want the response in the readyQ.
+This is a -2
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Manu Dhundi
+Date: 2017-08-03 18:59:50.000000000
+Message: 
+Patch Set 6:
+
+Overall pretty good first patch. Had to give -2 only due to that subtle logic error
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2017-08-04 11:09:29.000000000
+Message: 
+Patch Set 6:
+
+(7 comments)
+Line:13, /COMMIT_MSG -> I wrote a comment about Stream::popFromReadyQ() returning DcpResponse* directly on code.
+
+Line:165, engines/ep/src/dcp/stream.cc -> The reason for returning DcpResponse* here is the kind of situation below in PassiveStream::next():
+
+    DcpResponse* response = readyQ.front();
+    popFromReadyQ();
+    return response;
+
+Now, there we should change to `DcpResponse* response = readyQ.front().release();` because if we use get() then the raw pointer is deleted when we `readyQ.pop()` here at line 174. But, if we use release() then we dereference nullptr at line 170.
+
+So, I considered the possibility to remove the need of the double step "readyQ.front() + popFromReadyQ()" from code that calls popFromReadyQ().
+
+Also, I thought to delegate a 2nd patch for amending functions signature and return type to std::unique_ptr<DcpResponse>.
+
+Line:169, engines/ep/src/dcp/stream.cc -> Done
+
+Line:169, engines/ep/src/dcp/stream.cc -> i) I needed to use release() here to release the ownership of the managed raw pointer because we delete the same raw pointer somewhere else (DcpProducer::step()). If I use get() here, memory is freed the first time below at line 174 with readyQ.pop(), and then again in DcpProducer::step() leading to SegFault.
+
+ii) I need a raw pointer just for returning. I considered to change functions signature and return type in a 2nd patch.
+
+Line:191, engines/ep/src/dcp/stream.cc -> Done
+
+Line:857, engines/ep/src/dcp/stream.cc -> Done
+
+Line:2448, engines/ep/src/dcp/stream.cc -> Sorry for this :) Done
+
+----------------------------------------------------------------------------------------------------------------------

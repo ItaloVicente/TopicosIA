@@ -1,0 +1,302 @@
+======================================================================================================================
+DESCRIPTION:
+
+Ensure that GC#deleteOrphans respects pack lock
+
+If pack or index files are guarded by a pack lock (.keep file)
+deleteOrphans() should not touch the respective files protected by the
+lock file. Otherwise it may interfere with PackInserter concurrently
+inserting a new pack file and its index.
+
+Bug: https://bugs.chromium.org/p/gerrit/issues/detail?id=13544
+Change-Id: I559c81e4b1d7c487f92a751bd78b987d32c98719
+Signed-off-by: Matthias Sohn <matthias.sohn@sap.com>
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Matthias Sohn
+Date: 2020-11-25 16:34:19.000000000
+Message: 
+Uploaded patch set 2: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2020-11-25 16:34:29.000000000
+Message: 
+Patch Set 2:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/3902/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2020-11-25 16:42:40.000000000
+Message: 
+Patch Set 2: Verified-1
+
+Build Failed 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/3902/ : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: David Ostrovsky
+Date: 2020-11-25 18:09:45.000000000
+Message: 
+Patch Set 2:
+
+Should the fix be also relevant for older stable branches?
+----------------------------------------------------------------------------------------------------------------------
+Author: David Ostrovsky
+Date: 2020-11-25 18:30:58.000000000
+Message: 
+Patch Set 2:
+
+(3 comments)
+Line:80, org.eclipse.jgit.test/tst/org/eclipse/jgit/internal/storage/file/GcOrphanFilesTest.java -> More clear: keepPreventsDeletionOfIndexFileForMissingPackFile
+
+Line:968, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/GC.java -> Why is sorting order relevant here?
+
+Line:971, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/GC.java -> Unrelated to this change: should this be logged like on line 994 below, as mentioned by Luca on the original change?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Fabio Ponciroli
+Date: 2020-11-25 18:31:29.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:990, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/GC.java -> What about renaming "skip" to something more specific to this context, i.e.: "checkForOrphans"? 
+
+I believe, the following statement in particular would read better:
+
+if (checkForOrphans && (base == null || !n.startsWith(base))) { ... }
+
+Maybe the "base == null || !n.startsWith(base)" check could also be wrapped in a isOrphan() method? 
+
+WDYT?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Fabio Ponciroli
+Date: 2020-11-25 18:44:20.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:968, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/GC.java -> @DavidO: I am assuming a file is considered orphan if it doesn't have an associated pack or keep file.
+
+Ordering is important to detect the orphans later on at line 979. This sorting is forcing the pack or keep file to appear first to determine the prefix of the group of files we want to process. See a couple of examples below:
+
+CASE 1: No Orphans
+
+Given the following files, sorted as specified at line 968:
+
+pack-1234.pack
+pack-1234.idx
+
+1st loop cycle:
+n = pack-1234.pack
+base = pack-1234
+
+2nd loop cycle:
+n = pack-1234.idx
+base = pack-1234
+
+pack-1234.idx won't be discarded since statement at line 990 is false.
+
+
+CASE 2: Orphans detected
+
+Given the following files, sorted as specified at line 968:
+
+pack-1234.pack
+pack-5678.idx
+
+1st loop cycle:
+n = pack-1234.pack
+base = pack-1234
+
+2nd loop cycle:
+n = pack-5678.idx
+base = pack-1234
+
+pack-5678.idx will be discarded since statement at line 990 is true.
+
+Hope it makes sense.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2020-11-25 19:09:28.000000000
+Message: 
+Patch Set 2:
+
+> Patch Set 2:
+> 
+> Should the fix be also relevant for older stable branches?
+
+The code hitting this race was introduced in jgit 4.6.1.
+
+The chances to hit this in real world scenarios are small since deleteOrphans() must run in the small
+window after renaming the temporary pack to the final pack name and before the corresponding index file is renamed.
+
+I can move this fix to older versions.
+----------------------------------------------------------------------------------------------------------------------
+Author: David Ostrovsky
+Date: 2020-11-25 19:13:14.000000000
+Message: 
+Patch Set 2:
+
+> Patch Set 2:
+> 
+> > Patch Set 2:
+> > 
+> > Should the fix be also relevant for older stable branches?
+> 
+> The code hitting this race was introduced in jgit 4.6.1.
+
+Can you add a reference to the change that introduced this race condition?
+
+> The chances to hit this in real world scenarios are small since deleteOrphans() must run in the small
+> window after renaming the temporary pack to the final pack name and before the corresponding index file is renamed.
+> 
+> I can move this fix to older versions.
+
+Would it makes sense to move the fix to 4.6 where also receive.autogc feature was added (even though this race is not directly related to it)?
+----------------------------------------------------------------------------------------------------------------------
+Author: David Ostrovsky
+Date: 2020-11-25 19:25:16.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:968, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/GC.java -> Thanks @ponch!
+
+I was confused with reversed sorting order. It works even with extended logic to .keep file, because the sorting in reverse order would be:
+
+* pack-1234.pack
+* pack-1234.idx
+
+in case if pack file is in place, and:
+
+* pack-1234.keep
+* pack-1234.idx
+
+in case if keep file is in place.
+
+If .keep suffix would be instead .abc suffix, then the algorithm wouldn't work as is and the idx file would be removed.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2020-11-25 19:34:14.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+
+> Patch Set 2:
+> 
+> > Patch Set 2:
+> > 
+> > > Patch Set 2:
+> > > 
+> > > Should the fix be also relevant for older stable branches?
+> > 
+> > The code hitting this race was introduced in jgit 4.6.1.
+> 
+> Can you add a reference to the change that introduced this race condition?
+
+sure
+
+> > The chances to hit this in real world scenarios are small since deleteOrphans() must run in the small
+> > window after renaming the temporary pack to the final pack name and before the corresponding index file is renamed.
+> > 
+> > I can move this fix to older versions.
+> 
+> Would it makes sense to move the fix to 4.6 where also receive.autogc feature was added (even though this race is not directly related to it)?
+
+no, why should we patch a release which is almost 4 years old ? 
+I think it's too much effort to merge this patch to all the stable branches between
+4.6..4.11 and 5.0..5.10 up to master.
+
+As said above already this race is very small. Renaming the temporary pack and the corresponding pack index happens within 4 lines of code in the same method.
+
+I can move the fix to 5.1 or 5.3 used by Gerrit 2.16 and 3.0 and merge it up from there.
+Line:968, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/GC.java -> exactly, this avoids the need to look-ahead to find out which of the other files for the same pack are present
+
+----------------------------------------------------------------------------------------------------------------------
+Author: David Ostrovsky
+Date: 2020-11-25 19:53:04.000000000
+Message: 
+Patch Set 2:
+
+> > Would it makes sense to move the fix to 4.6 where also receive.autogc feature was added (even though this race is not directly related to it)?
+> 
+> no, why should we patch a release which is almost 4 years old ? 
+> I think it's too much effort to merge this patch to all the stable branches between
+> 4.6..4.11 and 5.0..5.10 up to master.
+> 
+> As said above already this race is very small. Renaming the temporary pack and the corresponding pack index happens within 4 lines of code in the same method.
+
+Even though the probability that the repository corruption occurs is low, on servers with high load, it still can happen (as very small Gerrit E2E load tests have demonstrated, with relative small load).
+
+> I can move the fix to 5.1 or 5.3 used by Gerrit 2.16 and 3.0 and merge it up from there.
+
+OK. I think it would be sufficient to fix gerrit starting from 2.16 and merge it up from there.
+
+Gerrit 2.16: JGit 5.1.13.202002110435-r
+Gerrit 3.0 : JGit 5.3.7.202002110540-r
+
+Starting from Gerrit 3.1 we use JGit submodule in Gerrit and wouldn't need official JGit release (though we could build JGit ourself and publish it to GCloud, but official build would be preferred):
+
+Gerrit 3.1: JGit 5.6
+Gerrit 3.2: JGit 5.8
+Gerrit 3.3: JGit 5.9
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2020-11-25 20:10:29.000000000
+Message: 
+Patch Set 2: Code-Review-1
+
+(2 comments)
+
+Why don't we untangle the deleteOrphans() method instead? WDYT?
+Line:968, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/GC.java -> However, the code looks hacky in this reverse ordering, it works only because the 'p' comes after the 'i' and the 'k', correct?
+
+I believe the code should be strengthened and just do something simpler:
+- get the full list of files
+- extract from that a hash-set of packfiles, considering the 'keep' also in that list
+- for all indexes and bitmaps that do not have a packfile => remove if it is older than the pruning expire.
+
+It should also be a lot faster, as there is no sorting involved.
+
+Line:971, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/GC.java -> +1, follow-up change?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Fabio Ponciroli
+Date: 2020-11-25 20:26:38.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:968, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/GC.java -> +1 for Luca suggestion, unless you think it is too much of a refactoring.
+
+Reading the code for the first time it took me a while to figure out what was te logic behind it :/
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2020-11-25 23:06:42.000000000
+MISMATCHED INLINE COMMENT
+Line:80, org.eclipse.jgit.test/tst/org/eclipse/jgit/internal/storage/file/GcOrphanFilesTest.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2020-11-25 23:06:42.000000000
+MISMATCHED INLINE COMMENT
+Line:968, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/GC.java -> I wanted a small fix on a maintenance branch. For now I will add a comment to explain. We can refactor on master. Don't know how you want to implement that with a HashSet.
+
+If performance of sorting a list with a few thousand entries is a performance problem we have much bigger issues with the size of the pack directory elsewhere.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2020-11-25 23:06:42.000000000
+MISMATCHED INLINE COMMENT
+Line:971, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/GC.java -> Ack
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2020-11-25 23:06:42.000000000
+MISMATCHED INLINE COMMENT
+Line:990, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/GC.java -> Done
+----------------------------------------------------------------------------------------------------------------------

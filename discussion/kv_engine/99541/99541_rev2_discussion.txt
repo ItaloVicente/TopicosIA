@@ -1,0 +1,223 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-30916: Introduce the new CheckpointBench fixture
+
+This commit adds also the newQueueDirtyWithManyClosedUnrefCheckpoints
+benchmark.
+
+In that test I want to measure resource contention between a mc::worker
+(front-end thread) adding incoming mutations to the CheckpointManager
+and the ClosedUnrefCheckpointRemoverTask when the number of checkpoints
+eligible for removing is high.
+
+Contention is on the CM::queueLock. If the RemTask performs some slow
+operation under queueLock, then a front-end thread may wait a long time
+before acquiring the lock. That would lead to throughput degradation.
+
+At the time when I create this benchmark I'm fixing a throughput
+regression that I caused by changing the scope of the queueLock in
+the RemTask. That led to freeing checkpoint memory (which is a slow
+operation) under queueLock.
+
+Bench run output with at current stage (regression):
+
+Run on (8 X 2500 MHz CPU s)
+2018-09-12 15:32:34
+--------------------------------------------------------------------------------------------------------
+Benchmark                                                 Time          CPU Iterations
+--------------------------------------------------------------------------------------------------------
+CheckpointBench/QueueDirtyHighNumCheckpoints/100   41004186 ns   1009190 ns        100 AvgNumCheckpointRemoved=3.72461k    96.767k items/s
+
+Bench run output after regression fixed:
+
+Run on (8 X 2500 MHz CPU s)
+2018-09-12 15:46:57
+--------------------------------------------------------------------------------------------------------
+Benchmark                                                 Time          CPU Iterations
+--------------------------------------------------------------------------------------------------------
+CheckpointBench/QueueDirtyHighNumCheckpoints/100 1565124277 ns   2348400 ns         10 AvgNumCheckpointRemoved=4.78613k   41.5842k items/s
+
+Change-Id: I90d8098b627714ee6517c3270e0b151ecbe960a5
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2018-09-12 15:53:15.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2018-09-12 16:02:51.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:347, engines/ep/benchmarks/vbucket_bench.cc -> I still have a problems here:
+
+1) the number of iterations is decided internally to GoogleBench. No way of setting a custom value from this change onward https://github.com/google/benchmark/commit/4bf6ceb50dcebe08afb10670a9e0c9c077a6305a .
+
+2) I need to ensure this preconditions at every iterations. At every iteration, checkpoints are removed, so the next one could be affected the CheckpointRemover is not busy enough.
+
+3) At the same time, I don't want to time this 'pre-filling', as it would have a relevant relative weight in the final measurements.
+
+4) But, given that I don't measure this pre-fill step, GoogleBench sets an high number of iterations; which lead to a very long runtime for this bench (> 10 minutes).
+As you see on the commit message, the example output for the post-regression shows 100 iterations, while at regression we have only 10 iterations.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-09-12 16:08:03.000000000
+Message: 
+Patch Set 2: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/11715/ : ABORTED
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/11715/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/3599/ : ABORTED
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/3599/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/1427/ : ABORTED
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/1427/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/10496/ : ABORTED
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/10496/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/11982/ : FAILURE
+
+Compile error at ..\kv_engine\engines\ep\benchmarks\vbucket_bench.cc(269): error C3493: "flusherApproxLimit" cannot be implicitly captured because no default capture mode has been specified ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/11982/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/10766/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-09-12 16:29:57.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:347, engines/ep/benchmarks/vbucket_bench.cc -> Could you not create the Items (and Checkpoints / Checkpoint manager once); then take a copy of it before each test iteration (i.e. "prototype" pattern)?
+
+Then we'd only pay the construction cost once, although we'd need to copy on each iteration?
+
+Alternatively, could you modify the closedUnrefCheckpointTask to only remove N closed checkpoints instead of them all (allowing you to force it to run in smaller chunks which perhaps allows smaller number of items)?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2018-09-13 07:07:37.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:347, engines/ep/benchmarks/vbucket_bench.cc -> > Could you not create the Items once; then take a copy.. 
+
+I'll give it a try, thanks for suggestion.
+I'm also thinking about using std::list::splice() with a pre-allocated source list (std::list::splice doesn't copy anything, internal pointers are just re-pointed https://en.cppreference.com/w/cpp/container/list/splice)
+
+> Alternatively, could you modify the ClosedUnrefCheckpointTask..
+
+I already force the RemoverTask to remove only N checkpoints at each run. That is controlled by the call at line 269 above, where I pass a relatively small approxLimit:
+
+    ckptMgr->getItemsForPersistence(items, flusherApproxLimit * 3);
+
+Note that the values above make the RemoverTask to remove (and release) 10k checkpoints at each run, which is aligned with the real scenario that I want to reproduce. From local measurements, freeing memory for 10k checkpoints costs ~20ms.
+I'll try to run the same bench with less closed-unref-checkpoints (1k, 2k, 4k, 8k) and see if I get relevant regression/post-regression measurements.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-09-13 09:12:47.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:347, engines/ep/benchmarks/vbucket_bench.cc -> Another thought - can you not restructure this so the benchmark loop is simply calls to queueDirty (with the BG threads all running in the background already)? that would give GoogleBenchmark a much higher iteration count (and much smaller work)...
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2018-09-13 10:30:29.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:347, engines/ep/benchmarks/vbucket_bench.cc -> In the first draft of this bench I had the pre-fill step and forking BG threads /before/ the benchmark loop. 
+The main problem is the pre-fill step: given that I cannot forecast the number of iterations that will be run, I cannot forecast the number of checkpoints for the pre-fill step. That's why I moved the pre-fill step into the bench-loop (as I know /exactly/ how each iteration behaves).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-09-13 10:34:55.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:347, engines/ep/benchmarks/vbucket_bench.cc -> Sure, but why to you need to pre-fill? Much like a full-stack test, the checkpoints will be created by the queueDirty...
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2018-09-13 13:10:07.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:347, engines/ep/benchmarks/vbucket_bench.cc -> I need to pre-fill because reproducing a scenario where we accumulate many closed-unref-checkpoints is not trivial as I initially thought. 
+The FrontEnd thread (doing queueDirty), Flusher and CkptRemover run concurrently and interleave in a Round-Robin manner, so checkpoints are removed as soon as they are created.
+Even if I put a sleep in the CkptRemover execution (so that we accumulate checkpoints) there will be just few slow runs of the FrontEnd thread; not enough for catching the regression scenario.
+Note that in the real scenario we have:
+1) many vbuckets
+2) many FrontEnd threads, and each thread manages many frontend connections
+3) in turn, the checkpointList of each vbucket grows. Most times it affects only some vbuckets, and the result is that we have a "minor" throughput regression (~10%). Other times (unlucky case) many vbuckets "collapse" all together; in this case we have a major regression (~50%).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-09-13 13:12:25.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:347, engines/ep/benchmarks/vbucket_bench.cc -> Ok, so I think you've answered your own question then - just run with multiple front-end threads in the benchmark :)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2018-09-13 15:50:11.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:347, engines/ep/benchmarks/vbucket_bench.cc -> Mmm the problem is: 
+
+1) how many FrontEnd thread do I have to fork to get what I aim to (thousands) ?
+
+2) even if that s feasible, all FrontEnd executions will be fast apart from a few slow executions (when the CheckpointRemover finally runs) which will be irrelevant in the final measurements
+
+I've already tried that approach days ago, with poor results. I'll check again though.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-09-13 16:15:13.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:347, engines/ep/benchmarks/vbucket_bench.cc -> I'd just say a few (representative of the number of workers we normally have - e.g. 8 or so).
+
+Ultimately I don't mind /too/ much how you implement this, but we need something which can run in the order of seconds.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2018-09-17 12:34:15.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:347, engines/ep/benchmarks/vbucket_bench.cc -> PatchSet 4 contains a new version of this bench where we can control both Iterations and Repetitions and we successfully:
+- catch the regression scenario
+- limit the bench runtime (~ 15 secs currently)
+- limit the Standard Deviation of the test (very important to consider the bench "stable")
+
+Note that I can adjust params if the bench runtime is still too high.
+
+----------------------------------------------------------------------------------------------------------------------

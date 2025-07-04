@@ -1,0 +1,346 @@
+======================================================================================================================
+DESCRIPTION:
+
+Suppress "Stale file handle" exception when reading loose objects
+
+When reading loose objects over NFS it is possible that the OS syscall
+would fail with ESTALE errors: This happens when the open file
+descriptor no longer refer to a valid file.
+
+Notoriously it is possible to hit this scenario when git data is shared
+among multiple clients, for example by multiple gerrit instances in HA.
+
+If one of the two clients performs a GC operation that would cause the
+packing and then the pruning of loose objects, the other client might
+still hold a reference to those objects, which would cause an exception
+to bubble up the stack.
+
+Explicitly suppress 'Stale file handle' exception, similarly to what is
+done with a FileNotFoundException and return null instead so that the
+object search can continue to PackFiles and alternates.
+
+Bug: 573791
+Change-Id: I9950002f772bbd8afeb9c6108391923be9d0ef51
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Antonio Barone
+Date: 2021-06-04 15:15:17.000000000
+Message: 
+Uploaded patch set 6.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2021-06-04 15:15:27.000000000
+Message: 
+Patch Set 6:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/4951/
+----------------------------------------------------------------------------------------------------------------------
+Author: Antonio Barone
+Date: 2021-06-04 15:15:51.000000000
+Message: 
+Patch Set 6:
+
+(2 comments)
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2021-06-04 15:44:44.000000000
+Message: 
+Patch Set 6: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/4951/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2021-06-04 16:20:08.000000000
+Message: 
+Patch Set 6:
+
+I tried building gerrit stable-3.2 against this version but the bazel build fails with
+ERROR: /Users/d029788/.cache/bazel/7bad2a2008c0528ccb0e391a73771531/external/jgit/org.eclipse.jgit/BUILD:28:8: Executing genrule @jgit//org.eclipse.jgit:jgit failed: (Exit 1): bash failed: error executing command /bin/bash -c ... (remaining 1 argument(s) skipped)
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2021-06-04 20:54:35.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+Line:485, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/ObjectDirectory.java -> remove id from unpackedObjectCache before throwing e in case it's cached when we catch the exception ?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2021-06-04 21:05:59.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+Line:485, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/ObjectDirectory.java -> Should that be done also before L481?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Antonio Barone
+Date: 2021-06-07 07:39:17.000000000
+Message: 
+Patch Set 6:
+
+> Patch Set 6:
+> 
+> I tried building gerrit stable-3.2 against this version but the bazel build fails with
+> ERROR: /Users/d029788/.cache/bazel/7bad2a2008c0528ccb0e391a73771531/external/jgit/org.eclipse.jgit/BUILD:28:8: Executing genrule @jgit//org.eclipse.jgit:jgit failed: (Exit 1): bash failed: error executing command /bin/bash -c ... (remaining 1 argument(s) skipped)
+
+Gerrit stable-3.2 does not compile even with the current origin/stable-5.9.
+I ran a bisect and it seems this is the first bad commit [1].
+
+[1]https://git.eclipse.org/r/c/jgit/jgit/+/165268
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2021-06-07 07:46:38.000000000
+Message: 
+Patch Set 6:
+
+@David: could you have a look ?
+----------------------------------------------------------------------------------------------------------------------
+Author: Antonio Barone
+Date: 2021-06-07 07:53:03.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+Line:485, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/ObjectDirectory.java -> @Matthias: Looking at the FileNotFoundException behaviour, we remove the id from the cache only when suppressing the exception (i.e we do not update `unpackedObjectCache` when throwing `nofile`).
+
+I thought to keep the "stale file handle" behaviour consistent, that's why I moved the
+
+```
+unpackedObjectCache.remove(id);
+```
+
+At L489, so that it would be called *only* when we *don't* re-throw the exception.
+
+I agree with you though, I was thinking that the cache should be updated regardless, since the loose object just does not exist anymore (or it's not accessible, at least).
+
+Perhaps a follow up change to address boh "file not found" and "stale file handle" exceptions?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: David Ostrovsky
+Date: 2021-06-07 11:03:25.000000000
+Message: 
+Patch Set 6:
+
+> Patch Set 6:
+> 
+> @David: could you have a look ?
+
+Sure, adding some verbose debug build output:
+
+  $ bazel build --verbose_failure -s @jgit//org.eclipse.jgit:jgit
+
+it's easy to see the culprit:
+
+  GEN_VERSION=$(cat bazel-out/stable-status.txt | grep -w STABLE_BUILD_JGIT_LABEL | cut -d '\'' '\'' -f 2)
+
+is failing because:
+
+  bazel-out/stable-status.txt
+
+doesn't include STABLE_BUILD_JGIT_LABEL.
+
+That's because the change that added it: [1], wasn't included on stable-3.2 branch, but was only added started from stable-3.3 branch (see included in on that change):
+
+  Tags:
+  v3.3.0 v3.3.0-rc0 v3.3.0-rc1 v3.3.0-rc2 v3.3.0-rc3
+  v3.3.0-rc4 v3.3.0-rc5 v3.3.0-rc6 v3.3.0-rc7 v3.3.1
+  [...]
+
+[1] https://gerrit-review.googlesource.com/c/gerrit/+/272505
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2021-06-07 23:27:41.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+Line:485, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/ObjectDirectory.java -> I believe that removing it from the cache and considering it as non-existent could be dangerous for transient failures though. @Matthias WDYT?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Antonio Barone
+Date: 2021-06-08 11:30:26.000000000
+Message: 
+Patch Set 6:
+
+> Patch Set 6:
+> 
+> > Patch Set 6:
+> > 
+> > @David: could you have a look ?
+> 
+> Sure, adding some verbose debug build output:
+> 
+>   $ bazel build --verbose_failure -s @jgit//org.eclipse.jgit:jgit
+> 
+> it's easy to see the culprit:
+> 
+>   GEN_VERSION=$(cat bazel-out/stable-status.txt | grep -w STABLE_BUILD_JGIT_LABEL | cut -d '\'' '\'' -f 2)
+> 
+> is failing because:
+> 
+>   bazel-out/stable-status.txt
+> 
+> doesn't include STABLE_BUILD_JGIT_LABEL.
+> 
+> That's because the change that added it: [1], wasn't included on stable-3.2 branch, but was only added started from stable-3.3 branch (see included in on that change):
+> 
+>   Tags:
+>   v3.3.0 v3.3.0-rc0 v3.3.0-rc1 v3.3.0-rc2 v3.3.0-rc3
+>   v3.3.0-rc4 v3.3.0-rc5 v3.3.0-rc6 v3.3.0-rc7 v3.3.1
+>   [...]
+> 
+> [1] https://gerrit-review.googlesource.com/c/gerrit/+/272505
+
+@Davido, I cherrypicked that change into 3.2 and pointed jgit to the latest stable-5.9.
+Could you have a look[1]?
+
+[1]https://gerrit-review.googlesource.com/c/gerrit/+/308801
+----------------------------------------------------------------------------------------------------------------------
+Author: Antonio Barone
+Date: 2021-06-10 06:53:54.000000000
+Message: 
+Patch Set 6:
+
+@Matthias, @David, @Luca, anymore feedback on this?
+----------------------------------------------------------------------------------------------------------------------
+Author: Antonio Barone
+Date: 2021-06-11 06:53:36.000000000
+Message: 
+Patch Set 6:
+
+> Patch Set 6:
+> 
+> @Matthias, @David, @Luca, anymore feedback on this?
+
+@Matthias, this chain [1] has been merged so that now gerrit stable-3.2 works with the latest jgit 5.9.
+
+Anything else I can do to get this ticket moving forward?
+----------------------------------------------------------------------------------------------------------------------
+Author: Antonio Barone
+Date: 2021-06-16 07:23:01.000000000
+Message: 
+Patch Set 6:
+
+This change has been latent for a while now, anything else I can do for it to move forward?
+@Matthias?
+----------------------------------------------------------------------------------------------------------------------
+Author: Antonio Barone
+Date: 2021-06-18 06:02:35.000000000
+Message: 
+Patch Set 6:
+
+> Patch Set 6:
+> 
+> This change has been latent for a while now, anything else I can do for it to move forward?
+> @Matthias?
+
+@luca, @David, @Matthias, Can any of you help please?
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2021-06-18 23:37:08.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+
+SGTM, but I don't have +2 powers here :-(
+
+Adding Thomas Wolf, as possibly Matthias is off.
+Line:206, org.eclipse.jgit.test/tst/org/eclipse/jgit/internal/storage/file/ObjectDirectoryTest.java -> import static Mockito.mock
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2021-06-21 21:49:35.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+Line:487, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/ObjectDirectory.java -> A.10 in the Linux NFS FAQ [1] says:
+
+"Thus in general, to recover from an ESTALE error, an application must close the file or directory where the error occurred, and reopen it so the NFS client can resolve the pathname again and retrieve the new file handle."
+
+Hence shouldn't we follow this recommendation and retry getObjectLoader()?
+Similar to how RefDirectory.readPackedRefs() retries if the file handle to packed-refs turns out to be stale when trying to read the packed-refs file.
+If the file was deleted by another NFS client retrying to read the loose object file should fail with FileNotFoundException and openLooseObject() would handle this in line 479 and not throw an exception but try to find the object in a pack or alternate.
+
+[1] http://nfs.sourceforge.net/
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Antonio Barone
+Date: 2021-06-22 09:19:01.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+Line:487, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/ObjectDirectory.java -> > A.10 in the Linux NFS FAQ [1] says:
+> 
+> "Thus in general, to recover from an ESTALE error, an application must close the file or directory where the error occurred, and reopen it so the NFS client can resolve the pathname again and retrieve the new file handle."
+
+Interesting, thanks for sharing.
+
+> 
+> Hence shouldn't we follow this recommendation and retry getObjectLoader()?
+> Similar to how RefDirectory.readPackedRefs() retries if the file handle to packed-refs turns out to be stale when trying to read the packed-refs file.
+> If the file was deleted by another NFS client retrying to read the loose object file should fail with FileNotFoundException and openLooseObject() would handle this in line 479 and not throw an exception but try to find the object in a pack or alternate.
+
+I am trying to understand what would be the benefit of retrying to read the loose object.
+Can the second loose object read attempt be ever successful rather than raising a FileNotFoundException?
+
+If not, then suppressing the stale exception and retrying to read the loose object would both end up triggering a search in the pack or alternate anyway.
+
+WDYT?
+
+> 
+> [1] http://nfs.sourceforge.net/
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2021-06-22 21:42:59.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+Line:487, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/ObjectDirectory.java -> I would implement the recommendation of the NFS FAQ since I am not sure I am aware of all possible use cases where this could play a role. JGit has > 1mio downloads from Maven central per month, this means there might be many use cases we are not aware of.
+
+If there is a use case where rereading a stale file handle succeeds we are on the safe side. We could add corresponding trace messages to find out if and how frequently such rereads succeed. Maybe we should also add a corresponding metric.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Antonio Barone
+Date: 2021-06-24 10:22:23.000000000
+MISMATCHED INLINE COMMENT
+Line:206, org.eclipse.jgit.test/tst/org/eclipse/jgit/internal/storage/file/ObjectDirectoryTest.java -> ok, *really* Done now 😊
+----------------------------------------------------------------------------------------------------------------------
+Author: Antonio Barone
+Date: 2021-06-23 20:13:28.000000000
+MISMATCHED INLINE COMMENT
+Line:206, org.eclipse.jgit.test/tst/org/eclipse/jgit/internal/storage/file/ObjectDirectoryTest.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2021-06-24 06:20:34.000000000
+MISMATCHED INLINE COMMENT
+Line:206, org.eclipse.jgit.test/tst/org/eclipse/jgit/internal/storage/file/ObjectDirectoryTest.java -> looks like you missed to push this
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2021-06-23 18:34:57.000000000
+MISMATCHED INLINE COMMENT
+Line:487, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/ObjectDirectory.java -> The only use-case where a re-read of a stale file handle for a loose object is if the filesystem was remounted.
+----------------------------------------------------------------------------------------------------------------------
+Author: Antonio Barone
+Date: 2021-06-23 07:30:22.000000000
+MISMATCHED INLINE COMMENT
+Line:487, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/ObjectDirectory.java -> Thanks Matthias.
+I have implemented the recommendation now.
+
+I am going to verify again on an environment with NFS that this fixes the issue.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2021-06-24 06:20:34.000000000
+MISMATCHED INLINE COMMENT
+Line:487, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/ObjectDirectory.java -> I think another thread or process may have re-inserted the same loose object concurrently to gc pruning it
+----------------------------------------------------------------------------------------------------------------------

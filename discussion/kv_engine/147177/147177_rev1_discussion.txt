@@ -1,0 +1,114 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-44585: Remove HDRHistogram bias
+
+HDRHistograms currently add 1 to all added values, and subtract 1 from
+all read values.
+
+This was done based on the understanding that HDRHistograms cannot
+store the value 0, so all values were mapped up by 1 to allow for
+storing 0.
+
+This appears to stem from:
+
+ int hdr_init_ex(int64_t lowest_trackable_value,
+                 int64_t highest_trackable_value,
+                 ...);
+
+Which takes a lowest trackable value argument. If this is set to 0, the
+call will later fail in
+
+ int hdr_calculate_bucket_config(...) {
+ ...
+     if (lowest_trackable_value < 1 ||
+             significant_figures < 1 || 5 < significant_figures)
+     {
+         return EINVAL;
+     }
+ ...
+ }
+
+However, this variable name is misleading. Based on its usage and the
+Java HDRHistogram [1] comments, it would be better named
+`lowestDiscernibleValue`. It is the lowest _non-zero_ trackable value,
+and represents the finest granularity required from the histogram.
+
+Java comment:
+   /**
+     * Construct a histogram given the Lowest and Highest values to be tracked and a number of significant
+     * decimal digits. Providing a lowestDiscernibleValue is useful is situations where the units used
+     * for the histogram's values are much smaller that the minimal accuracy required. E.g. when tracking
+     * time values stated in nanosecond units, where the minimal accuracy required is a microsecond, the
+     * proper value for lowestDiscernibleValue would be 1000.
+     *
+     * @param lowestDiscernibleValue The lowest value that can be discerned (distinguished from 0) by the histogram.
+     *                               Must be a positive integer that is {@literal >=} 1. May be internally rounded
+     *                               down to nearest power of 2.
+     * @param highestTrackableValue The highest value to be tracked by the histogram. Must be a positive
+     *                              integer that is {@literal >=} (2 * lowestDiscernibleValue).
+     * @param numberOfSignificantValueDigits The number of significant decimal digits to which the histogram will
+     *                                       maintain value resolution and separation. Must be a non-negative
+     *                                       integer between 0 and 5.
+     */
+
+While this biasing does not generally affect correctness, it leads to
+unexpected 0 upper bound buckets when using iterators other than
+percentile.
+
+This patch removes the biasing.
+
+Change-Id: Ica5fed32bbddded59f8e0e0a2190e879eefd9cbe
+
+---
+
+[1]: https://github.com/HdrHistogram/HdrHistogram/blob/377de7da9b08c4f6cf159b3157f4a0e0492b9c39/src/main/java/org/HdrHistogram/AbstractHistogram.java
+
+Change-Id: I062d866d43cd030de110f8edb14a076967445027
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: James H
+Date: 2021-02-26 10:00:03.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2021-02-26 10:23:58.000000000
+Message: 
+Patch Set 1: Code-Review-1
+
+(3 comments)
+Line:60, utilities/hdrhistogram.cc -> nit:might be worth renaming to newDisMin?
+
+Line:125, utilities/hdrhistogram.cc -> Don't think you need this once we've removed the bias
+
+Line:313, utilities/hdrhistogram.cc -> Probably being stupid but what's the logic for * 2?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2021-02-26 11:15:42.000000000
+Message: 
+Patch Set 1:
+
+(3 comments)
+Line:60, utilities/hdrhistogram.cc -> Done
+
+Line:125, utilities/hdrhistogram.cc -> Done
+
+Line:313, utilities/hdrhistogram.cc -> No it's a good question - as expected the comments where it is checked in the C code are less than illuminating!
+
+I've expanded the comments with my interpretation of why this check is done. Doing it _here_ is just repeating checks done in the C code so we can give better exceptions than just EINVAL.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2021-02-26 11:18:16.000000000
+MISMATCHED INLINE COMMENT
+Line:56, utilities/hdrhistogram.cc -> Refactoring the constructor seems a little orthogonal to removing the bias change. Given the patch is quite large already it might be worth splitting it out into a second patch?
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2021-02-26 11:36:27.000000000
+MISMATCHED INLINE COMMENT
+Line:56, utilities/hdrhistogram.cc -> Agreed - Done!
+----------------------------------------------------------------------------------------------------------------------

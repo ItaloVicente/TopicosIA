@@ -1,0 +1,109 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-34780: Clear the pending sync writes during bucket shutdown
+
+During bucket deletion all of the pending sync writes needs
+to be terminated for bucket deletion to complete. As part
+of bucket deletion we tear down all of the DCP streams so
+there is no way for the ack/nack's from the replicas to
+arrive and unblock the cookie and continue bucket deletion.
+
+Change-Id: I1f2801c69cb1ee35cd0cfa4622d7ab5dc847f1e4
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Trond Norbye
+Date: 2019-07-05 05:48:51.000000000
+Message: 
+Uploaded patch set 9.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-07-05 07:19:19.000000000
+Message: 
+Patch Set 9: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/19520/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/11900/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/18583/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/12657/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/21703/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/20866/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/2531/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/5450/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2019-07-05 11:35:41.000000000
+Message: 
+Patch Set 9: Code-Review+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-07-08 08:37:27.000000000
+Message: 
+Patch Set 9: Code-Review-1
+
+(6 comments)
+Line:979, engines/ep/src/durability/active_durability_monitor.cc -> Given we are now changing state in this function can you update the method comment in the header to mention this? (I assume this is done to avoid double-notifying?)
+
+Line:5820, engines/ep/src/ep_engine.cc -> As per comment in next file, probably more correct to hoist this up before setting `trafficEnabled`, and re-phasing to "Disabling traffic..." or similar.
+
+Line:682, engines/ep/src/kv_bucket.cc -> Could you remove the similar code in ep_engine.cc: storeIfInner() - given we now need to acquire (in shared mode) the vbstate lock before reading `trafficEnabled` the use in storeIfInner() is incorrect (and redundant given we have this call here).
+
+Line:884, engines/ep/src/kv_bucket.cc -> I think this should actually be associated with the change to enableTraffic - it's *that* flag we want to make sure has been changed without any other threads trying to read it.
+
+Line:1649, engines/ep/src/kv_bucket.cc -> Similar comment as per EventuallyPersistentEngine::setWithMeta
+
+Line:1962, engines/ep/src/kv_bucket.cc -> Hmm, so this might require some more thought. 
+
+The current trafficEnabled flag is a little odd - it _does_ allow some operations to occur even when false, if the underlying eviction mode allows it. For example, delete is permitted _even_ when trafficEnabled=false in full-eviction mode.
+
+As such, flipping trafficEnabled back to false during shutdown wouldn't necessarily block everything.
+
+Jim has been looking at this recently, might want to discuss with him.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2019-07-09 11:13:21.000000000
+MISMATCHED INLINE COMMENT
+Line:979, engines/ep/src/durability/active_durability_monitor.cc -> Done (and yes, that's the motivation)
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2019-07-09 11:13:21.000000000
+MISMATCHED INLINE COMMENT
+Line:5820, engines/ep/src/ep_engine.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2019-07-09 11:13:21.000000000
+MISMATCHED INLINE COMMENT
+Line:682, engines/ep/src/kv_bucket.cc -> That won't work as we'll start reporting NOT_MY_VBUCKET instead of tmpfail (or we could update all of these checks to start by checking if we're in degradedMode and then return tmpfail...)
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2019-07-09 11:13:21.000000000
+MISMATCHED INLINE COMMENT
+Line:884, engines/ep/src/kv_bucket.cc -> The "problem" is that enableTraffic is a single atomic variable protecting the "entire bucket", whereas the state lock is on a per vbucket base. In this case I just need to make sure that after I've fetched the cookies list for this vbucket there won't be anyone else adding stuff to it.
+
+I could of course do stuff like:
+
+    {folly::SharedMutex::WriteHolder rlh(vb->getStateLock());
+    engine.enableTraffic.store(false);}
+
+    folly::SharedMutex::ReadHolder rlh(vb->getStateLock());
+    if (vb->getState() .....
+
+to get a "barrier", but this is during bucket shutdown so I don't think holding the write lock to the state lock while we're scheduling the notification task is that bad..
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2019-07-09 11:13:21.000000000
+MISMATCHED INLINE COMMENT
+Line:1649, engines/ep/src/kv_bucket.cc -> ditto...
+----------------------------------------------------------------------------------------------------------------------

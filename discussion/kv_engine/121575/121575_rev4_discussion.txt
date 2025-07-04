@@ -1,0 +1,114 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-37748: Shared locking for bucket Collection::Manifest
+
+Primary change was to change the Collection::Manger mutex to be
+a shared lock so that concurrent readers don't have to serialise
+around a read.
+
+As part of that change is the removal of the "no-manifest" state,
+the Manager will always construct a Manifest, and this Manifest
+is in the initial collection state, that is:
+
+    uid:0
+    scopes:[_default] (1 scope)
+    collections[_default] (1 collection)
+
+The update code is also adjusted so that it doesn't hold exclusive
+access on the current state whilst it is validating/applying the new
+state, however the update function itself is exclusive.
+
+The update also remains "paranoid", rather than accepting the manifest
+blindly, we still apply some checks, e.g. uid is increasing and now
+we expect that a uid:0 manifest as input, matches our current state.
+
+Change-Id: I00013df2195d01a980625b85b1fb0b397f549735
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jim Walker
+Date: 2020-02-04 12:08:57.000000000
+Message: 
+Uploaded patch set 4: Patch Set 3 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-02-04 13:30:16.000000000
+Message: 
+Patch Set 4: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/9389/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/1496/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/1573/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/1460/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/661/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/25887/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/22077/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/15205/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/24133/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-02-06 17:24:23.000000000
+Message: 
+Patch Set 4: Code-Review-1
+
+(3 comments)
+Line:9, /COMMIT_MSG -> nit?
+
+Line:41, engines/ep/src/collections/manager.cc -> Is the mutex necessary? IIRC upgrade locks permit other read locks, but are exclusive of _other_ ulocks (or wlocks) on the same mutex i.e., only one ulock or wlock at a time.
+
+Line:92, engines/ep/src/collections/manager.cc -> Is it worth a comment that after this line the Synchronized lock is released? When reading it might be easy to skim past this and think that `current` is still holding a ulock until it goes out of scope, but really it was invalidated here, and then the write lock was dropped when this temporary dies.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2020-02-07 10:06:30.000000000
+Message: 
+Patch Set 4:
+
+(2 comments)
+Line:41, engines/ep/src/collections/manager.cc -> , i'll recheck the docs, it wasn't super clear, the bit I read said ulock is shared
+
+Line:92, engines/ep/src/collections/manager.cc -> No harm in extra comments
+
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-02-07 10:26:35.000000000
+Message: 
+Patch Set 4:
+
+(2 comments)
+Line:41, engines/ep/src/collections/manager.cc -> If it is helpful, I was thinking of the section from https://github.com/facebook/folly/blob/master/folly/docs/Synchronized.md
+
+> An upgrade lock may be held concurrently with any number of shared locks on the same mutex. An upgrade lock is exclusive with other upgrade locks and unique locks on the same mutex - only one upgrade lock or unique lock may be held at a time.
+
+:)
+
+Line:495, engines/ep/src/collections/manifest.cc -> OOI, is `unordered_map::operator==` unsuitable for this? Or is it avoided for e.g., performance? If that's the case, worth a comment?
+
+Alternatively, would
+
+ {std,boost}::all_of(...)
+
+be clearer to follow? (though, on the other hand that might just as easily turn out less readable, never mind)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2020-02-07 11:17:21.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:495, engines/ep/src/collections/manifest.cc -> I had been duped by misreading the cppref which says the operator is to be deprecated, only != is being deprecated - changed
+
+----------------------------------------------------------------------------------------------------------------------

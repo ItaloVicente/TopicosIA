@@ -1,0 +1,95 @@
+======================================================================================================================
+DESCRIPTION:
+
+Simplify KVStore persistence callbacks
+
+Simplify KVStore persistence callback handling for set & del
+operations. The main motifcation here is to simplify the ownership
+model, so once ep-engine calls KVStore::set() or del(), it doesn't
+have to handle the ownership of the created callback object. Instead
+the underlying store owns the callback object, and can delete it once
+it's finished calling it back.
+
+Specifically, for Sync Replication we need to flush an additional
+delete() operation when a CommittedSyncWrite is encountered, to remove
+any prevous prepared SyncWrite. The current design makes this hard as
+we need to insert an extra del into the persistenceCallbacks
+container.
+
+Main changes:
+
+1. Modify the types of the IORequest callbacks, from
+   raw-pointers-to-Callback-objects to std::function. This allows the
+   IORequest to take ownership of the callbacks, but still allows
+   different types of callbacks to be held (useful for the unit tests
+   which use different types).
+
+2. Use boost::variant instead of a raw union for holding the set &
+   delete callback. This mostly removes boilerplate and ensures safety
+   (the correct callback type is always accessed).
+
+3. The first two changes remove the need for having a separeate
+   persistence callback deque owned by KVStore, and which ep-engine
+   must manually populate and clear when necessary.
+
+This currently results in a ~10% _increase_ in directly-measured
+per-item memory - in the old structure we needed per queued item:
+
+    KVStore:PersistenceCallbacks
+    - 1x ptr + 1x PersistenceCallback per item :   8 B + 32 B  = 40 B
+    CouchRequest: 1x object per item                            208 B
+                                                                248 Bytes
+
+In the new structure we have removed KVStore::PersistenceCallbacks, but
+IORequest (base class for CouchRequest) has increaed due to use of
+std::function and boost::variant (various paddding / internal buffers):
+
+    <<KVStore::PersistenceCallbacks removed>>
+    CouchRequest:                                               272 B
+
+However, this doesn't include the per-allocation overhead (we now
+allocate 1 item instead of 3, and further simplificaiton should be now
+possible, so this seems like a sensible trade-off.
+
+Change-Id: Iddb1af78248e32361c6a090730ef4b7ad08b1e58
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2019-03-19 20:09:23.000000000
+Message: 
+Patch Set 4: Patch Set 3 was rebased
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-03-19 21:13:43.000000000
+Message: 
+Patch Set 4: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/9710/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/9257/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/16492/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/17875/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/18554/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/15897/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/2441/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Daniel Owen
+Date: 2019-03-20 12:00:16.000000000
+Message: 
+Patch Set 4: Code-Review+2
+
+(2 comments)
+Line:34, /COMMIT_MSG -> separate
+
+Line:54, /COMMIT_MSG -> simplification
+
+----------------------------------------------------------------------------------------------------------------------

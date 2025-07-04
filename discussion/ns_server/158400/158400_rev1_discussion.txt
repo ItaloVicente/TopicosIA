@@ -1,0 +1,237 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-35881 Limit DCP connection names to 200 chars max
+
+The DCP connection name consists of two node names, the name of the
+bucket, and a bit of overhead. If the generated name is longer than 200
+chars then we trim the node names from the right one char at a time
+(but always keeping at least one char). The name of a bucket is 100
+chars at most and is left alone.
+
+Change-Id: I59cf0f58cfb539022d2b9ffa682cd635ff6a98f9
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Steve Watanabe
+Date: 2021-07-28 23:06:08.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-07-28 23:06:16.000000000
+Message: 
+Patch Set 1:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-test/24666/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-07-28 23:10:35.000000000
+Message: 
+Patch Set 1: Well-Formed+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/ns-server-test/24666/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-07-28 23:12:06.000000000
+Message: 
+Patch Set 1:
+
+make simple-test
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-07-28 23:12:16.000000000
+Message: 
+Patch Set 1:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-simple-test/2577/
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2021-07-28 23:33:51.000000000
+Message: 
+Patch Set 1:
+
+(3 comments)
+Line:220, src/dcp_replicator.erl -> Do we use the connection name as id for retrieval or differentiating between 2 connections anywhere? Trimming might cause duplicates.
+
+Line:221, src/dcp_replicator.erl -> You do a lot of atom_to_list and list_to_atom conversion if length of connection name is above 200. 
+Why not just have another function that accepts string for consumer and producer nodes?
+
+Line:232, src/dcp_replicator.erl -> Why don't you have char limit for node names? This would prevent unnecessary recursion.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-07-28 23:41:03.000000000
+Message: 
+Patch Set 1:
+
+(3 comments)
+Line:220, src/dcp_replicator.erl -> Yeah, in the ticket the memcached folks were asked about uniqueness. But it's quite likely that it must be unique. Perhaps incorporating a hash into the name would solve this.
+
+Line:221, src/dcp_replicator.erl -> I'll look at doing that.
+
+Line:232, src/dcp_replicator.erl -> I'm trying to keep as much of the original node name as possible by just trimming one char at a time. Having a fixed limit might truncate the names unnecessarily.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-07-28 23:53:08.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/ns-server-simple-test/2577/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Finlay
+Date: 2021-07-29 01:27:51.000000000
+Message: 
+Patch Set 1:
+
+We need to worry about uniqueness of connection names. I'm pretty sure in KV that if you create a connection with the same name as an existing connection, the existing connection gets disconnected. I asked this question on the ticket, but I also checked the code and I see this: https://github.com/couchbase/kv_engine/blob/ac40000a482cac374c7130feabaa6a46b6a5bca6/engines/ep/src/dcp/dcpconnmap.cc#L170. 
+
+Separately, when debugging we need to know which connection is which. 
+
+If we can use the full node names and full bucket names then the name must be unique - so far so good.
+
+If not, we run the risk of non uniqueness, so we need to generate some sort of unique identifier to add on to the node name to unique-ify. I'm thinking a 128 bit UUID, which is a 32 bit hex string. Maybe overkill but will definitely work.
+
+I would only take the first 30 characters of the bucket name.
+
+To reduce the size of node names and still maximize the probability of getting a unique identifier, I might do something like this:
+* find the longest common prefix of all the node names - remove it (there are pretty efficient algorithms for this)
+* take the first 30 characters of what's left
+
+Note: of course the first 30 characters of the non-common bit is not guaranteed to be unique going forward as new nodes get added to the cluster.
+
+Take what's left and use it as your node name. Of course you still need the unique identifier. You end up with the following:
+* "replication:"
+* first 30 chars of producer node name that's not shared
+* "->"
+* first 30 chars of consumer node name 
+* ":"
+* unique identifier 
+* ":"
+* first 30 chars of bucket name.
+
+Which will happily fit in 200 characters. 
+
+Also at cbcollect time, we need to collect the "DCP connection name mapping" which will map the name of every connection to the full node and bucket names so that when we're looking at logs we can unambiguously know what a connection name actually maps to.
+----------------------------------------------------------------------------------------------------------------------
+Author: Meni Hillel
+Date: 2021-07-29 02:06:49.000000000
+Message: 
+Patch Set 1:
+
+> Patch Set 1:
+> 
+> We need to worry about uniqueness of connection names. I'm pretty sure in KV that if you create a connection with the same name as an existing connection, the existing connection gets disconnected. I asked this question on the ticket, but I also checked the code and I see this: https://github.com/couchbase/kv_engine/blob/ac40000a482cac374c7130feabaa6a46b6a5bca6/engines/ep/src/dcp/dcpconnmap.cc#L170. 
+> 
+> Separately, when debugging we need to know which connection is which. 
+> 
+> If we can use the full node names and full bucket names then the name must be unique - so far so good.
+> 
+> If not, we run the risk of non uniqueness, so we need to generate some sort of unique identifier to add on to the node name to unique-ify. I'm thinking a 128 bit UUID, which is a 32 bit hex string. Maybe overkill but will definitely work.
+> 
+> I would only take the first 30 characters of the bucket name.
+> 
+> To reduce the size of node names and still maximize the probability of getting a unique identifier, I might do something like this:
+> * find the longest common prefix of all the node names - remove it (there are pretty efficient algorithms for this)
+> * take the first 30 characters of what's left
+> 
+> Note: of course the first 30 characters of the non-common bit is not guaranteed to be unique going forward as new nodes get added to the cluster.
+> 
+> Take what's left and use it as your node name. Of course you still need the unique identifier. You end up with the following:
+> * "replication:"
+> * first 30 chars of producer node name that's not shared
+> * "->"
+> * first 30 chars of consumer node name 
+> * ":"
+> * unique identifier 
+> * ":"
+> * first 30 chars of bucket name.
+> 
+> Which will happily fit in 200 characters. 
+> 
+> Also at cbcollect time, we need to collect the "DCP connection name mapping" which will map the name of every connection to the full node and bucket names so that when we're looking at logs we can unambiguously know what a connection name actually maps to.
+
+I agree. Uniqueness is probably a must. I think we can do away with using just the host name, without the domain name should be sufficient. If it is not enough (bucket names can still be long), we can append bucket UUID, with as much as bucken name prefix. Another idea is to just maybe use the node's IP...?
+
+I also think we need to explore memcached to extend the size to 512, as we are finding out that the name needs to be human readable, and the node/bucket components can certainly be sizable.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-07-29 12:20:47.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+
+> Patch Set 1:
+> 
+> (3 comments)
+Line:232, src/dcp_replicator.erl -> As suggested on the main MB, if the limit is exceeded then I think replacing the hostname with the resolved IP address will generate something which is unique, and also more meaningful than a random hash (and also avoids having to ensure there's no collisions when hashing).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-07-29 12:22:59.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:232, src/dcp_replicator.erl -> (That also significantly simplifies this - logic is simply:
+
+* From string in old method (nice and human-readible)
+* If too long, form using IP address instead (which _must_ be unique within the cluster, or there's bigger issues...)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-08-02 16:48:14.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+
+> Patch Set 1:
+> 
+> We need to worry about uniqueness of connection names. I'm pretty sure in KV that if you create a connection with the same name as an existing connection, the existing connection gets disconnected. I asked this question on the ticket, but I also checked the code and I see this: https://github.com/couchbase/kv_engine/blob/ac40000a482cac374c7130feabaa6a46b6a5bca6/engines/ep/src/dcp/dcpconnmap.cc#L170. 
+> 
+> Separately, when debugging we need to know which connection is which. 
+> 
+> If we can use the full node names and full bucket names then the name must be unique - so far so good.
+> 
+> If not, we run the risk of non uniqueness, so we need to generate some sort of unique identifier to add on to the node name to unique-ify. I'm thinking a 128 bit UUID, which is a 32 bit hex string. Maybe overkill but will definitely work.
+
+There is a node uuid in ns_config (node, node(), uuid) and there's also Dave R's suggestion of using the IP address...which may be better as it's more easily translated into a node name.
+
+> 
+> I would only take the first 30 characters of the bucket name.
+
+The maximum length of a bucket name is 100 chars and I'd like to leave that intact if possible.
+
+> 
+> To reduce the size of node names and still maximize the probability of getting a unique identifier, I might do something like this:
+> * find the longest common prefix of all the node names - remove it (there are pretty efficient algorithms for this)
+> * take the first 30 characters of what's left
+> 
+> Note: of course the first 30 characters of the non-common bit is not guaranteed to be unique going forward as new nodes get added to the cluster.
+> 
+> Take what's left and use it as your node name. Of course you still need the unique identifier. You end up with the following:
+> * "replication:"
+> * first 30 chars of producer node name that's not shared
+> * "->"
+> * first 30 chars of consumer node name 
+> * ":"
+> * unique identifier 
+> * ":"
+> * first 30 chars of bucket name.
+> 
+> Which will happily fit in 200 characters. 
+> 
+> Also at cbcollect time, we need to collect the "DCP connection name mapping" which will map the name of every connection to the full node and bucket names so that when we're looking at logs we can unambiguously know what a connection name actually maps to.
+
+Good suggestion. I'll need to determine the best way of doing this.
+Line:232, src/dcp_replicator.erl -> I'll take a look at this...
+
+----------------------------------------------------------------------------------------------------------------------

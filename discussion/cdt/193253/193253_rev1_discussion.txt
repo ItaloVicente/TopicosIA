@@ -1,0 +1,162 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 579877 - Slow Threads update for debugging on remote target
+
+Reason:
+=======
+The problem is that we use '-thread-info' command for each thread and
+for each command, a lot of common conversation happen between gdb and
+gdbserver for each command.
+
+Solution:
+=========
+We should use '-list-thread-groups <group id>' instead which provides
+the same required information for all the threads and minimizes the
+communication between gdb and gdbserver. This command takes lesser time
+than the collective time taken by all '-thread-info' commands.
+
+Tested with 2 and 8 threaded application using gdb 7.1 and 11. The gain
+is more prominent as the number of threads increases.
+
+Signed-off-by: Umair Sair <umair_sair@hotmail.com>
+
+Change-Id: Ie4824bf110f05d4136697f4e1ecbcc19dcf145a7
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Umair Sair
+Date: 2022-05-09 20:54:15.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: CDT Bot
+Date: 2022-05-09 21:44:43.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-ui-only-pipeline/3961/ : SUCCESS
+
+https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-other-pipeline/4206/ : SUCCESS. p2 repository available on https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-other-pipeline/4206/artifact/releng/org.eclipse.cdt.repo/target/repository/ - please mark build as "Keep this build forever" if the p2 repo is needed for testing. Otherwise it will be deleted shortly.
+
+https://ci.eclipse.org/cdt/job/cdt-verify-code-cleanliness-pipeline/3783/ : SUCCESS. Formatting, whitespace, version numbers and other checks appear to be correct. See https://github.com/eclipse-cdt/cdt-infra/tree/master/jenkins/pipelines/cdt/verify#cdt-verify-code-cleanliness for documentation on what is checked.
+
+https://ci.eclipse.org/cdt/job/cdt-verify-test-dsf-gdb-only-pipeline/724/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonah Graham
+Date: 2022-05-10 19:21:10.000000000
+Message: 
+Patch Set 1:
+
+(2 comments)
+File Comment: /PATCHSET_LEVEL -> Please explain something to me, AFAIU how this is working and improving performance is that it relies on fCommandForCoresCache to cache the `-list-thread-groups i1` so that the multiple calls to getExecutionData for each thread now can use the cached result of the first call?
+
+I was originally going to ask you to look at org.eclipse.cdt.dsf.gdb.service.GDBRunControl_7_0_NS.refreshThreadStates() too, but if the above is true, then there would be no advantage in the Nonstop case in changing to -list-thread-groups?
+
+This change looks good to me pending answering the various questions I have. The tests pass (on GDB 10) so that is good too.
+Line:188, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBProcesses_7_1.java -> This is just a minor thing, but I am not sure why this part of the change? The only reason I can see to change it is so that the error message is "Could not get thread info" - but that loses the error that fCommandForCoresCache.execute may have added.
+
+Note that the handleCompleted at line 159 is different as in that case even if fCommandForCoresCache.execute fails, the getExecutionData. FTR I am not sure what is done at line 159 is a good idea.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Umair Sair
+Date: 2022-05-10 20:01:10.000000000
+Message: 
+Patch Set 1:
+
+(2 comments)
+File Comment: /PATCHSET_LEVEL -> > Please explain something to me, AFAIU how this is working and improving performance is that it relies on fCommandForCoresCache to cache the `-list-thread-groups i1` so that the multiple calls to getExecutionData for each thread now can use the cached result of the first call?
+
+It is basically improving performance by reducing the communication between GDB and GDB server which are RSP packets. Kindly see bug 550257 for more details. For each thread-info command, qXfer:threads:read RSP packets are communicated which is a lot of communication, also there are many other memory reads and stuff.
+
+Now using '-list-thread-groups i1' has only one (IIRC) qXfer:threads:read packet and other memory reads and stuff, hence communication is lesser and takes lesser time than collective thread-info command*s* and provides information for all threads. Then we cache it and other threads info are provided by cache.
+
+> I was originally going to ask you to look at org.eclipse.cdt.dsf.gdb.service.GDBRunControl_7_0_NS.refreshThreadStates() too, but if the above is true, then there would be no advantage in the Nonstop case in changing to -list-thread-groups?
+
+I compared "-thread-info" (without arg) and "-list-thread-group i1" and both provide same info for particular case, but "-thread-info" has two extra infos.
+1. current-thread info
+2. in case of non-stop, it provides the threads of all inferiors.
+
+Because of 2, the usage of it in GDBRunControl_7_0_NS.refreshThreadStates() is correct.
+Line:188, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBProcesses_7_1.java -> > but that loses the error that fCommandForCoresCache.execute may have added.
+
+thats a valid point.. The purpose was to show user more useful message.. I see following options
+1. Append the actual error message as well.
+2. Log the actual error and show user "could not get thread info" message only.
+3. or simply revert to use handleSuccess..
+
+WDYS?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonah Graham
+Date: 2022-05-10 22:15:46.000000000
+Message: 
+Patch Set 1:
+
+(2 comments)
+File Comment: /PATCHSET_LEVEL -> > Then we cache it and other threads info are provided by cache.
+
+that is the key part then - fCommandForCoresCache caches the information. This patch does a good job saving lots of comms between CDT and GDB, but it still has to parse the response to -list-thread-group i1 x number of threads. 
+
+At the moment it certainly isn't worth caching at a higher level, I am just trying to make sure I understand the code being changed.
+
+We are still having to do -list-thread-group i1 twice per stopped event AFAICT because the two places they are issued from have different caches:
+- fCommandForCoresCache in GDBProcesses_7_1
+- fThreadCommandCache in GDBProcesses_7_0
+
+Is it worth combining those two caches so that -list-thread-group i1 is only sent once?
+Line:188, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBProcesses_7_1.java -> 1 is best. I think you can replace the null argument in the new status with the status in the inner class.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Umair Sair
+Date: 2022-05-10 22:32:09.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> > > Then we cache it and other threads info are provided by cache.
+> 
+> that is the key part then - fCommandForCoresCache caches the information. This patch does a good job saving lots of comms between CDT and GDB, but it still has to parse the response to -list-thread-group i1 x number of threads. 
+
+Yeah! but it takes no time IMO.
+
+> At the moment it certainly isn't worth caching at a higher level, I am just trying to make sure I understand the code being changed.
+> 
+> We are still having to do -list-thread-group i1 twice per stopped event AFAICT because the two places they are issued from have different caches:
+> - fCommandForCoresCache in GDBProcesses_7_1
+> - fThreadCommandCache in GDBProcesses_7_0
+> 
+> Is it worth combining those two caches so that -list-thread-group i1 is only sent once?
+
+Actually I initially thought to use fThreadCommandCache but its tied with "Force thread list update on suspend" option and this cache is populated just once (thats why you are seeing two commands being issued on first suspend). But if user enables this option then definitely two will be issued.
+
+I tried to dig why we added this option and whats the benefit and couldn't grasp things well. Seems the problem was something related to linux target GDB used to debug an OS (IDK why baremetal gdb was not used).
+
+Given we are always issuing -list-thread-group i1 now, does this "Force thread list update on suspend" option make sense now? isn't it redundant now? Should we remove this option and combine the two caches?
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonah Graham
+Date: 2022-05-11 00:07:10.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> > Yeah! but it takes no time IMO. 
+
+I share the opinion with you on reparsing. There are certainly other areas far ahead of that for optimization! 
+
+> [...] if user enables this option then definitely two will be issued
+
+Ah, that makes sense, I only looked at first suspend. 
+
+I don't know whether there are any real hardware/gdb combinations that really need for the option, but people still use cdt with what I consider ancient versions of gdb. So I don't think its worth changing this. As above, there is much better places to spend the limited effort available.
+
+Thanks for the patch, once you have a chance to change the error handling its ready to submit afaict.
+----------------------------------------------------------------------------------------------------------------------
+Author: Umair Sair
+Date: 2022-05-11 00:28:09.000000000
+MISMATCHED INLINE COMMENT
+Line:188, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/gdb/service/GDBProcesses_7_1.java -> updated..
+----------------------------------------------------------------------------------------------------------------------

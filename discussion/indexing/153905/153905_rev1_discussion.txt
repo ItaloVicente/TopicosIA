@@ -1,0 +1,62 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-45964: Negative values for stat raw_data_size, key_size_distribution, backstore_raw_data_size
+
+Negative stats are because the stats persisted with a snapshot are not the stats of that snapshot
+– they are just the most recent stats available, so the stats don't match the snapshot and thus can go negative.
+This happens as doPersist call is done as async call.
+Fix is to collect stas at time of snapshot and pass it to doPersist.
+
+Change-Id: Ia405bad7aa1817d826ea6cdc9d5d49e8ae4638d7
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Yogendra Acharya
+Date: 2021-05-19 11:55:14.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: VarunVelamuri
+Date: 2021-05-19 12:20:14.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:954, secondary/indexer/memdb_slice_impl.go -> I think it would be good to keep this code after line 984 i.e. if CAS on isPersistorActive succeeds. Otherwise, every in-memory snapshot would carry this stats and can have some impact on memory (although little).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2021-05-19 16:28:13.000000000
+Message: 
+Patch Set 1: Code-Review+1
+
+PASS sanity,unit,functional,integration with storage plasma. See http://ci2i-unstable.northscale.in/gsi-19.05.2021-17.41.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: Deepkaran Salooja
+Date: 2021-05-19 22:04:26.000000000
+MISMATCHED INLINE COMMENT
+Line:954, secondary/indexer/memdb_slice_impl.go -> The original code change looks fine to me as this code block gets executed if s.committed is true (i.e. for disk persisted snapshots only). It shouldn't impact in-memory snapshots.
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2021-05-19 16:38:11.000000000
+MISMATCHED INLINE COMMENT
+Line:954, secondary/indexer/memdb_slice_impl.go -> I am worried that the patchset 2 change responding to Varun's comment, that moved the stats back to its original location and removed "go" routine from "go mdb.doPersistSnapshot(s)", will have a performance impact, especially with my fix for MB-45743 which makes it wait for the disk to finish persisting stats before returning. If current routine is in a caller loop that persists snapshots for all indexes (thought I found this before, tho not finding it right now), then this would change it from a parallel operation to a sequential one, with potentially huge performance impact.
+
+Better is to keep the stats collection here but do not do the line
+    s.info.IndexStats = snapshotStats
+Keep the call to doPersistSnapshot() as a go routine and pass it snapshotStats as a 2nd arg:
+    go mdb.doPersistSnapshot(s, snapshotStats)
+so it does not have to be added to s.info.IndexStats of the in-memory snapshots.
+----------------------------------------------------------------------------------------------------------------------
+Author: Yogendra Acharya
+Date: 2021-05-19 12:59:21.000000000
+MISMATCHED INLINE COMMENT
+Line:954, secondary/indexer/memdb_slice_impl.go -> Good catch, addressed for both moi as well as plasma.
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2021-05-20 04:13:49.000000000
+MISMATCHED INLINE COMMENT
+Line:954, secondary/indexer/memdb_slice_impl.go -> Agree with Deep - this code block is only for snapshots being persisted, so I think patchset 1 was good and patchsets 2-3 are not needed and would introduce a lot of unnecessary churn late in the release cycle. I had not noticed the pushdown of "go" into doPersistSnapshot() before, so the problem I was worried about does not exist but would prefer the lower-churn change of pathset 1.
+----------------------------------------------------------------------------------------------------------------------

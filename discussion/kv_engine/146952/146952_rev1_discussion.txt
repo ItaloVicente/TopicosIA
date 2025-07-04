@@ -1,0 +1,146 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-41257: Abort warmup if we fail to read persisted stats
+
+Abort warmup if we fail to read from our persisted stats file
+(stats.json) due to a read error from the file or if the json in the
+file is corrupted. We should not fail warmup if the stats.json file
+isn't no disk as we might not have persisted one yet.
+
+To enable this modify KVStore::getPersistedStats() to
+return a status code on if it succeed, failed or the file was not on
+disk.
+
+This patch also introduces unit tests to check the behaviour of
+KVStore::getPersistedStats().
+
+Change-Id: I10a2677e2d5f8fb543188d4a285937b7497e711b
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Richard de Mellow
+Date: 2021-02-24 13:35:29.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-02-24 13:38:03.000000000
+Message: 
+Patch Set 1: Code-Review-1
+
+(1 comment)
+Line:7, /COMMIT_MSG -> This might be too much of a blunt instrument. I've certainly seen issues where the persisted stats file cannot be read - and if we can't read it / is corrupt I don't think we should completely block a node from coming online.
+
+IIRC the persisted stats file's only purpose these days it to distinguish between a clean and unclean shutdown. If we simply treat the absence to read it as it not being present, then that's essentially the same as an unclean shutdown (we generate a new UUID) and that seems a more robust approach.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2021-02-24 13:56:24.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:7, /COMMIT_MSG -> I was coming at this from the angle that if we're unable to read the contents of file that we could be experiencing disk failure or problems with file permissions. So we should be conservative about going any further with warmup. Though I do get your point trying to keep availability of the node if its just an issue with stat.json as thats what we currently do. Is there any good reason why we would expect us to be unable to read stats.json or for it to be corrupted?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-02-24 14:51:46.000000000
+Message: 
+Patch Set 1: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/33805/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [0110/0157]: test sync vbucket destroy restart...W0224 06:27:44.862926 59468 HazptrDomain.h:671] Using the default inline executor for asynchronous reclamation may be susceptible to deadlock if the current thread happens to hold a resource needed by the deleter of a reclaimable object
+
+
+99% tests passed, 2 tests failed out of 401
+
+Total Test time (real) = 649.88 sec
+
+The following tests FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/33805/ )
+
+Timeout of a CTest test 400/401 Test #243: ep_testsuite.value_eviction.comp_active .......................................................................................} ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/33805/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/5792/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/7256/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/29051/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/9203/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/8856/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/8993/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/16754/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/7909/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-02-24 15:07:31.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:7, /COMMIT_MSG -> > Is there any good reason why we would expect us to be unable to read stats.json or for it to be corrupted?
+
+So it won't exist (IIRC) if we never completed writing it last time.
+
+It could be corrupted if we were halfway through updating it (which is done periodically / on clean shutdown) and we crashed or similar.
+
+I don't believe the stats file is written with any attempted atomicity (unlike say couchstore files where we create a new file with a temporary name, and rely on atomic rename to ensure consistency). 
+
+As such, I think it would be risky for us to fail to entirely warmup if we cannot read the stats file (but the actual couchstore files are fine). I think we should simply treat an unreadable stats snapshot in the same way as we treat one which doesn't have "ep_force_shutdown" set to false - i.e. an unclean shutdown but otherwise continue. That minimises any system downtime, but still communicating that this wasn't a clean shutdown and hence the timeline may have diverged.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-02-24 15:20:47.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/5792/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/7256/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/29051/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/9203/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/8856/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/8993/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/16754/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/7909/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/33809/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2021-02-24 15:37:53.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:7, /COMMIT_MSG -> Thanks for a little more background on it, I'll abandon this patch as we currently handle a failure in the as an unclean shutdown.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2021-02-24 15:38:09.000000000
+Message: 
+Abandoned
+
+Not needed
+----------------------------------------------------------------------------------------------------------------------

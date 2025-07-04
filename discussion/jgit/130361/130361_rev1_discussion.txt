@@ -1,0 +1,133 @@
+======================================================================================================================
+DESCRIPTION:
+
+UploadPack: Implement deepen-not for protocol v2
+
+This allows clients to use the --shallow-exclude parameter (producing a
+"deepen-not <ref>" line when communicating with the server) in their fetch
+commands when fetching against a JGit server using protocol v2.
+
+Note that the implementation in this commit is somewhat inefficient in
+that any "deepen-not <ref>" in the request results in all commits
+reachable from that ref being parsed and marked, even if the commit
+topology is such that it is not necessary.
+
+Change-Id: I9fad3ed9276b624d8f668356ffd99a067dc67ef7
+Signed-off-by: Jonathan Tan <jonathantanmy@google.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jonathan Tan
+Date: 2018-10-03 17:59:50.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonathan Tan
+Date: 2018-10-03 18:02:11.000000000
+Message: 
+Patch Set 1:
+
+Any ideas on improving the algorithm is appreciated - I couldn't think of something general that would work in all situations (for example, I don't think we can assume anything about the topology of the commits in the returned packfile, since if fetching into a shallow repository, the packfile could contain conceivably anything).
+
+I have tested C Git against both itself and this commit using the following script:
+
+#!/bin/bash
+
+rm -rf shallowexclude
+mkdir shallowexclude
+(
+	cd shallowexclude
+	git init server
+	(
+		cd server
+		git commit --allow-empty -m one
+		git tag -a -m "message" one
+		git commit --allow-empty -m two
+		git commit --allow-empty -m three
+		git tag three
+
+		git config protocol.version 2
+		touch .git/git-daemon-export-ok
+	)
+
+	#~/egit-master/git/jgit/bazel-bin/org.eclipse.jgit.pgm/jgit daemon . &
+	git daemon --base-path=. . &
+	PID=$!
+	sleep 2
+
+	git clone --depth=1 git://localhost:9418/server client
+
+	(
+		cd server
+		git checkout -b side one
+		git commit --allow-empty -m side
+		git checkout master
+		git merge --no-edit --no-ff side
+	)
+
+	GIT_TRACE_PACKET="$(pwd)/trace" git -C client -c protocol.version=2 fetch \
+		--shallow-exclude=side git://localhost:9418/server master
+
+	# Ensure that the expected commits exist and don't exist
+	git -C client cat-file -e $(git -C server rev-parse master)
+	echo "Exit code is" $?
+	! git -C client cat-file -e $(git -C server rev-parse side)
+	echo "Exit code is" $?
+	git -C client cat-file -e $(git -C server rev-parse three)
+	echo "Exit code is" $?
+	git -C client cat-file -e $(git -C server rev-parse three^)
+	echo "Exit code is" $?
+	! git -C client cat-file -e $(git -C server rev-parse one)
+	echo "Exit code is" $?
+
+	# Ensure that the shallow file is correct
+	test "$(cat client/.git/shallow)" == "$(git -C server rev-parse master three^ | sort)"
+	echo "Test exit code is" $?
+
+	# Ensure that the trace is as expected
+	grep "fetch< version 2" trace &&
+	grep "fetch< shallow $(git -C server rev-parse master)" trace &&
+	grep "fetch< shallow $(git -C server rev-parse three^)" trace &&
+	grep "fetch< unshallow $(git -C server rev-parse three)" trace
+	echo "Exit code is" $?
+
+	git init server2
+	(
+		cd server2
+		git commit --allow-empty -m one
+		git commit --allow-empty -m two
+		git tag two
+		git commit --allow-empty -m three
+		git commit --allow-empty -m four
+		git tag four
+
+		git config protocol.version 2
+		touch .git/git-daemon-export-ok
+	)
+
+	git init client2
+
+	git -C client2 -c protocol.version=2 fetch \
+		--shallow-exclude=four git://localhost:9418/server2 two
+	echo "Exit code of fetch is (supposed to fail)" $?
+
+	kill $PID
+)
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-10-03 18:26:26.000000000
+Message: 
+Patch Set 1:
+
+Build Started https://ci.eclipse.org/jgit/job/jgit.gerrit/14258/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-10-03 18:38:51.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/jgit.gerrit/14258/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

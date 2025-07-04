@@ -1,0 +1,135 @@
+======================================================================================================================
+DESCRIPTION:
+
+draft: overlapping segment backend
+
+This prototype uses the structure and serialization of a quark-
+less oSHT to store segments to disk.
+Also, performance test inspired by the SHT performance test.
+
+Change-Id: I9bf5cfffa7aa15aa6048b30f2e17446406aba891
+Signed-off-by: Loïc Prieur-Drevon <loic.prieurdrevon@gmail.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Loic Prieur-Drevon
+Date: 2016-10-21 21:30:57.000000000
+Message: 
+Uploaded patch set 14.
+----------------------------------------------------------------------------------------------------------------------
+Author: Genevieve Bastien
+Date: 2016-10-25 16:46:46.000000000
+Message: 
+Patch Set 14:
+
+I just noticed you pushed something friday afternoo, I was waiting for a new patchset... I'll review this then!
+
+Just for the record, could you list what would be needed to avoid code duplication? What are the main differences and what would be the impediments for common code. 
+
+Let's assume there is no dependency problem, when that's the only impediment left, we'll deal with it ;-)
+----------------------------------------------------------------------------------------------------------------------
+Author: Loic Prieur-Drevon
+Date: 2016-10-25 17:00:12.000000000
+Message: 
+Patch Set 14:
+
+This isn't finished per se, I need to implement the CustomStateValues reader to (de)serialize segments.
+Deduplication would require a common interface between segments and intervals, as well as allowing generic typing most of the classes that constitute the HT:
+HT_IO would need to be typed for the highest level HTNode
+HTConfig can be reused as is, it is an exact copy of the one from SHT
+HTBackend is specific to the ISegmentStore interface here, except for a few constructors and methods, it could probably use a common class.
+HistoryTree is very similar to oSHT
+CoreNode is similar to oSHT in structure albeit the methods are specific to ISegmentStore searches/iterators.
+
+I'll be @poly after running an errand to implement it based upon custom state values, the rest can be reviewed
+----------------------------------------------------------------------------------------------------------------------
+Author: Genevieve Bastien
+Date: 2016-10-25 17:08:21.000000000
+Message: 
+Patch Set 14: Code-Review-1
+
+(8 comments)
+Line:24, statesystem/org.eclipse.tracecompass.segmentstore.core/META-INF/MANIFEST.MF -> o.e.t.statesystem.core should a in the require-bundle section
+
+Line:48, statesystem/org.eclipse.tracecompass.segmentstore.core/src/org/eclipse/tracecompass/internal/segmentstore/core/Activator.java -> Do you really need this one, since you have instance?
+
+Line:231, statesystem/org.eclipse.tracecompass.segmentstore.core/src/org/eclipse/tracecompass/internal/segmentstore/core/segmentHistoryTree/HTNode.java -> You need to extract this to local variable, otherwise there is a potential null warning on line 236
+
+Line:236, statesystem/org.eclipse.tracecompass.segmentstore.core/src/org/eclipse/tracecompass/internal/segmentstore/core/segmentHistoryTree/HTNode.java -> I guess it doesn't work, from this you seem to look for a constructor with a buffer in parameter, instead of calling the readInterval method.
+
+I'll wait for the custom state value implementation to review the rest
+
+Line:41, statesystem/org.eclipse.tracecompass.segmentstore.core/src/org/eclipse/tracecompass/internal/segmentstore/core/segmentHistoryTree/HistoryTreeBackend.java -> Do we support mixed segments types segment stores? I think there's nothing that should prevent that, so E here... I'm not so sure
+
+Line:7, statesystem/org.eclipse.tracecompass.segmentstore.core/src/org/eclipse/tracecompass/internal/segmentstore/core/segmentHistoryTree/package-info.java -> Fix header of this file
+
+Line:65, statesystem/org.eclipse.tracecompass.segmentstore.core/src/org/eclipse/tracecompass/segmentstore/core/BasicSegment.java -> Is this just for the HT segment store? If so, start and end are provided by the interval itself, no need to add it to the byte buffer, that means 2 less longs to store
+
+Line:78, statesystem/org.eclipse.tracecompass.segmentstore.core/src/org/eclipse/tracecompass/segmentstore/core/ISegment.java -> These will require default methods, otherwise there is API breakage
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Genevieve Bastien
+Date: 2016-10-25 17:16:54.000000000
+Message: 
+Patch Set 14:
+
+(1 comment)
+Line:47, statesystem/org.eclipse.tracecompass.segmentstore.core.tests/perf/org/eclipse/tracecompass/segmentstore/core/tests/segmentHistoryTree/OverlappingSegmentStorePerfTest.java -> Is this benchmark relevant or is SegmentStoreBenchmark enough for this case?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Loic Prieur-Drevon
+Date: 2016-10-25 19:20:58.000000000
+Message: 
+Patch Set 14:
+
+(4 comments)
+
+a few answers and many implementation questions
+Line:47, statesystem/org.eclipse.tracecompass.segmentstore.core.tests/perf/org/eclipse/tracecompass/segmentstore/core/tests/segmentHistoryTree/OverlappingSegmentStorePerfTest.java -> SegmentStoreBenchmark should be enough, this essentially ended up the massive copy paste from the SHT
+
+Line:48, statesystem/org.eclipse.tracecompass.segmentstore.core/src/org/eclipse/tracecompass/internal/segmentstore/core/Activator.java -> I wish I didn't but it seems to require an explicit constructor...
+
+Line:236, statesystem/org.eclipse.tracecompass.segmentstore.core/src/org/eclipse/tracecompass/internal/segmentstore/core/segmentHistoryTree/HTNode.java -> I can't seem to get this to work, I thought I would be able to call the interface methods (in particular readSegment) from E but it is not possible when E is dynamic... thoghts?
+
+Line:41, statesystem/org.eclipse.tracecompass.segmentstore.core/src/org/eclipse/tracecompass/internal/segmentstore/core/segmentHistoryTree/HistoryTreeBackend.java -> I just put it because it was in the other segment stores...
+no E means mixed types and with E means single type?
+if there is no type where should the method to convert from custom SV to typed ISegment go?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Genevieve Bastien
+Date: 2016-10-26 13:36:54.000000000
+Message: 
+Patch Set 14:
+
+Let's be bold and heretic here... maybe erratic... nothing else.
+
+Bear with me:
+
+1- An interval _is_ a segment: it has a start, end and its payload would be the attribute and state value. I think we can all agree on that.
+
+2- Corollary of this: an interval tree _is_ a segment tree. So it makes sense to move [part of] the IHistoryTree interface and implementation and other necessary classes to segment store. A basic history tree backend can be extended by both segment store and state system where they differ.
+
+3- That makes state system depend on segment store. IHistoryTree and such are internal, so they can easily be moved, but they become [provisional?] API in segment store. I personnally see no problem with that.
+
+4- The HT backend for state system would become a segment backend! That means that this backend can be used as a ISegmentStore with HTInterval a special type of segment! It would make no sense 95% of the time to have the state system be a segment store of course (or would it?), but I can definitely see at least one case when that can be useful: the callstack! Where the HTInterval becomes a ICalledFunction, with the attribute hierarchy being the element (thread for instance) it belongs to, and its attribute name in the stack allowing the parent/children relationship! There, no need for the callgraph anymore, at least the non-aggregated part.
+
+Problems solved!
+
+Sounds crazy? Take a step back on think on it, I'm open for discussion.
+----------------------------------------------------------------------------------------------------------------------
+Author: Loic Prieur-Drevon
+Date: 2016-10-26 13:44:57.000000000
+Message: 
+Patch Set 14:
+
++1
++1
++1
+0 ~ OK for sharing Node and HT classes, not so sure about having the SHT backend be a Segment Store...
+----------------------------------------------------------------------------------------------------------------------
+Author: Gerrit Code Review
+Date: 2017-04-07 15:01:30.000000000
+Message: 
+Change has been successfully cherry-picked as da132663cfdadb0d35e96773758be381cf0e6169 by Genevieve Bastien
+----------------------------------------------------------------------------------------------------------------------

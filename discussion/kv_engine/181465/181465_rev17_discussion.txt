@@ -1,0 +1,173 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-52311: [7/n] Pause / Resume Bucket: Add cancellation support
+
+If a Resume() request is made while a previous Pause() request is
+still executing, we don't want to have to wait until the Pause()
+completes before resuming. This is particulary important when
+considering failover - if ns_server decides it needs to failover a
+node it needs to being the Bucket back to the Ready state asap so it
+can examine and/or set vBucket state to perform the failover.
+
+As such, we want to be able to cancel a running Pause() operation if a
+Resume() request arrives.
+
+This patch adds cancellation support in the daemon-level handling of
+pause() - e.g. check for cancellation while waiting for clients to
+disconnect. A follow-up patch will expand checking for cancellation
+inside ep-engine (which also has some potentially slow-running tasks
+as part of pause).
+
+=== Implementation Details ===
+
+We do this using Cancellation Tokens - which Folly provides an
+implementation. Quoting from folly/CancellationToken.h:
+
+    A CancellationToken is an object that can be passed into an
+    function or operation that allows the caller to later request that
+    the operation be cancelled.
+
+    A CancellationToken object can be obtained by calling the
+    .getToken() method on a CancellationSource or by copying another
+    CancellationToken object. All CancellationToken objects obtained
+    from the same original CancellationSource object all reference the
+    same underlying cancellation state and will all be cancelled
+    together.
+
+    If your function needs to be cancellable but does not need to
+    request cancellation then you should take a CancellationToken as a
+    parameter.  If your function needs to be able to request
+    cancellation then you should instead take a CancellationSource as
+    a parameter.
+
+In terms of how this maps to kv_engine, we add a CancellationSource to
+each Bucket object, and whenever a Pause() operation occurs we create
+a CancellationToken from the Bucket's CancellationSource and pass the
+token into the BucketManager (and later further down into the
+engine). At suitable points in the pause process (typically before
+some long-lived / blocking operation) the CancellationToken can be
+checked to see if cancellation has been requested, if so then we
+cancel the pause, undoing any steps in the Pause process which have
+already been performed.
+
+Note that one can also register CancellationCallbacks with the
+CancellationToken (multiple callbacks can be registered). Each
+callback can perform whatever necessary "undo" logic to revert the
+back to the unpaused state.
+
+To trigger cancellation, the Resume() method checks to see if
+Cancellation is possible (i.e. a Pause request is in progress), and if
+so requests cancellation and returns early - the cancelled Pause()
+request is responsible for undoing any pause steps already executed.
+
+Change-Id: I1125b6d96d215989b975eda3a4fa81837cd9ea5f
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2022-11-10 22:02:53.000000000
+Message: 
+Patch Set 17: Patch Set 16 was rebased
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-11-10 22:37:49.000000000
+Message: 
+Patch Set 17: Verified-1 Code-Review-1
+
+Build Failed 
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/21112/ : FAILURE
+
+<p>clang-format suggested the following changes:
+
+<pre>
+cat <<"EOF" | patch -p1
+diff --git a/daemon/buckets_test.cc b/daemon/buckets_test.cc
+index 3aed44c9b..72c9f0568 100644
+--- a/daemon/buckets_test.cc
++++ b/daemon/buckets_test.cc
+@@ -493,7 +493,7 @@ void BucketManagerTest::testPauseBucketCancellable(
+             }};
+ 
+     bucketPausingListenerFunc =
+-            [&amp;testFixture = *this, threaded, expectedPhase, &amp;baton1, &amp;baton2](
++            [&amp; testFixture = *this, threaded, expectedPhase, &amp;baton1, &amp;baton2](
+                     std::string_view bucket, std::string_view phase) {
+                 // Ignore if not the expected phase.
+                 if (phase != expectedPhase) {
+
+EOF
+</pre> ( https://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/21112/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/24274/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [159/160]: test bucket quota reduction...../kv_engine/engines/ep/tests/ep_testsuite.cc:8515 Test failed: `" (Expected `success", got `temporary failure" - We should be able to store an item as the BucketQuotaChangeTask should not enforce memory limits until memory usage is low enough.)
+[2022-11-10T22:10:30.453Z] (1939 ms) FAIL
+</pre>
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/24274/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/42872/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/21815/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-windows-master/51083/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/11632/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/11542/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/23860/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/25103/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/32279/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux-debug/job/master/567/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/23310/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2022-11-28 12:18:30.000000000
+Message: 
+Patch Set 17: Code-Review-1
+
+(3 comments)
+Line:976, daemon/buckets.cc -> is this okay to do without the bucket mutex?
+
+Line:995, daemon/buckets.cc -> This may be executed in-line on the current thread if the source is already cancelled, can that happen/is that safe to do without the bucket mutex at this stage?
+
+Line:519, daemon/buckets_test.cc -> nit unmatched (
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-11-29 17:02:23.000000000
+MISMATCHED INLINE COMMENT
+Line:976, daemon/buckets.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-11-28 15:17:48.000000000
+MISMATCHED INLINE COMMENT
+Line:995, daemon/buckets.cc -> I added a test which covers the inline execution case (see patch set 20), but locally on macOS at least TSan doesn't complain about anything - where I believe it _should_.
+
+Perhaps the folly::Baton used for orchestrating of the resume is adding extra serialisation?
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-11-28 13:05:55.000000000
+MISMATCHED INLINE COMMENT
+Line:995, daemon/buckets.cc -> I'll check... I had deadlock issues acquiring the mutex in here originally, so might need some more restructuring if we are cancelled before this point :(
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-11-29 17:02:23.000000000
+MISMATCHED INLINE COMMENT
+Line:995, daemon/buckets.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-11-28 13:05:55.000000000
+MISMATCHED INLINE COMMENT
+Line:519, daemon/buckets_test.cc -> Ack
+----------------------------------------------------------------------------------------------------------------------

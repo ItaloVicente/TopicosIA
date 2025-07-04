@@ -1,0 +1,95 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-46827: Introduce the new checkpoint memory recovery logic
+
+With this patch the checkpoints memory behaviour is fully driven by:
+
+- checkpoint_memory_ratio
+- checkpoint_memory_recovery_upper_mark
+- checkpoint_memory_recovery_lower_mark
+
+At any incoming mutation (see note below for details on what is
+included and what excluded) the system checks whether the new data can
+be accepted/rejected and whether checkpoint memory recovery needs to be
+attempted, with the following logic:
+
+- If the checkpoint mem-usage is below the recovery_upper_mark, then
+  just accept the mutation
+- Else, if the checkpoint mem-usage is above the recovery_upper_mark,
+  then accept the mutation (ie, don't enter any TempOOM phase) and
+  trigger checkpoint mem-recovery
+- Else, checkpoint mem-usage has hit the checkpoint quota (as defined by
+  checkpoint_memory_ratio), so reject the mutation (ie, enter a
+  TempOOM phase) and trigger checkpoint mem-recovery
+
+Checkpoint memory recovery attempts to push the checkpoints mem-usage
+down to recovery_lower_mark, then it yields.
+
+The patch sets checkpoint_memory_ratio=0.5 to maintain a similar
+behaviour (in terms of mem-recovery thresholds) to the old
+cursor_dropping_checkpoint_mem_upper_mark (now unused, will be removed
+in a follow-up patch).
+
+*Note on what this patch covers*
+
+The new checkpoint quota is enforced for Alive Mutations, Prepares and
+tombstones created via CreateAsDeleted. Which are essentially covered by
+the VBucket::add/set code paths touched in this patch.
+
+We exclude Deletion/Expiration for now as they are operations that
+implicitly lead to memory recovery (as the StoredValue is released from
+the HashTable as soon as the tombstone is persisted).
+
+Obvioulsy here we introduce an inconsistency in the behaviour between
+CreateAsDeleted and Deletion/Expiration. That doens't seem bad though,
+as while Deletion/Expiration retains only the SysXattrs (if any) in the
+payload, CreateAsDeleted may carry a much bigger payload in the Xattr
+chunk. So enforcing the checkpoint quota for the latter seems
+reasonable.
+
+Finally, also Commit and Abort bypass the checkpoint quota checks. That
+doesn't seem a big deal to date as they small items compared to
+mutations. Also, we need to verify what are the side-effects of failing
+a Commit/Abort by no-mem, so just deferring to now.
+
+Change-Id: I16146133ee83d16ec0d39be91263fd16922fcd56
+Reviewed-on: http://review.couchbase.org/c/kv_engine/+/157603
+Tested-by: Build Bot <build@couchbase.com>
+Reviewed-by: Dave Rigby <daver@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2021-08-11 11:25:03.000000000
+Message: 
+Change has been successfully cherry-picked as cb334fa9db6c90596795a5069186f2f9af5f15b8 by Dave Rigby
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-08-11 11:25:11.000000000
+Message: 
+Patch Set 16:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-TSan-master/5578/ (1/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-08-11 11:45:40.000000000
+Message: 
+Patch Set 16:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-master/8521/ (2/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-08-11 12:34:38.000000000
+Message: 
+Patch Set 16:
+
+Build Unstable 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-TSan-master/5578/ : UNSTABLE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-TSan-master/5578/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-master/8521/ : SUCCESS'
+----------------------------------------------------------------------------------------------------------------------

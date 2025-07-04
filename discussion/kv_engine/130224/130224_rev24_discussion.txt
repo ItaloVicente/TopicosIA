@@ -1,0 +1,123 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-34217: Add support for dropping collections with prepares
+
+Add support for dropping collections with prepares. When we remove a
+prepare we need to cleanup the ADM and PDM. We need to remove the
+prepares without updating the HCS or HPS. All iterators have to be
+moved back to their previous position (if valid).
+
+Change-Id: I597c888a6b7e4790639d0ab8246f39723f2a0e41
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Ben Huddleston
+Date: 2020-06-25 08:56:13.000000000
+Message: 
+Uploaded patch set 24.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-06-25 09:57:14.000000000
+Message: 
+Patch Set 24: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/4417/ : FAILURE
+
+Failure of an engine_testapp test:
+
+<pre>
+Running [0137/0158]: test expired item with item_eviction...../kv_engine/engines/ep/tests/ep_testsuite.cc:6075 Test failed: `" (Expected `1", got `0" - Expect the compactor to delete an expired item)
+[2020-06-25T09:19:04.542Z] (20 ms) FAIL
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/4417/ )
+
+Failure of a CTest test [2020-06-25T09:19:04.542Z]  13/410 Test #240: ep_testsuite.full_eviction.magma ............................................................................ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/4417/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/4503/ : FAILURE
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/1501/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/24820/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/28797/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/2995/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/3458/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/4351/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/12233/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2020-06-25 10:57:17.000000000
+Message: 
+Patch Set 24: Code-Review-1
+
+(4 comments)
+
+some comments/questions
+Line:810, engines/ep/src/couch-kvstore/couch-kvstore.cc -> Will magma-kvstore have to do the same check? Might be worth adding an extra arg to the dropKeyCb and allowing that function to do nothing for aborts
+
+Line:875, engines/ep/src/durability/durability_monitor_impl.h -> update comment? map of collection and mention what does it map to (seqno, prepared?)
+
+Line:534, engines/ep/src/durability/passive_durability_monitor.cc -> remove
+
+Line:981, engines/ep/src/ep_vb.cc -> an alternative could be to have the trigger once we've persisted the drop ( Collections::VB::Flush::checkAndTriggerPurge)? I don't know if that makes any difference, better 'consistency' etc... or does having this here provide functionality, stopping the replica acking for collections that are dropped?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-06-25 11:10:35.000000000
+Message: 
+Patch Set 24:
+
+(1 comment)
+Line:981, engines/ep/src/ep_vb.cc -> I vaguely recall from chatting with Ben that this might be to avoid the PDM seeing seemingly out of order completions:
+
+Active drops a collection mid-sync write
+Active discards prepare A and removes from ADM
+Active completes next prepare B
+Replica sees
+ Prepare A
+ Prepare B
+ Drop Collection (containing A)
+ Commit B
+
+If this notification were delayed until persistence, the replica could receive the Commit B before being notified the other collection was dropped - it would still be expecting A to be completed first.
+
+Caveat - this may be misremembered or entirely wrong, I just wanted to mention it as it came to mind :shrug: Ben will have the whole answer 😊
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2020-06-25 12:36:02.000000000
+MISMATCHED INLINE COMMENT
+Line:810, engines/ep/src/couch-kvstore/couch-kvstore.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2020-06-25 12:36:02.000000000
+MISMATCHED INLINE COMMENT
+Line:875, engines/ep/src/durability/durability_monitor_impl.h -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2020-06-25 12:36:02.000000000
+MISMATCHED INLINE COMMENT
+Line:534, engines/ep/src/durability/passive_durability_monitor.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2020-06-26 11:54:58.000000000
+MISMATCHED INLINE COMMENT
+Line:981, engines/ep/src/ep_vb.cc -> The bySeqnoScanCallback actually solves this for us by not warming up anything in a dropped collection. I've added a test to cover it anyway
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2020-06-25 12:36:02.000000000
+MISMATCHED INLINE COMMENT
+Line:981, engines/ep/src/ep_vb.cc -> James is correct, we may get a snapshot containing a collection drop then a commit for a different alive collection and process both before persistence.
+
+The replica can still ack but the active would skip the item if the ack would drive a commit. Given collections drops should be relatively infrequent I don't a potentially pointless ack matters.
+
+One issue with this (as a whole, not notifying the PDM here) though is I think we can warmup and load prepares of dropped collections into the DMs.
+----------------------------------------------------------------------------------------------------------------------

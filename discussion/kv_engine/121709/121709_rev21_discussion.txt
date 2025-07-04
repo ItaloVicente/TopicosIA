@@ -1,0 +1,212 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-37546: Introduce the "backup persistence cursor" in CM
+
+We introduce the concept of "backup persistence cursor" for getting rid
+of the (old) broken VBucket::rejectQueue.
+
+The main reason behind the rejectQueue was the way getItemsForCursor()
+works:
+  1) move the cursor forward
+  2) pick-up the item
+  3) repeat (1) until we get all (or up to a limit) items for cursor
+  4) return items
+Given that the cursor has moved, if the flusher fails we cannot rely on
+the CM for retrieving again the same items.
+So, the rejectQueue was used at flush to re-queueing all the items of a
+failed flush-batch and pulling them from the queue when re-attempting
+the flush.
+
+With the new backup pcursor we do exactly the same as before in
+getItemsForCursor(). But (only for persistence) we register a copy of
+the cursor before the cursor move. Then:
+  1) if flush succeeds, we just remove the copy
+  2) if flush fails, we reset the pcursor to the copy
+
+That allows to rely entirely on the CM for re-attemping the flush after
+failure.
+
+In this patch the backup cursor is already used at
+EPBucket::flushVBucket. That fixes the issue tracked in this MB (ie, new
+persisted vbstate could be lost at re-attempting flush after storage
+failure at replica). The fix is covered by test.
+
+@todo in follow-ups:
+ - test backup pcursor placed at different queue_op
+ - test backup pcursor and reset at Checkpoint deduplication
+ - test all pcursor reset code-paths at flush
+ - remove all the reject-queue code
+
+Change-Id: Icc03e8c18dd1e5998b384efeff777ffff9699106
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2020-02-20 15:51:12.000000000
+Message: 
+Uploaded patch set 21.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-02-20 15:51:20.000000000
+Message: 
+Patch Set 21: Well-Formed+1
+
+Permission granted to commit: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/169315/artifact/restricted.html : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-02-20 17:45:20.000000000
+Message: 
+Patch Set 21: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/1008/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/1008/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/913/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/24685/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/983/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-mad-hatter-cv-perf/242/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/782/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/1004/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/998/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/mad-hatter/344/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-02-21 07:15:30.000000000
+Message: 
+Patch Set 21: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/913/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/24685/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/983/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-mad-hatter-cv-perf/242/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/782/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/1004/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/998/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/mad-hatter/344/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/1015/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-02-24 11:47:45.000000000
+Message: 
+Patch Set 21: Code-Review-1
+
+(11 comments)
+Line:42, /COMMIT_MSG -> Do we have all these done now?
+
+Line:176, engines/ep/src/checkpoint.h -> I'm a little nervous in changing the name of a cursor once it is created, given various things in CheckpointManager use a name to manage cursors. 
+
+What's the reason for adding this?
+
+Line:368, engines/ep/src/checkpoint_manager.cc -> As per previous comment I think we should avoid the setName method. Just add a constructor which takes two parameters (existing Cursor, new name).
+
+Line:379, engines/ep/src/checkpoint_manager.cc -> An Expects() is like an assert() - it could be elided if not enabled at compile-time. Therefore don't put anything with side-effects inside an Expects().
+
+Line:805, engines/ep/src/checkpoint_manager.cc -> This feels over-complex - this is a lot of extra logic to basically say "are there non-persistence cursors in oldest closet checkpoint?"
+
+This is also why I suggested adding a property to the CheckpointCursor object - "isDroppable" or similar which is false for persistence and persistence-backup. Then code like this can simply be done in terms of testing for properties.
+
+Line:165, engines/ep/src/checkpoint_manager.h -> Why a unique_ptr? can't we use value semantics here?
+
+Line:238, engines/ep/src/checkpoint_manager.h -> The 'P' almost gets lost in the name here. Suggest spelling Persistence out fully to make it more readable.
+
+Line:459, engines/ep/src/checkpoint_manager.h -> Style: prefer naming boolean functions with an `is` or `has` prefix or similar (methods should read as verb phrases - doFoo, hasBar, isBaz...).
+
+Line:577, engines/ep/src/checkpoint_manager.h -> as previous - please expand.
+
+Line:21, engines/ep/src/vbucket.h -> Can we remove this from vbucket.h? The interface of VBucket shouldn't care about CheckpointManager.
+
+Line:581, engines/ep/src/vbucket.h -> As per above comment, if this is forcing us to pull in all of checkpoint_manager then maybe move PendingFlushHandle into checkpoint_types.h or similar.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-02-25 08:59:53.000000000
+Message: 
+Patch Set 21:
+
+(5 comments)
+Line:42, /COMMIT_MSG -> Almost all covered in the follow-ups.
+
+The only partial coverage is for the first point (backup cursor placed and reset at any queue_op). We have coverage for backup cursor placed at mutation and set-vbstate, and we check that pcursor is reset correctly in those cases.
+Note that the logic for creating and resetting the cursor deals with iterators, queue_op is not involved at all. But I can definitely expand at http://review.couchbase.org/#/c/121950/.
+
+Line:368, engines/ep/src/checkpoint_manager.cc -> fixing
+
+Line:379, engines/ep/src/checkpoint_manager.cc -> fixing
+
+Line:805, engines/ep/src/checkpoint_manager.cc -> I think that I can simplify a bit this function.
+I gave a try to isDroppable in Cursor but it leads to changing more code around (register() functions etc..), while avoiding cursor-dropping for backup-cursor is a 2-line change (see getListOfCursorsToDrop() above)
+
+Line:165, engines/ep/src/checkpoint_manager.h -> Some points:
+
+1) As a RAII resource, PendingFlushHandle calls back into the CM in the dtor.
+
+2) An instance of PendingFlushHandle is created in CM and returned back to the caller.
+
+3) We want to trigger the callback only once and only at the caller.
+
+
+So, an instance of PendingFlushHandle has logically a single (unique) owner. The callback must be triggered only when the owner goes out-of-scope.
+
+
+We could implement that by move-semantic. But, a pure move is not enough, as is doesn't prevent the dtor (of move-from object) from being executed.
+So, we would need to add further state to the Handle (something like 'bool valid'). In the dtor we perform our operations only if valid==true. At move, we set valid=false for the move-from object.
+
+
+But look: what I ve just describe is exactly the move-semantic of a std::unique_ptr !
+
+
+Here we could probably rename PendingFlushHandle to SomethingElse, and then:
+
+    using PendingFlushHandle = std::unique_ptr<SomethingElse>;
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-02-25 16:25:41.000000000
+Message: 
+Patch Set 21:
+
+(1 comment)
+Line:581, engines/ep/src/vbucket.h -> Done
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-02-25 17:00:20.000000000
+Message: 
+Patch Set 21:
+
+(1 comment)
+Line:805, engines/ep/src/checkpoint_manager.cc -> If it's not worth / possible to simplify much that's fine.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-02-25 16:55:49.000000000
+MISMATCHED INLINE COMMENT
+Line:805, engines/ep/src/checkpoint_manager.cc -> Mmm I've (re)tried to simplify this logic but that seems the minimum amount of checks.
+
+But, how Cursor::isDroppable is going to help here?
+It seems to me that the logic in this function would stay pretty much the same.
+----------------------------------------------------------------------------------------------------------------------

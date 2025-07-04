@@ -1,0 +1,94 @@
+======================================================================================================================
+DESCRIPTION:
+
+Use ICommandLauncher instead of ProcessBuilder
+
+Another step forward to run builds in a container
+
+Change-Id: I47b17a0640c59d67782b7cfafeb6871043df1432
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Martin Weber
+Date: 2020-12-06 17:46:40.000000000
+Message: 
+Patch Set 2: Patch Set 1 was rebased
+----------------------------------------------------------------------------------------------------------------------
+Author: CDT Bot
+Date: 2020-12-06 18:08:58.000000000
+Message: 
+Patch Set 2: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-ui-only-pipeline/2771/ : SUCCESS
+
+https://ci.eclipse.org/cdt/job/cdt-verify-code-cleanliness-pipeline/2441/ : SUCCESS. Formatting, whitespace, version numbers and other checks appear to be correct. See https://github.com/eclipse-cdt/cdt-infra/tree/master/jenkins/pipelines/cdt/verify#cdt-verify-code-cleanliness for documentation on what is checked.
+
+https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-other-pipeline/2958/ : SUCCESS. p2 repository available on https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-other-pipeline/2958/artifact/releng/org.eclipse.cdt.repo/target/repository/ - please mark build as "Keep this build forever" if the p2 repo is needed for testing. Otherwise it will be deleted shortly.
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonah Graham
+Date: 2020-12-06 18:25:55.000000000
+Message: 
+Patch Set 2:
+
+Adding Jeff to list - he is the most familiar with container runs.
+----------------------------------------------------------------------------------------------------------------------
+Author: Jeff Johnston
+Date: 2020-12-07 19:39:31.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:271, cmake/org.eclipse.cdt.cmake.core/src/org/eclipse/cdt/cmake/core/internal/CMakeBuildConfiguration.java -> This will run the build in a Container via the tool chain for the target.  There is ContainerGCCToolChain which is a type of IToolChain2.  When you select a Container target, it gets this form of a toolchain.  The startBuildProcess() method checks for this type of tool chain and defers to the tool chain startBuildProcess() method which in this case uses an ICommandLauncher.  This is the current system that CBuildConfiguration projects build in a Container.  The same logic is used for Make projects and Meson projects. Note that the startBuildProcess() method in the ContainerGCCToolChain also handles the include file copying which is needed by the indexer to work properly (need the header files from the Container target copied over locally). Is there some reason this system is not working for you?  How do you propose getting header files from the target and keeping the indexer working properly?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Martin Weber
+Date: 2020-12-08 20:45:48.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:271, cmake/org.eclipse.cdt.cmake.core/src/org/eclipse/cdt/cmake/core/internal/CMakeBuildConfiguration.java -> > This will run the build in a Container via the tool chain for the target.  There is ContainerGCCToolChain which is a type of IToolChain2.  When you select a Container target, it gets this form of a toolchain.  The startBuildProcess() method checks for 
+
+Is there a way to select a container to build in? The current project property page does not allow to set a container, it has just a 'Launch CMake GUI' button (which does not work).
+My assumption is that CommandLauncherManager.getInstance().getCommandLauncher() returns a ICommandLauncher that either runs the commands locally or in a container.
+
+> this type of tool chain and defers to the tool chain startBuildProcess() method which in this case uses an ICommandLauncher.  This is the current system that 
+
+The problem with startBuildProcess() is that it uses an ICommandLauncher only if an IToolChain2 is given. This forces users who want to build in a container to not only specify the container, but also to specify a CDT toolchain (IToolChain2) plus a cmake tool-chain file. 
+Since CMake detects the build-tool perfectly on its own, the is no need for users to the the toolchains. (In practice, you need to specify a cmake toolchain-file only if you want to cross-compile; e.g. use gnu-eabihf-gcc instead of gcc).
+From my experience with managed build + cmake4eclipse, the command-launcher itself handles the header-file and build-dir copying seamlessly. See this [1] commit I had to make my plugin work with in-container build when they were introduced in CDT 9.4.
+
+[1] https://github.com/15knots/cmake4eclipse/commit/9e73ea5dcf33a89e559805a0992246852563b5ad
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jeff Johnston
+Date: 2020-12-08 22:37:47.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:271, cmake/org.eclipse.cdt.cmake.core/src/org/eclipse/cdt/cmake/core/internal/CMakeBuildConfiguration.java -> | Is there a way to select a container to build in? The current project property page does not | allow to set a container, it has just a 'Launch CMake GUI' button (which does not work).
+| My assumption is that CommandLauncherManager.getInstance().getCommandLauncher() returns a    | ICommandLauncher that either runs the commands locally or in a container.
+
+The container is part of the target's toolchain which is selected via the LaunchBar target selector.  For every image, ContainerTargetTypeProvider creates a launch target which has properties that specify the connection URI and the image id.  The class ContainerGCCToolChainProvider creates a toolchain for each connection URI/image id.
+
+When a user chooses a launch target for any of the images, the matching toolchain will be 
+used to build a Core Build project.  This differs from managed build where the container info is specified as part of the Managed Build configuration.  In that case, the user chooses the container in the Container tab in the build settings.  Part of the new Core build 
+infrastructure is to simplify and use the launch bar.
+
+| The problem with startBuildProcess() is that it uses an ICommandLauncher only if an 
+| IToolChain2 is given. This forces users who want to build in a container to not only specify | the container, but also to specify a CDT toolchain (IToolChain2) plus a cmake tool-chain 
+| file. 
+| Since CMake detects the build-tool perfectly on its own, the is no need for users to the the | toolchains. (In practice, you need to specify a cmake toolchain-file only if you want to 
+| cross-compile; e.g. use gnu-eabihf-gcc instead of gcc).
+| From my experience with managed build + cmake4eclipse, the command-launcher itself handles 
+| the header-file and build-dir copying seamlessly. See this [1] commit I had to make my plugin | work with in-container build when they were introduced in CDT 9.4.
+
+So, I get that you want CMake to determine the toolset, however, how do you determine headers to copy back from the container to the host for the use of the indexer?  Some header file dependencies are calculated by calling the compile command with special options to list the header file directories.  You cannot use the host's headers to do the indexing as the container may be ahead or behind in tools or may not have additional system headers installed.  See ContainerGCCToolChain for details on calculating scannerInfo.  Is there a generic way in CMake to get this information?  FWIW: the ContainerGCCToolChain supports gcc and clang.
+
+For Managed Build, the copying of header files occurs due to calls made via LanguageSettingsSerializableProvider.  These calls don't occur in Core Build which is why the additional processIncludePaths() method was added in CommandLauncherManager.  This new method gets called via the startBuildProcess() method and getScannerInfo() which are both in ContainerGCCToolChain.
+
+----------------------------------------------------------------------------------------------------------------------

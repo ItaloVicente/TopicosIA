@@ -1,0 +1,176 @@
+======================================================================================================================
+DESCRIPTION:
+
+Do not scan all refs when filtering for HEAD
+
+The retrieval of refs by prefix from the refDatabase
+should also consider HEAD as a valid prefix so to avoid
+the full scanning all refs, which could be very expensive.
+
+A common use-case is the implementation of Git protocol v2
+where the Git client may request only the HEAD of a large
+mono-repo, where the full scan of all refs must be avoided as
+much as possible.
+
+Example of a git client call that should have NOT triggered
+the fetch of all refs:
+$ git fetch origin HEAD
+
+By tracing what the 'git fetch origin HEAD' client call triggers
+on the JGit backend, it is clear that the associated invocation of
+RefDatabase.getRefsByPrefix("HEAD") is the one responsible for
+fetching in memory all refs, due to the following condition:
+
+public List<Ref> getRefsByPrefix(String prefix) throws IOException {
+ Map<String, Ref> coarseRefs;
+ int lastSlash = prefix.lastIndexOf('/');
+ if (lastSlash == -1) {
+  coarseRefs = getRefs(ALL); <<= This is where the 'HEAD' would go
+ } else {
+  coarseRefs = getRefs(prefix.substring(0, lastSlash + 1));
+ }
+}
+
+Rely on the fetching of HEAD directly as exact ref and returning
+it as a single element list, avoiding the allocation of the full
+refs maps and lists in memory.
+
+Introduce also a WrappedRefDirectory for making sure in tests
+that fetching a single HEAD would not trigger anymore the loading
+of all refs in memory by the underlying RefDirectory.
+
+NOTE: Because the solution relies on existing methods that are
+already supported by all ref-db backends (DfsRefDatabase,
+FileReftableDatabase and RefDirectory), it works out of the box with
+all of them.
+
+Bug: 578550
+Signed-off-by: Luca Milanesio <luca.milanesio@gmail.com>
+Change-Id: Ib340ff0ff065df6b1ee718100ad779b996b82ea5
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Luca Milanesio
+Date: 2022-02-06 00:50:48.000000000
+Message: 
+Uploaded patch set 18.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2022-02-06 00:50:57.000000000
+Message: 
+Patch Set 18:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline.java11/872/
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2022-02-06 00:51:56.000000000
+Message: 
+Patch Set 18:
+
+This is now ready again for review: the new approach is compatible with all RefDatabase backends.
+
+@Matthias please let me know if anything else is unclear on the rationale behind the change and the associated benefits, especially with large mono-repos with millions of refs.
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2022-02-06 00:53:54.000000000
+Message: 
+Patch Set 18:
+
+(1 comment)
+Line:205, org.eclipse.jgit.test/tst/org/eclipse/jgit/internal/storage/file/RefDirectoryTest.java -> @Matthias I have verified that this test is failing without the fix, because even though the ref returned is one, the ones loaded are all the refs in the RefDatabase, which is exactly the problem I am trying to resolve.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2022-02-06 01:02:03.000000000
+Message: 
+Patch Set 18: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline.java11/872/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2022-02-06 13:08:30.000000000
+Message: 
+Patch Set 18:
+
+(1 comment)
+Line:420, org.eclipse.jgit/src/org/eclipse/jgit/lib/RefDatabase.java -> I'm sorry; I don't understand how this solves the problem that is might not work with all back-ends. If there is an implementation that overrides getRefsByPrefix(String), there's still no guarantee that this HEAD special case is handled without loading all refs. So why not do this, if at all, directly in getRefsByPrefix(String)? Why add a new method? Besides I find it strange to have a new method that doesn't operate on 'this' but on an externally provided database 'refDb'.
+
+I get the impression that the difficulties to implement this (18 patch sets clearly show that this is not as trivial as it might have looked originally) show one thing: this operation is about "normal" refs, and HEAD is special. Maybe it'd be better not to change RefDatabase at all but handle the HEAD special case at the call site where you observed the problem?
+
+Besides, the @since is wrong.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2022-02-06 15:24:21.000000000
+Message: 
+Patch Set 18:
+
+> Patch Set 17: Code-Review-1
+> 
+> Actually, this solution was way too invasive on assuming that all the underlying RefDatabase implementations were able to understand that fetching with prefix "HEAD" means returning just "HEAD". Going to provide a less invasive solution that would avoid the full scanning of refs but would work out-of-the-box with all existing RefDatabases without impact.
+
+- it seems PS 18 should have been pushed as another change, PS 17 and 18 look completely different
+
+- I will try to reproduce the problem before looking at your change again.
+- did you verify the problem exists with RefTable ?
+- did you observe this problem in production ? How often does it occur ? I can't remember having seen anybody fetching HEAD explicitly.
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2022-02-06 20:00:23.000000000
+Message: 
+Patch Set 18:
+
+(1 comment)
+
+> Patch Set 18:
+> 
+> > Patch Set 17: Code-Review-1
+> > 
+> > Actually, this solution was way too invasive on assuming that all the underlying RefDatabase implementations were able to understand that fetching with prefix "HEAD" means returning just "HEAD". Going to provide a less invasive solution that would avoid the full scanning of refs but would work out-of-the-box with all existing RefDatabases without impact.
+> 
+> - it seems PS 18 should have been pushed as another change, PS 17 and 18 look completely different
+
+Those are two variations of the same change: I believe it is best to keep them as two patch-sets on the same change with associated comments rather than starting a brand-new one. WDYT?
+
+> - I will try to reproduce the problem before looking at your change again.
+
+Sure, no problem.
+
+> - did you verify the problem exists with RefTable ?
+
+Yes, because RefTable does not override getRefsByPrefix.
+
+> - did you observe this problem in production ? How often does it occur ? I can't remember having seen anybody fetching HEAD explicitly.
+
+Yes, it happens all the times HEAD is fetched. It is pretty clear from the code.
+Let me know if you need any further info.
+Line:420, org.eclipse.jgit/src/org/eclipse/jgit/lib/RefDatabase.java -> > I'm sorry; I don't understand how this solves the problem that is might not work with all back-ends. If there is an implementation that overrides getRefsByPrefix(String), there's still no guarantee that this HEAD special case is handled without loading all refs.
+
+True, that can be said for any of the other methods isn't it?
+I believe we should introduce a more well-defined interface < implementation relationship moving forward, otherwise it is always unclear whether the implementation should/can/must
+override and implement it or not.
+
+> So why not do this, if at all, directly in getRefsByPrefix(String)? Why add a new method? 
+
+Good question indeed :-) I had to introduce a new method for being able to actually test that it was NOT triggering the loading of all refs. Do you have another suggestion on how to achieve the same without this extra method?
+
+> Besides I find it strange to have a new method that doesn't operate on 'this' but on an externally provided database 'refDb'.
+
+Yes, it seems strange, agreed.
+
+> I get the impression that the difficulties to implement this (18 patch sets clearly show that this is not as trivial as it might have looked originally) show one thing: this operation is about "normal" refs, and HEAD is special.
+
+Yep, that's exactly the culprit of the problem.
+
+> Maybe it'd be better not to change RefDatabase at all but handle the HEAD special case at the call site where you observed the problem?
+
+Sure, but then we should reject 'HEAD' in getRefsByPrefix() and force the caller to manage it in a different way. It *has to be* managed differently, agreed. Either by the caller or by getRefsByPrefix. I'm open to either of the two solutions :-)
+
+> Besides, the @since is wrong.
+
+Thanks, fixed.
+
+----------------------------------------------------------------------------------------------------------------------

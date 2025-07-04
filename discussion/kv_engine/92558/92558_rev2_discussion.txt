@@ -1,0 +1,135 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-29184: Improve log message for slow BackfillManagerTask runtime
+
+We log all the useful information (vbid, startSeqno, endSeqno) when we
+schedule a backfill, e.g.:
+
+.. (vb 102) Scheduling backfill from 1 to 15650692 ..
+
+But, we do not do the same when we log a slow backfill, e.g.:
+
+.. Slow runtime for 'Backfilling items for a DCP Connection' on thread
+    auxIO_worker_1: 2676 ms
+
+It would be useful to have the backfill details for slow backfills, so
+with this change we produce the following slow-backfill output:
+
+.. Slow runtime for 'Backfilling items for a DCP Connection, vbid:1,
+    startSeqno:1, endSeqno:53392' on thread auxIO_worker_0: 4104 ms
+
+Change-Id: I2cb4975914ef33e5a2d0c076fb6caba08e7aa2d3
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2018-04-11 11:30:22.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-04-11 11:33:02.000000000
+Message: 
+Patch Set 2: Code-Review-1
+
+(1 comment)
+Line:121, engines/ep/src/dcp/backfill-manager.cc -> Be careful here - this method is called extremely frequently (every time the task is scheduled). You may well see a performance degradation if you're performing all this memory allocation - that's why most tasks pre-calculate the description.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2018-04-11 11:42:34.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:121, engines/ep/src/dcp/backfill-manager.cc -> Ok, I missed to re-check that (I assumed the method to be called only if we have as slow runtime, which is wrong).
+Do you think that a solution where I pre-size a buffer and then I 'memcpy' into the buffer would be acceptable? In that case there would be no memory allocation at all here.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-04-11 11:45:19.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:121, engines/ep/src/dcp/backfill-manager.cc -> The simplest solution is to just update the description once each time run() is called -however technically that will be sightly wrong as the description is read just before we run() the task (it's used to populate the recent / slow task log).
+
+TBH I'm not quite sure if this is the best approach - we can already see backfills slow from the difference between when we start and when they finish (which IIRC we log both events). Is that not sufficient?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-04-11 11:53:15.000000000
+Message: 
+Patch Set 2: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master-gcc7/789/ : FAILURE
+
+Failure of a CTest test  25/144 Test  #24: ep-engine_ep_unit_tests ...................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master-gcc7/789/ )
+
+Failure of a GoogleTest  ( http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master-gcc7/789/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/9030/ : FAILURE
+
+Failure of a CTest test  26/164 Test  #25: ep-engine_ep_unit_tests ...................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/9030/ )
+
+Failure of a GoogleTest  ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/9030/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/8857/ : FAILURE
+
+Failure of a CTest test  24/147 Test  #22: ep-engine_ep_unit_tests ...................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/8857/ )
+
+Failure of a GoogleTest  ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/8857/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master-gcc7/744/ : FAILURE
+
+ThreadSanitizer issue: data race /usr/local/include/c++/7.3.0/chrono:341 in std::chrono::duration<long, std::ratio<1l, 1000000000l> >::count() const  ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master-gcc7/744/ )
+
+Failure of a CTest test  27/146 Test  #25: ep-engine_ep_unit_tests ...................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master-gcc7/744/ )
+
+Failure of a GoogleTest  ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master-gcc7/744/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/7977/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/7220/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/2385/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2018-04-16 15:04:22.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:121, engines/ep/src/dcp/backfill-manager.cc -> We do log the Begin and End event for the BackFillManagerTask with Phosphor, but we do not have any stream detail. 
+So essentially on logs we have a long list of scheduled Backfills, but we do not know the VBucket, StartSeqno, EndSeqno for a slow BackFillManagerTask.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-04-16 15:25:39.000000000
+Message: 
+Patch Set 2:
+
+(4 comments)
+Line:80, engines/ep/src/dcp/backfill-manager.cc -> Style: given the constructor doesn't do anything else; prefer in-class member initialisers: http://isocpp.github.io/CppCoreGuidelines/CppCoreGuidelines#Rc-default
+
+Line:121, engines/ep/src/dcp/backfill-manager.cc -> Ok. Let's go with the approach you have for now - backfill doesn't run that often, and it's a relatively slow task, so I hope the cost of this isn't that high. We can adjust if necessary later.
+
+Line:70, engines/ep/src/dcp/backfill.h -> These should be uint64_t
+
+Line:79, engines/ep/src/dcp/backfill.h -> These should be uint64_t
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2019-05-16 11:38:08.000000000
+Message: 
+Removed reviewer Sriram Ganesan.
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2019-05-16 11:38:12.000000000
+Message: 
+Removed reviewer Trond Norbye.
+----------------------------------------------------------------------------------------------------------------------

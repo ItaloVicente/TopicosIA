@@ -1,0 +1,212 @@
+======================================================================================================================
+DESCRIPTION:
+
+Introduce core.trustPackedRefsModificationTime config
+
+Currently, we always read packed-refs file when 'trustFolderStat'
+is false. Introduce a new config 'trustPackedRefsModificationTime'
+which takes precedence over trustFolderStat when reading packed
+refs. Possible values for this new config are:
+
+* always: Trust packed-refs modification time
+* after_open: Same as 'always', but refresh the modification time
+              of packed-refs file before trusting it
+* never: Always read the packed-refs file
+* unset: Fallback to trustFolderStat to determine if the modification
+         time of packed-refs can be trusted
+
+Folks whose repositories are on NFS and have traditionally been
+setting trustFolderStat=false can now get some performance improvement
+with trustPackedRefsModificationTime=after_open as it refreshes the
+modification time of packed-refs file (at least on some NFS clients)
+before considering it.
+
+For example, consider a repository on NFS with ~500k packed-refs. Here
+are some stats which illustrate the improvement with this new config
+when reading packed refs on NFS:
+
+trustFolderStat=true trustPackedRefsModificationTime=unset: 0.2ms
+trustFolderStat=false trustPackedRefsModificationTime=unset: 155ms
+trustFolderStat=false trustPackedRefsModificationTime=after_open: 1.5ms
+
+Change-Id: I00da88e4cceebbcf3475be0fc0011ff65767c111
+Signed-off-by: Kaushik Lingarkar <quic_kaushikl@quicinc.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Kaushik Lingarkar
+Date: 2022-12-06 20:41:43.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2022-12-06 20:41:54.000000000
+Message: 
+Patch Set 2:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline.java11/2336/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2022-12-06 20:53:43.000000000
+Message: 
+Patch Set 2: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline.java11/2336/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Nasser Grainawi
+Date: 2022-12-12 17:59:26.000000000
+Message: 
+Patch Set 2:
+
+(4 comments)
+File Comment: /PATCHSET_LEVEL -> @Matthias, is this an appropriate change for a JGit stable branch? I couldn't find a guideline for that on https://wiki.eclipse.org/EGit/Contributor_Guide
+Line:49, Documentation/config-options.md -> "of the packed-refs file"
+
+Line:49, Documentation/config-options.md -> Should this say "use the behavior described in `trustFolderStat`."?
+
+Line:911, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/RefDirectory.java -> This is challenging to read and understand correctly, and all the boilerplate above distracts from the intent of this method. Maybe a small private method like `boolean trustPackedRefsModTime()` would help with breaking up the complexity? It would have to do the open/close too, which I'm not sure I like moving out of this method, so maybe there's a better approach that keeps the code here.
+
+To improve the code here, I think it would help (and also potentially be more correct) if you matched the behavior from the docs in the logic? Maybe using a switch statement on `trustPackedRefsModTime` would help do that?
+
+ switch (trustPackedRefsModTime) {
+   case TrustPackedRefsModificationTime.NEVER:
+     break;
+   case TrustPackedRefsModificationTime.AFTER_OPEN:
+     try (InputStream stream = Files.newInputStream(packedRefsFile.toPath())) {};
+     // allowed to fall through
+   case TrustPackedRefsModificationTime.ALWAYS:
+     if (!curList.snapshot.isModified(packedRefsFile)) {
+       return curList;
+     }
+     break;
+   case TrustPackedRefsModificationTime.UNSET: // allowed to fall through
+   default:
+     if (trustFolderStat && !curList.snapshot.isModified(packedRefsFile)) {
+       return curList;
+     }
+     break;
+ }
+
+I was hoping that would have a way to keep `curList.snapshot.isModified()` de-duplicated, but I don't see one (without creating the helper method that does that switch but returns 'true' whenever we would run isModified()). I still think the better readability and still keeping the code all together is probably a net improvement.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Nasser Grainawi
+Date: 2022-12-12 17:59:29.000000000
+Message: 
+Patch Set 2: Code-Review-1
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2022-12-12 19:42:29.000000000
+Message: 
+Patch Set 2:
+
+(2 comments)
+File Comment: /PATCHSET_LEVEL -> - yes, we occasionally did such changes in the past if they improve an important use case, don't break API and are not invasive
+- stable-6.1 is ok
+- the oldest branch we accepted fixes on since 6.0 is out was 5.13 to help users who are still stuck on Java 8
+Line:858, org.eclipse.jgit/src/org/eclipse/jgit/lib/ConfigConstants.java -> Can we name this trustPackedRefsStat ?
+I think this name is too long and not consistent with the naming of trustFolderStat.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Nasser Grainawi
+Date: 2022-12-13 15:09:12.000000000
+Message: 
+Patch Set 2:
+
+(2 comments)
+File Comment: /PATCHSET_LEVEL -> Ack
+Line:858, org.eclipse.jgit/src/org/eclipse/jgit/lib/ConfigConstants.java -> > Can we name this trustPackedRefsStat ?
+> I think this name is too long and not consistent with the naming of trustFolderStat.
+
+I think `trustFolderStat` is not a great name though as it doesn't clearly describe the behavior associated with the config. It's not 'stats' in general that we're (not) trusting, it's specifically the file modification time. git.git has configs like `checkoutAmbiguousRemoteBranchName` so I don't think length is an issue.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2022-12-13 15:20:10.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:858, org.eclipse.jgit/src/org/eclipse/jgit/lib/ConfigConstants.java -> I disagree, RefDirectory#getPackedRefs calls FileSnapshot#isModified which checks
+- if the file's size changed
+- if the file's FileKey changed (inode on Unix)
+- if the file's lastModified changed
+
+see https://git.eclipse.org/r/plugins/gitiles/jgit/jgit/+/refs/heads/stable-6.1/org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/FileSnapshot.java#315
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Nasser Grainawi
+Date: 2022-12-13 18:58:51.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:858, org.eclipse.jgit/src/org/eclipse/jgit/lib/ConfigConstants.java -> > I disagree, RefDirectory#getPackedRefs calls FileSnapshot#isModified which checks
+> - if the file's size changed
+> - if the file's FileKey changed (inode on Unix)
+> - if the file's lastModified changed
+> 
+> see https://git.eclipse.org/r/plugins/gitiles/jgit/jgit/+/refs/heads/stable-6.1/org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/FileSnapshot.java#315
+
+Oh, I'm sorry, you're of course correct. Somehow between reading that code in the past and reviewing this change I lost track in my head of what all was being checked. Given that, `trustPackedRefsStat` would be fine with me, but maybe `trustPackedRefsFileAttributes` would be slightly better? @Kaushik/@Martin do you have any concerns with either?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Kaushik Lingarkar
+Date: 2022-12-13 21:48:38.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:858, org.eclipse.jgit/src/org/eclipse/jgit/lib/ConfigConstants.java -> > > I disagree, RefDirectory#getPackedRefs calls FileSnapshot#isModified which checks
+> > - if the file's size changed
+> > - if the file's FileKey changed (inode on Unix)
+> > - if the file's lastModified changed
+> > 
+> > see https://git.eclipse.org/r/plugins/gitiles/jgit/jgit/+/refs/heads/stable-6.1/org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/FileSnapshot.java#315
+> 
+> Oh, I'm sorry, you're of course correct. Somehow between reading that code in the past and reviewing this change I lost track in my head of what all was being checked. Given that, `trustPackedRefsStat` would be fine with me, but maybe `trustPackedRefsFileAttributes` would be slightly better? @Kaushik/@Martin do you have any concerns with either?
+
+No concerns with either. I like `trustPackedRefsStat` as it is consistent with `trustFolderStat`.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Martin Fick
+Date: 2022-12-13 22:40:26.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:858, org.eclipse.jgit/src/org/eclipse/jgit/lib/ConfigConstants.java -> I do think `trustPackedRefsFileAttributes` is more accurate, but I understand why  `trustPackedRefsStat` might be better for consistency, so either sounds good to me.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Kaushik Lingarkar
+Date: 2022-12-14 19:51:30.000000000
+Message: 
+Patch Set 2:
+
+(4 comments)
+Line:49, Documentation/config-options.md -> Done
+
+Line:49, Documentation/config-options.md -> Done
+
+Line:911, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/RefDirectory.java -> Done. Thanks. Your suggestion greatly improves the readability of the code. I have removed the 'default' case though as it is not needed.
+
+Line:858, org.eclipse.jgit/src/org/eclipse/jgit/lib/ConfigConstants.java -> Done
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2022-12-14 19:58:54.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:858, org.eclipse.jgit/src/org/eclipse/jgit/lib/ConfigConstants.java -> ok, then I propose we use `trustPackedRefsStat` which is consistent to `trustFolderStat`
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2022-12-14 20:00:56.000000000
+MISMATCHED INLINE COMMENT
+Line:858, org.eclipse.jgit/src/org/eclipse/jgit/lib/ConfigConstants.java -> Done
+----------------------------------------------------------------------------------------------------------------------

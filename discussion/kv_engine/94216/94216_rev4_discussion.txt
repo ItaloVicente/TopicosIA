@@ -1,0 +1,96 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-29675: Cache is{Snappy,ForceValueCompression}Enabled in ActiveStream
+
+makeResponseFromItem is called for every item to be sent out over DCP;
+and it shows up high in 'linux perf' profiles (approx 6% of AuxIO
+threads). The bulk of the cost is actually checking if the given
+stream supports Snappy, and if all items should be focrcefully
+compressed.
+
+This cost comes from both isSnappyEnabled &
+isForceValueCompressionEnabled() having to promote the producer
+weak_ptr to a shared_ptr to check the relevent producer flag (and then
+delete the shared_ptr).
+
+Optimise this by simply caching the value of snappyEnabled /
+forceValueCompression in the ActiveStream object at construction time,
+and checking the local flag. We don't support changing either of these
+flags dynamically for a stream, so this is safe - and avoids all the
+shared_ptr manipulation.
+
+With these changes makeResponseFromItem drops to less than 1% of AuxIO
+threads.
+
+Change-Id: Ice4a559fc7a54bfab4ce9a136d2dc9bdb618e6f4
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2018-05-16 11:38:52.000000000
+Message: 
+Uploaded patch set 4: Patch Set 3 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2018-05-16 11:54:21.000000000
+Message: 
+Patch Set 4: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-05-16 13:03:39.000000000
+Message: 
+Patch Set 4: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-vulcan/367/ : FAILURE
+
+One of more core files found at the end of the build. Data for post-mortem saved to archived_core_dumps.tar.bz2 under "Build Artifacts". ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-vulcan/367/ )
+
+Failure of a CTest test  24/151 Test  #25: ep-engine_ep_unit_tests ...................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-vulcan/367/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-vulcan/337/ : FAILURE
+
+Failure of a CTest test  23/140 Test  #24: ep-engine_ep_unit_tests ...................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-vulcan/337/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-undefinedsanitizer-vulcan/366/ : FAILURE
+
+One of more core files found at the end of the build. Data for post-mortem saved to archived_core_dumps.tar.bz2 under "Build Artifacts". ( http://cv.jenkins.couchbase.com/job/kv_engine-undefinedsanitizer-vulcan/366/ )
+
+Failure of a CTest test  25/141 Test  #24: ep-engine_ep_unit_tests ...................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-undefinedsanitizer-vulcan/366/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-vulcan/417/ : FAILURE
+
+Failure of a CTest test  26/141 Test  #25: ep-engine_ep_unit_tests ...................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-vulcan/417/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-vulcan/440/ : FAILURE
+
+Failure of a CTest test  23/145 Test  #22: ep-engine_ep_unit_tests ...................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-vulcan/440/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/8048/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-vulcan/324/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-05-16 15:37:53.000000000
+Message: 
+Assignee added: Jim Walker <jim@couchbase.com>
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-05-16 15:40:47.000000000
+Message: 
+Patch Set 4: Code-Review-1
+
+@Jim: Note this is currently failing in dcp_test.cc (test_verifyDCPCompression) when the test is attempting to enable compression after a stream has been created:
+
+ [ RUN      ] CompressionStreamTest/CompressionStreamTest.test_verifyDCPCompression/persistent
+ /home/daver/repos/couchbase/server-vulcan/kv_engine/engines/ep/tests/module_tests/dcp_test.cc:527: Failure
+ Value of: mutProdResponse->getItem().get()
+   Actual: 0x7fffeef24c80
+ Expected: qi.get()
+ Which is: 0x7fffeef24d60
+
+I checked the spec (https://docs.google.com/document/d/13vrXU6rG5xxr_KNZ0vYdZJRbGYi5fQDm8KlICF5CXjk/edit#) and there's no mention this is actually supported (and I don't think we should support it). As such, I believe we just need to update the test to not attempt this - if compression needs to be changed then the stream needs to be re-established.
+----------------------------------------------------------------------------------------------------------------------

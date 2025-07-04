@@ -1,0 +1,107 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-30532: Optimize and simplify CM::checkAndAddNewCheckpoint
+
+CheckpointManager::checkAndAddNewCheckpoint ("the function" from now on)
+contains a lot of legacy code from TAP that is both unnecessary and
+suboptimal.
+
+a) The function takes in input the id of the new checkpoint that is
+being created.
+This is a legacy from TAP, when we used to synchronize checkpoints
+between active and replica (http://review.couchbase.org/#/c/4917/).
+We don't do that with DCP. We still do active/replica synchronization,
+but it is a logical synchronization on sequence-numbers rather than on
+checkpoint IDs.
+
+The function is called only by PassiveStream::handleSnapshotEnd, where:
+    - we compute id=prevId+1; note that for retrieving prevId we call a
+      dedicated CheckpointManager function that acquires/releases the
+      CM::queueLock
+    - we call CM::checkAndAddNewCheckpoint(id), where we acquire/release
+      the CM::queueLock again
+
+b) Given point a), the function considers the case where the
+CM::checkpointList contains a checkpoint-id >= newId:
+    - we scan the CM::checkpointList to find an id >= newId.
+      Note: that means that the function is O(N), with N=numCheckpoints.
+          That is the main cause of the regression in MB-30019, where
+          the number of checkpoints is very high (up to ~50000).
+    - if it exist, than we collapse all the checkpoints into one.
+      This was added in MB-4707 for resolving a consistency issue.
+
+But:
+- by code inspection it seems that there is no other actor that modifies
+  the CM::checkpointList for a replica vbucket consurrently with
+  PassiveStream::handleSnapshotEnd. This means that checkpoint-collapsing
+  is never executed in the current code for real runs
+- by computing the new checkpoint id inside the function, we ensure that
+  the id-sequence is strictly increasing, so we can never execute the
+  collapse-path by logic
+
+All the above allows a logical sequence of optimizations and
+simplifications:
+1) we can avoid acquiring/releasing the CM::queueLock twice just by
+   computating the new id inside the function
+2) so, we ensure that the new checkpoint id>prevId always
+3) so, we don't need to scan the CM::checkpointList to check if
+   id<=prevId. That means that we drop the function's complexity from
+   O(N) to O(1)
+4) so, we can remove the code path that performs checkpoint-collapsing,
+   as we never execute it by logic
+5) also, we can remove the CheckpointTest::reset_checkpoint_id test.
+   That test was added in MB-7567 to check that we don't copy the
+   checkpoint-end metaitems when we merge checkpoints.
+   Note that checkpoint-merging is still performed as part of
+   closed-checkpoint-collapsing, so I'll add a new test for
+   checkpoint-merging in a follow-up patch
+
+The optimizations at 1) and 3) (the latter in particular) help in reducing
+the runtime of CM::checkAndAddNewCheckpoint considerably.
+Here I show the results of the
+perf_dcp_consumer_snap_end_mutation_latency test before and after the
+optimizations above. Note that I re-introduced the regression of MB-30019
+on my local environment for taking the measurements:
+
+[Before]
+=== DCP Consumer snapshot-end mutation - 20000 items === Latency (ns) =======================
+
+                                Percentile
+                         Median     95th     99th  Std Dev  Histogram of samples
+
+Datatype::Raw           287.665  628.839  752.913  182.681  ▁▁▄▅▄▆▇█▅▅▅▅▆▅▅▅▅▅▄▄▅▅▄▄▄▄▃▄▄▄▃▂
+                                                            52             ns            628
+
+[After]
+=== DCP Consumer snapshot-end mutation - 20000 items === Latency (ns) =======================
+
+                                Percentile
+                         Median     95th     99th  Std Dev  Histogram of samples
+
+Datatype::Raw            22.980   41.178   81.831   12.852  ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▇█▅▅▃▂▂▁▁▁▁▁▁▁▁▁
+                                                            20             ns             41
+
+Change-Id: I4a9f317efecc4a77faec9b14980fa7ccc92edb6b
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2018-08-02 10:50:53.000000000
+Message: 
+Uploaded patch set 6.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-08-02 10:52:49.000000000
+Message: 
+Patch Set 6: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/10870/ : ABORTED
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/10870/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/9716/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

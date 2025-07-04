@@ -1,0 +1,298 @@
+======================================================================================================================
+DESCRIPTION:
+
+FileRepository: Refactor to not use deprecated Repository#getAllRefs
+
+Replace usage of Repository#getRefs with getRefDatabase().getRefs() which
+throws IOException instead of swallowing it.
+
+As a result, the calling method getAdditionalHaves needs to be modified
+to throw IOException. Adding it only on FileRepository's implementation is
+not sufficient; it needs to be added on the original declaration of the
+method in Repository. Subsequently it needs to be added on all derived
+classes.
+
+Change-Id: I4b82654fcc0d6fdc616ccbe7f28fadc6805838fe
+Signed-off-by: David Pursehouse <david.pursehouse@gmail.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: David Pursehouse
+Date: 2018-05-23 05:21:05.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonathan Nieder
+Date: 2018-05-23 05:30:49.000000000
+Message: 
+Patch Set 2: Code-Review-1
+
+Thanks for writing this. I expect this kind of pattern to come up a lot, so I'd like to figure out whether it's possible to do in a less invasive way.
+
+E.g. with this one, one possibility is to introduce RefDatabase#getAdditionalHaves(), throwing IOException. Then for backward compatibility, Repository#getAdditionalHaves() could temporarily use https://docs.oracle.com/javase/8/docs/api/java/io/UncheckedIOException.html:
+
+ @Deprecated
+ ... getAdditionalHaves() {
+   try {
+     return getRefDatabase().getAdditionalHaves();
+   } catch (IOException e) {
+     throw new UncheckedIOException(e);
+   }
+ }
+
+That would make the transition easier for callers, so it feels worth doing.
+
+If we wanted to make the transition completely smooth for implementors too, that's harder: it would require the same three-step dance as https://git.eclipse.org/r/c/122970. Historically we've been okay with changing API for implementors in minor (but not micro) releases at will, and the downsides discussed in that change are severe, so there's probably no need for that --- instead, we can skip straight to step 2 of those three steps:
+
+ public class Repository {
+   ...
+   @Deprecated
+   @NonNull
+   public final Set<ObjectId> getAdditionalHaves() {
+     try {
+       ...
+     }
+   }
+ }
+
+Marking the wrapper final forces any implementors overriding it to notice they need to override RefDatabase#getAdditionalHaves instead. Implementors that didn't override it don't have to do anything.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-05-23 05:38:02.000000000
+Message: 
+Patch Set 2:
+
+Build Started https://ci.eclipse.org/jgit/job/jgit.gerrit/13253/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2018-05-23 05:56:57.000000000
+Message: 
+Patch Set 2: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/jgit.gerrit/13253/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: David Pursehouse
+Date: 2018-05-23 06:47:42.000000000
+Message: 
+Patch Set 2:
+
+Sorry if I'm missing something, but I'm not completely following how the proposed solution would work.
+
+If we add RefDatabase.getAdditionalHaves, and then delegate to that from Repository.getAdditionalHaves which is made final, then the FileRepository can no longer implement its own getAdditionalHaves (cannot override final method).
+
+In that case where does the implementation in FileRepository.getAdditionalHaves move to? It iterates over objectDatabase.myAlternates() which would not be accessible from RefDatabase's implementation.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2018-09-02 05:55:48.000000000
+Message: 
+Patch Set 2:
+
+> Sorry if I'm missing something, but I'm not completely following
+ > how the proposed solution would work.
+ > 
+ > If we add RefDatabase.getAdditionalHaves, and then delegate to that
+ > from Repository.getAdditionalHaves which is made final, then the
+ > FileRepository can no longer implement its own getAdditionalHaves
+ > (cannot override final method).
+ > 
+ > In that case where does the implementation in FileRepository.getAdditionalHaves
+ > move to? It iterates over objectDatabase.myAlternates() which would
+ > not be accessible from RefDatabase's implementation.
+
+@Jonathan: did you want to comment on this ?
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonathan Nieder
+Date: 2018-09-02 07:20:32.000000000
+Message: 
+Patch Set 2:
+
+> If we add RefDatabase.getAdditionalHaves, and then delegate to that from Repository.getAdditionalHaves which is made final, then the FileRepository can no longer implement its own getAdditionalHaves (cannot override final method).
+
+I don't understand what you're asking. The RefDatabase for FileRepository is RefDirectory. Why would FileRepository want to override its own implementation?
+----------------------------------------------------------------------------------------------------------------------
+Author: David Pursehouse
+Date: 2018-09-02 08:16:11.000000000
+Message: 
+Patch Set 2:
+
+> > If we add RefDatabase.getAdditionalHaves, and then delegate to
+ > that from Repository.getAdditionalHaves which is made final, then
+ > the FileRepository can no longer implement its own
+ > getAdditionalHaves (cannot override final method).
+ > 
+ > I don't understand what you're asking. The RefDatabase for
+ > FileRepository is RefDirectory. Why would FileRepository want to
+ > override its own implementation?
+
+TBH I'm not sure any more either. I'll have to look into this again.
+----------------------------------------------------------------------------------------------------------------------
+Author: David Pursehouse
+Date: 2018-09-03 02:24:44.000000000
+Message: 
+Patch Set 2:
+
+> > If we add RefDatabase.getAdditionalHaves, and then delegate to
+ > that from Repository.getAdditionalHaves which is made final, then
+ > the FileRepository can no longer implement its own
+ > getAdditionalHaves (cannot override final method).
+ > 
+ > I don't understand what you're asking. The RefDatabase for
+ > FileRepository is RefDirectory. Why would FileRepository want to
+ > override its own implementation?
+
+Tried it again.  If I make this change:
+
+  diff --git a/org.eclipse.jgit/src/org/eclipse/jgit/lib/Repository.java b/org.eclipse.jgit/src/org/eclipse/jgit/lib/Repository.java
+  index d73c05e24..7f55af9ea 100644
+  --- a/org.eclipse.jgit/src/org/eclipse/jgit/lib/Repository.java
+  +++ b/org.eclipse.jgit/src/org/eclipse/jgit/lib/Repository.java
+  @@ -1053,7 +1053,8 @@ public String getBranch() throws IOException {
+           * @return unmodifiable collection of other known objects.
+           */
+          @NonNull
+  -       public Set<ObjectId> getAdditionalHaves() { 
+  +       @Deprecated
+  +       public final Set<ObjectId> getAdditionalHaves() {
+                  return Collections.emptySet();
+          }
+
+then FileRepository doesn't compile:
+
+  Cannot override the final method from Repository
+
+because it extends Repository, and has this method:
+
+  @Override
+  public Set<ObjectId> getAdditionalHaves() {
+    return getAdditionalHaves(null);
+  }
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonathan Nieder
+Date: 2018-09-03 03:55:27.000000000
+Message: 
+Patch Set 2:
+
+>   --- a/org.eclipse.jgit/src/org/eclipse/jgit/lib/Repository.java
+>   +++ b/org.eclipse.jgit/src/org/eclipse/jgit/lib/Repository.java
+>   @@ -1053,7 +1053,8 @@ public String getBranch() throws IOException {
+>            * @return unmodifiable collection of other known objects.
+>            */
+>           @NonNull
+>   -       public Set<ObjectId> getAdditionalHaves() { 
+>   +       @Deprecated
+>   +       public final Set<ObjectId> getAdditionalHaves() {
+>                   return Collections.emptySet();
+>           }
+
+That doesn't look right. Instead, we'd do
+
+  @NonNull
+  public final Set<ObjectId> getAdditionalHaves() {
+    try {
+      return getRefDatabase().getAdditionalHaves();
+    } catch (IOException e) {
+      throw new UncheckedIOException(e);
+    }
+  }
+
+and in RefDatabase.java:
+
+  public Set<ObjectId> getAdditionalHaves() throws IOException {
+    return Collections.emptySet();
+  }
+
+That would allow overriding getAdditionalHaves for FileRepository in RefDirectory.
+----------------------------------------------------------------------------------------------------------------------
+Author: David Pursehouse
+Date: 2018-09-03 04:46:51.000000000
+Message: 
+Patch Set 2:
+
+> >   --- a/org.eclipse.jgit/src/org/eclipse/jgit/lib/Repository.java
+ > >   +++ b/org.eclipse.jgit/src/org/eclipse/jgit/lib/Repository.java
+ > >   @@ -1053,7 +1053,8 @@ public String getBranch() throws
+ > IOException {
+ > >            * @return unmodifiable collection of other known
+ > objects.
+ > >            */
+ > >           @NonNull
+ > >   -       public Set<ObjectId> getAdditionalHaves() {
+ > >   +       @Deprecated
+ > >   +       public final Set<ObjectId> getAdditionalHaves() {
+ > >                   return Collections.emptySet();
+ > >           }
+ > 
+ > That doesn't look right.
+
+That was just a minimal change to demonstrate the compilation error.
+
+ >  Instead, we'd do
+ > 
+ > @NonNull
+ > public final Set<ObjectId> getAdditionalHaves() {
+ > try {
+ > return getRefDatabase().getAdditionalHaves();
+ > } catch (IOException e) {
+ > throw new UncheckedIOException(e);
+ > }
+ > }
+ > 
+
+OK so far.
+
+ > and in RefDatabase.java:
+ > 
+ > public Set<ObjectId> getAdditionalHaves() throws IOException {
+ > return Collections.emptySet();
+ > }
+ > 
+
+And this also compiles.
+
+ > That would allow overriding getAdditionalHaves for FileRepository
+ > in RefDirectory.
+
+The additional change in RefDatabase doesn't fix anything in FileRepository, which still fails to compile with "Cannot override the final method from Repository" because it extends Repository and attempts to override its method which we just made final.
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonathan Nieder
+Date: 2018-09-03 06:06:35.000000000
+Message: 
+Patch Set 2:
+
+>  > That would allow overriding getAdditionalHaves for FileRepository
+>  > in RefDirectory.
+> 
+> The additional change in RefDatabase doesn't fix anything in FileRepository, which still fails to compile with "Cannot override the final method from Repository" because it extends Repository and attempts to override its method which we just made final.
+
+I still don't understand. Why would FileRepository want to override getAdditionalHaves in this scenario? The override would need to move to RefDirectory instead.
+----------------------------------------------------------------------------------------------------------------------
+Author: David Pursehouse
+Date: 2018-09-03 06:24:48.000000000
+Message: 
+Patch Set 2:
+
+> >  > That would allow overriding getAdditionalHaves for
+ > FileRepository
+ > >  > in RefDirectory.
+ > >
+ > > The additional change in RefDatabase doesn't fix anything in
+ > FileRepository, which still fails to compile with "Cannot override
+ > the final method from Repository" because it extends Repository and
+ > attempts to override its method which we just made final.
+ > 
+ > I still don't understand. Why would FileRepository want to override
+ > getAdditionalHaves in this scenario? The override would need to
+ > move to RefDirectory instead.
+
+The point is that it already does override it, which is why I am confused about the proposed solution. If we can just move it to RefDirectory I will try to do that. I wasn't sure if we can just remove a public method.  Although now as I'm writing this I remember that FileDirectory is in the internal package, so we probably can...
+----------------------------------------------------------------------------------------------------------------------
+Author: David Pursehouse
+Date: 2018-09-03 07:16:54.000000000
+Message: 
+Abandoned
+
+Superseded by https://git.eclipse.org/r/#/c/128521/
+----------------------------------------------------------------------------------------------------------------------

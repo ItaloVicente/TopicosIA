@@ -1,0 +1,177 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 565316 - Combine ICBuildConfiguration2 into ICBuildConfiguration
+
+Change-Id: Ic8e55a0e3b86f6218a6e4e0f417edc22d24ad704
+Signed-off-by: Marc-Andre Laperle <malaperle@gmail.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Marc-André Laperle
+Date: 2020-07-18 03:20:10.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: CDT Bot
+Date: 2020-07-18 03:42:32.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-ui-only-pipeline/2008/ : SUCCESS
+
+https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-other-pipeline/2100/ : SUCCESS. p2 repository available on https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-other-pipeline/2100/artifact/releng/org.eclipse.cdt.repo/target/repository/ for approximately 7 days.
+
+https://ci.eclipse.org/cdt/job/cdt-verify-code-cleanliness-pipeline/1662/ : SUCCESS. Formatting, whitespace, version numbers and other checks appear to be correct. See https://github.com/eclipse-cdt/cdt-infra/tree/master/jenkins/pipelines/cdt/verify#cdt-verify-code-cleanliness for documentation on what is checked.
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexander Fedorov
+Date: 2020-07-18 09:29:44.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:249, core/org.eclipse.cdt.core/src/org/eclipse/cdt/core/build/ICBuildConfiguration.java -> I would like to avoid this method in the API
+The reason is that we already have 
+`CBuildConfiguration::setActive(IProgressMonitor monitor) throws CoreException` that does a different thing and this leads to confusion.
+
+Or at least let's rename this method to `reindex` as this is what it does. 
+Actually I have deeper concerns why `CoreBuildLaunchBarTracker` needs to do so much heavy work on simple event - but this is another story.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc-André Laperle
+Date: 2020-07-20 02:54:29.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:249, core/org.eclipse.cdt.core/src/org/eclipse/cdt/core/build/ICBuildConfiguration.java -> "I would like to avoid this method in the API"
+It's already in the API, in ICBuildConfiguration2. Do you want us to both collapse the interfaces and change the method at the same time? It seems more risky to rename something that could change its semantics for implementers. The other setActive(IProgressMonitor monitor) also doesn't seem to be called either so maybe it should be removed instead. I don't know enough about Core build to make the right call. Who does?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexander Fedorov
+Date: 2020-07-20 10:33:59.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:249, core/org.eclipse.cdt.core/src/org/eclipse/cdt/core/build/ICBuildConfiguration.java -> > Do you want us to both collapse the interfaces and change the method at the same time?
+
+You are right, may be not in the same Gerrit. But generally yes, I would like to avoid the API of procedural "setter" style, it makes things more complex than really needed. As we already have incompartible change in upcoming 10.0 it may be a good time to proceed with rename. 
+
+> I don't know enough about Core build to make the right call. Who does?
+
+May be nobody, but with declaring this formally new method with the current contract and implementation we "introduce" the API defect, as implementation does not corresponds to the method contract.
+
+
+Ideally we should avoid this "force reindex" lever at all, because what we are saying is:
+```
+hey, user is clicking something related, let's follow and do the very heavy reindex for every click!
+```
+This is the way of thinking that we offer for CDT developers with an API like this.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc-André Laperle
+Date: 2020-08-08 23:29:40.000000000
+Message: 
+Patch Set 1:
+
+I'm not really sure what to do. I don't really agree with renaming it to reindex. I think configurations should be notified that they are active and it's up to them do what they want, like fire events (of course, doing heavy work synchronously is not good practice for extenders). A specific configuration type could have custom UI to notify of the active config change. Unless there is another mechanism to listen to such "active config" change?
+I would suggest deleting setActive(IProgressMonitor monitor) though. Nothing calls it.
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexander Fedorov
+Date: 2020-08-09 07:22:52.000000000
+Message: 
+Patch Set 1:
+
+> Patch Set 1:
+> 
+> I'm not really sure what to do. I don't really agree with renaming it to reindex. I think configurations should be notified that they are active and it's up to them do what they want, like fire events (of course, doing heavy work synchronously is not good practice for extenders). A specific configuration type could have custom UI to notify of the active config change. Unless there is another mechanism to listen to such "active config" change?
+
+This sounds like an invitation to discussion :) The problem has very deep roots and I'm not sure that we can resolve it on one turn.
+1) CDT declared its own "Project Build Configuration" idea and started its own journey mostly outside of the platform support.
+2) The appropriate layer to manage changes like "project active configuration changes" is "org.eclipse.core.resources" package, and all others can trigger it via Platform Resources API and listen for changes.
+3) UI can ask to trigger the event chain (using Job) and then listen for the result to react (asynchronously). But it should not try to implement its own "gear" to manually control the build configuration: it is just not possible in general case, because one will need to duplicate all the Platform Resources implementation, including its native parts.
+4) We are far from the right way at the moment but at least we can start our turn to the right direction, and for this we need to stop introducing another "gear" for manual control of resources.
+5) If we don't have the appropriate events in Platform Resources, let's understand what we need and then let's introduce them.
+
+
+> I would suggest deleting setActive(IProgressMonitor monitor) though. Nothing calls it.
+
+Generally I would be glad to delete every setter as it will decrease complexity. But for this particular case I need to reference the following code:
+
+1) https://github.com/eclipse-cdt/cdt/blob/master/debug/org.eclipse.cdt.debug.core/src/org/eclipse/cdt/debug/core/launch/CoreBuildLaunchBarTracker.java#L182
+2) https://github.com/eclipse-cdt/cdt/blob/master/debug/org.eclipse.cdt.debug.core/src/org/eclipse/cdt/debug/core/launch/CoreBuildLaunchConfigDelegate.java#L147
+3) https://github.com/eclipse-cdt/cdt/blob/master/launch/org.eclipse.cdt.docker.launcher/src/org/eclipse/cdt/internal/docker/launcher/ContainerLaunchConfigurationDelegate.java#L589
+
+Isn't it nice to see how "leaf" subsystems brutally manipulate the platform resources state using the code copied from `CBuildConfiguration#setActive(IProgressMonitor monitor)`? So, in fact it is used. But the way it is used is something special.
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc-André Laperle
+Date: 2020-08-09 16:06:36.000000000
+Message: 
+Patch Set 1:
+
+> Patch Set 1:
+> 
+> > Patch Set 1:
+> > 
+> > I'm not really sure what to do. I don't really agree with renaming it to reindex. I think configurations should be notified that they are active and it's up to them do what they want, like fire events (of course, doing heavy work synchronously is not good practice for extenders). A specific configuration type could have custom UI to notify of the active config change. Unless there is another mechanism to listen to such "active config" change?
+> 
+> This sounds like an invitation to discussion :) The problem has very deep roots and I'm not sure that we can resolve it on one turn.
+> 1) CDT declared its own "Project Build Configuration" idea and started its own journey mostly outside of the platform support.
+
+James didn't get to finish the platform support in order to fully replace the CDT configs. I guess Doug didn't want to continue that work with the new Core build configuration as there is the reputation of being hard to put things in Platform (less so now!), or just didn't get to address this point.
+
+> 2) The appropriate layer to manage changes like "project active configuration changes" is "org.eclipse.core.resources" package, and all others can trigger it via Platform Resources API and listen for changes.
+> 3) UI can ask to trigger the event chain (using Job) and then listen for the result to react (asynchronously). But it should not try to implement its own "gear" to manually control the build configuration: it is just not possible in general case, because one will need to duplicate all the Platform Resources implementation, including its native parts.
+
+That's more or less what I had in mind too.
+
+> 4) We are far from the right way at the moment but at least we can start our turn to the right direction, and for this we need to stop introducing another "gear" for manual control of resources.
+> 5) If we don't have the appropriate events in Platform Resources, let's understand what we need and then let's introduce them.
+
+I thought it would be a simple clean-up patch (a follow-up to the mailing list question), as is it collapsing existing API so not introducing anything new.
+I don't plan to be involved in much Build development as I find it does not provide as much value (I build outside CDT) and considering the small amount of free time I have. This sounds like a more substantial change (perhaps I'm wrong!). So if this patch doesn't go in the right direction, it sounds to me the status quo is better than this patch and it should be abandoned.
+
+> Isn't it nice to see how "leaf" subsystems brutally manipulate the platform resources state using the code copied from `CBuildConfiguration#setActive(IProgressMonitor monitor)`? So, in fact it is used. But the way it is used is something special.
+
+I don't understand, I still see nothing calling setActive(IProgressMonitor monitor) in those three. You mean it should stay so that people can copy its code?
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexander Fedorov
+Date: 2020-08-09 16:23:26.000000000
+Message: 
+Patch Set 1:
+
+> Patch Set 1:
+> 
+> > Patch Set 1:
+> > 
+> > > Patch Set 1:
+> > > 
+> 
+> > 4) We are far from the right way at the moment but at least we can start our turn to the right direction, and for this we need to stop introducing another "gear" for manual control of resources.
+> > 5) If we don't have the appropriate events in Platform Resources, let's understand what we need and then let's introduce them.
+> 
+> I thought it would be a simple clean-up patch (a follow-up to the mailing list question), as is it collapsing existing API so not introducing anything new.
+> I don't plan to be involved in much Build development as I find it does not provide as much value (I build outside CDT) and considering the small amount of free time I have. This sounds like a more substantial change (perhaps I'm wrong!). So if this patch doesn't go in the right direction, it sounds to me the status quo is better than this patch and it should be abandoned.
+>
+
+Yes, I can understand that it eats more time than planned. I like the idea to reduce the number of "numeric" successors we have now, but I don't want to declare new API methods that invites to the wrong paradigm.
+
+> 
+> > Isn't it nice to see how "leaf" subsystems brutally manipulate the platform resources state using the code copied from `CBuildConfiguration#setActive(IProgressMonitor monitor)`? So, in fact it is used. But the way it is used is something special.
+> 
+> I don't understand, I still see nothing calling setActive(IProgressMonitor monitor) in those three. You mean it should stay so that people can copy its code?
+
+Sorry for being so unreadable. No, I believe people should invoke proper API method instead of doing copy&paste. 
+The code that I mentioned shows that currently things does not work as expected without forced synchronization between Platform and CDT build configs and without reindex. From this perspective removing `CBuildConfiguration#setActive(IProgressMonitor monitor)` will not improve the situation that match: we will get more and more copy&paste to workaround this problem
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc-André Laperle
+Date: 2020-08-09 20:19:05.000000000
+Message: 
+Abandoned
+
+This needs more consideration regarding the setActive method
+----------------------------------------------------------------------------------------------------------------------

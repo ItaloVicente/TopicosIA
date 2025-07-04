@@ -1,0 +1,165 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-52455: Avoid double counting during indexer restart
+
+Change-Id: I982663b641ac8a87c54c55ae0a7529686fc62592
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: SAI KRISHNA TEJA KOMMARAJU
+Date: 2023-01-27 05:23:05.000000000
+Message: 
+Uploaded patch set 9.
+----------------------------------------------------------------------------------------------------------------------
+Author: VarunVelamuri
+Date: 2023-01-27 05:52:31.000000000
+Message: 
+Patch Set 9:
+
+(8 comments)
+Line:107, secondary/indexer/metering_enterprise.go -> Do you want to log this error as well?
+
+Line:146, secondary/indexer/metering_enterprise.go -> As this is a shard object and multiple go-routines can invoke this handler simultaneously, do you want to lock protect this?
+
+Line:150, secondary/indexer/metering_enterprise.go -> What is the frequency with which this endpoint is invoked? Do you want to persist the data every time as this can delay responding to the endpoint - since persistence is unpredictable in performance
+
+Line:164, secondary/indexer/metering_enterprise.go -> Can this lead to log flooding?
+
+Line:232, secondary/indexer/metering_enterprise.go -> If index inst map is read only, then no need to copy index instance map. See timekeeper for reference.
+
+Line:245, secondary/indexer/metering_enterprise.go -> Same as above
+
+Line:266, secondary/indexer/metering_enterprise.go -> Since we just recovered, why is Persistence required again?
+
+Line:2130, secondary/indexer/plasma_slice.go -> Any reason why resetStats() should reset writeUnits?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: VarunVelamuri
+Date: 2023-01-27 06:00:31.000000000
+Message: 
+Patch Set 9:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> Can you also add few lines about your approach in the gerrit comments so that it becomes easy to understand the approach without going though the design document
+----------------------------------------------------------------------------------------------------------------------
+Author: SAI KRISHNA TEJA KOMMARAJU
+Date: 2023-01-27 06:05:21.000000000
+Message: 
+Patch Set 9:
+
+(6 comments)
+Line:146, secondary/indexer/metering_enterprise.go -> Valid Varun. This endpoint will only called by control plane periodically. But that is not a good assumption to live with when its http handler will fix this.
+
+Line:150, secondary/indexer/metering_enterprise.go -> Yes this was what we thought in the design discussions too. This will be called every 5 seconds or so by control plane and the data to be written will be very less i.e. say one unit64 for every bucket in this subcluster. I can make this background thread and do it like plasma persistence with a compare and swap if needed. Can take that up in next patch.
+
+Line:164, secondary/indexer/metering_enterprise.go -> Yeah will reduce the frequency of logging.
+
+Line:232, secondary/indexer/metering_enterprise.go -> Got that. Yes its read only will change it.
+
+Line:245, secondary/indexer/metering_enterprise.go -> Yes its readonly will change it.
+
+Line:266, secondary/indexer/metering_enterprise.go -> For multiple recoveries. If it crashes again before metering endpoint handler is called we should not refund or meter again.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: SAI KRISHNA TEJA KOMMARAJU
+Date: 2023-01-27 06:08:53.000000000
+Message: 
+Patch Set 9:
+
+(2 comments)
+File Comment: /PATCHSET_LEVEL -> Sure will do that
+Line:2130, secondary/indexer/plasma_slice.go -> To reset the value on rollback to 0 or when there are no snapshots found.. I could do in rollback patch too.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: SAI KRISHNA TEJA KOMMARAJU
+Date: 2023-01-27 14:36:40.000000000
+Message: 
+Patch Set 9:
+
+(2 comments)
+Line:232, secondary/indexer/metering_enterprise.go -> Looks like that every service is copying index inst map. 
+And i think we should copy as indexer is writing to the same map that is sent
+
+        //update index maps with this index
+	idx.indexInstMap[indexInst.InstId] = indexInst
+	idx.indexPartnMap[indexInst.InstId] = partnInstMap
+
+	msgUpdateIndexInstMap := idx.newIndexInstMsg(idx.indexInstMap)
+	msgUpdateIndexInstMap.AppendUpdatedInsts(common.IndexInstList{indexInst})
+
+	msgUpdateIndexPartnMap := &MsgUpdatePartnMap{indexPartnMap: idx.indexPartnMap}
+
+
+There is copy in timekeeper too
+func (tk *timekeeper) handleUpdateIndexInstMap(cmd Message) {
+	tk.lock.Lock()
+	defer tk.lock.Unlock()
+
+	req := cmd.(*MsgUpdateInstMap)
+	logging.Tracef("Timekeeper::handleUpdateIndexInstMap %v", cmd)
+	indexInstMap := req.GetIndexInstMap()
+	tk.indexInstMap.Set(common.CopyIndexInstMap(indexInstMap)
+
+Line:245, secondary/indexer/metering_enterprise.go -> func (tk *timekeeper) handleUpdateIndexPartnMap(cmd Message) {
+	tk.lock.Lock()
+	defer tk.lock.Unlock()
+
+	logging.Tracef("Timekeeper::handleUpdateIndexPartnMap %v", cmd)
+	indexPartnMap := cmd.(*MsgUpdatePartnMap).GetIndexPartnMap()
+	tk.indexPartnMap.Set(CopyIndexPartnMap(indexPartnMap))
+	tk.supvCmdch <- &MsgSuccess{}
+}
+
+----------------------------------------------------------------------------------------------------------------------
+Author: SAI KRISHNA TEJA KOMMARAJU
+Date: 2023-01-27 21:05:29.000000000
+MISMATCHED INLINE COMMENT
+File Comment: /PATCHSET_LEVEL -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: SAI KRISHNA TEJA KOMMARAJU
+Date: 2023-01-27 21:05:29.000000000
+MISMATCHED INLINE COMMENT
+Line:107, secondary/indexer/metering_enterprise.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: SAI KRISHNA TEJA KOMMARAJU
+Date: 2023-01-27 21:05:29.000000000
+MISMATCHED INLINE COMMENT
+Line:146, secondary/indexer/metering_enterprise.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: SAI KRISHNA TEJA KOMMARAJU
+Date: 2023-01-27 21:05:29.000000000
+MISMATCHED INLINE COMMENT
+Line:150, secondary/indexer/metering_enterprise.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: SAI KRISHNA TEJA KOMMARAJU
+Date: 2023-01-27 21:05:29.000000000
+MISMATCHED INLINE COMMENT
+Line:150, secondary/indexer/metering_enterprise.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: SAI KRISHNA TEJA KOMMARAJU
+Date: 2023-01-27 21:05:29.000000000
+MISMATCHED INLINE COMMENT
+Line:164, secondary/indexer/metering_enterprise.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: SAI KRISHNA TEJA KOMMARAJU
+Date: 2023-01-27 21:05:29.000000000
+MISMATCHED INLINE COMMENT
+Line:232, secondary/indexer/metering_enterprise.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: SAI KRISHNA TEJA KOMMARAJU
+Date: 2023-01-27 21:05:29.000000000
+MISMATCHED INLINE COMMENT
+Line:245, secondary/indexer/metering_enterprise.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: SAI KRISHNA TEJA KOMMARAJU
+Date: 2023-01-27 21:05:29.000000000
+MISMATCHED INLINE COMMENT
+Line:266, secondary/indexer/metering_enterprise.go -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: SAI KRISHNA TEJA KOMMARAJU
+Date: 2023-01-27 21:05:29.000000000
+MISMATCHED INLINE COMMENT
+Line:2130, secondary/indexer/plasma_slice.go -> Done
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,203 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-47514: Remove cbepctl support for tuning executor threads
+
+The engine can query the ExecutorPool if it needs to know
+the sizes.
+
+Remove the support for tuning the sizes with cbepctl as it
+would lead to "cache inconsistency" (the cached version in other
+buckets would not be updated, but the actual sizes would)
+
+Change-Id: I306d086b06532486298d6679d203735875b67fd1
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Trond Norbye
+Date: 2021-07-20 13:58:08.000000000
+Message: 
+Uploaded patch set 3.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-07-20 14:18:06.000000000
+Message: 
+Patch Set 3: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/9381/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/37905/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/10723/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/32319/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/11394/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/310/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/337/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/12308/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/12481/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/20380/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/12830/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2021-07-21 07:31:55.000000000
+Message: 
+Patch Set 3: Code-Review-1
+
+Offline discussion in progress. Main points:
+
+1) This is a stats issue only, the current EP way is fine on applying the new global threadpool settings but that is visible only in the ep_num_<type>_threads stats for that specific bucket that got the changes
+
+2) By moving the settings to memcached we lose the possibility of changing the threadpool settings for the single node. That's because the only way of changing them will be via ns_server rest-api, which is applied to all nodes of the cluster.
+
+3) Wiring the existing mcctl to the new memcached settings seems a proper way of solving (2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2021-07-21 07:43:05.000000000
+Message: 
+Patch Set 3:
+
+> Patch Set 3: Code-Review-1
+> 
+> Offline discussion in progress. Main points:
+> 
+> 1) This is a stats issue only, the current EP way is fine on applying the new global threadpool settings but that is visible only in the ep_num_<type>_threads stats for that specific bucket that got the changes
+
+Yes, but we shouldn't be exposing incorrect stats. It makes it harder for people trying to debug a problem. By keeping values we _KNOW_ are incorrect we now suddenly add an extra requirement to people who look at our logs that they can't trust variable X, Y, Z, but need to look at variable F, G, H etc. That's BAD!
+
+> 
+> 2) By moving the settings to memcached we lose the possibility of changing the threadpool settings for the single node. That's because the only way of changing them will be via ns_server rest-api, which is applied to all nodes of the cluster.
+
+It would surprise me a lot if there isn't a way to modify values on a per-node base on ns_server (it must keep a per-node internal setting as when two nodes run different version of memcached they may allow / require different settings).
+
+Apart from that. Is this an existing _requirement_, or was it added because we didn't have a better way to do so initially? _personally_ I see a greater need of being able to set it cluster-wide and have it persisted across restart rather than being able to set it on a per-node base and loose it if the node crash.
+
+> 
+> 3) Wiring the existing mcctl to the new memcached settings seems a proper way of solving (2)
+
+Given that I don't see a use of being able to tune the "in memory copy" and end up with incorrect stats and loose it as part of restart I'd rather not add extra (unused) code to the system we have to maintain, support and test.
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2021-07-21 09:39:23.000000000
+Message: 
+Patch Set 3:
+
+> Patch Set 3:
+> 
+> > Patch Set 3: Code-Review-1
+> > 
+> > Offline discussion in progress. Main points:
+> > 
+> > 1) This is a stats issue only, the current EP way is fine on applying the new global threadpool settings but that is visible only in the ep_num_<type>_threads stats for that specific bucket that got the changes
+> 
+> Yes, but we shouldn't be exposing incorrect stats. It makes it harder for people trying to debug a problem. By keeping values we _KNOW_ are incorrect we now suddenly add an extra requirement to people who look at our logs that they can't trust variable X, Y, Z, but need to look at variable F, G, H etc. That's BAD!
+> 
+> > 
+> > 2) By moving the settings to memcached we lose the possibility of changing the threadpool settings for the single node. That's because the only way of changing them will be via ns_server rest-api, which is applied to all nodes of the cluster.
+> 
+> It would surprise me a lot if there isn't a way to modify values on a per-node base on ns_server (it must keep a per-node internal setting as when two nodes run different version of memcached they may allow / require different settings).
+> 
+> Apart from that. Is this an existing _requirement_, or was it added because we didn't have a better way to do so initially? _personally_ I see a greater need of being able to set it cluster-wide and have it persisted across restart rather than being able to set it on a per-node base and loose it if the node crash.
+> 
+> > 
+> > 3) Wiring the existing mcctl to the new memcached settings seems a proper way of solving (2)
+> 
+> Given that I don't see a use of being able to tune the "in memory copy" and end up with incorrect stats and loose it as part of restart I'd rather not add extra (unused) code to the system we have to maintain, support and test.
+
+
+
+Btw: 
+trond@nox:~/compile/trunk/ns_server$ curl -u Administrator:asdasd \
+  -X POST http://127.0.0.1:9000/pools/default/settings/memcached/node/self \
+  --data num_reader_threads=5
+
+trond@nox:~/compile/neo/ns_server$ find . -name "memcached.json" | xargs grep num_reader
+./data/n_1/config/memcached.json:  "num_reader_threads": "default",
+./data/n_2/config/memcached.json:  "num_reader_threads": "default",
+./data/n_3/config/memcached.json:  "num_reader_threads": "default",
+./data/n_0/config/memcached.json:  "num_reader_threads": 5,
+
+So yes, one may update configuration on a single node
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-07-22 12:21:48.000000000
+Message: 
+Patch Set 3:
+
+> Patch Set 3:
+> 
+> > Patch Set 3:
+> > 
+> > > Patch Set 3: Code-Review-1
+> > > 
+> > > Offline discussion in progress. Main points:
+> > > 
+> > > 1) This is a stats issue only, the current EP way is fine on applying the new global threadpool settings but that is visible only in the ep_num_<type>_threads stats for that specific bucket that got the changes
+> > 
+> > Yes, but we shouldn't be exposing incorrect stats. It makes it harder for people trying to debug a problem. By keeping values we _KNOW_ are incorrect we now suddenly add an extra requirement to people who look at our logs that they can't trust variable X, Y, Z, but need to look at variable F, G, H etc. That's BAD!
+> > 
+> > > 
+> > > 2) By moving the settings to memcached we lose the possibility of changing the threadpool settings for the single node. That's because the only way of changing them will be via ns_server rest-api, which is applied to all nodes of the cluster.
+> > 
+> > It would surprise me a lot if there isn't a way to modify values on a per-node base on ns_server (it must keep a per-node internal setting as when two nodes run different version of memcached they may allow / require different settings).
+> > 
+> > Apart from that. Is this an existing _requirement_, or was it added because we didn't have a better way to do so initially? _personally_ I see a greater need of being able to set it cluster-wide and have it persisted across restart rather than being able to set it on a per-node base and loose it if the node crash.
+> > 
+> > > 
+> > > 3) Wiring the existing mcctl to the new memcached settings seems a proper way of solving (2)
+> > 
+> > Given that I don't see a use of being able to tune the "in memory copy" and end up with incorrect stats and loose it as part of restart I'd rather not add extra (unused) code to the system we have to maintain, support and test.
+> 
+> 
+> 
+> Btw: 
+> trond@nox:~/compile/trunk/ns_server$ curl -u Administrator:asdasd \
+>   -X POST http://127.0.0.1:9000/pools/default/settings/memcached/node/self \
+>   --data num_reader_threads=5
+> 
+> trond@nox:~/compile/neo/ns_server$ find . -name "memcached.json" | xargs grep num_reader
+> ./data/n_1/config/memcached.json:  "num_reader_threads": "default",
+> ./data/n_2/config/memcached.json:  "num_reader_threads": "default",
+> ./data/n_3/config/memcached.json:  "num_reader_threads": "default",
+> ./data/n_0/config/memcached.json:  "num_reader_threads": 5,
+> 
+> So yes, one may update configuration on a single node
+
+Trond asked me to look at this.
+
+Clearly the executor thread counts are global, not per-bucket settings and hence exposing their values at the per-bucket level is inconsistent and confusing (and indeed we've had issues with that in the past). Ideally we'd move them all to be only configurable at the daemon level (as we did for readers & writers in 6.5.0).
+
+However, we do need to be careful here given these are public APIs and hence users already might have scripts which make use of the existing API - both for configuring thread count and reading current values. Certainly I can recall a number of instances where we've told customers to modify thread counts via the (per-bucket) num_{auxio,nonio}_threads config parameters, and I expect these are embedded in scripts.
+
+Additionally, we are proposing this for a minor release (probably named 7.1) and hence we should not make any API-breaking changes unless absolutely necessary.
+
+I would therefore propose the following - we deprecate setting these parameters via ep-enginebucket-level parameters (and hence cbepctl), making the daemon-level setting the supported one going forward. In practical terms I think this means:
+
+1. Add support for setting auxIO / nonIO threads via the ns_server memcached REST API (ns_server, but I think a simple change)
+2. Wiring this through via memcached.json.
+3. Marking num_{reader,writer,nonio,auxio}_threads as deprecated in cbepctl - help message should add a "DEPRECATED" label, setting should print a warning message (but still work).
+4. Deprecating the stats at the bucket level - they are still present but we should document in release notes they will be removed.
+5. Adding suitable stats at the top-level deamon stats level showing the current values.
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2021-07-23 06:10:27.000000000
+Message: 
+Abandoned
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2021-07-23 06:11:46.000000000
+Message: 
+Patch Set 3:
+
+Feature creep to make it out of scope
+----------------------------------------------------------------------------------------------------------------------

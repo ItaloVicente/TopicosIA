@@ -1,0 +1,117 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-35275: Skip ADM::HPS update on null->topology change
+
+When a replica is promoted to active, the trackedWrites are
+moved from the PDM to the ADM. This ADM will have a null topology and
+the active node iterator will not exist. When we move from a null
+topology to a topology we would then update the HPS and this causes
+the highPreparedSeqno to throw a monotonic exception as the HPS loops
+from trackedWrites->end() back to trackedWrites->end() and commits
+all prepares if possible.
+
+Avoid calling updateHighPreparedSeqno post topology change and
+instead iterate over trackedWrites and commit everything after
+setting the HPS iterator correctly.
+
+Change-Id: I8b74dfd307bebf2d3a596fdf9090275aa892ff61
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Ben Huddleston
+Date: 2019-07-29 13:33:33.000000000
+Message: 
+Uploaded patch set 7.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-07-29 14:04:21.000000000
+Message: 
+Patch Set 7: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/19989/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/12324/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/19016/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/13185/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/22182/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/21360/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/3012/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/5922/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-07-29 14:24:02.000000000
+Message: 
+Patch Set 7: Code-Review-1
+
+(3 comments)
+Line:205, engines/ep/src/durability/active_durability_monitor.cc -> ?
+
+Line:1275, engines/ep/src/durability/active_durability_monitor.cc -> Note this used to be below the copying of the chain positions, so the account in each SyncWrite was correct. 
+
+*If* you move this below the active chain update (at line 1277) and chain copying (1324)  then I think that simplifies things - the logic could be:
+
+1) Ensure all nodes in all chains are at the correct positions.
+2) Update all trackedWrites to ensure they have the correct ack counts (with the new topology)
+3) Check for any committed SyncWrites (sufficient ACKs).
+
+Thoughts?
+
+Line:1324, engines/ep/src/durability/active_durability_monitor.cc -> Style: Might be more explicit to make this an else attached to the new code at line 1277, given the two paths are mutually exclusive.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2019-07-29 14:31:46.000000000
+Message: 
+Patch Set 7:
+
+(3 comments)
+Line:205, engines/ep/src/durability/active_durability_monitor.cc -> ? indeed. Fixed.
+
+Line:1275, engines/ep/src/durability/active_durability_monitor.cc -> The stuff at line 1277 needs to be done after because we need to "ack" the active node manually (line 1309) which requires that we have already called write.resetTopology (segfault otherwise).
+
+I was going for "none of the tests fail if I move this chunk of code"
+
+Line:1324, engines/ep/src/durability/active_durability_monitor.cc -> I'm not a fan but done
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2019-07-29 14:45:13.000000000
+Message: 
+Patch Set 7:
+
+(2 comments)
+Line:1275, engines/ep/src/durability/active_durability_monitor.cc -> Will do
+
+Line:1324, engines/ep/src/durability/active_durability_monitor.cc -> of course :)
+
+It's probably just more my familiarity with the function and knowing which bits do logically different things. Will look into refactoring along with the comment updates
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-07-29 14:42:45.000000000
+MISMATCHED INLINE COMMENT
+Line:1275, engines/ep/src/durability/active_durability_monitor.cc -> Ok - got it.  
+
+Could you add a comment along these lines to aid the reader on what's going on here.
+
+In fact I think it would be useful to do review _all_ comments in this function, to check they are consistent - and in a follow-up patch fix add any necessary updates, perhaps adding a opening summary of what the function does.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-07-29 14:42:45.000000000
+MISMATCHED INLINE COMMENT
+Line:1324, engines/ep/src/durability/active_durability_monitor.cc -> "Well, that's just your opinion, man!" ;)
+
+Just trying to make the overall flow easier to follow here (as there's a lot going on); in this kind of situation I'd argue that an else allows the reader to mentally "skip" one big chunk of code as they know only one of the two is relevant.
+
+The other thing which might be worth doing (given the complexity of this function now) would be to break it into a number of sub-functions; along the lines of the phases I outlined. However it's not necessary to change now.
+----------------------------------------------------------------------------------------------------------------------

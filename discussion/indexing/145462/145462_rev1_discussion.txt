@@ -1,0 +1,101 @@
+======================================================================================================================
+DESCRIPTION:
+
+    MB-44147 Fix panic from edge case of MB-42623 patch
+
+    An edge case exists where index.Desc slice has zero length, which
+    caused slice index [0] out of range in the original MB-42623 patch.
+    This replaces that patch with a simpler and safer one. In the scan
+    case being fixed, when there is no projection list, we just need
+    to initialize the RequestBroker.projDesc slice as a reference to
+    the IndexDefn.Desc slice rather than creating a new slice and
+    populating its entries based on key part position lookups.
+
+Change-Id: I13d2d29b285927877026ebb21a196ebedc85a963
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Kevin Cherkauer
+Date: 2021-02-08 20:50:28.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Deepkaran Salooja
+Date: 2021-02-08 21:43:40.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:2045, secondary/queryport/client/scatter.go -> Can index.Desc be nil? If so, can it lead to similar panic issue further in the code path?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2021-02-08 22:37:48.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:2045, secondary/queryport/client/scatter.go -> It is hard to tell in the code if index.Desc can ever be nil. cluster_manager_agent.go handleGetGlobalTopology() implies it can as it has this piece of code:
+
+		// init Desc if missing (pre-Spock indexes did not have it)
+		if idxDefn.Desc == nil {
+			idxDefn.Desc = make([]bool, len(idxDefn.SecExprs))
+		}
+
+However, this is moot if the scan code correctly handles RequestBroker.projDesc == nil, which it does.
+
+projDesc is local to the scatter.go file. The scan sets it to nil in scatter.Reset() before calling analyzeProjection(), and the only code that ever sets it to non-nil is the "if" block of code above my patch in analyzeProjection(). So if the "if" block is skipped, it will still be nil. This was the case before I made the original MB-42623 patch, so projDesc was in fact nil in that case, and there was no panic. Instead the data just came back unsorted.
+
+The only code besides the "if" block above my patch (that makes a slice for projDesc) which references slots in projDesc is compareKey(), which treats a nil projDesc as if all entries were false (i.e. all fields sorted ascending) without ever attempting to index projDesc[]:
+
+	for i := 0; i < ln; i++ { <============== i indexes key parts
+
+		if r := key1[i].Collate(key2[i]); r != 0 {
+
+			// default: ascending
+			if i >= len(c.projDesc) { <=============== protects against nil
+				return r
+			}
+
+			// asecending
+			if !c.projDesc[i] { <=============== never reached if projDesc == nil
+				return r
+			}
+
+i >= 0 always. If projDesc == nil, len(c.projDesc) returns 0, so the above code will return from the first block and never reach the second block that is the only place anywhere in the code that indexes projDesc[].
+
+I tested that len() of a nil slice returns 0 rather than panicking:
+
+	fmt.Println("########## kjc begin ##########")
+	var mySlice []bool = nil
+	fmt.Printf("len(mySlice) = %v\n", len(mySlice))
+	fmt.Println("########## kjc end ##########")
+
+########## kjc begin ##########
+len(mySlice) = 0
+########## kjc end ##########
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Deepkaran Salooja
+Date: 2021-02-08 22:48:57.000000000
+Message: 
+Patch Set 1: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2021-02-09 03:27:24.000000000
+Message: 
+Patch Set 1: Code-Review+1
+
+PASS sanity,unit,functional,integration with storage memdb. See http://ci2i-unstable.northscale.in/gsi-09.02.2021-05.30.pass.html
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2021-02-09 04:59:02.000000000
+Message: 
+Patch Set 1: Verified+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Kevin Cherkauer
+Date: 2021-02-09 04:59:16.000000000
+Message: 
+Change has been successfully merged by Kevin Cherkauer
+----------------------------------------------------------------------------------------------------------------------

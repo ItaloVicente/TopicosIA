@@ -1,0 +1,299 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-39514: Separate use cases and time-bound calls to 'df'
+
+Separated two different use-cases in an attempt to minimize the damage
+associated with failures of the 'df' command on macos/linux. The
+gen_server will now manage only the paths that are relevant to us,
+such as DB paths. The ones that are used to populate the UI with disk
+usage data, are separated, and bounded by a timeout, as well.
+
+Additionally, added timeouts/kill logic for long-running commands.
+Due to changes in the linux kernel to include the process state:
+"TASK_KILLABLE" which takes the place of "TASK_UNINTERRUPTIBLE" in
+certain situations. The NFS client code that famously had bugs related
+to this have been fixed to now use this separate process state. The
+remaining situations where processes cannot be killed are much more
+limited and unlikely to span a substantial period of
+time (https://lwn.net/Articles/288056/). Some care had to be taken to
+handle situations where we fail to kill a command, but there still
+exists the possibility that a kill command could hang or continue to
+fail, but this seemed largely unsolvable in the scope of this change.
+
+Change-Id: Iebab040fde31aedf0ac800ec16c78a93f5889048
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Bryan McCoid
+Date: 2021-06-08 22:45:45.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-06-08 22:45:53.000000000
+Message: 
+Patch Set 1:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-test/24151/
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2021-06-08 22:46:07.000000000
+Message: 
+Patch Set 1:
+
+make simple-test
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-06-08 22:46:13.000000000
+Message: 
+Patch Set 1:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-simple-test/2402/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-06-08 22:51:04.000000000
+Message: 
+Patch Set 1: Well-Formed+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/ns-server-test/24151/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2021-06-08 23:07:40.000000000
+Message: 
+Patch Set 1: Verified+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-06-08 23:58:19.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/ns-server-simple-test/2402/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Meni Hillel
+Date: 2021-06-10 05:49:29.000000000
+Message: 
+Patch Set 1:
+
+(4 comments)
+Line:33, src/ns_disksup.erl -> I realized it was in the original code, but - do we need to include os and timeout in the state...? I'd consider them a "const".
+
+Line:35, src/ns_disksup.erl -> Can you help me understand why we need cmd_ref? Is it the indication that we have a "command running" and we need this for pattern matching for functions? Can't we use os_pid != undefined as a the indication?
+
+Line:69, src/ns_disksup.erl -> I'd move this os check to platform_specific_cmd() for better encapsulation and it would also simplify argsto downstream functions
+
+Line:46, src/ns_info.erl -> If this is the call used from the UI, timeout should be shorter, probably under 2 secs.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2021-06-10 22:38:33.000000000
+Message: 
+Patch Set 1:
+
+(16 comments)
+Line:42, src/ns_disksup.erl -> Seems unnecessary to do any of this.
+
+Line:65, src/ns_disksup.erl -> Why can't this be executed through the gen_server since we now use a worker to do our bidding?
+
+Line:93, src/ns_disksup.erl -> Please use something more descriptive like gather_disk_data
+
+Line:119, src/ns_disksup.erl -> I don't think you need CmdRef, there is only one worker pid at a time no? 
+Also I would want you can preface with worker_result atom to track where the message is coming from, like {worker_result, Result}.
+
+Line:131, src/ns_disksup.erl -> This is hard to read. 
+You can club all these into one, and have a handle_cmd_exit which handles all cases and returns the new state or use a case statement.
+
+Line:137, src/ns_disksup.erl -> What's the point of retaining the unkillable pid?
+
+Line:138, src/ns_disksup.erl -> I would like for you to explicitly handle worker EXIT messages, which don't exit normally. The end outcome is still the same as to stop gen_server but better to be explicit and have a debug error message for the same.
+
+Line:164, src/ns_disksup.erl -> Why do we care about all disks?
+
+Line:197, src/ns_disksup.erl -> I don't think this adds much to justify the complexity. Just running periodically after Timeout secs is good enough.
+
+Line:206, src/ns_disksup.erl -> Do you ever expect more data after eof? I presume you want to catch the exit_status here so you should just do that. Or perhaps remove eof from open_port setting.
+
+Line:213, src/ns_disksup.erl -> We triggered the timeout we don't care about the exit status anymore. We should just fail here.
+
+Line:217, src/ns_disksup.erl -> If we can't kill it now, how are you sure we can kill it later?
+
+Line:245, src/ns_disksup.erl -> 2 things,
+1. It doesn't matter why it failed because we killed it(because of timeout), someone else killed it or it's didn't run properly. So we can return one error message, {error, N/unknown_exit_code}.
+2. I don't see that we use this error message anyway so why are we bothering.
+
+Line:250, src/ns_disksup.erl -> Can you not use os:cmd for some reason? Not an erlang expert here, but seems that would be easier.
+
+Line:269, src/ns_disksup.erl -> No need of another function here. Please do whatever this function does inline.
+
+Line:270, src/ns_disksup.erl -> No need for this function.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2021-06-10 23:36:53.000000000
+Message: 
+Patch Set 1:
+
+(18 comments)
+Line:33, src/ns_disksup.erl -> so we use it a few places, and its not strictly static but I could call the function we call to get this value somewhere else and remove from state probably
+
+Line:35, src/ns_disksup.erl -> So that we are only handling the current command and never old messages but in theory you can do what you suggest it just doesn't guarantee the same cmd you get a response for is the one you sent. So we can remove if you want.
+
+Line:42, src/ns_disksup.erl -> Sure, ok. Online people were suggesting using macros for constants so that they fail compile on typos, but I know that we don't do that elsewehre so will remove.
+
+Line:65, src/ns_disksup.erl -> Well the two can happen concurrently so there's a slightly different path. I could make an endpoint and launch it from the gen_server, perhaps.. But it can't follow the exact same path without causing issues with where the response messages get sent back to. For one it goes to the gen_server and the other, should go back to whatever pid calls it. If they all go back to the gen_server the two commands would clash.
+
+Line:93, src/ns_disksup.erl -> fair enough
+
+Line:119, src/ns_disksup.erl -> So yes and no.. We probably could live without the cmdref, but we do actually have multiple workers for the full list of disk stats and the subset of them that we care about after all paths have been set. But we probably don't need the cmdref because those responses don't go back to the gen_server at all (they go back to the calling pid). My worry was just that there'd be an old message or something like that but it's probably ok to just remove.
+
+Line:131, src/ns_disksup.erl -> Sure ok
+
+Line:137, src/ns_disksup.erl -> Because we keep trying to kill it and don't spawn more until we do. This only applies for the gen_server path, not the other one.
+
+Line:138, src/ns_disksup.erl -> definitely, will do
+
+Line:164, src/ns_disksup.erl -> The UI needs all of them for setting up the cluster and setting the paths initially (Pretty sure it's only needed that way at the beginning before you set the paths for the cluster). I wish we didn't need them but we'd need a different way for the UI to get them, which I am open to.
+
+Line:197, src/ns_disksup.erl -> Sure, ok that's fine
+
+Line:206, src/ns_disksup.erl -> no more data expected, just wanted to grab the exit_status but I can relocate that inline instead
+
+Line:217, src/ns_disksup.erl -> It's actually less that I think we will be able to kill it later, but that we should at the very least know when we can't kill so we don't just keep spawning more failed ones. And I don't think it's unfair to assume that attempting to kill again is more likely to kill it than doing nothing. But this is primarily for avoiding leaking many failed process'.
+
+Line:245, src/ns_disksup.erl -> Sure ok -- it was being used at one point bu maybe I missed that in a refactor. The point remains the same, just make it 1 error. Got it.
+
+Line:250, src/ns_disksup.erl -> All the research I found online suggests not using os:cmd and instead using this port method. I did originally want to just do that but online they suggested that this is the better way to do it. It also worked this way originally.
+
+Line:269, src/ns_disksup.erl -> sure ok
+
+Line:270, src/ns_disksup.erl -> ok
+
+Line:46, src/ns_info.erl -> My only concern is this is the only way for commands to leak, so I didn't want to do it too fast -- and it's not used immediately, through the UI. It's periodic and uses the same data if I'm not mistaken but will double check again and we can obviously reduce this, I just really worry about leaking these calls.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2021-06-10 23:40:17.000000000
+Message: 
+Patch Set 1:
+
+Overall: There is a lot of stuff I can address without question, so I will work on an additional patch until we converge on what to do about the others.
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Artamonau
+Date: 2021-06-11 00:01:21.000000000
+Message: 
+Patch Set 1:
+
+(2 comments)
+
+Left some comments inline.
+
+In addition. I'm still conflicted about killing the processes we spawn. It's not like it's helping with anything, so it feels redundant and it makes the code quite a bit more complex. Also, races, albeit somewhat theoretical, make me uncomfortable.
+
+Here's what I would do.
+
+ - As a first step I'd just make sure that disk_sup continues to return some information while it waits for df. If I recall correctly, you had a patch like this at some point. This would not involve killing df: if it's stuck, it's stuck.
+
+ - Then we have options.
+
+   1. It may be sufficient to stop there and ignore any further issues.
+
+   2. ns_disksup may return some indication that the information it's returning is stale. Which then could be used to send an alert. Compaction daemon needs this information to estimate if there's enough space on disk to perform compaction. So this will still be a problem. On the other hand, if we can't compact, we are going to run out of disk space very quickly anyway. So it's not entirely clear how reasonable that behavior is, we could probably come up with something better.
+
+   3. Instead of returning stale information, ns_disksup could spawn an instance of df for the specific path requested by compaction_daemon (and other similar users) when the periodic df is stuck. This will certainly add more complexity, because we would probably want to spawn at most one df instance per path.
+Line:65, src/ns_disksup.erl -> Is the intention to use for UI? If so, it'll spawn an instance of df for each request, which is not great. Also, the UI doesn't really care for super up-to-date information. So spawning df synchronously feels like an overkill.
+
+Line:90, src/ns_disksup.erl -> This is still a problem. These paths may still change after ns_disksup was started.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Artamonau
+Date: 2021-06-11 00:12:19.000000000
+Message: 
+Patch Set 1:
+
+(2 comments)
+Line:33, src/ns_disksup.erl -> I'd keep it as is.
+
+Line:42, src/ns_disksup.erl -> I think it's a matter of taste. It doesn't offend my sensibilities, for example, although I myself don't tend to write code like this.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Artamonau
+Date: 2021-06-11 00:18:39.000000000
+Message: 
+Patch Set 1:
+
+> Patch Set 1:
+>
+> Here's what I would do.
+
+Of the options suggested, I'd prefer the simplest one that we deem good enough. For me personally the patch fails the cost/benefit analysis wrt to the complexity involved and the benefits that we rip.
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Artamonau
+Date: 2021-06-11 00:19:42.000000000
+Message: 
+Patch Set 1:
+
+> Patch Set 1:
+> 
+> rip
+
+reap :)
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2021-06-11 00:23:13.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:90, src/ns_disksup.erl -> Right so that really needs to be recalculated constantly
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Artamonau
+Date: 2021-06-11 00:30:11.000000000
+Message: 
+Patch Set 1:
+
+(1 comment)
+Line:90, src/ns_disksup.erl -> Again, I personally would simply continue collecting all paths and deal with the consequences.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2021-06-11 01:40:34.000000000
+Message: 
+Patch Set 1: -Verified
+
+> Patch Set 1:
+> 
+> (2 comments)
+> 
+> Left some comments inline.
+> 
+> In addition. I'm still conflicted about killing the processes we spawn. It's not like it's helping with anything, so it feels redundant and it makes the code quite a bit more complex. Also, races, albeit somewhat theoretical, make me uncomfortable.
+> 
+> Here's what I would do.
+> 
+>  - As a first step I'd just make sure that disk_sup continues to return some information while it waits for df. If I recall correctly, you had a patch like this at some point. This would not involve killing df: if it's stuck, it's stuck.
+> 
+>  - Then we have options.
+> 
+>    1. It may be sufficient to stop there and ignore any further issues.
+> 
+>    2. ns_disksup may return some indication that the information it's returning is stale. Which then could be used to send an alert. Compaction daemon needs this information to estimate if there's enough space on disk to perform compaction. So this will still be a problem. On the other hand, if we can't compact, we are going to run out of disk space very quickly anyway. So it's not entirely clear how reasonable that behavior is, we could probably come up with something better.
+> 
+>    3. Instead of returning stale information, ns_disksup could spawn an instance of df for the specific path requested by compaction_daemon (and other similar users) when the periodic df is stuck. This will certainly add more complexity, because we would probably want to spawn at most one df instance per path.
+
+Ok so I agree that we can definitely start with a patch I had a while ago that just returned stale data instead of blocking, and that is an easy place to start. Then..
+
+It seems like #3 is the most "effective" option and we might be able to make it relatively simple by using a map where the keys are the individual paths and a mechanism to determine when the main gen_server call is "stuck" and spawn a worker per path key for the individual needs of certain sections. If that key is taken we will have to either return stale data or an error.
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2021-06-15 19:30:24.000000000
+Message: 
+Abandoned
+
+went with a different method altogether
+----------------------------------------------------------------------------------------------------------------------

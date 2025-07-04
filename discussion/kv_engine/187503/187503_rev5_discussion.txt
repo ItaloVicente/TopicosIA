@@ -1,0 +1,111 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-55391: Don't leave Cursors in CM if not moved to ActiveStream
+
+In ActiveStream::scheduleBackfill_UNLOCKED an exception was thrown
+before the result of registerCursor was assigned to
+ActiveStream::cursor. This resulted in the cursor being orphaned - it
+existed in CheckpointManager but was not associated with any Stream,
+and hence was not advanced (via getItemsForCursor) - but also was not
+subject to cursor-dropping so resulted in the CheckpointManager
+getting stuck at the checkpoint high watermark.
+
+Address this problem (and similar issues) by having CursorRegResult
+own the Cursor object, until the user takes ownership of it (via new
+takeCursor() method). If CursorRegResult is destroyed and still owns
+the cursor; then remove it from CheckpointManager.
+
+Note: An alternate approach would be to implement the "auto remove"
+      logic to CheckpointCursor itself (in its dtor); then say have
+      CheckpointManager only hold a weak_ptr to CheckpointCursor
+      (currently holds a shared_ptr). That would solve the problem at
+      a higher level and for all uses of Cursor / CheckpointCursor,
+      even after cursor has been moved from CursorRegResult. For
+      example right now we rely on ActiveStream's dtor "remembering"
+      to remove the cursor from CheckpointManager.
+
+      While such an approach certainly has merit, I feel it's more
+      invasive as we would be changing the ownership model of
+      CheckpointManager / CheckpointCursor, so at this stage in Elixir
+      development, the current approach - while less "complete" is
+      smaller in scope and at lower risk of introducing any
+      regressions.
+
+Change-Id: If292d10d03cbddeb34cd567e7ce5110a5d58db70
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2023-03-08 15:17:42.000000000
+Message: 
+Uploaded patch set 5.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2023-03-08 15:19:52.000000000
+Message: 
+Patch Set 5: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2023-03-08 16:38:00.000000000
+Message: 
+Patch Set 5: Verified-1
+
+Build Failed 
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux-debug/job/master/1688/ : ABORTED
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( https://cv.jenkins.couchbase.com/job/kv_engine.linux-debug/job/master/1688/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/12619/ : ABORTED
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( https://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/12619/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/43903/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( https://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/43903/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/22887/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/23125/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-windows-master/52339/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/24523/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/12699/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/24950/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/25408/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/26261/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/33366/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Vesko Karaganev
+Date: 2023-03-08 17:27:36.000000000
+Message: 
+Patch Set 5: Code-Review-1
+
+(2 comments)
+Line:71, engines/ep/src/checkpoint_manager.h -> typo
+
+Line:89, engines/ep/src/checkpoint_manager.h -> Does this need to be noexcept(false)? The destructors of the members are noexcept, so I believe this destructor will be noexcept by default, and we'd end up calling std::terminate.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2023-03-09 11:56:42.000000000
+MISMATCHED INLINE COMMENT
+Line:71, engines/ep/src/checkpoint_manager.h -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2023-03-09 11:56:42.000000000
+MISMATCHED INLINE COMMENT
+Line:89, engines/ep/src/checkpoint_manager.h -> Good spot - indeed our dtor could throw here; which is generally a Bad Idea.
+
+I looked at making manager non-optional (i.e. a reference), but that requires us to remove the default ctor of it (see comment from Paolo above for discussion on why that's also not desirable).
+
+I think given the simplicity of this class, it's fine to assume manager is non-null iff CursorRegResult owns a valid result from registerCursor; and hence remove the Expects (and hence possibility of it throwing).
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,147 @@
+======================================================================================================================
+DESCRIPTION:
+
+Always log pending connections at bucket delete
+
+Currently at bucket deletion we don't log the list of pending alive
+connections if that list has not changed since the last time we checked.
+If the system ends up in a state where the same set of connections stay
+pending for a while (eg, minutes) then logs may wrap and we may lose all
+info on those connections.
+
+That has been recently seen on some customer issues where bucket
+deletion gets very slow and fails the ns_server orchestration by
+timeout. Those are cases where many different flavours of log messages
+may wrap logs quite quickly. The result is that we just see logs like:
+
+  INFO 45 Delete bucket [default]. Still waiting: 1 clients connected (state is unchanged)
+
+This change ensures that we always get something like:
+
+  INFO 45 Delete bucket [default]. Still waiting: 1 clients connected:{<conns details>}
+
+Change-Id: I508f3f5990813edf380a4488a5fb47860491fd32
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2021-01-13 11:52:01.000000000
+Message: 
+Uploaded patch set 4: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2021-01-13 11:54:03.000000000
+Message: 
+Patch Set 4:
+
+@dan @daver
+In the commit message a refer to CBSEs on 6.6.1, I think that this one should be backported to 6.6.2 too. Your thoughts?
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2021-01-14 08:02:59.000000000
+Message: 
+Patch Set 4: Code-Review-1
+
+The logic was added because we had a number of other issues where the logs was flushed with all of the connection dump. Perhaps we should change it to dump a full dump ever 10th minute for instance?
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2021-01-14 09:00:04.000000000
+Message: 
+Patch Set 4:
+
+> Patch Set 4: Code-Review-1
+> 
+> The logic was added because we had a number of other issues where the logs was flushed with all of the connection dump. Perhaps we should change it to dump a full dump ever 10th minute for instance?
+
+Yeah the logic was added at http://review.couchbase.org/c/kv_engine/+/103254/13/daemon/memcached.cc for fixing MB-31402 (which is what what you refer to). But in MB-31402 probably the main issue was that we used to repeatedly log connections, while since your fix we do it every 30secs, so I think that it's unlikely to fill out logs by that now.
+Anyway, fine to increases the interval but 10mins seem huge.. In recent CBSEs I've seen memcached generating 2+ Millions log lines in less then 10mins, all from modules different than this one.
+I trust you on deciding a proper interval, maybe something like 1 min sounds reasonable?
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2021-01-14 10:34:43.000000000
+Message: 
+Patch Set 4:
+
+> Patch Set 4:
+> 
+> > Patch Set 4: Code-Review-1
+> > 
+> > The logic was added because we had a number of other issues where the logs was flushed with all of the connection dump. Perhaps we should change it to dump a full dump ever 10th minute for instance?
+> 
+> Yeah the logic was added at http://review.couchbase.org/c/kv_engine/+/103254/13/daemon/memcached.cc for fixing MB-31402 (which is what what you refer to). But in MB-31402 probably the main issue was that we used to repeatedly log connections, while since your fix we do it every 30secs, so I think that it's unlikely to fill out logs by that now.
+> Anyway, fine to increases the interval but 10mins seem huge.. In recent CBSEs I've seen memcached generating 2+ Millions log lines in less then 10mins, all from modules different than this one.
+> I trust you on deciding a proper interval, maybe something like 1 min sounds reasonable?
+
+Another option is to dump only part of the connection state here. So we dump every 30secs but with less impact on the log size. Currently we print a lot of info that is not strictly necessary, as here we essentially need to know (1) what conn, (2) if blocked and (3) blocked on what.
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2021-01-18 08:22:29.000000000
+Message: 
+Patch Set 4:
+
+> Patch Set 4:
+> 
+> > Patch Set 4:
+> > 
+> > > Patch Set 4: Code-Review-1
+> > > 
+> > > The logic was added because we had a number of other issues where the logs was flushed with all of the connection dump. Perhaps we should change it to dump a full dump ever 10th minute for instance?
+> > 
+> > Yeah the logic was added at http://review.couchbase.org/c/kv_engine/+/103254/13/daemon/memcached.cc for fixing MB-31402 (which is what what you refer to). But in MB-31402 probably the main issue was that we used to repeatedly log connections, while since your fix we do it every 30secs, so I think that it's unlikely to fill out logs by that now.
+> > Anyway, fine to increases the interval but 10mins seem huge.. In recent CBSEs I've seen memcached generating 2+ Millions log lines in less then 10mins, all from modules different than this one.
+> > I trust you on deciding a proper interval, maybe something like 1 min sounds reasonable?
+> 
+> Another option is to dump only part of the connection state here. So we dump every 30secs but with less impact on the log size. Currently we print a lot of info that is not strictly necessary, as here we essentially need to know (1) what conn, (2) if blocked and (3) blocked on what.
+
+So the logic for disconnecting clients is that they should complete their current command (not be in an ewouldblock state with a task running on their behalf in ep-engine) _AND_ not being reserved inside ep-engine (currently only DCP connections).
+
+For 99% of the connections this happens "immediately" as most of our operations execute in subseconds, but for instance compaction runs for a long(er) time (currently ep-engine don't terminate any ongoing compactions and refuse new ones to start as part of the notification of bucket shutdown). 
+
+For pre-CC a connection would also be "stuck" if the client don't drain its read-end of the socket and requested so much data that the socket sendbuffer in the kernel is full and we've got more data to send as we only disconnect clients as part of starting a _NEW_ command. In CC (as part of bufferevent change) we would just drop everything we had planned to send (this is most likely a DCP connection).
+
+The final thing which could cause a connection to be "stuck" would be that ep-engine reserved the cookie and the core is waiting for ep-engine to call "release" on it (that would be a DCP connection).
+
+So for pre-CC the problem would most likely be one of the two last ones (bad behaving client which don't drain the buffer; perhaps it is "dead" but the socket hasn't been disconnected) or a bug in the system where we've lost a reference....
+
+So what if we extend the logic so that after the first 10 (or 5?) minutes we start logging the connection details when we log. (We're most likely in a situation where we've encountered a bug and will continue to do that "forever", and my gut feeling tells me that it'll typically be only 1 connection so _this_ wouldn't be the info which would flush the log files causing the other information to get lost). And it'll probably take at least 10 minutes until people discover that a deletion is hung and figure out that they should collect information and file a bug so we'll most likely have the information in there _IF_ we hit the problem...
+
+what do you think?
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2021-03-18 11:53:58.000000000
+Message: 
+Patch Set 4:
+
+> Patch Set 4:
+> 
+> > Patch Set 4:
+> > 
+> > > Patch Set 4:
+> > > 
+> > > > Patch Set 4: Code-Review-1
+> > > > 
+> > > > The logic was added because we had a number of other issues where the logs was flushed with all of the connection dump. Perhaps we should change it to dump a full dump ever 10th minute for instance?
+> > > 
+> > > Yeah the logic was added at http://review.couchbase.org/c/kv_engine/+/103254/13/daemon/memcached.cc for fixing MB-31402 (which is what what you refer to). But in MB-31402 probably the main issue was that we used to repeatedly log connections, while since your fix we do it every 30secs, so I think that it's unlikely to fill out logs by that now.
+> > > Anyway, fine to increases the interval but 10mins seem huge.. In recent CBSEs I've seen memcached generating 2+ Millions log lines in less then 10mins, all from modules different than this one.
+> > > I trust you on deciding a proper interval, maybe something like 1 min sounds reasonable?
+> > 
+> > Another option is to dump only part of the connection state here. So we dump every 30secs but with less impact on the log size. Currently we print a lot of info that is not strictly necessary, as here we essentially need to know (1) what conn, (2) if blocked and (3) blocked on what.
+> 
+> So the logic for disconnecting clients is that they should complete their current command (not be in an ewouldblock state with a task running on their behalf in ep-engine) _AND_ not being reserved inside ep-engine (currently only DCP connections).
+> 
+> For 99% of the connections this happens "immediately" as most of our operations execute in subseconds, but for instance compaction runs for a long(er) time (currently ep-engine don't terminate any ongoing compactions and refuse new ones to start as part of the notification of bucket shutdown). 
+> 
+> For pre-CC a connection would also be "stuck" if the client don't drain its read-end of the socket and requested so much data that the socket sendbuffer in the kernel is full and we've got more data to send as we only disconnect clients as part of starting a _NEW_ command. In CC (as part of bufferevent change) we would just drop everything we had planned to send (this is most likely a DCP connection).
+> 
+> The final thing which could cause a connection to be "stuck" would be that ep-engine reserved the cookie and the core is waiting for ep-engine to call "release" on it (that would be a DCP connection).
+> 
+> So for pre-CC the problem would most likely be one of the two last ones (bad behaving client which don't drain the buffer; perhaps it is "dead" but the socket hasn't been disconnected) or a bug in the system where we've lost a reference....
+> 
+> So what if we extend the logic so that after the first 10 (or 5?) minutes we start logging the connection details when we log. (We're most likely in a situation where we've encountered a bug and will continue to do that "forever", and my gut feeling tells me that it'll typically be only 1 connection so _this_ wouldn't be the info which would flush the log files causing the other information to get lost). And it'll probably take at least 10 minutes until people discover that a deletion is hung and figure out that they should collect information and file a bug so we'll most likely have the information in there _IF_ we hit the problem...
+> 
+> what do you think?
+
+As per offline discussion, agreed to dump all pending connections every 2 mins.
+----------------------------------------------------------------------------------------------------------------------

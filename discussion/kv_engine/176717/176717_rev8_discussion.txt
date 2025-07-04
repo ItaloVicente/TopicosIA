@@ -1,0 +1,107 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-52668 Release Magma SeqIterator when scan is yielded
+
+> Problem
+A seeked SeqIterator has considerable memory consumption depending on
+the item size. During DCP disk backills, kv-engine opens and seeks many
+such iterators and round robins across them. The aggregate memory
+consumption can be very large and cause all backfills to *permanently
+snooze* upon hitting the backfill_mem_threshold. This results in a
+forever stuck state.
+
+> Source of memory consumption
+Magma's SeqIterator internally creates an iterator per level of the LSM
+Tree. Every such iterator holds 2 index blocks (fixed size 4KB) and 1
+data block. The size of the data block is 4KB for all levels except the
+data level (last level) whose size depends on the item size.
+
+Assuming a typical 5 level tree, memory consumption is:
+* For item sizes <= 4KB 5*12KB=60KB.
+* If item size > 4KB, for example 5MB, 4*12KB + (8KB+5MB) = 5.056MB.
+
+Depending on num_running_backills, this scales up a lot. For example
+with 48 backfills on a 256MB bucket quota, memory consumption is 242MB.
+
+> Solution
+When deciding to yield an iterator and move on to the next one, destroy
+the iterator. Upon a resume, construct a new iterator starting from the
+lastReadSeqno. This brings down memory consumption significantly as only
+one iterator is kept alive. In the previous 5MB item size example,
+memory consumption is only 5MB.
+
+In theory doing this frequently will cause reseeks which will incur
+extra read I/Os to re-read the index, data blocks for all levels.
+However this is not as severe for two reasons:
+* reads could be served from Linux page cache due to temporal locality.
+* reseeks happen even now if the iterator internally moved to a seqno >
+startSeqno provided.
+
+> Regression testing
+Ran these tests under the HiDD showfast tab and did not observe any
+significant regression:
+* DCP tput
+* 250M rebalance out
+* 1B rebalance out
+* XDCR 2->2
+
+> Implementation note
+As we now frequently construct/destruct SeqIterator, the logs in its
+constructor/destructor indicating start/end of the backfill have been
+made to log on debug level. Start/end of the backfill and other details
+can anyways be figured out from kv-engine's log messages by grepping for
+"MagmaKVStore::initBySeqnoScanContext", "Backfill complete"
+respectively.
+
+The only detail now missing is number of times a SeqIterator was
+reseeked. As this corresponds to a scan pausing/resuming, in a follow up
+patch we will add a yieldCount field to the scan context itself and log
+it when backfill completes.
+
+Linked magma change:
+https://review.couchbase.org/c/magma/+/176876
+
+Change-Id: I8bf9d8ce58c166c8c95e632a5a84106452e0913e
+Reviewed-on: https://review.couchbase.org/c/kv_engine/+/176717
+Reviewed-by: Dave Rigby <daver@couchbase.com>
+Tested-by: Build Bot <build@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Rohan Suri
+Date: 2022-07-01 06:03:10.000000000
+Message: 
+Change has been successfully cherry-picked as d84225fc4835f770b834d877f6a8bcf98918bc34
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-07-01 06:03:20.000000000
+Message: 
+Patch Set 8:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-TSan-master/7550/ (1/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-07-01 06:19:27.000000000
+Message: 
+Patch Set 8:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-master/11515/ (2/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-07-01 06:45:26.000000000
+Message: 
+Patch Set 8:
+
+Build Unstable 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-master/11515/ : UNSTABLE
+
+ERROR: suite_setUp (unittest.loader._FailedTest)
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-master/11515/ )
+
+Failure of a testrunner test ( http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-master/11515/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-TSan-master/7550/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,142 @@
+======================================================================================================================
+DESCRIPTION:
+
+[osgi] Disperse the EGit core Activator into OSGi dynamic services
+
+Use OSGi DS to perform most of the setup formerly done in the Activator.
+Because of interdependencies it's not possible to do this step-by-step.
+
+The Activator did a number of unrelated things:
+
+* setting up the internal EGit caches (RepositoryCache, IndexDiffCache,
+  RepositoryUtil).
+* setting up a number of IResourceChangeListeners for auto-sharing
+  projects, auto-ignoring derived resources, and similar things.
+* setting up HTTP and SSH, and proxy support.
+* handling debug tracing options.
+* migrating preferences.
+* tracking merge strategies contributed via an extension point.
+
+Each of these have now become an OSGi DS component:
+
+* RepositoryInitializer: EGit caches
+* WorkspaceConnector: IResourceChangeListeners
+* TransportConfigurator: HTTP, SSH, and proxies
+* DebugOptionsHandler: debug tracing options
+* PreferencesMigrator: preferences migrations; runs as a Job
+* MergeStrategyTracker: merge strategy tracking; runs as a Job
+
+The activator is no longer the central hub from which other classes
+can obtain the RepositoryCache, IndexDiffCache, or RepositoryUtil. This
+change was necessary because otherwise an early component activation
+causes the Activator to run, which then might cause trying to activate
+org.eclipse.core.resources before the instance location is set, which
+breaks Eclipse start-up.
+
+These central singletons are newly managed in these three classes
+directly, and are accessible via getInstance() static methods.
+
+Likewise, the EGitSecureStore is now such a singleton that will be
+created on first access to the EGitSecureStore class.
+
+The RepositoryInitializer publishes the RepositoryCache as a service,
+which is consumed by the WorkspaceConnector OSGi component. This
+ensures correct initialization order.
+
+The changes outside the Activator and the six new OSGi components are
+all simple replacements for using the new instance getters instead of
+the Activator.
+
+Bug: 560412
+Change-Id: Id5c7440213ae25a573e84720db7dfcc83a8f5d0a
+Signed-off-by: Thomas Wolf <thomas.wolf@paranor.ch>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Thomas Wolf
+Date: 2021-02-16 08:00:38.000000000
+Message: 
+Uploaded patch set 4.
+----------------------------------------------------------------------------------------------------------------------
+Author: EGit Bot
+Date: 2021-02-16 08:00:48.000000000
+Message: 
+Patch Set 4:
+
+Build Started https://ci.eclipse.org/egit/job/egit.gerrit/1900/
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2021-02-16 08:09:49.000000000
+Message: 
+Patch Set 4:
+
+Moved preference migration and that merge strategy loading into Jobs.
+
+I'm not happy at all with that merge strategy handling. As far as I see, this serves two purposes:
+
+1. Register strategies contributed via an extension point with JGit.
+2. Populate a list of ids/labels for use by the SynchronizePreferencePage.
+
+(1) should be done by the time the merge strategy is used first (callers of Activator.getPreferredMergeStrategy()). (2) is needed when that preference page is opened. At least for (1) there is currently some synchronization missing; maybe need some load on demand mechanism in case the job didn't run/complete yet.
+
+I have the impression that loading these strategies may cause *a lot* of bundle activation as it even instantiates the classes for the contributed strategies.
+----------------------------------------------------------------------------------------------------------------------
+Author: EGit Bot
+Date: 2021-02-16 08:23:22.000000000
+Message: 
+Patch Set 4: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/egit/job/egit.gerrit/1900/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2021-02-16 08:55:24.000000000
+Message: 
+Patch Set 4:
+
+> I have the impression that loading these strategies may cause *a lot* of bundle activation as it even instantiates the classes for the contributed strategies.
+
+Unfortunately this extension point is badly designed. It has a "name" attribute, but it's optional. If it were mandatory, class loading would not be necessary as far as I see. But at least EMF compare, which introduced this extension point, doesn't set that optional "name" attribute.[1] And changing it would be a breaking API change :-( If it was only EMF compare that used this, we might be able to coordinate changing this extension point. But who knows which other bundles may have made use of this since it was introduced in 2015?
+
+@Laurent (both of you :-)): any suggestions how we might improve this?
+
+[1] https://git.eclipse.org/r/plugins/gitiles/emfcompare/org.eclipse.emf.compare/+/refs/heads/master/plugins/org.eclipse.emf.compare.egit/plugin.xml
+----------------------------------------------------------------------------------------------------------------------
+Author: Alex Blewitt
+Date: 2021-02-16 10:10:23.000000000
+Message: 
+Patch Set 4:
+
+I like the idea of moving the requests to Jobs, especially with the cancel for when it shuts down. Getting long-running jobs out of the Activator is going to help startup speed, in that a number of them can start in parallel.
+
+If they're starting too early, we can insert some delays into the OSGi components by listening to the e4 ready message topic; this will have the effect of deferring them until needed. I think this will be appropriate for things that are dependant upon registering the resource change listeners.
+----------------------------------------------------------------------------------------------------------------------
+Author: Alex Blewitt
+Date: 2021-02-16 10:10:29.000000000
+Message: 
+Patch Set 4: Code-Review+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2021-02-19 07:56:49.000000000
+Message: 
+Patch Set 4:
+
+> If they're starting too early, we can insert some delays into the OSGi components by listening to the e4 ready message topic;
+
+What's the "e4 ready message topic"? If you mean APP_STARTUP_COMPLETE: that's a UIEvent. I don't think the core bundle should listen to a UIEvent. Or is there some other e4 event that we could rely on?
+----------------------------------------------------------------------------------------------------------------------
+Author: Lars Vogel
+Date: 2021-02-23 12:55:05.000000000
+Message: 
+Patch Set 4:
+
+> Patch Set 4:
+> 
+> > If they're starting too early, we can insert some delays into the OSGi components by listening to the e4 ready message topic;
+> 
+> What's the "e4 ready message topic"? If you mean APP_STARTUP_COMPLETE: that's a UIEvent. I don't think the core bundle should listen to a UIEvent. Or is there some other e4 event that we could rely on?
+
+AFAIK all e4 events are defined by the o.e.e4.ui.UIEvents class, so I would say: no we do not have another event you could rely on.
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,221 @@
+======================================================================================================================
+DESCRIPTION:
+
+[osgi] Disperse the EGit core Activator into OSGi dynamic services
+
+Use OSGi DS to perform most of the setup formerly done in the Activator.
+Because of interdependencies it's not possible to do this step-by-step.
+
+The Activator did a number of unrelated things:
+
+* setting up the internal EGit caches (RepositoryCache, IndexDiffCache,
+  RepositoryUtil).
+* setting up a number of IResourceChangeListeners for auto-sharing
+  projects, auto-ignoring derived resources, and similar things.
+* setting up HTTP and SSH, and proxy support.
+* handling debug tracing options.
+* migrating preferences.
+* tracking merge strategies contributed via an extension point.
+
+Each of these have now become an OSGi DS component:
+
+* RepositoryInitializer: EGit caches
+* WorkspaceConnector: IResourceChangeListeners
+* TransportConfigurator: HTTP, SSH, and proxies
+* DebugOptionsHandler: debug tracing options
+* PreferencesMigrator: preferences migrations
+* MergeStrategyTracker: merge strategy tracking
+
+The activator is no longer the central hub from which other classes
+can obtain the RepositoryCache, IndexDiffCache, or RepositoryUtil. This
+change was necessary because otherwise an early component activation
+causes the Activator to run, which then might cause trying to activate
+org.eclipse.core.resources before the instance location is set, which
+breaks Eclipse start-up.
+
+These central singletons are newly managed in these three classes
+directly, and are accessible via getInstance() static methods. The
+RepositoryUtil is created by the new RepositoryInitializer component
+once the workspace is available. This initialization may occur on a
+background thread, and thus RepositoryUtil.getInstance() blocks until
+the OSGi component has created the instance.
+
+The RepositoryInitializer publishes the RepositoryCache as a service,
+which is consumed by the WorkspaceConnector OSGi component. This
+ensures correct initialization order.
+
+The changes outside the Activator and the six new OSGi components are
+all simple replacements for using the new instance getters instead of
+the Activator.
+
+Bug: 560412
+Change-Id: Id5c7440213ae25a573e84720db7dfcc83a8f5d0a
+Signed-off-by: Thomas Wolf <thomas.wolf@paranor.ch>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Thomas Wolf
+Date: 2021-02-15 11:45:24.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: EGit Bot
+Date: 2021-02-15 11:45:34.000000000
+Message: 
+Patch Set 2:
+
+Build Started https://ci.eclipse.org/egit/job/egit.gerrit/1895/
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2021-02-15 11:55:55.000000000
+Message: 
+Patch Set 2:
+
+Hi Alex; would you have time to take a look at this? Turns out that EGit core Activator was a tough beast; it really must not use org.eclipse.core.resources at all.
+
+The change looks big, but most file changes are simple replacements of some moved/changed accessor methods. Activator content has been moved to 6 DS components. The main changes are in Activator and in the 6 new DS components. Two of them depend on each other: RepositoryInitializer publishes the RepositoryCache as service, consumed by WorkspaceConnector. The others are basically independent.
+
+There's still more cleanup possible; all these logging utilities could probably go elsewhere, and the remaining little bits dealing with MergeStrategies could probably also be moved somewhere else.
+
+Removing the Activator completely is not going to be possible; at the very least it will need to configure the JGit WindowCache.
+----------------------------------------------------------------------------------------------------------------------
+Author: EGit Bot
+Date: 2021-02-15 12:11:03.000000000
+Message: 
+Patch Set 2: Verified-1
+
+Build Failed 
+
+https://ci.eclipse.org/egit/job/egit.gerrit/1895/ : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: EGit Bot
+Date: 2021-02-15 12:19:29.000000000
+Message: 
+Patch Set 2: -Verified
+
+Build Started https://ci.eclipse.org/egit/job/egit.gerrit/1896/
+----------------------------------------------------------------------------------------------------------------------
+Author: EGit Bot
+Date: 2021-02-15 12:46:18.000000000
+Message: 
+Patch Set 2: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/egit/job/egit.gerrit/1896/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Alex Blewitt
+Date: 2021-02-15 13:23:15.000000000
+Message: 
+Patch Set 2:
+
+Yes I'm happy to have a look through this but it'll take me a while if that's OK with you.
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2021-02-15 13:34:20.000000000
+Message: 
+Patch Set 2:
+
+> Yes I'm happy to have a look through this but it'll take me a while if that's OK with you.
+
+Sure, there's no hurry. We could target a merge early in the next release cycle (i.e., after March 17).
+----------------------------------------------------------------------------------------------------------------------
+Author: Alex Blewitt
+Date: 2021-02-15 18:05:07.000000000
+Message: 
+Patch Set 2: Code-Review+1
+
+(9 comments)
+
+OK I've taken a walk through the changes and think I understand most of them; some commentary attached.
+
+A few higher-level observations:
+
+* The IWorkspace is created quite early on in the startup of Eclipse's splash screen (probably in the first 10% or so). Moving the dependency on the IWorkspace in the OSGi component will pull the setup quite a lot earlier, so instead of taking time at the ~90% mark you'll find that the ~10% mark it's a bit slower. It will also (paradoxically) make the startup of the resources plugin longer, because when that publishes the IWorkspace, it will trigger components who were waiting on IWorkspace to run.
+
+The above can be remediated somewhat if the 'heavy hitting' OSGi components use the same trick as the StartupInitializer component that was listening for the e4 event and/or Platform.isRunning() checks.
+
+* There's a few lazy-locking type steps (if instance == null, lock() if instance == still null) for static fields. It's almost certainly the case that anyone referring to this class is going to immediately call ThingCache.getInstance() anyway, so actually there's not much benefit in doing that versus just having the instance created as a static final field; and that way, you know it's not null, so you can avoid a bunch of `if null` checks. You might not want/need to do that change in this one as it can be done afterwards as a subsequent change.
+
+* The thing I'm mostly concerned on is the RepositoryUtil.getInstance(), which blocks until such time as an instance is available. This is used in a few places (noted elsewhere) which is potentially gong to run on the main UI thread, including dialogs being shown, classes being loaded etc.
+
+I understand that the issue with RepositoryUtil is that it won't exist until the location has been set, but perhaps another way of doing it is to have a RepositoryUtil that can set the location as a mutable field, and then have the implementations of (e.g.) 'contains' return null or 'getName' to be an empty string.
+
+You'll have more knowledge of where/how/why RepositoryUtil is used, and might be able to think about other approaches that would work in this case, but that is the most contentious part of the change that I can think of.
+Line:55, org.eclipse.egit.core/src/org/eclipse/egit/core/RepositoryCache.java -> As with comment on instance cache; I'm not sure delaying this until the method call actually buys you anything. If the first use of RepositoryCache is to call this method, then there's not a lot of difference in just putting it straight into the static final field.
+
+There's also a lot of calls to e.g. `cache = InstanceCache.getInstance()` and `if cache != null` going on -- if you just had this as a public static final field then you would end up being able to simplify a bunch of the `if` statements as well.
+
+Line:62, org.eclipse.egit.core/src/org/eclipse/egit/core/RepositoryInitializer.java -> This is triggering the side-effect of initialising the `IndexDiffCache` which you wouldn't need if it were a final field of `IndexDiffCache`.
+
+Line:71, org.eclipse.egit.core/src/org/eclipse/egit/core/RepositoryInitializer.java -> What does this do? Does it make the instance field null, so that it's re-created again, or does it drop the contents of any contained maps?
+
+Line:102, org.eclipse.egit.core/src/org/eclipse/egit/core/RepositoryUtil.java -> I think there's a danger this could deadlock but I think I understand the rationale here.
+
+Line:124, org.eclipse.egit.core/src/org/eclipse/egit/core/RepositoryUtil.java -> Not clear where this is being called from -- but maybe I've just missed it.
+
+Line:48, org.eclipse.egit.core/src/org/eclipse/egit/core/internal/EclipseSystemReader.java -> Worth wrapping in an Objects.requireNonNull or similar here? Most of the APIs will fail if it's null from what I can tell.
+
+Line:61, org.eclipse.egit.core/src/org/eclipse/egit/core/internal/indexdiff/IndexDiffCache.java -> This seems like a lot of overhead to assign a static variable on demand. Why not just have it as `private static final IndexDiffCache instance = new IndexDiffCache()` instead?
+
+If the only static method you've got is `.getInstance()` and the only time you'll call this cache is when you're loading the class, by which time you're not really saving anything by not having it in the instance field.
+
+Is there static behaviour which requires the RepositoryCache to be set up first? If so, you could put that in a `static {}` block for this class ahead of the instance field.
+
+Line:80, org.eclipse.egit.ui/src/org/eclipse/egit/ui/internal/pull/MultiPullResultDialog.java -> This is where a deadlock in RepositoryUtil.getInstance would be nasty; when creating the Dialog we'd be blocked at this point until it appeared.
+
+Line:306, org.eclipse.egit.ui/src/org/eclipse/egit/ui/internal/repository/RepositoriesView.java -> This could also potentially be a nasty deadlock when showing a view.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2021-02-15 20:25:03.000000000
+MISMATCHED INLINE COMMENT
+Line:55, org.eclipse.egit.core/src/org/eclipse/egit/core/RepositoryCache.java -> Right, the RepositoryCache can be created up front. The cache != null statements are a leftover from previous code, where Activator.stop() actually set the cache reference to null, and some code could during shutdown run into this.
+
+Changed.
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2021-02-15 20:25:03.000000000
+MISMATCHED INLINE COMMENT
+Line:62, org.eclipse.egit.core/src/org/eclipse/egit/core/RepositoryInitializer.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2021-02-15 20:25:03.000000000
+MISMATCHED INLINE COMMENT
+Line:71, org.eclipse.egit.core/src/org/eclipse/egit/core/RepositoryInitializer.java -> It just drops internal caches. Renamed to clear().
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2021-02-15 20:25:03.000000000
+MISMATCHED INLINE COMMENT
+Line:102, org.eclipse.egit.core/src/org/eclipse/egit/core/RepositoryUtil.java -> I don't like this either. But you're right, it can be simplified, too. If we're careful not to cause this class being loaded too early, we can just use a static instance field, too, and then initialize from ResourcesPlugin.getWorkspace(). (As it was before, actually.)
+
+I suppose these complications all arise from my difficulties to figure out what to create when. For quite a while I always ran into that "instance location not set".
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2021-02-15 20:25:03.000000000
+MISMATCHED INLINE COMMENT
+Line:124, org.eclipse.egit.core/src/org/eclipse/egit/core/RepositoryUtil.java -> This was called from the RepositoryInitializer OSGi component once the workspace exists. In PS 2 refactored; relying on the class not being accessed early, and when it is accessed, it's late enough so that a static field should be OK.
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2021-02-15 20:25:03.000000000
+MISMATCHED INLINE COMMENT
+Line:48, org.eclipse.egit.core/src/org/eclipse/egit/core/internal/EclipseSystemReader.java -> Annotated with @NonNull. The parameter is always SystemReader.getInstance(), which is never null.
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2021-02-15 20:25:03.000000000
+MISMATCHED INLINE COMMENT
+Line:61, org.eclipse.egit.core/src/org/eclipse/egit/core/internal/indexdiff/IndexDiffCache.java -> You're right. For these two caches, that works.
+
+Done.
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2021-02-15 20:25:03.000000000
+MISMATCHED INLINE COMMENT
+Line:80, org.eclipse.egit.ui/src/org/eclipse/egit/ui/internal/pull/MultiPullResultDialog.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2021-02-15 20:25:03.000000000
+MISMATCHED INLINE COMMENT
+Line:306, org.eclipse.egit.ui/src/org/eclipse/egit/ui/internal/repository/RepositoriesView.java -> Done
+----------------------------------------------------------------------------------------------------------------------

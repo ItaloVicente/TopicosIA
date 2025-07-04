@@ -1,0 +1,106 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-26470: Use shared/weak ptr for Stream and ActiveStream objs.
+
+Currently we use SingleThreadedRCPtr for Stream and ActiveStream
+objs that are shared across multiple modules. This can lead to
+cyclic references and hence memory leak.
+
+This commit uses std::shared_ptr and std::weak_ptr to overcome
+the problem of cyclic reference.
+
+Change-Id: If620386f6a93bf60f3b333962ae6e6dfaa2023ff
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Manu Dhundi
+Date: 2017-10-28 19:13:56.000000000
+Message: 
+Uploaded patch set 3.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2017-10-28 19:39:06.000000000
+Message: 
+Patch Set 3: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/3405/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/1924/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/3065/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master/3240/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/3378/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/3459/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2017-10-29 14:19:24.000000000
+Message: 
+Patch Set 3: Code-Review-1
+
+(14 comments)
+
+I'd be tempted to break this change into two parts - the first moves from RCPtr to shared_ptr (but without fixing the cyclic reference) - i.e. just a straight refactor.
+
+The second would fix the actual circular reference using weak_ptr.
+
+Please check all your instances of passing shared_ptr - they should confirm to the guidelines about in: http://isocpp.github.io/CppCoreGuidelines/CppCoreGuidelines#Rr-sharedptrparam-owner
+Line:154, engines/ep/src/dcp/backfill-manager.cc -> Passing a shared_ptr by const reference is unusual - const implies that it isn't modified, but in that case it would be preferred to pass via a raw reference if the "smartness" of the ptr isn't relevant here.
+
+If you don't change the refcount of this object then prefer a const&; if you do change the ref-count then pass a non-const shared_ptr&.
+
+See guidelines R.34 and R.36 - http://isocpp.github.io/CppCoreGuidelines/CppCoreGuidelines#Rr-sharedptrparam-owner
+
+Line:63, engines/ep/src/dcp/backfill.h -> How often to we call this method? If it's infrequent, it might be a premature optimisation to cache the vbid.
+
+Line:73, engines/ep/src/dcp/backfill.h -> Now we are converting weak to shared ptrs I think this should be made non0inline and moved to .cc
+
+Line:84, engines/ep/src/dcp/backfill.h -> Probably worth expanding this comment to explain why we use a weak ptr here.
+
+Line:85, engines/ep/src/dcp/backfill.h -> No need to put `weak` in the variable name - the type of the variable already tells us that.
+
+Line:158, engines/ep/src/dcp/backfill_disk.cc -> This means little (or nothing!) to people outside KV-Engine. Try to re-phrease to it expresses /why/ and /what/ has failed, not the details of the /how/.
+
+Line:241, engines/ep/src/dcp/backfill_disk.cc -> Should be DCPBackfillDisk
+
+Line:46, engines/ep/src/dcp/backfill_disk.h -> As previous; I don't think you need to rename this; but it would be useful to describe why it's a weak ptr.
+
+Line:57, engines/ep/src/dcp/backfill_disk.h -> ditto
+
+Line:896, engines/ep/src/dcp/stream.cc -> I think it's safer to do this casting the other way around - i.e. change `queue` to be of type shared_ptr<ActiveStream>, and cast the type on the way in using dynamic cast - that way the queue is guaranteed to only contain ActiveStream objects; and you remove the need for the case here (and the null check).
+
+Line:51, engines/ep/src/dcp/stream.h -> Can you remove RCValue from Stream now? (if all places which used to user our SingleThreadedRCPtr now use shared_ptr?)
+
+Line:537, engines/ep/src/dcp/stream.h -> This could be null (if the lock fails). Are you handling that correctly when you return it - i.e would callers be happy with a null return value?
+
+Line:563, engines/ep/src/dcp/stream.h -> Please document what this `int` is for.
+
+Line:1129, engines/ep/tests/module_tests/dcp_test.cc -> You should check the result of all dynamic_casts (especially in test code).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Manu Dhundi
+Date: 2017-11-01 03:36:03.000000000
+Message: 
+Patch Set 3:
+
+(5 comments)
+
+Commit split into 2. In this commit, I only covert RCPtr to shared_ptr.
+In the subsequent commit will use weak_ptr.
+Line:154, engines/ep/src/dcp/backfill-manager.cc -> Done
+
+Line:63, engines/ep/src/dcp/backfill.h -> This is needed for debug logs when we use a weak ptr to the stream and the stream is null prematurely
+
+Line:896, engines/ep/src/dcp/stream.cc -> Done
+
+Line:51, engines/ep/src/dcp/stream.h -> We still need this because PassiveStream still uses RCPtr
+
+Line:1129, engines/ep/tests/module_tests/dcp_test.cc -> Done
+
+----------------------------------------------------------------------------------------------------------------------

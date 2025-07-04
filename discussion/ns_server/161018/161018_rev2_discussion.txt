@@ -1,0 +1,299 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-46215 Event log server
+
+The guts of the gen_server is the same as ns_log gen_server. Specifically,
+1) We checkpoint the entire state of the gen_server every 5 secs.
+2) We replicate the entire state to one nodes in the cluster at random
+approximately every 30 secs.
+3) When a new event log arrives at a node, it is abcasted to all the
+nodes.
+
+To facilitate streaming API each event log is appended with a seq_num,
+which denotes the order it was added to the unique_recent list.
+
+Change-Id: I0ca09b4387dcee88c03e7e686ad223c7e4d2695a
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Hareen Kancharla
+Date: 2021-09-08 18:50:27.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-09-08 18:50:37.000000000
+Message: 
+Patch Set 2:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-test/25651/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-09-08 18:55:12.000000000
+Message: 
+Patch Set 2: Well-Formed+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/ns-server-test/25651/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2021-09-09 23:20:32.000000000
+Message: 
+Patch Set 2: Verified+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2021-09-13 17:40:47.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:2, include/event_log_server.hrl -> This should be 2021 as this file is new as of that year. Same comment for any other newly added files.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2021-09-13 18:45:40.000000000
+Message: 
+Patch Set 2:
+
+(11 comments)
+
+Took an initial pass at the code.
+General comments,
+1. Please format code correctly and separate assignment and operations with spaces. Example, "A + B" or "A = B".
+2. Limit code copying from other existing module and instead re-use code. event_log_server and ns_log share many common pieces. Did you consider making their behavior standardized for example see, memcached_cfg usage below. If you considered it and decided against doing so, please specify the reasoning.
+src/memcached_passwords.erl:13:-behaviour(memcached_cfg).
+src/memcached_permissions.erl:14:-behaviour(memcached_cfg).
+Line:10, include/event_log_server.hrl -> Any reason why this is in it's own header file?
+
+Line:56, src/event_log_server.erl -> Why do this? You are not handling the EXIT messages.
+
+Line:57, src/event_log_server.erl -> The Pid can crash. Noone is going to restart it? 
+You need to wrap both this server and this gen_events in a supervisor.
+
+Line:136, src/event_log_server.erl -> Maybe use atomic_write_file?
+
+Line:144, src/event_log_server.erl -> redundant naming. Perhaps you can use seqno.
+
+Line:162, src/event_log_server.erl -> Please assert that this gen_server is not running when delete_log is called.
+
+Line:166, src/event_log_server.erl -> Why do you need to get the entire config? This filename is not going to change I assume so please use the cache.
+
+Line:178, src/event_log_server.erl -> Why aren't we deleting the corrupted file? Or crashing here?
+
+Line:203, src/event_log_server.erl -> Formatting is off.
+
+Line:241, src/event_log_server.erl -> Similar comment for maybe_notify would be nice.
+
+Line:258, src/event_log_server.erl -> Why do we do this?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2021-09-13 20:13:41.000000000
+Message: 
+Patch Set 2:
+
+(12 comments)
+
+The plan was to eventually remove ns_log entirely and therefore decided against creating a new behavior with the common code. 
+
+> Patch Set 2:
+> 
+> (11 comments)
+> 
+> Took an initial pass at the code.
+> General comments,
+> 1. Please format code correctly and separate assignment and operations with spaces. Example, "A + B" or "A = B".
+> 2. Limit code copying from other existing module and instead re-use code. event_log_server and ns_log share many common pieces. Did you consider making their behavior standardized for example see, memcached_cfg usage below. If you considered it and decided against doing so, please specify the reasoning.
+> src/memcached_passwords.erl:13:-behaviour(memcached_cfg).
+> src/memcached_permissions.erl:14:-behaviour(memcached_cfg).
+Line:2, include/event_log_server.hrl -> Ack
+
+Line:10, include/event_log_server.hrl -> No particular reason. Will move it in to the event_log_server.erl file.
+
+Line:56, src/event_log_server.erl -> ah not sure. Picked it from ns_log as the common part. Will recheck if we need it in event_log_server.
+
+Line:57, src/event_log_server.erl -> I added event_log_server as a child in the child_specs in ns_server_sup.erl. Would I have to do something else too to add it to the supervision tree?
+
+Line:136, src/event_log_server.erl -> Ack
+
+Line:144, src/event_log_server.erl -> Ack
+
+Line:162, src/event_log_server.erl -> This function was for the case where a node joins an existing cluster and we want to remove all the logs from the joinee node before we add it to the cluster (similar to how it is done in ns_log) ... didn't get why we would have to assert the gen_server isn't running.
+
+Line:166, src/event_log_server.erl -> Ack. Makes sense. It is cached in the gen_server state - will reuse it.
+
+Line:178, src/event_log_server.erl -> Since this is the checkpoint we are reading from in the init path for this process; restarting here would mean we'll keep restarting if the file is corrupt. The corrupt file would be overwritten once we do a schedule_save later.
+
+Line:203, src/event_log_server.erl -> Ack
+
+Line:241, src/event_log_server.erl -> Ack
+
+Line:258, src/event_log_server.erl -> Stripping the local seq_nums to help with the merge and comparison of the logs on the remote node in this function - handle_cast({sync_all, SrcNode, RemoteLogs0}, State0).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2021-09-14 20:45:35.000000000
+MISMATCHED INLINE COMMENT
+Line:56, src/event_log_server.erl -> Looks like the reason to trap exits was so that the gen_server can call Module:terminate even if there are runtime errors etc - which makes sense since we want to checkpoint the event_logs before we kill this gen_server.
+
+https://blog.differentpla.net/blog/2014/11/13/erlang-terminate/
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2021-09-14 22:29:19.000000000
+MISMATCHED INLINE COMMENT
+Line:56, src/event_log_server.erl -> Would appreciate comment detailing this.
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2021-09-14 16:43:08.000000000
+MISMATCHED INLINE COMMENT
+Line:57, src/event_log_server.erl -> I feel you might be missing the point on gen_event server needing to be under a supervisor tree, this would make restarts explicit. Just to clarify, the gen_event process can be restarted without the need for this gen_server process to be restarted if you so require. 
+See example for buckets_events, 
+src/ns_server_sup.erl:114:     {buckets_events, {gen_event, start_link, [{local, buckets_events}]},
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2021-09-13 21:57:20.000000000
+MISMATCHED INLINE COMMENT
+Line:57, src/event_log_server.erl -> Here you trap_exit and ignore any EXIT messages. The linked process exit is conveniently ignored. Noone is going to restart the event_log_events server. 
+See, other gen_event servers on how they are managed.
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2021-09-13 23:23:33.000000000
+MISMATCHED INLINE COMMENT
+Line:57, src/event_log_server.erl -> uhum got that bit. I don't think the gen_server needs to trap the exit. I'll remove it all together.
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2021-09-14 20:45:35.000000000
+MISMATCHED INLINE COMMENT
+Line:57, src/event_log_server.erl -> Makes sense. Thanks. I have added the event_log_events gen_event as a child in ns_server_sup.
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2021-09-14 16:43:08.000000000
+MISMATCHED INLINE COMMENT
+Line:108, src/event_log_server.erl -> What is the reasoning behind delaying the cast to the source node?
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2021-09-14 22:29:19.000000000
+MISMATCHED INLINE COMMENT
+Line:108, src/event_log_server.erl -> Not really. I'm asking why do you need this delay? It's not obvious to me why you do this.
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2021-09-14 20:45:35.000000000
+MISMATCHED INLINE COMMENT
+Line:108, src/event_log_server.erl -> In comparison to how it is done in ns_log you mean?
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2021-09-13 21:57:20.000000000
+MISMATCHED INLINE COMMENT
+Line:162, src/event_log_server.erl -> You are deleting a file from outside gen_server process. You are modifying the file from within the gen_server process. This will lead to unnecessary race conditions unless you feel this delete is called when gen_server isn't running. By having an assert you can catch bugs in code or behavior change is the caller.
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2021-09-13 23:23:33.000000000
+MISMATCHED INLINE COMMENT
+Line:162, src/event_log_server.erl -> Ah interesting .. I see what you are saying. Let me think about it more.
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2021-09-14 20:45:35.000000000
+MISMATCHED INLINE COMMENT
+Line:178, src/event_log_server.erl -> :) Well I don't see why we have to change it if it is the baseline behavior and technically it works.
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2021-09-14 22:29:19.000000000
+MISMATCHED INLINE COMMENT
+Line:178, src/event_log_server.erl -> For me it's always better to be explicit. This way there is no wondering what could have been, or what is going to happen. Per you comments, I'm not asking you to the change the behavior just making it easier to read.
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2021-09-13 23:23:33.000000000
+MISMATCHED INLINE COMMENT
+Line:178, src/event_log_server.erl -> I don't think the initial design gave it much thought (in ns_log). On the flip side I don't see the downside of waiting until the schedule_save is done. It's a corrupted file but it will be rectified soon via the schedule_save.
+
+Even if crash before schedule_save is called due to the addition of a new log, we checkpoint the current state in memory in terminate. So we'll never read the corrupt file more than once.
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2021-09-14 16:43:08.000000000
+MISMATCHED INLINE COMMENT
+Line:178, src/event_log_server.erl -> All I heard is delete or save with no entries is safe here :)
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2021-09-13 21:57:20.000000000
+MISMATCHED INLINE COMMENT
+Line:178, src/event_log_server.erl -> Then you should delete the file no? What is the point of having a corrupted file around?
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2021-09-13 23:23:33.000000000
+MISMATCHED INLINE COMMENT
+Line:258, src/event_log_server.erl -> I did think about doing it initially in the comparison (on the remote node). The thing was that the "handle_cast({sync_all" call was already doing a lot of heavy lifting cpu wise - thought it made sense to strip the logs here. I could add a comment to clarify it.
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2021-09-13 21:57:20.000000000
+MISMATCHED INLINE COMMENT
+Line:258, src/event_log_server.erl -> You should handle this in the comparison I feel. The data is modified in different places and it's difficult to see why.
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2021-09-14 16:43:08.000000000
+MISMATCHED INLINE COMMENT
+Line:260, src/event_log_server.erl -> Maybe use strip_metadata_in_logs? Right now function name isn't indicative of the operation performed.
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2021-09-14 20:45:35.000000000
+MISMATCHED INLINE COMMENT
+Line:260, src/event_log_server.erl -> Ack
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2021-09-14 16:43:08.000000000
+MISMATCHED INLINE COMMENT
+Line:268, src/event_log_server.erl -> Please rename as get_seqno or something equivalent.
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2021-09-14 20:45:35.000000000
+MISMATCHED INLINE COMMENT
+Line:268, src/event_log_server.erl -> Ack
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2021-09-14 16:43:08.000000000
+MISMATCHED INLINE COMMENT
+Line:271, src/event_log_server.erl -> Since you are stripping metadata before sync with other node. You might want to rename to add_local_node_metadata to make the distinction clearer.
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2021-09-14 20:45:35.000000000
+MISMATCHED INLINE COMMENT
+Line:271, src/event_log_server.erl -> I have renamed it as add_seqnum to be consistent and symmetric with get_seqnum.
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2021-09-14 16:43:08.000000000
+MISMATCHED INLINE COMMENT
+Line:313, src/event_log_server.erl -> The complex logic in here can be split into a simple 3 step. 
+1. Filter events log events greater than a particular timestamp
+2. Use sublist to return a specific number/limit the entries.
+3. Transform all filtered entries
+
+This would make it easier to read.
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2021-09-14 20:45:35.000000000
+MISMATCHED INLINE COMMENT
+Line:313, src/event_log_server.erl -> Agree adding the transform logic makes it hard to read - I moved the transform logic out of the inner functions. 
+
+It didn't make sense to me to go over the entire 10K entries (or higher based on the configured value) to filter the logs based on time and then drop them based on the limit. Like I could request 100 entries from the start. Seems wasteful to go over 10K entries and drop large portion of it.
+
+Seemed like a fair optimization gain for writing it like this.
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2021-09-14 22:29:19.000000000
+MISMATCHED INLINE COMMENT
+Line:313, src/event_log_server.erl -> The big O complexity is the same, so I'm curious to know what the actual difference in performance is for the example you stated.
+Also, the optimization you have hoped to do, goes out the window when you already used lists:reverse anyway.
+----------------------------------------------------------------------------------------------------------------------
+Author: Abhijeeth Nuthan
+Date: 2021-09-14 16:43:08.000000000
+MISMATCHED INLINE COMMENT
+Line:339, src/event_log_server.erl -> What happens when MinTStamp is undefined but limit is 10? I would be explicit with this use case. 
+Also the -1 for limits when MinStamp is valid timestamp.
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2021-09-14 20:45:35.000000000
+MISMATCHED INLINE COMMENT
+Line:339, src/event_log_server.erl -> Ah thanks for catching that. Have added a separate case for that.
+----------------------------------------------------------------------------------------------------------------------

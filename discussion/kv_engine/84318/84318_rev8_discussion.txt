@@ -1,0 +1,120 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-26173 [RocksDB] Move to one DB instance per VBucket
+
+The previous implementation of RocksDBKVStore creates a single RocksDB
+instance, thus we have 4 RocksDB instances in total (one per Shard).
+With this change, each RocksDBKVStore creates and manages one RocksDB
+instance per VBucket, thus we have 1024 RocksDB instances in total.
+
+Change-Id: Icb5d1b24ad2fd1e9f5f0f2f8b42c357a9a86e86d
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2017-10-16 15:13:32.000000000
+Message: 
+Uploaded patch set 8.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2017-10-16 15:50:46.000000000
+Message: 
+Patch Set 8: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/3123/ : FAILURE
+
+Failure of a CTest test  34/110 Test  #34: ep_testsuite_dcp.value_eviction.rocksdb .......... ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/3123/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/3190/ : FAILURE
+
+The warnings threshold for this job was exceeded - <a href="warningsResult">1 warnings</a> found. ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/3190/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master/2993/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/3143/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/1674/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/2825/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2017-10-16 17:18:12.000000000
+Message: 
+Patch Set 8:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/3196/ : FAILURE
+
+Failure of a CTest test 10/83 MemCheck #62: memcached-legacy-ssl-tests ..................... ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/3196/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/3128/ : FAILURE
+
+Failure of a CTest test  34/110 Test  #34: ep_testsuite_dcp.value_eviction.rocksdb .......... ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/3128/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master/2993/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/3143/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/1674/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/2825/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2017-10-16 17:22:45.000000000
+Message: 
+Patch Set 8: Code-Review-1
+
+(8 comments)
+Line:149, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> Nit: This should be private.
+
+Line:151, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> `CFHPtr` is pretty cryptic. I think we can afford a slightly longer, more descriptive name - for example `ColFamilyPtr` ?
+
+Line:491, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> I think you can remove this TODO now - we have removed any immediate copy in this function here; and to avoid any further up the call-chain we'd have to make DocKey some kind of ref-counted object which I think is not worth the complexity.
+
+Line:506, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> Style: Given you do the same think at line 492, would be nice to make a simple helper function which creates a rocksdb::Slice from a Key - something like:
+
+ rocksdb::Slice toSlice(DocKey key);
+
+Line:556, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> Note you can constrain the lock scope to just this code.
+
+Line:556, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> You don't need the conditional - reset() on an empty unique_ptr is a no-op.
+
+Line:909, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> As previous; would be nice to use that toSlice helper method :)
+
+Line:314, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.h -> This reads more like a white-box (implementation) comment, as opposed to a black-box (interface) comment. 
+
+Callers of this function don't need to know (or care!) about how the function works; they just need to know about its observable behaviour.
+
+I suggest you change; simply describing what the function does from the callers' pov (returns a handle representing the specified vBuckets' data). Also add how it might fail - what happens if no such database exists for the given vbid.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2017-10-17 10:10:46.000000000
+Message: 
+Patch Set 8:
+
+(4 comments)
+Line:151, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> You are right, but I would like to use 3 more characters for a nice `ColumnFamilyPtr` :)
+
+Line:491, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> Here the use of `PinnableSlice` is intended for `value`. And also, I think we should use it in place of `string` to avoid a `memcpy`. Here how it works:
+http://rocksdb.org/blog/2017/08/24/pinnableslice.html
+I checked `makeGetValue`, and we copy the value into a `Blob` in there, so we can safely avoid the temporary copy into `std::string value` here.
+
+Line:506, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> Done
+
+Line:556, engines/ep/src/rocksdb-kvstore/rocksdb-kvstore.cc -> Sorry, I did explain well here. 
+We have a `writeLock` to synchronize `delVBucket` and `commit` to avoid data loss.
+I think we should also lock on `openDBmutex` to synchronize `delVBucket` and `openDB` to avoid the following scenario:
+
+1) thread_1 executes `vbDB[vbid].reset()`
+2) thread_2 executes code in `openDB(vbid)`
+3) thread_1 executes `DestroyDB`, so calling `DestroyDB` on a live DB
+
+I think that both locks should have function-scope here.
+
+----------------------------------------------------------------------------------------------------------------------

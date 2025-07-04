@@ -1,0 +1,200 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-33112 [SR]: Introduce the PassiveDurabilityMonitor
+
+- Introducing the new DurabilityMonitor hierarchy
+- DurabilityMonitor is the abstract base class
+- The old DurabilityMonitor features have been moved to the
+  ActiveDurabilityMonitor
+- Using folly::Synchronized for the new ADM internal state
+- The new PassiveDurabilityMonitor class just exposes some stats for
+  now. It will implement all the DM features necessary for Replica
+  VBuckets.
+
+Change-Id: I00e2e28598894f8264afa810ba5fdd108c7151c9
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2019-04-11 12:32:43.000000000
+Message: 
+Uploaded patch set 10.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-04-11 12:37:35.000000000
+Message: 
+Patch Set 10: Code-Review-1
+
+In general, this is now a *massive* patch! I suggest you try to break it down - for example maybe split the introduction of the passive durability monitor into a second patch, with the first just "making room" in the hierarchy.
+
+Similary, can we maybe stage the various refactors inside what is now the ActiveDurabilityMonitor?
+
+(Will also look at more specific points now...)
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-04-11 12:48:57.000000000
+Message: 
+Patch Set 10:
+
+(3 comments)
+Line:541, engines/ep/src/durability/active_durability_monitor.cc -> Style: This method (and other similar ones) I think are overly verbose - I don't think for a single statement it's worth the extra abstraction to have a method on the State object which just returns a single field.
+
+In other words, I think it's better to just implement this as:
+
+ uint8_t ActiveDurabilityMonitor::getFirstChainSize() const {
+    auto s = state.rlock();
+    return s->firstChain ? s->firstChain->positions.size() : 0;
+ }
+
+Similarly for the other methods you have which just do something very trivial - what you have at the moment just creates a lot of boilerplate code and unnecessary jumping between two functions for the reader to understand the code.
+
+Line:282, engines/ep/src/vbucket.cc -> This might be problematic, as I expect we'll call getHighPreparedSeqno for all vBucket states (not just replica / active). Probably simpler / safer to return 0 / -1 if the durabilityMonitor isn't defined.
+
+Line:3210, engines/ep/src/vbucket.cc -> Might be worth pulling this into a helper method (getActiveDM() ?)
+
+You could also move the Expects() into there.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-04-11 13:47:37.000000000
+Message: 
+Patch Set 10: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/10328/ : FAILURE
+
+Failure of a CTest test  31/177 Test  #22: ep-engine_ep_unit_tests ...................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/10328/ )
+
+Failure of a GoogleTest  ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/10328/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/204/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/204/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/18544/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/18544/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/17118/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/19179/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/9809/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/16456/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/3077/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-04-11 16:28:06.000000000
+Message: 
+Patch Set 10: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/17118/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/10331/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/19179/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv-engine-cv-perf/9809/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/16456/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/207/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/3077/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/18548/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-04-12 14:30:21.000000000
+Message: 
+Patch Set 10:
+
+(3 comments)
+
+> *massive* patch! I suggest you try to break it down
+
+Doing
+Line:541, engines/ep/src/durability/active_durability_monitor.cc -> Done.
+Apart from getNodeWriteSeqnos/getNodeAckSeqnos below.
+They are called internally by ADM::addSyncWrite while the caller has already acquired a state.wlock(). We would deadlock on state.rlock() by executing line 550/555 below, so we need to call the (lock-free) ADM::State inner functions.
+
+Line:282, engines/ep/src/vbucket.cc -> Done.
+
+Line:3210, engines/ep/src/vbucket.cc -> Good point, doing.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-04-12 14:43:34.000000000
+Message: 
+Removed reviewer Trond Norbye.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-04-12 14:43:35.000000000
+Message: 
+Removed reviewer Tim Bradgate.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-04-12 14:43:36.000000000
+Message: 
+Removed reviewer Sven Signer.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-04-12 14:43:37.000000000
+Message: 
+Removed reviewer Paolo Cocchi.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-04-12 14:43:39.000000000
+Message: 
+Removed reviewer Richard de Mellow.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-04-12 14:43:40.000000000
+Message: 
+Removed reviewer David Haikney.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-04-12 14:43:42.000000000
+Message: 
+Removed reviewer James Harrison.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-04-12 14:43:43.000000000
+Message: 
+Removed reviewer Jim Walker.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-04-12 14:43:45.000000000
+Message: 
+Removed reviewer Daniel Owen.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-04-12 14:43:47.000000000
+Message: 
+Removed reviewer Dave Finlay.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-04-12 14:43:49.000000000
+Message: 
+Removed reviewer Dave Rigby with the following votes:
+
+* Code-Review-1 by Dave Rigby <daver@couchbase.com>
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-04-12 14:43:51.000000000
+Message: 
+Removed reviewer Ben Huddleston.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2019-04-12 14:43:53.000000000
+Message: 
+Removed reviewer Chris Farman.
+----------------------------------------------------------------------------------------------------------------------

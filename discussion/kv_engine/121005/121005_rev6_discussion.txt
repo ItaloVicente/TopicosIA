@@ -1,0 +1,133 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-37546: Add the ability to explicitly position a cursor in CM
+
+This patch exposes a new CM::positionCursorAt() interface for allowing
+the user to perform an explicit cursor-move.
+That is supposed to happen when the user calls
+getItemsForCursor(CursorMove::DEFERRED), which returns also the deferred
+position for cursor.
+
+The new interface is added and tested in patch, but not used yet.
+
+Change-Id: I192bc9f7823c44e821c9e5c418f21cc1267e566d
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2020-01-31 12:20:56.000000000
+Message: 
+Uploaded patch set 6.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-01-31 12:21:05.000000000
+Message: 
+Patch Set 6: Well-Formed+1
+
+Permission granted to commit: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/166388/artifact/restricted.html : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-01-31 13:32:35.000000000
+Message: 
+Patch Set 6: Code-Review-1
+
+Still something to fix
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-01-31 14:13:33.000000000
+Message: 
+Patch Set 6: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/812/ : FAILURE
+
+Failure of a GoogleTest test:
+
+LoggingTests/LoggingTest.ChangeVerbosity/0, where GetParam() = 0 (0 ms) ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/812/ )
+
+Failure of a CTest test 115/187 Test #114: memcached_testapp.default.LoggingTests/LoggingTest ........................... ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/812/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/24077/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/742/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/mad-hatter/163/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/592/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/817/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/811/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/822/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-01-31 15:25:35.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+Line:15, /COMMIT_MSG -> nit "this"
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-02-03 09:02:05.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+Line:1020, engines/ep/src/checkpoint_manager.cc -> I've been looking at that on last days. I continue the discussion on this new version of the function, here's a summary.
+
+
+First thing: obviously this function must execute under CM::queueLock, which means that any front-end operation will block meanwhile.
+I have not measured it, but it's very likely that it will have a relevant impact on throughput.
+
+
+Back to correctness now.
+The cursor-shifting mentioned by @James doesn't appear to cause any issue by itself.
+But deduplication is definitely an issue. Eg.
+
+
+1) CM::getItemsForCursor(DEFERRED) -> return deferredPos
+2) front-end ops causes deduplication of item referred by deferredPos -> deferredPos is invalidated
+3) In my tests that causes the while-loop to execute forever, but that's totally undefined behaviour
+
+
+A possible solution is to identify deferredPos by CAS or Seqno, and then use that to increase the cursor up to the new pos. Note that Seqno is ok for items, while CAS must be used for meta-items (eg, set-vbstate).
+Given that we have deduplication, the new pos may not be exactly at deferredPos.casOrSeqno. In general it is the right-most position that verifies (newPos.casOrSeqno <= deferredPos.casOrSeqno).
+
+
+The last observation increases a bit the complexity of using the existing incrCursor() function, as we may hit the loop break-condition (ie, newPos.casOrSeqno > deferredPos.casOrSeqno) only when the cursor has already incremented. At that point we need to decrement the cursor.
+Note that decrementing the cursor must be done carefully, as it may involve jumping back to the previous checkpoint.
+
+
+That complexity and the likely impact on throughput make me think that this approach must be abandoned.
+
+
+Another approach could be:
+
+1) At CM::getItemsForCursor(DEFERRED) we register a copy of the cursor (eg, persistence cursor) in the CM (ie, the cursor-copy introduces a new CM state that survives the function return) and we operate on that. The cursor-copy will be the new persistence cursor at deferred-move.
+2) Any change in the CM will affect also the cursor-copy (eg, cursor shifting by deduplication)
+3) At that point doing the deferred-move means swapping that original cursor with cursor-copy + removing the original cursor
+
+
+At first look that should address all the issues found so far by just re-using the existing logic in CM:
+
+1) accounting the correct num-cursors on each checkpoint
+2) cursor shifting by deduplication
+3) cursor moving through different checkpoints
+4) performance - the deferred cursor-move by swapping is O(1)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2020-02-11 10:16:09.000000000
+Message: 
+Abandoned
+
+Not implementing CursorMove::DEFERRED
+----------------------------------------------------------------------------------------------------------------------

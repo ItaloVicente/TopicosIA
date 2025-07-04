@@ -1,0 +1,267 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 574131: SIGTERM should let app do a gracefully exit on win
+
+Let the process have some time to do a graceful exit with the signal
+SIGTERM. If the process is still alive after 1s, raise the SIGKILL
+signal and hammer down the process.
+The 1s is aligned on all platforms and handled in JAVA.
+
+Contributed by STMicroelectronics
+
+Change-Id: Iff2f7727c1ac37b190c60a01774f106638eeeeaa
+Signed-off-by: Torbjörn Svensson <torbjorn.svensson@st.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Torbjörn Svensson
+Date: 2021-10-15 19:40:39.000000000
+Message: 
+Uploaded patch set 3.
+----------------------------------------------------------------------------------------------------------------------
+Author: CDT Bot
+Date: 2021-10-15 20:03:17.000000000
+Message: 
+Patch Set 3: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-ui-only-pipeline/3561/ : SUCCESS
+
+https://ci.eclipse.org/cdt/job/cdt-verify-code-cleanliness-pipeline/3354/ : SUCCESS. Formatting, whitespace, version numbers and other checks appear to be correct. See https://github.com/eclipse-cdt/cdt-infra/tree/master/jenkins/pipelines/cdt/verify#cdt-verify-code-cleanliness for documentation on what is checked.
+
+https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-other-pipeline/3780/ : SUCCESS. p2 repository available on https://ci.eclipse.org/cdt/job/cdt-verify-test-cdt-other-pipeline/3780/artifact/releng/org.eclipse.cdt.repo/target/repository/ - please mark build as "Keep this build forever" if the p2 repo is needed for testing. Otherwise it will be deleted shortly.
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonah Graham
+Date: 2021-10-16 01:17:56.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+
+> Patch Set 1:
+> 
+> Regardless of platform, there is a 1 sec delay between calling Spawner#terminate() and Spawner#kill().
+> With this starter.exe, the application will have the possibility to do a graceful exit by registering a signal handler for SIGINT as long as it's faster than the Spawner class raises SIGKILL (1 sec).
+> 
+> As all the other platforms have a delay of 1 sec today to allow a graceful exit, I think the time should be okay. Do you think we need to have this delay configurable?
+> If the delay needs to be provided from the ProcessFactory, then the API for both the ProcessFactory and the Spawner needs to be extended to take into account this additional parameter. The place in the code that does the delay is Spawner#destroy().
+
+Hopefully Anton or Tommy can comment on the amount of time, or if it should be configurable. 
+
+1 second seems awfully short to allow full cleanup. Any reason it shouldn't be 10seconds for example, to give maximum amount of time? The default amount of time that we wait for suspending a process recently changed from 5 to 10 seconds (and is now configurable - https://wiki.eclipse.org/CDT/User/NewIn105#Debug) so it makes sense to me that if it takes some targets up to 10 seconds to suspend, then shutting down could take that amount of time too.
+
+Either way, that delay is a separate patch. I think the change here is good, it both cleans up the code and removes the TerminateJobObject when asking for a graceful termination.
+Line:458, core/org.eclipse.cdt.core.native/native_src/win/starter.c -> IIUC this block is the only behaviour change - i.e. that it now only runs for SIGKILL and not for SIGTERM?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonah Graham
+Date: 2021-10-16 01:19:02.000000000
+Message: 
+Patch Set 3:
+
+Umair - CC'ing you for your information on this issue as you may have some useful input based on the recent change to 10 second default for suspend timeout. See my previous comment.
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonah Graham
+Date: 2021-10-16 01:21:16.000000000
+Message: 
+Patch Set 3: Code-Review+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Torbjörn Svensson
+Date: 2021-10-16 06:15:25.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+
+> Patch Set 3:
+> Hopefully Anton or Tommy can comment on the amount of time, or if it should be configurable. 
+> 
+> 1 second seems awfully short to allow full cleanup. Any reason it shouldn't be 10seconds for example, to give maximum amount of time? The default amount of time that we wait for suspending a process recently changed from 5 to 10 seconds (and is now configurable - https://wiki.eclipse.org/CDT/User/NewIn105#Debug) so it makes sense to me that if it takes some targets up to 10 seconds to suspend, then shutting down could take that amount of time too.
+> 
+> Either way, that delay is a separate patch. I think the change here is good, it both cleans up the code and removes the TerminateJobObject when asking for a graceful termination.
+
+Yes, that is a separate patch.
+The needed time varies from application to application, so 10 seconds is probably too short for some, but an ocean of time for another. The time of 1 sec was introduced in commit f3745131b94ec1b7d4149b9a385d67de2c380559 back in 2002, so I suppose it's okay for most applications.
+Anyway, it should not be too hard to implement since all that code is in JAVA world and should not have any impact on the native code.
+
+Should it be a global configurable timeout or should it be something that you tell the ProcessFactory when you create the process or perhaps both?
+Line:458, core/org.eclipse.cdt.core.native/native_src/win/starter.c -> Yes, the new part is that the TerminateJobObject is only issued for the SIGKILL signal.
+The rest is about trying to make it more obvious what the difference is without duplicating too much code.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Umair Sair
+Date: 2021-10-16 12:08:13.000000000
+Message: 
+Patch Set 3:
+
+> With this starter.exe, the application will have the possibility to do a graceful exit by registering a signal handler for SIGINT as long as it's faster than the Spawner class raises SIGKILL (1 sec).
+
+You mean by registering SIGTERM handler, and not SIGINT, right?
+----------------------------------------------------------------------------------------------------------------------
+Author: Umair Sair
+Date: 2021-10-16 12:41:34.000000000
+Message: 
+Patch Set 3:
+
+> 1 second seems awfully short to allow full cleanup. Any reason it shouldn't be 10seconds for example, to give maximum amount of time? The default amount of time that we wait for suspending a process recently changed from 5 to 10 seconds (and is now configurable - https://wiki.eclipse.org/CDT/User/NewIn105#Debug) so it makes sense to me that if it takes some targets up to 10 seconds to suspend, then shutting down could take that amount of time too.
+
+Hmm.. yes, clean up for a process can be time taking, e.g., if a process is communicating with remote then it may take some time to clean up.. the same way gdb takes time for suspend communication with remote target..
+
+but terminating gdb process in launch has no impact with this change IMO because on terminating gdb process, we have complete mechanism of suspending and then issuing gdb-exit command.. and if we don't get response for specific time (GDBControl.getGDBExitWaitTime()) then we just destroy the process. 
+
+> Either way, that delay is a separate patch. I think the change here is good, it both cleans up the code and removes the TerminateJobObject when asking for a graceful termination.
+
+agree.. if we want, we can make it a little flexible for now by converting the if into while in destroy method..
+
+```
+		int seconds = 0;
+		while (seconds < 5 && !isDone) { // 5 seconds max, maybe change to 10
+			try {
+				wait(1000);
+			} catch (InterruptedException e) {
+			}
+			seconds++;
+		}
+		if (!isDone) {
+			kill();
+		}
+	}
+```
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonah Graham
+Date: 2021-10-16 12:51:45.000000000
+Message: 
+Patch Set 3:
+
+> agree.. if we want, we can make it a little flexible for now by converting the if into while in destroy method..
+> 
+> ```
+> 		int seconds = 0;
+> 		while (seconds < 5 && !isDone) { // 5 seconds max, maybe change to 10
+> 			try {
+> 				wait(1000);
+> 			} catch (InterruptedException e) {
+> 			}
+> 			seconds++;
+> 		}
+> 		if (!isDone) {
+> 			kill();
+> 		}
+> 	}
+> ```
+
+This shouldn't be necessary (haven't tested though) as the wait on the object is waiting for a notify all that comes after setting is done.
+----------------------------------------------------------------------------------------------------------------------
+Author: Torbjörn Svensson
+Date: 2021-10-16 14:11:18.000000000
+Message: 
+Patch Set 3:
+
+> Patch Set 3:
+> 
+> > With this starter.exe, the application will have the possibility to do a graceful exit by registering a signal handler for SIGINT as long as it's faster than the Spawner class raises SIGKILL (1 sec).
+> 
+> You mean by registering SIGTERM handler, and not SIGINT, right?
+
+For non-cygwin applications, a simple CTRL+C event is sent, and AFAIK, that's equal to SIGINT.
+
+
+
+> Patch Set 3:
+> 
+> > 1 second seems awfully short to allow full cleanup. Any reason it shouldn't be 10seconds for example, to give maximum amount of time? The default amount of time that we wait for suspending a process recently changed from 5 to 10 seconds (and is now configurable - https://wiki.eclipse.org/CDT/User/NewIn105#Debug) so it makes sense to me that if it takes some targets up to 10 seconds to suspend, then shutting down could take that amount of time too.
+> 
+> Hmm.. yes, clean up for a process can be time taking, e.g., if a process is communicating with remote then it may take some time to clean up.. the same way gdb takes time for suspend communication with remote target..
+> 
+> but terminating gdb process in launch has no impact with this change IMO because on terminating gdb process, we have complete mechanism of suspending and then issuing gdb-exit command.. and if we don't get response for specific time (GDBControl.getGDBExitWaitTime()) then we just destroy the process. 
+
+Depending on how the process was created, the "destroy the process" can call the Spawner#terminate() and Spawner#kill()...
+
+> > Either way, that delay is a separate patch. I think the change here is good, it both cleans up the code and removes the TerminateJobObject when asking for a graceful termination.
+> 
+> agree.. if we want, we can make it a little flexible for now by converting the if into while in destroy method..
+> 
+> ```
+> 		int seconds = 0;
+> 		while (seconds < 5 && !isDone) { // 5 seconds max, maybe change to 10
+> 			try {
+> 				wait(1000);
+> 			} catch (InterruptedException e) {
+> 			}
+> 			seconds++;
+> 		}
+> 		if (!isDone) {
+> 			kill();
+> 		}
+> 	}
+> ```
+
+If we want a longer delay, then the argument to wait() should just be changed... no need to have any loop or any such construction. Actually, this construction will delay the execution for longer than needed as when the notification is sent, the wait will return, but the renaming iterations of the loop will have a full timeout (1 sec per iteration) as it's unlikely that there will be another notify.
+----------------------------------------------------------------------------------------------------------------------
+Author: Umair Sair
+Date: 2021-10-16 14:13:34.000000000
+Message: 
+Patch Set 3:
+
+> Patch Set 3:
+> 
+> > agree.. if we want, we can make it a little flexible for now by converting the if into while in destroy method..
+> > 
+> > ```
+> > 		int seconds = 0;
+> > 		while (seconds < 5 && !isDone) { // 5 seconds max, maybe change to 10
+> > 			try {
+> > 				wait(1000);
+> > 			} catch (InterruptedException e) {
+> > 			}
+> > 			seconds++;
+> > 		}
+> > 		if (!isDone) {
+> > 			kill();
+> > 		}
+> > 	}
+> > ```
+> 
+> This shouldn't be necessary (haven't tested though) as the wait on the object is waiting for a notify all that comes after setting is done.
+
+ahh.. yes, you are right..
+----------------------------------------------------------------------------------------------------------------------
+Author: Torbjörn Svensson
+Date: 2021-10-16 18:07:52.000000000
+Message: 
+Patch Set 3:
+
+Based on the previous reviews, is there anything blocking this from being merged?
+
+The reason I'm asking is that the timeout gerrit should be based on top of this and it would be easier to do that outside the Windows world...
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonah Graham
+Date: 2021-10-16 18:50:05.000000000
+Message: 
+Patch Set 3:
+
+> Patch Set 3:
+> 
+> Based on the previous reviews, is there anything blocking this from being merged?
+> 
+> The reason I'm asking is that the timeout gerrit should be based on top of this and it would be easier to do that outside the Windows world...
+
+I don't think anything is blocking merging this.
+----------------------------------------------------------------------------------------------------------------------
+Author: Torbjörn Svensson
+Date: 2021-10-18 11:05:32.000000000
+Message: 
+Patch Set 3: Code-Review+2
+
+Got this comment from Anton on mail:
+
+From our perspective, 10 seconds feels a lot of time, but to somebody with a different mindset and problem might have a different opinion about it.
+But I wouldn't increase the default time too much, what if something is really stuck and really needs to be terminated forcefully. How much time is the threshold until I will be starting my task manager and killing it myself? At 10 seconds I think I would start killing stuff manually and impatiently. So if the setting would be global, then let anybody to tweak it higher if they have a very slow process, but for regular users and use cases that something feels goes very wrong then 10 seconds feels already on high end of patience (maybe I'm just not impatient).
+
+
+End quote.
+As there is no objection, I'm merging this now.
+----------------------------------------------------------------------------------------------------------------------

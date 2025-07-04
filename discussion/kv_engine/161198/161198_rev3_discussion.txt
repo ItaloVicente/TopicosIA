@@ -1,0 +1,102 @@
+======================================================================================================================
+DESCRIPTION:
+
+Add mem_used_primary, secondary to default stats
+
+Right now it is only included in the "memory" category of stats. This
+change adds it to the low cardinality stats as well.
+
+Change-Id: Ic3f12566dfedeb314728814d2fbd41523747032c
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Rohan Suri
+Date: 2021-09-09 20:24:03.000000000
+Message: 
+Uploaded patch set 3.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-09-09 20:44:56.000000000
+Message: 
+Patch Set 3: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/33766/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/39640/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/12186/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/10978/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/1828/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/13796/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/12943/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/1847/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/22022/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/14039/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/14520/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2021-09-10 09:22:20.000000000
+Message: 
+Patch Set 3: Code-Review-1
+
+(1 comment)
+Line:2957, engines/ep/src/ep_engine.cc -> Check with James, but prometheus likes to use labels to group related statistics (so they can be summed etc).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Rohan Suri
+Date: 2021-09-13 09:12:32.000000000
+MISMATCHED INLINE COMMENT
+Line:2957, engines/ep/src/ep_engine.cc -> I think right now stat mem_used belongs to its own family "mem_used" since it doesn't specify a family explicitly? Whereas primary, secondary stat belong to family "memory_used". So double counting shouldn't be an issue.
+
+However I think we'll still have to go with your suggestion of having a different metric family. Since family "memory_used" includes stats like: ep_storedval_size, ep_value_size, ep_kv_size, a blind aggregation of family "memory_used" would overcount since mem_used_primary already account s for them.
+----------------------------------------------------------------------------------------------------------------------
+Author: Rohan Suri
+Date: 2021-09-13 08:10:12.000000000
+MISMATCHED INLINE COMMENT
+Line:2957, engines/ep/src/ep_engine.cc -> Spoke to James. I've added these to existing family "memory_used" with two new labels: primary_domain, secondary_domain.
+----------------------------------------------------------------------------------------------------------------------
+Author: Rohan Suri
+Date: 2021-09-14 06:34:36.000000000
+MISMATCHED INLINE COMMENT
+Line:2957, engines/ep/src/ep_engine.cc -> @James I've refactored to use a new family. Have a look.
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2021-09-13 08:41:40.000000000
+MISMATCHED INLINE COMMENT
+Line:2957, engines/ep/src/ep_engine.cc -> Actually, if mem_used is expected to be the sum of mem_used{domain="primary"} and mem_used{domain="secondary"}, it might be better for them _not_ to be in the same family as mem_used
+
+This is primarily to make queries easier - if someone doesn't care about the domain they may choose to aggregate it away, but if it has the same name as mem_used this can lead to double accounting
+
+e.g.,
+
+`sum without (domain) (memory_used_bytes)`
+
+
+memory_used_bytes X+Y
+memory_used_bytes{domain="primary"} X
+memory_used_bytes{domain="secondary"} Y
+
+results in
+(X+Y) + X + Y
+
+which would be double the value the user expects. If mem_used is _exactly_ the sum of primary and secondary domains, Prometheus recommendations would be to remove the total, and allow users to "recreate" the total themselves if they don't care about domain. However, mem_used is probably a heavily used metric, meaning that would entail changes throughout ns_server, the UI, support tooling, possibly even QE tooling... which might be a bit much upheaval.
+
+Another option would be to move the domain values out to a different metric family, for example
+
+memory_used_bytes X+Y
+domain_memory_used_bytes{domain="primary"} X
+domain_memory_used_bytes{domain="secondary"} Y
+
+Though the trade-off here is it's less clear how (or even if) the domain metrics relate to memory_used_bytes, and there's duplicated information for users to navigate.
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,241 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-54729: Enable history scan for CDC backfill
+
+Replace the todo markers with code that now utilises the magma history
+API - this now means scanAllVersions for example is hooked into the
+magma history scanning API.
+
+Add new tests that validate multiple versions can be stored and
+returned.
+
+Also required are changes to unit tests to respect new expectation
+checks that occur in magma - primarily that flushing writes ordered
+batches - this is only a problem for tests which bypass the flusher
+and call KVStore directly.
+
+**** ISSUES ****
+
+ep-engine_ep_unit_tests does not pass:
+
+1) Exception from magma
+
+MagmaKVStoreRollbackTest.Rollback hits the following exception
+
+GSL: Precondition failure: 'levelSize >= compactionState[level].history.Size' at /Users/jimwalker/Code/couchbase/neo/magma/lsm/lsm_tree.cc:895
+
+2) Seg-fault in magma
+
+Seen in a number of tests, 1 example:
+
+CollectionsDcpEphemeralOrPersistent/CollectionsDcpParameterizedTest.DefaultCollectionDropped/persistent_magma_value_only
+
+Process 78731 stopped
+* thread #1, queue = 'com.apple.main-thread', stop reason = EXC_BAD_ACCESS (code=EXC_I386_GPFLT)
+    frame #0: 0x00000001012eb7b0 ep-engine_ep_unit_tests`magma::DocSequenceBuffer::GetKey(this=0x0000000118131700) at lsd.cc:75:36 [opt]
+   72   }
+   73
+   74   Slice DocSequenceBuffer::GetKey() {
+-> 75       seqFmt.Set(sortedList[offset]->seqno);
+   76       return seqFmt.Encode();
+   77   }
+   78
+
+* thread #1, queue = 'com.apple.main-thread', stop reason = EXC_BAD_ACCESS (code=EXC_I386_GPFLT)
+  * frame #0: 0x00000001012eb7b0 ep-engine_ep_unit_tests`magma::DocSequenceBuffer::GetKey(this=0x0000000118131700) at lsd.cc:75:36 [opt]
+    frame #1: 0x0000000101361e2e ep-engine_ep_unit_tests`magma::mvccIteratorAdaptor::GetKey(this=0x0000000118536c00) at mvcc.h:249:25 [opt]
+    frame #2: 0x000000010132b688 ep-engine_ep_unit_tests`magma::IteratorWithFilter::filterKeys(this=0x0000000118128350) at iterator.cc:214:32 [opt]
+    frame #3: 0x000000010132de5b ep-engine_ep_unit_tests`magma::KVReader::ReadKVs(this=0x00007ff7bfefd550) at common.cc:70:19 [opt]
+    frame #4: 0x0000000101378f63 ep-engine_ep_unit_tests`magma::LSMTree::writeSSTable(this=0x000000011855a820, w=0x00007ff7bfefd890, itr=0x0000000118128350, maxSn=10, stopFn=function<bool (const magma::Slice &)> @ 0x00007ff7bfefd860)>) at lsm_tree.cc:719:15 [opt]
+    frame #5: 0x0000000101376ee8 ep-engine_ep_unit_tests`magma::LSMTree::writeSSTable(this=0x000000011855a820, appendMode=<unavailable>, itr=0x0000000118128350, sizeEstimate=<unavailable>, maxSn=10, stopFn=function<bool (const magma::Slice &)> @ 0x00007ff7bfefdb60)>) at lsm_tree.cc:682:17 [opt]
+    frame #6: 0x00000001013761b2 ep-engine_ep_unit_tests`magma::LSMTree::writeMemtable(this=0x000000011855a820, memtable=0x000000011854c7a0) at lsm_tree.cc:449:21 [opt]
+    frame #7: 0x000000010137753f ep-engine_ep_unit_tests`magma::LSMTree::doMemtableFlushWork(this=0x000000011855a820) at lsm_tree.cc:531:18 [opt]
+    frame #8: 0x000000010139fe62 ep-engine_ep_unit_tests`std::__1::__function::__func<magma::LSMTree::newFlush()::$_16, std::__1::allocator<magma::LSMTree::newFlush()::$_16>, std::__1::tuple<magma::Status, magma::CheckpointTransaction> ()>::operator()() [inlined] magma::LSMTree::newFlush(this=<unavailable>)::$_16::operator()() const at lsm_tree.cc:993:34 [opt]
+    frame #9: 0x000000010139fe5d ep-engine_ep_unit_tests`std::__1::__function::__func<magma::LSMTree::newFlush()::$_16, std::__1::allocator<magma::LSMTree::newFlush()::$_16>, std::__1::tuple<magma::Status, magma::CheckpointTransaction> ()>::operator()() [inlined] decltype(__f=<unavailable>)::$_16&>(fp)()) std::__1::__invoke<magma::LSMTree::newFlush()::$_16&>(magma::LSMTree::newFlush()::$_16&) at type_traits:3918:1 [opt]
+    frame #10: 0x000000010139fe5d ep-engine_ep_unit_tests`std::__1::__function::__func<magma::LSMTree::newFlush()::$_16, std::__1::allocator<magma::LSMTree::newFlush()::$_16>, std::__1::tuple<magma::Status, magma::CheckpointTransaction> ()>::operator()() [inlined] std::__1::tuple<magma::Status, magma::CheckpointTransaction> std::__1::__invoke_void_return_wrapper<std::__1::tuple<magma::Status, magma::CheckpointTransaction>, false>::__call<magma::LSMTree::newFlush(__args=<unavailable>)::$_16&>(magma::LSMTree::newFlush()::$_16&) at invoke.h:30:16 [opt]
+    frame #11: 0x000000010139fe5d ep-engine_ep_unit_tests`std::__1::__function::__func<magma::LSMTree::newFlush()::$_16, std::__1::allocator<magma::LSMTree::newFlush()::$_16>, std::__1::tuple<magma::Status, magma::CheckpointTransaction> ()>::operator()() [inlined] std::__1::__function::__alloc_func<magma::LSMTree::newFlush()::$_16, std::__1::allocator<magma::LSMTree::newFlush()::$_16>, std::__1::tuple<magma::Status, magma::CheckpointTransaction> ()>::operator(this=<unavailable>)() at function.h:178:16 [opt]
+    frame #12: 0x000000010139fe59 ep-engine_ep_unit_tests`std::__1::__function::__func<magma::LSMTree::newFlush()::$_16, std::__1::allocator<magma::LSMTree::newFlush()::$_16>, std::__1::tuple<magma::Status, magma::CheckpointTransaction> ()>::operator(this=<unavailable>)() at function.h:352:12 [opt]
+    frame #13: 0x00000001012f72af ep-engine_ep_unit_tests`magma::FlushWork::Execute() [inlined] std::__1::__function::__value_func<std::__1::tuple<magma::Status, magma::CheckpointTransaction> ()>::operator(this=<unavailable>)() const at function.h:505:16 [opt]
+    frame #14: 0x00000001012f7296 ep-engine_ep_unit_tests`magma::FlushWork::Execute() [inlined] std::__1::function<std::__1::tuple<magma::Status, magma::CheckpointTransaction> ()>::operator(this=0x0000000118131560)() const at function.h:1182:12 [opt]
+    frame #15: 0x00000001012f7292 ep-engine_ep_unit_tests`magma::FlushWork::Execute(this=0x0000000118131560) at flush_work.cc:61:29 [opt]
+    frame #16: 0x0000000101389d5e ep-engine_ep_unit_tests`magma::KVStore::flushMemTables(this=0x00007ff7bfefe1c0)::$_38::operator()() at kvstore.cc:515:27 [opt]
+    frame #17: 0x0000000101388fac ep-engine_ep_unit_tests`magma::KVStore::flushMemTables(this=0x000000010442a420, wal=<unavailable>, offset=(SegID = 1, SegOffset = 4096), flushMode=<unavailable>, blockMode=Blocking) at kvstore.cc:582:16 [opt]
+    frame #18: 0x0000000101389a5a ep-engine_ep_unit_tests`magma::KVStore::FlushMemTables(this=<unavailable>, wal=<unavailable>, flushMode=<unavailable>, blockMode=<unavailable>) at kvstore.cc:387:12 [opt]
+    frame #19: 0x00000001012fd9ba ep-engine_ep_unit_tests`magma::Magma::Impl::syncKVStore(this=0x000000011814f000, kvID=<unavailable>, checkpoint=true) at db.cc:1352:21 [opt]
+    frame #20: 0x000000010132678a ep-engine_ep_unit_tests`std::__1::__function::__func<magma::Magma::Impl::CompactKVStore(unsigned short, magma::Slice const&, magma::Slice const&, std::__1::function<std::__1::unique_ptr<magma::Magma::CompactionCallback, std::__1::default_delete<magma::Magma::CompactionCallback> > (unsigned short)>)::$_8, std::__1::allocator<magma::Magma::Impl::CompactKVStore(unsigned short, magma::Slice const&, magma::Slice const&, std::__1::function<std::__1::unique_ptr<magma::Magma::CompactionCallback, std::__1::default_delete<magma::Magma::CompactionCallback> > (unsigned short)>)::$_8>, void ()>::operator()() [inlined] magma::Magma::Impl::CompactKVStore(this=0x00007ff7bfefe400)>)::$_7::operator()() const at db.cc:880:23 [opt]
+    frame #21: 0x0000000101326772 ep-engine_ep_unit_tests`std::__1::__function::__func<magma::Magma::Impl::CompactKVStore(unsigned short, magma::Slice const&, magma::Slice const&, std::__1::function<std::__1::unique_ptr<magma::Magma::CompactionCallback, std::__1::default_delete<magma::Magma::CompactionCallback> > (unsigned short)>)::$_8, std::__1::allocator<magma::Magma::Impl::CompactKVStore(unsigned short, magma::Slice const&, magma::Slice const&, std::__1::function<std::__1::unique_ptr<magma::Magma::CompactionCallback, std::__1::default_delete<magma::Magma::CompactionCallback> > (unsigned short)>)::$_8>, void ()>::operator()() [inlined] magma::Magma::Impl::CompactKVStore(this=<unavailable>)>)::$_8::operator()() const at db.cc:891:21 [opt]
+    frame #22: 0x0000000101326772 ep-engine_ep_unit_tests`std::__1::__function::__func<magma::Magma::Impl::CompactKVStore(unsigned short, magma::Slice const&, magma::Slice const&, std::__1::function<std::__1::unique_ptr<magma::Magma::CompactionCallback, std::__1::default_delete<magma::Magma::CompactionCallback> > (unsigned short)>)::$_8, std::__1::allocator<magma::Magma::Impl::CompactKVStore(unsigned short, magma::Slice const&, magma::Slice const&, std::__1::function<std::__1::unique_ptr<magma::Magma::CompactionCallback, std::__1::default_delete<magma::Magma::CompactionCallback> > (unsigned short)>)::$_8>, void ()>::operator()() [inlined] decltype(__f=<unavailable>)>)::$_8&>(fp)()) std::__1::__invoke<magma::Magma::Impl::CompactKVStore(unsigned short, magma::Slice const&, magma::Slice const&, std::__1::function<std::__1::unique_ptr<magma::Magma::CompactionCallback, std::__1::default_delete<magma::Magma::CompactionCallback> > (unsigned short)>)::$_8&>(magma::Magma::Impl::CompactKVStore(unsigned short, magma::Slice const&, magma::Slice const&, std::__1::function<std::__1::unique_ptr<magma::Magma::CompactionCallback, std::__1::default_delete<magma::Magma::CompactionCallback> > (unsigned short)>)::$_8&) at type_traits:3918:1 [opt]
+    frame #23: 0x0000000101326772 ep-engine_ep_unit_tests`std::__1::__function::__func<magma::Magma::Impl::CompactKVStore(unsigned short, magma::Slice const&, magma::Slice const&, std::__1::function<std::__1::unique_ptr<magma::Magma::CompactionCallback, std::__1::default_delete<magma::Magma::CompactionCallback> > (unsigned short)>)::$_8, std::__1::allocator<magma::Magma::Impl::CompactKVStore(unsigned short, magma::Slice const&, magma::Slice const&, std::__1::function<std::__1::unique_ptr<magma::Magma::CompactionCallback, std::__1::default_delete<magma::Magma::CompactionCallback> > (unsigned short)>)::$_8>, void ()>::operator()() [inlined] void std::__1::__invoke_void_return_wrapper<void, true>::__call<magma::Magma::Impl::CompactKVStore(__args=<unavailable>)>)::$_8&>(magma::Magma::Impl::CompactKVStore(unsigned short, magma::Slice const&, magma::Slice const&, std::__1::function<std::__1::unique_ptr<magma::Magma::CompactionCallback, std::__1::default_delete<magma::Magma::CompactionCallback> > (unsigned short)>)::$_8&) at invoke.h:61:9 [opt]
+    frame #24: 0x0000000101326772 ep-engine_ep_unit_tests`std::__1::__function::__func<magma::Magma::Impl::CompactKVStore(unsigned short, magma::Slice const&, magma::Slice const&, std::__1::function<std::__1::unique_ptr<magma::Magma::CompactionCallback, std::__1::default_delete<magma::Magma::CompactionCallback> > (unsigned short)>)::$_8, std::__1::allocator<magma::Magma::Impl::CompactKVStore(unsigned short, magma::Slice const&, magma::Slice const&, std::__1::function<std::__1::unique_ptr<magma::Magma::CompactionCallback, std::__1::default_delete<magma::Magma::CompactionCallback> > (unsigned short)>)::$_8>, void ()>::operator()() [inlined] std::__1::__function::__alloc_func<magma::Magma::Impl::CompactKVStore(unsigned short, magma::Slice const&, magma::Slice const&, std::__1::function<std::__1::unique_ptr<magma::Magma::CompactionCallback, std::__1::default_delete<magma::Magma::CompactionCallback> > (unsigned short)>)::$_8, std::__1::allocator<magma::Magma::Impl::CompactKVStore(unsigned short, magma::Slice const&, magma::Slice const&, std::__1::function<std::__1::unique_ptr<magma::Magma::CompactionCallback, std::__1::default_delete<magma::Magma::CompactionCallback> > (unsigned short)>)::$_8>, void ()>::operator(this=<unavailable>)() at function.h:178:16 [opt]
+    frame #25: 0x0000000101326764 ep-engine_ep_unit_tests`std::__1::__function::__func<magma::Magma::Impl::CompactKVStore(unsigned short, magma::Slice const&, magma::Slice const&, std::__1::function<std::__1::unique_ptr<magma::Magma::CompactionCallback, std::__1::default_delete<magma::Magma::CompactionCallback> > (unsigned short)>)::$_8, std::__1::allocator<magma::Magma::Impl::CompactKVStore(unsigned short, magma::Slice const&, magma::Slice const&, std::__1::function<std::__1::unique_ptr<magma::Magma::CompactionCallback, std::__1::default_delete<magma::Magma::CompactionCallback> > (unsigned short)>)::$_8>, void ()>::operator(this=<unavailable>)() at function.h:352:12 [opt]
+    frame #26: 0x0000000101303138 ep-engine_ep_unit_tests`magma::Magma::Impl::CompactKVStore(unsigned short, magma::Slice const&, magma::Slice const&, std::__1::function<std::__1::unique_ptr<magma::Magma::CompactionCallback, std::__1::default_delete<magma::Magma::CompactionCallback> > (unsigned short)>) [inlined] std::__1::__function::__value_func<void ()>::operator(this=<unavailable>)() const at function.h:505:16 [opt]
+    frame #27: 0x000000010130312d ep-engine_ep_unit_tests`magma::Magma::Impl::CompactKVStore(unsigned short, magma::Slice const&, magma::Slice const&, std::__1::function<std::__1::unique_ptr<magma::Magma::CompactionCallback, std::__1::default_delete<magma::Magma::CompactionCallback> > (unsigned short)>) [inlined] std::__1::function<void ()>::operator(this=0x00007ff7bfefe4b0)() const at function.h:1182:12 [opt]
+    frame #28: 0x0000000101303129 ep-engine_ep_unit_tests`magma::Magma::Impl::CompactKVStore(unsigned short, magma::Slice const&, magma::Slice const&, std::__1::function<std::__1::unique_ptr<magma::Magma::CompactionCallback, std::__1::default_delete<magma::Magma::CompactionCallback> > (unsigned short)>) [inlined] magma::defer::~defer(this=0x00007ff7bfefe4b0) at common.h:92:9 [opt]
+    frame #29: 0x0000000101303129 ep-engine_ep_unit_tests`magma::Magma::Impl::CompactKVStore(unsigned short, magma::Slice const&, magma::Slice const&, std::__1::function<std::__1::unique_ptr<magma::Magma::CompactionCallback, std::__1::default_delete<magma::Magma::CompactionCallback> > (unsigned short)>) [inlined] magma::defer::~defer(this=0x00007ff7bfefe4b0) at common.h:91:14 [opt]
+    frame #30: 0x0000000101303129 ep-engine_ep_unit_tests`magma::Magma::Impl::CompactKVStore(this=<unavailable>, kvID=<unavailable>, lowKey=0x00007ff7bfefe780, highKey=0x00007ff7bfefe780, makeCallback=magma::Magma::CompactionCallbackBuilder @ 0x00007ff7bfefe550)>) at db.cc:895:1 [opt]
+    frame #31: 0x000000010130336c ep-engine_ep_unit_tests`magma::Magma::CompactKVStore(this=<unavailable>, kvID=0, lowKey=0x00007ff7bfefe780, highKey=<unavailable>, makeCallback=<unavailable>)>) at db.cc:901:18 [opt]
+    frame #32: 0x000000010004fd3d ep-engine_ep_unit_tests`MagmaMemoryTrackingProxy::CompactKVStore(this=<unavailable>, kvID=0, lowKey=0x00007ff7bfefe780, highKey=0x00007ff7bfefe780, makeCallback=magma::Magma::CompactionCallbackBuilder @ 0x00007ff7bfefea00)>) at magma-memory-tracking-proxy.cc:190:19 [opt]
+    frame #33: 0x00000001000a9eeb ep-engine_ep_unit_tests`MagmaKVStore::compactDBInternal(this=<unavailable>, vbLock=0x00007ff7bfefeda0, ctx=std::__1::shared_ptr<CompactionContext>::element_type @ 0x00000001184acc20 strong=3 weak=1) at magma-kvstore.cc:2590:29 [opt]
+    frame #34: 0x00000001000a93ad ep-engine_ep_unit_tests`MagmaKVStore::compactDB(this=0x00000001067e6500, vbLock=0x00007ff7bfefeda0, ctx=nullptr) at magma-kvstore.cc:2445:12 [opt]
+    frame #35: 0x00000001001d7eb0 ep-engine_ep_unit_tests`EPBucket::compactInternal(this=0x00000001067e6000, vb=0x00007ff7bfefed90, config=<unavailable>) at ep_bucket.cc:1398:25 [opt]
+    frame #36: 0x00000001001d83f6 ep-engine_ep_unit_tests`EPBucket::doCompact(this=0x00000001067e6000, vbid=(vbid = 0), config=0x00007ff7bfefedf0, cookies=size=0) at ep_bucket.cc:1476:14 [opt]
+
+3) Key sorting issue
+
+Magma now checks for sorted keys - it turns out KV flushing is violating that ordering.
+Need to know if KV should fix or is the magma check required??
+
+Example:
+
+CollectionsDcpEphemeralOrPersistent/CollectionsLegacyDcpTest.default_collection_is_not_vbucket_highseqno_with_pending/persistent_nexus_couchstore_magma_value_only
+
+CRITICAL [(SynchronousEPEngine:default) magma_0]Fatal error: Found: preceding key(d2) > current key(    _collection). If history is enabled, all keys in the batch must be sorted lexicographicall
+
+The problem is that the test flushes a prepare(default collection, key=d2) and create-collection(fruit) together. The flusher orders these...
+
+\0d2
+\1create_fruit
+
+This is correct.
+
+But \0d2 is marked as a prepare, when flushed to disk it goes into a special namespace. This occurs in KVStore after the sorting.
+
+\0d2 becomes \2\0d2
+
+And magma actually sees
+
+\2\0d2
+\1create_fruit
+
+and we have violated the expects
+
+Change-Id: Ica9ea1b52c51f125c9e8839a0fca412834fc25f7
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jim Walker
+Date: 2023-01-20 14:33:47.000000000
+Message: 
+Uploaded patch set 10.
+----------------------------------------------------------------------------------------------------------------------
+Author: Restriction Checker
+Date: 2023-01-20 14:34:04.000000000
+Message: 
+Patch Set 10: Well-Formed+1
+
+Permission granted to commit: 
+
+https://server.jenkins.couchbase.com/job/restricted-branch-check/333521/artifact/restricted.html : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2023-01-20 14:53:17.000000000
+Message: 
+Patch Set 10: Verified-1 Code-Review-1
+
+Build Failed 
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-neo/893/ : FAILURE
+
+clang-tidy found the following problems:
+
+<pre>
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy-neo/kv_engine/engines/ep/src/kvstore/magma-kvstore/magma-kvstore.cc:1820:49: error: no member named "Mode" in "magma::Magma::SeqIterator" [clang-diagnostic-error]
+    return scan(ctx, magma::Magma::SeqIterator::Mode::Snapshot);
+                                                ^
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy-neo/kv_engine/engines/ep/src/kvstore/magma-kvstore/magma-kvstore.cc:1824:49: error: no member named "Mode" in "magma::Magma::SeqIterator" [clang-diagnostic-error]
+    return scan(ctx, magma::Magma::SeqIterator::Mode::History);
+                                                ^
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy-neo/kv_engine/engines/ep/src/kvstore/magma-kvstore/magma-kvstore.cc:1828:60: error: no type named "Mode" in "magma::Magma::SeqIterator" [clang-diagnostic-error]
+                                magma::Magma::SeqIterator::Mode mode) const {
+                                                           ^
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy-neo/kv_engine/engines/ep/src/kvstore/magma-kvstore/magma-kvstore.cc:2887:18: error: no member named "RangeNotFound" in "magma::Status" [clang-diagnostic-error]
+    case Status::RangeNotFound:
+                 ^
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy-neo/kv_engine/engines/ep/src/kvstore/magma-kvstore/magma-kvstore.h:774:50: error: no type named "Mode" in "magma::Magma::SeqIterator" [clang-diagnostic-error]
+                      magma::Magma::SeqIterator::Mode mode) const;
+                                                 ^
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy-neo/kv_engine/engines/ep/src/kvstore/magma-kvstore/magma-memory-tracking-proxy.cc:37:9: error: unknown type name "Mode" [clang-diagnostic-error]
+        Mode mode) {
+        ^
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy-neo/kv_engine/engines/ep/src/kvstore/magma-kvstore/magma-memory-tracking-proxy.cc:39:17: error: no member named "Initialize" in "magma::Magma::SeqIterator" [clang-diagnostic-error]
+    return itr->Initialize(startSeqno, endSeqno, mode);
+                ^
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy-neo/kv_engine/engines/ep/src/kvstore/magma-kvstore/magma-memory-tracking-proxy.cc:460:12: error: no member named "SetHistoryRetentionSize" in "magma::Magma" [clang-diagnostic-error]
+    magma->SetHistoryRetentionSize(historyBytes);
+           ^
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy-neo/kv_engine/engines/ep/src/kvstore/magma-kvstore/magma-memory-tracking-proxy.cc:466:12: error: no member named "SetHistoryRetentionTime" in "magma::Magma" [clang-diagnostic-error]
+    magma->SetHistoryRetentionTime(historySeconds);
+           ^
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy-neo/kv_engine/engines/ep/src/kvstore/magma-kvstore/magma-memory-tracking-proxy.cc:539:19: error: no member named "GetOldestHistorySeqno" in "magma::Magma" [clang-diagnostic-error]
+    return magma->GetOldestHistorySeqno(kvid);
+                  ^
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy-neo/kv_engine/engines/ep/src/kvstore/magma-kvstore/magma-memory-tracking-proxy.cc:545:19: error: no member named "GetOldestHistorySeqno" in "magma::Magma" [clang-diagnostic-error]
+    return magma->GetOldestHistorySeqno(snapshot);
+                  ^
+/home/couchbase/jenkins/workspace/kv_engine-clang_tidy-neo/kv_engine/engines/ep/src/kvstore/magma-kvstore/magma-memory-tracking-proxy.h:53:30: error: unknown type name "Mode" [clang-diagnostic-error]
+                             Mode mode) override;
+                             ^
+
+</pre> ( https://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-neo/893/ )
+
+Compile error at /home/couchbase/jenkins/workspace/kv_engine-clang_tidy-neo/kv_engine/engines/ep/src/kvstore/magma-kvstore/magma-kvstore.cc:1820:49:
+error: no member named "Mode" in "magma::Magma::SeqIterator" [clang-diagnostic-error]
+ ( https://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-neo/893/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine-windows-neo/1076/ : FAILURE
+
+Compile error at C:\Jenkins\workspace\kv_engine-windows-neo\kv_engine\engines\ep\src\kvstore/magma-kvstore/magma-kvstore.h(774): error C2039: "Mode": is not a member of "magma::Magma::SeqIterator" ( https://cv.jenkins.couchbase.com/job/kv_engine-windows-neo/1076/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-neo/864/ : FAILURE
+
+Compile error at /home/couchbase/jenkins/workspace/kv_engine-clang_analyzer-neo/kv_engine/engines/ep/src/kvstore/magma-kvstore/magma-kvstore.h:774:50:
+error: no type named "Mode" in "magma::Magma::SeqIterator"
+ ( https://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-neo/864/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine.macos/job/neo/1188/ : FAILURE
+
+Compile error at [2023-01-20T14:38:55.752Z] /Users/couchbase/workspace/workspace/kv_engine.macos_neo/kv_engine/engines/ep/src/kvstore/magma-kvstore/magma-kvstore.h:774:50:
+error: no type named "Mode" in "magma::Magma::SeqIterator"
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.macos/job/neo/1188/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/neo/906/ : FAILURE
+
+Compile error at [2023-01-20T14:39:25.894Z] ../kv_engine/engines/ep/src/kvstore/magma-kvstore/magma-kvstore.h:774:50:
+error: no type named "Mode" in "magma::Magma::SeqIterator"
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/neo/906/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/neo/885/ : FAILURE
+
+Compile error at [2023-01-20T14:44:14.352Z] ../kv_engine/engines/ep/src/kvstore/magma-kvstore/magma-kvstore.h:774:50:
+error: no type named "Mode" in "magma::Magma::SeqIterator"
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/neo/885/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux/job/neo/904/ : FAILURE
+
+Compile error at [2023-01-20T14:38:41.136Z] ../kv_engine/engines/ep/src/kvstore/magma-kvstore/magma-kvstore.h:774:23:
+error: ?magma::Magma::SeqIterator::Mode? has not been declared
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.linux/job/neo/904/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/neo/913/ : FAILURE
+
+Compile error at [2023-01-20T14:36:22.354Z] ../kv_engine/engines/ep/src/kvstore/magma-kvstore/magma-kvstore.h:774:50:
+error: no type named "Mode" in "magma::Magma::SeqIterator"
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/neo/913/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/neo/902/ : FAILURE
+
+Compile error at [2023-01-20T14:39:35.650Z] ../kv_engine/engines/ep/src/kvstore/magma-kvstore/magma-kvstore.h:774:23:
+error: ?magma::Magma::SeqIterator::Mode? has not been declared
+ ( https://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/neo/902/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/22319/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/neo/914/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2023-02-01 10:56:36.000000000
+Message: 
+Abandoned
+----------------------------------------------------------------------------------------------------------------------

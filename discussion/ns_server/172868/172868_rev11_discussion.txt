@@ -1,0 +1,151 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-44611: Minimize cbcollect disk usage and refactor core
+
+Modified the task system to minimize the amount of disk and memory
+being used. There are a few approaches used to accomplish this..
+
+The main goal was: Attempt to write files directly from their source,
+to their output inside the zip file, without copying to a temporary
+directory. This has some challenges and limitations such as:
+
+ 1.) You can only open one file at a time inside the zip for writing.
+ 2.) You cannot reopen or append to a file already written to the zip
+ file.
+ 3.) The current set of tasks are all ran to output in different
+ files, sometimes coming back to files written to before.
+
+To solve this we have changed the runtime model for the task system to
+collect up all tasks at the beginning, categorize them by file output,
+and then run them in those chunks. This way we only open a file one
+time, but can run many tasks that write to it without ever coming back
+to that file later.
+
+Additionally, I attempted to add types to the relevant core functions,
+implemented the correct interfaces to treat the ZipStream,
+RedactStream and DoubleStream as writeable streams and changed the
+platforms to use an enum to represent them instead of just a string.
+
+The main flow is this:
+
+ 1.) Create a bunch of tasks, append them all to a list.
+ 2.) Create a TaskRunner with the relevant arguments, specifically
+ ones that mention the name of the zipfile, and the correct redaction
+ information.
+ 3.) Begin running the tasks:
+   a.) Categorize list of tasks into a dictionary that places all tasks
+   that use a specific output/log file into the same list. This
+   actually creates a mapping between the filename -> MetaTask, where
+   a MetaTask is a new construct to contain other tasks that all write
+   to the same file.
+   b.) Depending on whether or not redaction is turned on, construct
+   one or two ZipStream objects that manage the underlying zipfile for
+   the main output, and potentially the redacted zipfile.
+   c.) If redaction is enabled, construct a DoubleStream that combines
+   the RedactStream and the ZipStream into a single stream that can be
+   written into.
+   d.) Begin running through the MetaTasks. The MetaTask.execute starts
+   running through the subtasks of the MetaTask, passing each one the
+   same output pointer (same file).
+   e.) If artifacts are created while running a task, append it to the
+   artifacts list inside the metatask.
+   f.) Run the CollectFileTask's for each artifact, if any exist on
+   the MetaTask we just ran.
+ 4.) Finish running the task and start on a new one.
+
+The 'artifacts' are the only files written to the temporary directory
+after this patch is applied. This is the best possible scenario, since
+all other file types can be directly written to the zip(s) in one way
+or another.
+
+The next largest change is attempting to use type hints as much as
+possible. They can be checked by installing 'mypy' and doing:
+
+ $ mypy cbcollect_info
+
+The types also work as good documentation for consumers of the
+library.
+
+Finally, the next major task was to upgrade all the implicit instance
+members of a class to be explicitly defined in the class body, and
+properly mentioned in the __init__ function. This is instead of just
+smuggling them in with the **kwargs and directly applying them to the
+class dictionary.
+
+This should ensure that the Task API is better defined and the options
+are known explicitly.
+
+Change-Id: Ica83599ab330863e82b93756c0d153fdf1fd9715
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Bryan McCoid
+Date: 2022-04-15 18:50:42.000000000
+Message: 
+Uploaded patch set 11.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-04-15 18:51:31.000000000
+Message: 
+Patch Set 11:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-test/30143/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-04-15 18:56:26.000000000
+Message: 
+Patch Set 11: Well-Formed+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/ns-server-test/30143/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-04-15 21:00:01.000000000
+Message: 
+Patch Set 11: Verified+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2022-04-16 01:22:01.000000000
+Message: 
+Patch Set 11:
+
+(2 comments)
+Line:1027, cbcollect_info -> So if at list one task has unsatisfied precondition we don't execute any tasks in the meta task.
+I thought it should be the other way around: if there is at least one task with precondition == true, we execute the whole meta task.
+Could you please clarify?
+
+Part about DEFAULT_LOG is not clear as well. If there are no tasks for DEFAULT_LOG why do we need it?
+
+Line:1106, cbcollect_info -> Please correct if I'm wrong. The fact that precondition is satisfied doesn't mean that the file has been collected.
+Seems like the log "Collected file" might still be present even in the case when the file collection fails.
+
+Not sure why we need this "Collected file" record in the couchbase.log, but if we don't really have a strong reason for having it I would rather write it to cbcollect_info.log (which I think we already do for every task automatically). There will be a record for it in cbcollect_info.log right?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2022-04-16 01:53:53.000000000
+Message: 
+Patch Set 11:
+
+(1 comment)
+Line:686, cbcollect_info -> Any reasons why it should not be moved to precondition check?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-04-16 02:04:27.000000000
+MISMATCHED INLINE COMMENT
+Line:686, cbcollect_info -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-04-16 02:04:27.000000000
+MISMATCHED INLINE COMMENT
+Line:1027, cbcollect_info -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-04-16 02:04:27.000000000
+MISMATCHED INLINE COMMENT
+Line:1106, cbcollect_info -> Done
+----------------------------------------------------------------------------------------------------------------------

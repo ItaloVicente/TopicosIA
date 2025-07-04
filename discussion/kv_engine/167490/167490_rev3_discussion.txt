@@ -1,0 +1,93 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-49858: Compaction throttle: account for #writer threads
+
+When scheduling a compaction, if too many compaction tasks are already
+running we snooze the new task instead of running it immediately. This
+is done by comparing the number of compaction tasks to the shard
+count, and only allowing up to half of the shard count compaction
+tasks to run concurrently.
+
+The intent here is that the shard count represents the maximum number
+of concurrent Writer tasks (flushing or compaction); hence we want to
+'reserve' half of the available slots for non-compaction tasks.
+
+However the current logic is flawed as the number of runnable
+Compaction / Flusher tasks also depends on how many Writer threads
+exist - if there are 16 shards but only 4 writer threads, then only 4
+Writer tasks can run at once - and by the current logic one could
+consume all available Writer threads if 4 vBuckets were requested to
+be compacted at once.
+
+Before v6.5.0 this was less of an issue, as the default number of
+shards was 4 and the default number of Writer threads was also
+4. Changing either required either a restart (num_shards) or a
+diag/eval (num writer threads).
+
+However from 6.5.0 onwards the defaults have changed:
+
+- Default shard count is #logical_CPU_cores (typically much higher
+  than 4).
+
+- Default writer thread count is still 4 (however it can easily be
+  changed from the UI without restarting)
+
+As such, out-of-the-box on a typical system (16+ cores); the number of
+shards will be 4 and num_writers will be 16. The existing throttle
+calculation would not kick in into the 9th compaction task; well in
+excess of the maximum concurrent tasks which can be run, and flushing
+throughput can be impacted significantly.
+
+Address this by including the writer thread count in the calculation,
+so we base the cap on how many tasks can _actually_ run for the given
+Bucket.
+
+Change-Id: I3306588049f086172d0d3938c41fc87f6d84a507
+Reviewed-on: https://review.couchbase.org/c/kv_engine/+/167490
+Tested-by: Build Bot <build@couchbase.com>
+Reviewed-by: Trond Norbye <trond.norbye@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2021-12-15 13:14:43.000000000
+Message: 
+Change has been successfully cherry-picked as f1e7f3a7e3be993c8992ab45715d243af5f3f28c by Dave Rigby
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-12-15 13:46:12.000000000
+Message: 
+Patch Set 3:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-master/9789/ (1/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-12-15 13:47:21.000000000
+Message: 
+Patch Set 3:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-TSan-master/6449/ (2/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-12-15 14:45:55.000000000
+Message: 
+Patch Set 3:
+
+Build Unstable 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-master/9789/ : UNSTABLE
+
+Failure of a testrunner test ( http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-master/9789/ )
+
+ERROR: do_warmup_100k (memcapable.WarmUpMemcachedTest)
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-master/9789/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-TSan-master/6449/ : UNSTABLE
+
+Failure of a testrunner test ( http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-TSan-master/6449/ )
+
+ERROR: do_warmup_100k (memcapable.WarmUpMemcachedTest)
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-TSan-master/6449/ )'
+----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,75 @@
+======================================================================================================================
+DESCRIPTION:
+
+BgFetcher: Remove periodic 2s wakeup
+
+The BgFetcher task currently snoozes for 2s once it has completed any
+work; periodically waking up 2s irrespective of if there are any
+pending background fetches.
+
+I believe (but not 100% sure) this was doen to add a 'safety net' to
+try to avoid the lost wakeup problem[1]; however this results in
+waking up the task when there's no work to be done; wasting resource
+and making it difficult to accurately follow execution flow. Note this
+problem exists for other tasks in addition to the BGFetcher.
+
+This patch changes the behaviour to instead sleep forever if there's
+no work to be done; relying on notifyBGEvent() being called to wake up
+the background fetched.
+
+We use the same approach as ActiveStreamCheckpointProcessorTask -
+namely an atomic flag which is used in conjunction with snooze() /
+wakeUp() to ensure we cannot loose any wakeups - the problem we are
+trying to avoid is the following in BGFetcher::run():
+
+    Setup to snooze forever, and *then* clear the pending flag.
+    The ordering of these two statements is important - if we were
+    to clear the flag *before* snoozing, then we could have a Lost
+    Wakeup (and sleep forever) - consider the following scenario:
+
+        Time   Reader Thread                   Frontend Thread
+               (notifyBGEvent)                 (BgFetcher::run)
+
+        1                                      pendingFetch = false
+        2      if (pendingFetch == false)
+        3          wake(task)
+        4                                      snooze(INT_MAX)  /* BAD */
+
+    By clearing pendingFlag after the snooze() we ensure the wake()
+    must happen after snooze().
+
+Additionally, this also changes the construction of BgFetcher to
+initially snooze the task - previously it would run once immediatley
+at startup and then sleep (for 2s).
+
+[1]: https://docs.oracle.com/cd/E19120-01/open.solaris/816-5137/sync-30/index.html
+
+Change-Id: I8382ee30708637cc712335dd9fea2656f41d2095
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2017-09-01 15:55:29.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2017-09-01 16:24:13.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master/2323/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/2396/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/2405/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/2174/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/927/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/2441/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

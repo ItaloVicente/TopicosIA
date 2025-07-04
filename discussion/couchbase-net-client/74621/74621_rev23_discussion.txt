@@ -1,0 +1,148 @@
+======================================================================================================================
+DESCRIPTION:
+
+NCBC-1366: Fast-failover support
+
+Motivation
+----------
+The upcoming Couchbase Server 5.0 offers a new feature called 'Fast
+Failover' which allows failover to be configurable as low as 5s on the
+server. This patch includes client-side support for FF by adding logic to
+ensure that a config check only happens every 10ms to reduce spamming.
+
+**NOTE: a future patch will be released as a .minor which will reduce the
+HeartbeatConfigInterval from 10ms to 2.5ms to support the lower range of
+support for FF on the server.
+
+Modifications
+-------------
+ - Add ConfigMonitor class that encapsulates the logic for checking for
+   configs at set intervals using CCCP only.
+ - Add a centralized method on ClusterController called CheckConfigUpdate
+   that can be called in the IO layer when certain classes of errors are
+   encountered (Socket errors, etc).
+ - Add a field called LastConfigCheckedTime which is used to ensure that
+   there is a floor between checks so that the server is not spammed.
+ - Add Endpoint to SyncState and bubble up so that the failed node can be
+   omitted from the config check
+
+Result
+------
+The SDK will check for a config update every 10s or when an IO
+related error is detected. To reduce load on the server, the config check
+will be limited to a single thread and will honor a floor of 10ms between
+checks.
+
+Change-Id: I7bc2ffa75bccf172f80d61b44130a82b1e8edc6f
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jeffry Morris
+Date: 2017-04-26 17:06:13.000000000
+Message: 
+Uploaded patch set 23: Patch Set 22 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2017-04-26 17:06:21.000000000
+Message: 
+Patch Set 23:
+
+Build Started http://sdkbuilds.sc.couchbase.com/job/cv-netclient/626/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2017-04-26 17:34:06.000000000
+Message: 
+Patch Set 23: Verified+1
+
+Build Successful 
+
+http://sdkbuilds.sc.couchbase.com/job/cv-netclient/626/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Jeffry Morris
+Date: 2017-04-26 22:06:09.000000000
+Message: 
+Removed Code-Review-2 by Jeffry Morris <jeffrymorris@gmail.com>
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Mike Goldsmith
+Date: 2017-04-28 12:14:06.000000000
+Message: 
+Patch Set 23: Code-Review-2
+
+(14 comments)
+
+Hey Jeff - I've done a review and have some suggestions / questions below.
+Line:17, /COMMIT_MSG -> It think these should these be s (seconds) not ms (milliseconds).
+
+Line:10, Src/Couchbase.IntegrationTests/MemcachedBucketTests.cs -> Are these namespace changes needed?
+
+Line:17, Src/Couchbase.UnitTests/Configuration/Server/Monitoring/ConfigMonitorTests.cs -> What is this testing? There are no assertions
+
+Line:62, Src/Couchbase/Configuration/Server/Monitoring/ConfigMonitor.cs -> Could use OfType<CarrierPublicationProvider> to skip the cast / null check below
+
+Line:78, Src/Couchbase/Configuration/Server/Monitoring/ConfigMonitor.cs -> What does doing a modulus over servers do here?
+
+Line:94, Src/Couchbase/Configuration/Server/Monitoring/ConfigMonitor.cs -> Should be break after successfully retrieving a config to prevent further requests to get configs?
+
+Line:98, Src/Couchbase/Configuration/Server/Monitoring/ConfigMonitor.cs -> Do we need to set ClusterController.LastConfigCheckedTime after a successfully getting a config? Maybe we could use a finally statement and remove from the catch statements?
+
+Line:170, Src/Couchbase/Configuration/Server/Providers/CarrierPublication/CarrierPublicationProvider.cs -> Why make this override-able? Marking as override effectively makes the method virtual which has a small perf effect.
+
+Line:28, Src/Couchbase/Core/Buckets/CallbackFactory.cs -> Would be good to have unit tests to make sure config checks are made after a TransportFailure error
+
+Line:362, Src/Couchbase/Core/ClusterController.cs -> You shouldn't need this with the ToList() in the servers assignment.
+
+Line:366, Src/Couchbase/Core/ClusterController.cs -> Would the util Shuffle work better to get a random server from the list?
+
+Line:154, Src/Couchbase/CouchbaseBucket.cs -> Is this an an unrelated change to FF?
+
+Line:94, Src/Couchbase/IO/Operations/IOperation.cs -> Is this related to FF?
+
+Line:551, Src/Couchbase/IO/Operations/OperationBase.cs -> Is this related to FF?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jeffry Morris
+Date: 2017-04-29 00:48:04.000000000
+Message: 
+Patch Set 23:
+
+(11 comments)
+Line:17, Src/Couchbase.UnitTests/Configuration/Server/Monitoring/ConfigMonitorTests.cs -> Sigh...
+
+Line:62, Src/Couchbase/Configuration/Server/Monitoring/ConfigMonitor.cs -> done. Thanks, I somehow missed that method...pretty cool.
+
+Line:78, Src/Couchbase/Configuration/Server/Monitoring/ConfigMonitor.cs -> Sets the index back to zero instead of overflowing:
+Using index 1: 101.111.101.102
+Using index 2: 101.111.101.103
+Using index 3: 101.111.101.104
+Using index 0: 101.111.101.101
+Using index 1: 101.111.101.102
+Using index 2: 101.111.101.103
+Using index 3: 101.111.101.104
+Using index 0: 101.111.101.101
+Using index 1: 101.111.101.102
+Using index 2: 101.111.101.103
+
+Line:94, Src/Couchbase/Configuration/Server/Monitoring/ConfigMonitor.cs -> Done
+
+Line:98, Src/Couchbase/Configuration/Server/Monitoring/ConfigMonitor.cs -> Done
+
+Line:170, Src/Couchbase/Configuration/Server/Providers/CarrierPublication/CarrierPublicationProvider.cs -> I needed to depend on an interface, so ConfigProviderBase got an abstract method. The vtable lookup is negligible i am sure.
+
+Line:28, Src/Couchbase/Core/Buckets/CallbackFactory.cs -> Indeed, i omitted do to the perceived complexity of setting up that test.
+
+Line:362, Src/Couchbase/Core/ClusterController.cs -> Isn't servers.Any() cleaner than if(servers.Count >0)?
+
+Line:154, Src/Couchbase/CouchbaseBucket.cs -> Yes, its used to map the op back to its bucket when ClusterController.CheckConfigUpdate is called.
+
+Line:94, Src/Couchbase/IO/Operations/IOperation.cs -> Yes, its used to map the op back to its bucket when ClusterController.CheckConfigUpdate is called.
+
+Line:551, Src/Couchbase/IO/Operations/OperationBase.cs -> Yes, its used to map the op back to its bucket when ClusterController.CheckConfigUpdate is called.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Mike Goldsmith
+Date: 2017-04-29 11:36:24.000000000
+MISMATCHED INLINE COMMENT
+Line:362, Src/Couchbase/Core/ClusterController.cs -> Yeah, .Any() is cleaner for sure.
+----------------------------------------------------------------------------------------------------------------------

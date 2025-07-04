@@ -1,0 +1,69 @@
+======================================================================================================================
+DESCRIPTION:
+
+chronicle integrated into cluster
+
+1. automatically provisioned on the first node of cluster
+2. correctly handles join and leave
+3. forwards chronicle events to ns_config_events
+
+caveat: config gets completely erased when node is renamed
+
+Change-Id: I7a1e08fb408b585c7086959e212eadd57b77ca3c
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Artem Stemkovski
+Date: 2020-08-20 21:13:33.000000000
+Message: 
+Uploaded patch set 13: Patch Set 12 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-08-20 21:13:53.000000000
+Message: 
+Patch Set 13: -Well-Formed
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-test/18515/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-08-20 21:14:38.000000000
+Message: 
+Patch Set 13: Well-Formed-1
+
+Permission denied to commit to restricted branch: 
+
+http://cv.jenkins.couchbase.com/job/ns-server-test/18515/ : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Artamonau
+Date: 2020-09-01 21:11:20.000000000
+Message: 
+Patch Set 13:
+
+(4 comments)
+Line:510, src/ns_cluster.erl -> It's possible that the node being removed will wipe itself before being removed as voter. But then it may effectively get unwiped since it's still a voter and may get sent data. So the node must first be successfully removed from the chronicle topology.
+
+Line:539, src/ns_cluster.erl -> Need to handle situations where the first the node gets removed from nodes wanted but for whatever reason chronicle:remove_voter() fails.
+
+Line:638, src/ns_cluster.erl -> I think this should live in dist_manager because it at least attempts to complete the rename in case of failures (though there's a number of issues with the code in other modules being exposed to a half-renamed node). If we leave the call here, we might end up with a half-renamed node forever.
+
+Line:1328, src/ns_cluster.erl -> I think a more appropriate place for this is node_add_transaction() function on the cluster end. The latter attempts to rollback the transaction if something goes wrong. Changing topology in the joinee end invalidates this logic: the joinee node may add itself to the topology after node_add_transaction already went through rollback.
+
+More generally, node add protocol needs to be rethought. We've seen nodes end up in half-added states. But at least dealing with the topology on the node that performs the addition seems to lower the number of ways in which things can go wrong.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Aliaksey Artamonau
+Date: 2020-09-03 00:26:04.000000000
+Message: 
+Patch Set 13:
+
+(1 comment)
+Line:95, src/chronicle_manager.erl -> I see at least a couple of problems here:
+
+1. The process that is created by subscribe_link() may take time to react to its parent's termination. So it's possible to end up with two gen_event handlers at the same time sending duplicated events to ns_config_events.
+
+2. More importantly, subscribers may miss events if either this process or something inside chronicle crashes and restarts. Inside chronicle, I make sure to restart the gen_event associated with a particular instance of chronicle_kv if the latter crashes. So subscribers will know. But a subscriber to ns_config_events will not be able to detect these situations.
+
+I don't think we should mix events from ns_config and chronicle together. IMO it's better to subscribe to ns_config_events in mixed clusters and then make an explicit transition to chronicle events once compat version changes. Of course I might be missing something important.
+
+----------------------------------------------------------------------------------------------------------------------

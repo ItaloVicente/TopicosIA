@@ -1,0 +1,202 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-31002: Add protocol spec for auth through external process
+
+Memcached may be configured to use an external process as an RBAC provider.
+The provider needs to register itself by sending `RbacProvider` on a
+connection authenticated as `@ns_server` with `Duplex` enabled. Once
+successfully registered memcached will start using the connection. It is not
+defined how memcached will utilize multiple registered connections (that's an
+internal implementation detail within memcached). It may use one, it may
+round robin etc. It is recommended that multiple connections is registered
+to be prepared for failure situations.
+
+The authentication protocol between memcached and external RBAC providers
+proxies the SASL protocol between the external client and memcached.
+
+Change-Id: I675a69d4e1bac875061ba1a7e433c3cd2d221e5a
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Trond Norbye
+Date: 2018-08-31 07:38:39.000000000
+Message: 
+Uploaded patch set 18.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-08-31 08:23:21.000000000
+Message: 
+Patch Set 18: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/3314/ : FAILURE
+
+Failure of a CTest test  24/157 Test  #22: ep-engine_ep_unit_tests ...................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/3314/ )
+
+Failure of a GoogleTest  ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/3314/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/11432/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/10220/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/1154/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/11659/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/10453/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-08-31 08:46:20.000000000
+Message: 
+Patch Set 18: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/11432/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/10220/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/1154/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/11659/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/10453/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/3316/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2018-08-31 18:45:16.000000000
+Message: 
+Patch Set 18:
+
+(4 comments)
+Line:10, /COMMIT_MSG -> You renamed it to 'AuthProvider', right? Could you please change the commit message as well
+
+Line:99, docs/ExternalAuthProvider.md -> It would be much easier to read in the following format:
+
+    Field        (offset) (value)
+    Magic        (0)    : 0x82 (ServerRequest)
+    Opcode       (1)    : 0x02 (AuthRequest)
+    Key length   (2,3)  : 0x0000
+    Extra length (4)    : 0x00
+    Data type    (5)    : 0x01
+    Vbucket      (6,7)  : 0x0000
+    Total body   (8-11) : 0x0000003c
+    Opaque       (12-15): 0x00000000
+    CAS          (16-23): 0x0000000000000000
+
+    Data: {"challenge": "AGV4dGVybmFsAHBhc3N3b3Jk", "mechanism": "PLAIN"}
+
+Line:211, docs/ExternalAuthProvider.md -> 1) Looks like you are using username "external" which is confusing for documentation;
+
+2) I think there is no point in sending back username twice. I mean instead of sending:
+
+{
+    "username": "external",
+    "domain": "local",
+    "rbac": {
+        "external": {
+            "buckets": {
+                "default": [
+                    "Read",
+                    "SimpleStats",
+                    "Insert",
+                    "Delete",
+                    "Upsert"
+                ]
+            },
+            "privileges": []
+        }
+    }
+}
+
+we can send
+
+{
+    "username": "external",
+    "domain": "local",
+    "rbac": {
+        "buckets": {
+            "default": [
+                "Read",
+                "SimpleStats",
+                "Insert",
+                "Delete",
+                "Upsert"
+            ]
+        },
+        "privileges": []
+    }
+}
+
+Line:259, docs/ExternalAuthProvider.md -> Ns_server will never send this. Ns_server returns rbac record (it might be empty). Real authorization is done on memcached and memcached makes the decision if user has access to the system or not.
+
+I would use AuthError if authentication fails by any reason. But if you really need to distinguish between "wrong password" and "wrong username" (not sure that it's ok from security perspective) we can use KeyEnoent for "wrong user" and AuthError for "wrong password". What do you think?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2018-09-01 05:29:04.000000000
+Message: 
+Patch Set 18:
+
+(4 comments)
+Line:10, /COMMIT_MSG -> Done
+
+Line:99, docs/ExternalAuthProvider.md -> Probably.. it's generated by a common tool for dumping packets ;) I'll add it at the bottom
+
+Line:211, docs/ExternalAuthProvider.md -> 1. I'll use another username (I generated these from the unit tests I had in my prototype ;-))
+
+As of 2, that would change the format of the JSON from the format it is in the memcached.rbac file (the current parser checks the key to figure out if the username starts with an @ and if it does it treats the user as a system-internal user.
+
+We could in theory drop domain and username as the domain will _always_ be external (as I don't ask ns_server for local users. they'll be found in the provided files), and username would be part of the rbac object.
+
+Line:259, docs/ExternalAuthProvider.md -> Memcached generates different audit trails for the 3 different failure scenarios. If ns_server generates the various audit events I could get AuthError for all 3 of them.
+
+How will I know the difference for a user with the right username/password combination in LDAP but doesn't contain any of the ldap groups we've defined, and a user with a username/password combination which have one, but the profile doesn't allow for any KV access (which would result in an empty set).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2018-09-05 04:18:52.000000000
+Message: 
+Patch Set 18:
+
+(1 comment)
+Line:259, docs/ExternalAuthProvider.md -> why? It seems just weird to me (and how can I differenciate that from a user which is defined but without any KV access?)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2018-09-05 07:08:20.000000000
+Message: 
+Patch Set 18:
+
+(1 comment)
+Line:259, docs/ExternalAuthProvider.md -> I think we are mixing here authentication and authorization.
+
+-----------------------------------------------------------
+Authentication:
+The goal is to verify the user's identity. For authentication there are two possible outcomes:
+1) Successfully authenticated
+2) Invalid username or password
+
+We can hypothetically split #2 into (a) wrong username and (b) wrong password. But I think it's not secure because usernames may leak in this case (you don't need to know the password to check if user exists or not).
+
+'AuthRequest' command performs authentication so the outcome "user doesn't have access to the system" is not possible.
+
+-----------------------------------------------------------
+Authorization:
+The goal of authorization is to figure out if particular user has access to a specific feature or not. By this time we should already know user's identity. In our case authorization is done by memcached (not ns_server). To perform the authorization memcached retrieves rbac record for the user from ns_server (we don't want to have separate command for this so we just send rbac record in response for 'AuthRequest'). Rbac record contains all the permissions the user has. Memcached checks the list of user's permissions: if required permission is on the list the user is authorized.
+On this step memcached may get "user doesn't have access to the system" error but ns_server has nothing to do with it.
+
+Returning back to your example: If user is defined and sends us the right password authentication must succeed. But it doesn't mean that authorization will necessarily succeed. It may succeed for one operation and fail for another one.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2018-09-05 00:06:25.000000000
+MISMATCHED INLINE COMMENT
+Line:259, docs/ExternalAuthProvider.md -> Sorry, I missed this comment. We need to continue discussion on this.
+
+AuthRequest - authentication request. In the case you described authentication is successful (since the password is right). So the response status should be 'Success' but response will contain empty list of permissions (rbac record). After receiving that authentication response memcached will perform authorization and it will find that the user doesn't have needed permission and generate the audit event.
+----------------------------------------------------------------------------------------------------------------------

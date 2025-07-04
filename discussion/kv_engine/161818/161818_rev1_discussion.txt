@@ -1,0 +1,80 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-48506: Don't rely on allocator for estimating mem-release at expel
+
+At expel we need to compute an estimate of the memory released.
+There are many ways of doing that, but in our case all is conditioned
+by the fact that we need to use a O(1) call to CheckpointQueue::splice
+for extracting items from CheckpointQueue::toWrite.
+This is how it currently works:
+
+1. We acquire the CM::queueLock and we instantiate a
+   CheckpointQueue(toWrite.get_allocator()) 'expelledItems' container.
+   Ie, we store expelled items in a container that uses the same
+   allocator as Checkpoint::toWrite
+2. The toWrite->expelledItems splice opearation performed in
+   Checkpoint::expelItems() doesn't perform any actual
+   deallocation/allocation on toWrite/expelledItems
+3. The caller of Checkpoint::expelItems() gets 'expelledItems' and
+   copies it into a CheckpointQueue() 'dest'. Note that this
+   destination container uses its own allocator, which computes the
+   actual memory usage of the original 'expelledItems'. That is what
+   allows us to make a dest.get_allocator().gteBytesAllocated() call
+   for computing the exact mem-overedead released by expel.
+4. Also, in step (3) the original 'expelledItems' container goes
+   out-of-scope and deallocations are accounted in the 'toWrite'
+   allocator. That is how we correctly update the 'toWrite' mem-usage
+
+The important point in the description above is that at step (3) we
+need to perform a O(N = toWrite-size) copy for computing the
+mem-overhead released by expel. That copy is performed under
+CM::queueLock and must be avoided.
+
+As collateral (but not completely irrelevant) point, note that the copy
+that we want to remove is O(N) in both time and space, so avoiding the
+copy would also decrease the mem-utilization spike at expel.
+
+This patch removes the needs of relying on that copy for computing the
+mem-overhead deallocation. This is a pre-requirement for then avoiding
+the copy in a follow-up patch.
+
+Change-Id: I84e1b813061fd8e55e94c110a84ee8e2be883d30
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2021-09-20 08:50:04.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-09-20 09:27:28.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/34146/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/40111/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/12583/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/11374/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/13341/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/14199/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/2255/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/14957/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/22459/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/2226/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/14450/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

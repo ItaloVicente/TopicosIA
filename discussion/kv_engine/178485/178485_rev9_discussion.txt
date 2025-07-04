@@ -1,0 +1,368 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-53100: Don't register checkpoint cursors in meta only checkpoints
+
+Problem:
+In MB-53100 it was observed that the ActiveStream::curChkSeqno throws
+due to its value becoming non weakly monotonic, while it's processing
+times from the checkpoint manager. Just after vbucket became active due
+to a takeover stream.
+
+Cause:
+The reason for this is due an issue in how we register cursors when the
+checkpoint manager contains an checkpoint that only contains meta items.
+A meta only checkpoint can occur during a takeover stream, as the
+initial active node sends a snapshot with just one meta item which is a
+setVbucketState to pending.
+
+Example:
+id:2 [ e:5, cs:5, vbs:5, ce:5]
+id:3 [ e:5, cs:5, m:5, m:6 )
+
+Using the example above. The meta only checkpoint is problematic for
+CheckpointManager::registerCursorBySeqno() as it will walk through the
+meta checkpoint trying to find the seqno 5 requested for. However, if
+the requested seqno 5 was the same seqno as setVbucketState(e.g. vbs:5),
+we would end up walking though the checkpoint without ever finding an
+item with a seqno greater than 5. Thus, getting to the
+checkpoint_end (ce:5) item, who's seqno is 5. We would then return the
+registration seqno as 5 + 1 = 6. This would then set the value of
+ActiveStream::curChkSeqno to 6 from 5.
+
+When the active stream wants to process items using the cursor it will
+then receive the items from the point where the cursor currently sits,
+including the vbucket item but also importantly it will see a non-meta
+item with seqno X. This then caused curChkSeqno to from 6 to 5
+which a violation and thus we throw.
+
+Fix:
+When walking though the checkpoint to find the right item to register
+the cursor against, we need to ensure the item is not a meta item. If it
+is then we should just continue to the next item. If we don't find a
+non-meta item in the checkpoint for the seqno, then we should continue
+to the next checkpoint.
+
+In the situation we reach the end of the open checkpoint we need to
+register at the end of the checkpoint. This means we need to predict
+what the next item's seqno will be. Thus, if the last item isn't a meta
+item then we will set the 'result.seqno' to the end item's bySeqno + 1.
+If it is a meta item then it will just be set to bySeqno. As the meta
+items's seqno hasn't been made visible.
+
+Change-Id: I2fb89a81f506be71991b2a58a9f9a9144d75cad3
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Richard de Mellow
+Date: 2022-08-31 10:47:50.000000000
+Message: 
+Uploaded patch set 9.
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-08-31 10:48:02.000000000
+Message: 
+Patch Set 9:
+
+(2 comments)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-08-31 11:15:22.000000000
+Message: 
+Patch Set 9: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/21108/ : FAILURE
+
+Failure of GoogleTest "PersistentAndEphemeral/StreamTest.BackfillSmallBuffer/persistent_couchstore":
+
+<pre>
+[ RUN      ] PersistentAndEphemeral/StreamTest.BackfillSmallBuffer/persistent_couchstore
+[2022-08-31T11:07:50.345Z] ../kv_engine/engines/ep/tests/module_tests/dcp_stream_test.cc:883: Failure
+[2022-08-31T11:07:50.345Z] Expected equality of these values:
+[2022-08-31T11:07:50.345Z]   stream->getNumBackfillPauses()
+[2022-08-31T11:07:50.345Z]     Which is: 1
+[2022-08-31T11:07:50.345Z]   0
+[2022-08-31T11:07:50.345Z] [  FAILED  ] PersistentAndEphemeral/StreamTest.BackfillSmallBuffer/persistent_couchstore, where GetParam() = "persistent_couchstore" (15 ms)
+PersistentAndEphemeral/StreamTest.BackfillSmallBuffer/persistent_couchstore
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/21108/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/22907/ : FAILURE
+
+Failure of GoogleTest "PersistentAndEphemeral/StreamTest.BackfillSmallBuffer/persistent_couchstore":
+
+<pre>
+[ RUN      ] PersistentAndEphemeral/StreamTest.BackfillSmallBuffer/persistent_couchstore
+[2022-08-31T11:12:02.389Z] ../kv_engine/engines/ep/tests/module_tests/dcp_stream_test.cc:927: Failure
+[2022-08-31T11:12:02.389Z] Expected equality of these values:
+[2022-08-31T11:12:02.389Z]   stream->getNumBackfillPauses()
+[2022-08-31T11:12:02.389Z]     Which is: 1
+[2022-08-31T11:12:02.389Z]   0
+[2022-08-31T11:12:02.389Z] [  FAILED  ] PersistentAndEphemeral/StreamTest.BackfillSmallBuffer/persistent_couchstore, where GetParam() = "persistent_couchstore" (217 ms)
+PersistentAndEphemeral/StreamTest.BackfillSmallBuffer/persistent_couchstore
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/22907/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/21817/ : FAILURE
+
+One of more core files found at the end of the build. Data for post-mortem saved to archived_core_dumps.tar.bz2 under "Build Artifacts". ( http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/21817/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/19086/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/19865/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/48799/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/41025/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/9659/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/30199/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/9560/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/22170/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-08-31 12:16:01.000000000
+Message: 
+Patch Set 9:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/21108/ : FAILURE
+
+Failure of GoogleTest "PersistentAndEphemeral/StreamTest.BackfillSmallBuffer/persistent_couchstore":
+
+<pre>
+[ RUN      ] PersistentAndEphemeral/StreamTest.BackfillSmallBuffer/persistent_couchstore
+[2022-08-31T11:07:50.345Z] ../kv_engine/engines/ep/tests/module_tests/dcp_stream_test.cc:883: Failure
+[2022-08-31T11:07:50.345Z] Expected equality of these values:
+[2022-08-31T11:07:50.345Z]   stream->getNumBackfillPauses()
+[2022-08-31T11:07:50.345Z]     Which is: 1
+[2022-08-31T11:07:50.345Z]   0
+[2022-08-31T11:07:50.345Z] [  FAILED  ] PersistentAndEphemeral/StreamTest.BackfillSmallBuffer/persistent_couchstore, where GetParam() = "persistent_couchstore" (15 ms)
+PersistentAndEphemeral/StreamTest.BackfillSmallBuffer/persistent_couchstore
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/21108/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/22907/ : FAILURE
+
+Failure of GoogleTest "PersistentAndEphemeral/StreamTest.BackfillSmallBuffer/persistent_couchstore":
+
+<pre>
+[ RUN      ] PersistentAndEphemeral/StreamTest.BackfillSmallBuffer/persistent_couchstore
+[2022-08-31T11:12:02.389Z] ../kv_engine/engines/ep/tests/module_tests/dcp_stream_test.cc:927: Failure
+[2022-08-31T11:12:02.389Z] Expected equality of these values:
+[2022-08-31T11:12:02.389Z]   stream->getNumBackfillPauses()
+[2022-08-31T11:12:02.389Z]     Which is: 1
+[2022-08-31T11:12:02.389Z]   0
+[2022-08-31T11:12:02.389Z] [  FAILED  ] PersistentAndEphemeral/StreamTest.BackfillSmallBuffer/persistent_couchstore, where GetParam() = "persistent_couchstore" (217 ms)
+PersistentAndEphemeral/StreamTest.BackfillSmallBuffer/persistent_couchstore
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/22907/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/19086/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/19865/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/48799/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/41025/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/9659/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/30199/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/9560/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/22170/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/21824/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-08-31 12:41:18.000000000
+Message: 
+Patch Set 9: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/19086/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/19865/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/48799/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/41025/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/9659/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/22916/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/30199/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/9560/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/21824/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/22170/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/21119/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-08-31 16:17:26.000000000
+Message: 
+Patch Set 9: Code-Review-1
+
+(1 comment)
+Line:365, engines/ep/src/checkpoint_manager.cc -> I think this is the wrong place to add the new check. The "current" checkpoint is not the correct one to place the cursor - we have essentially entered the wrong checkpoint as line 346; and are spending a bunch of time iterating through the checkpoint just to discover it's the wrong one.
+
+I think we should be able to add a check similar to the one at lines 350 without iterating the whole checkpoint. Something like checking:
+
+ If this is a closed checkpoint and startBySeqno equals checkpoint.endSeqno, then we know that we could place the cursor on (at least) the empty item at the start of the next checkpoint, so don't bother scanning it.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2022-09-01 06:58:50.000000000
+Message: 
+Patch Set 9: Code-Review-1
+
+(2 comments)
+Line:17, /COMMIT_MSG -> Is that correct?
+Isn't the problem a more generic issue that might happen when the last item in checkpoint is a meta items (regardless of whether the checkpoint contains mutations) ?
+
+Eg from our previous discussion:
+
+    [e:1 cs:1 m:1 vbs:2) -> seqno=3 -> X       <-- !!
+    We end up telling the caller that the next seqno available is 3, while the correct seqno is 2.
+
+Line:18, /COMMIT_MSG -> Actually we can end up with mata-only checkpoints by others ways:
+
+- New open checkpoint: [e:123, cs:123)
+- ItemExpel + SetVBState: [e:456, cs:456, vbs:789)
+
+etc..
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2022-09-01 07:47:39.000000000
+Message: 
+Patch Set 9:
+
+(1 comment)
+Line:365, engines/ep/src/checkpoint_manager.cc -> So 2 comments:
+
+1) With regard to Dave's point, yeah that's correct, but I would be careful on adding to many "fast jump" conditions as at line 350 :)
+And in fact IIRC I tried to block that fast jump at line 350 at the time 😄
+
+My point is: true that in some cases we might be unnecessarily placing a cursor at the end of a closed checkpoint while we could just place it at the begin of the next one.
+But cursors are being moved quickly anyway (specially if mem-recovery is required), so not sure if optimizing a "cold" code path is worth the risk.
+If we want to do that, isn't it better to make that change in a dedicated patch?
+I'm personally finding this patch already difficult enough to think about 😊
+
+2) Strictly on this fix, it seems to me that the minimal fix to the core issue was the change at https://review.couchbase.org/c/kv_engine/+/178485/4/engines/ep/src/checkpoint_manager.cc.
+@richard Could you remind why we didn't stick with that please? Wasn't that enough?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-09-01 08:43:59.000000000
+Message: 
+Patch Set 9:
+
+(1 comment)
+Line:365, engines/ep/src/checkpoint_manager.cc -> While it's desirable to have a "minimal" patch which fixes the issue, we also want to consider the long-term maintainability of the code - i.e. if we can end up with a simpler solution (checking things at the high-level Checkpoint level instead of having to iterate all the items) I would say that is preferred both in terms of code readability and performance.
+
+Note in theory we could have multiple "meta-only" checkpoints in sequence, so we need to potentially scan mutltiple ones.
+
+Thinking a bit more, it might be simpler to reason about the if() around like 350 essentially considered three cases:
+
+1) Requested seqno is less than Checkpoint start - we must place cursor at the start of that Checkpoint (this code already exists).
+2) Requested seqno is greater than Checkpoint end - we know the cursor must be placed somewhere inside this checkpoint, and we must scan to find out where  - this is the bulk of the code which exists at the moment.
+3) Requested seqno is equal to Checkpoint end - cursor needs to be at least placed at the checkpoint end, _but_ we also need to check the next checkpoint.
+
+Personally I think this gives simpler handling of each of the cases (in terms of splitting the current single '<=' clause and we lose the 'if (next == (*ckptIt)->end())' check from case (2).
+
+Thoughts?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2022-09-01 13:12:31.000000000
+Message: 
+Patch Set 9:
+
+(1 comment)
+Line:365, engines/ep/src/checkpoint_manager.cc -> > 2) Requested seqno is greater than Checkpoint end
+
+I assume you mean "less than Checkpoint end".
+
+So the current conditions in the if-else blocks consider Checkpoint::getHighSeqno(), which accounts non-meta-items only.
+While here my understanding is that we need to compute the correct registerSeqno for the case where a cursor falls on a meta-item.. Which is (currently) a condition that we verify during the checkpoint-scan.
+
+Let me think more on that, maybe we can simplify things here
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-09-01 13:13:17.000000000
+Message: 
+Patch Set 9:
+
+(1 comment)
+Line:365, engines/ep/src/checkpoint_manager.cc -> > I assume you mean "less than Checkpoint end".
+Apologies - yes.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2022-09-01 13:48:40.000000000
+Message: 
+Patch Set 9:
+
+(1 comment)
+Line:365, engines/ep/src/checkpoint_manager.cc -> Note sure.
+
+For what I said before on getHighSeqno(), it seems to me that more than "expanding" the if-else we need to rewrite it by accounting meta-items too.
+
+On the other side, when I look at the code and I start writing line350-like conditions I end up in a "consider all the ways a checkpoint can end" game that I would discourage.
+
+@richard Maybe you have some good idea based on Dave's comments above?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-09-01 15:46:24.000000000
+MISMATCHED INLINE COMMENT
+Line:17, /COMMIT_MSG -> Correct but I'm not focusing on every single possibility when trying to describe the MB-53100. In this section I'm discussing the specific cause of MB-53100.
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-09-02 09:46:10.000000000
+MISMATCHED INLINE COMMENT
+Line:17, /COMMIT_MSG -> We could throw in the same way, yes. But I'm trying to talk the reader though what was observed in MB-53100, not every possible permutation of this case.
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-09-02 12:04:11.000000000
+MISMATCHED INLINE COMMENT
+Line:17, /COMMIT_MSG -> I added an extra comment to clarify this point in the patch that was submitted
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2022-09-02 11:36:59.000000000
+MISMATCHED INLINE COMMENT
+Line:17, /COMMIT_MSG -> I just believe that the wording here is misleading the reader to thinking that we have an issue only "when the checkpoint manager contains an checkpoint that only contains meta items".
+
+While the problem is when "the last item in checkpoint is a meta item".
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2022-09-02 06:54:12.000000000
+MISMATCHED INLINE COMMENT
+Line:17, /COMMIT_MSG -> Would we hit MB-53100 also in the case where the checkpoint is like the one I drew above?
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-09-01 15:46:24.000000000
+MISMATCHED INLINE COMMENT
+Line:18, /COMMIT_MSG -> True but I'm not saying that it's the only way, just an example of how it may occur
+----------------------------------------------------------------------------------------------------------------------
+Author: Richard de Mellow
+Date: 2022-09-01 15:46:24.000000000
+MISMATCHED INLINE COMMENT
+Line:365, engines/ep/src/checkpoint_manager.cc -> Done
+----------------------------------------------------------------------------------------------------------------------

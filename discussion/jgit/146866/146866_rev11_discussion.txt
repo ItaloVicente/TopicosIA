@@ -1,0 +1,470 @@
+======================================================================================================================
+DESCRIPTION:
+
+FileSnapshot: fix bug with timestamp thresholding
+
+The filesystem timestamp and the lastRead timestamp are effectively
+two measurements, both affected by the filesystem resolution. Hence we
+should use at least 2x FS resolution as threshold. We use 2.5x for
+extra safety.
+
+Before, the threshold was 1.1x FS resolution, and we could issue the
+following sequence of events,
+
+  start
+  create-file
+  read-file (currentTime)
+  end
+
+which had the following timestamps:
+
+  create-file 1564589081998
+  start 1564589082002
+  read 1564589082003
+  end 1564589082004
+
+In this case, the difference between create-file and read is 5ms,
+which exceeded the 4ms FS resolution, even though the events together
+took just 2ms of runtime.
+
+Reproduce with:
+  bazel test --runs_per_test=100 \
+    //org.eclipse.jgit.test:org_eclipse_jgit_internal_storage_file_FileSnapshotTest
+
+The file system timestamp resolution is 4ms in this case.
+
+This code assumes that the kernel and the JVM use the same clock that
+is synchronized with the file system clock. This seems plausible,
+given the resolution of System.currentTimeMillis() and the latency for
+a gettimeofday system call (typically ~1us), but it would be good to
+justify this with specifications.
+
+Also cover a source of flakiness: if the test runs under extreme load,
+the we could have
+
+  start
+  create-file
+  <long delay>
+  read
+  end
+
+which would register as a unmodified file. Avoid this by skipping the
+test if end-start is too big.
+
+Change-Id: I87d2cf035e01c44b7ba8364c410a860aa8e312ef
+Signed-off-by: Han-Wen Nienhuys <hanwen@google.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Han-Wen NIenhuys
+Date: 2019-07-31 17:43:42.000000000
+Message: 
+Patch Set 11: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2019-07-31 17:43:55.000000000
+Message: 
+Patch Set 11:
+
+Build Started https://ci-staging.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/576/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2019-07-31 18:00:24.000000000
+Message: 
+Patch Set 11: Verified+1
+
+Build Successful 
+
+https://ci-staging.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/576/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2019-07-31 21:25:40.000000000
+Message: 
+Patch Set 11:
+
+(2 comments)
+Line:399, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/FileSnapshot.java -> What are the arguments for a factor of 2 ?
+
+Looking at the results of [1] it seems there is some uncertainty which this patch tries to quantify by measuring the difference between the results from measuring clock resolution, file timestamp resolution and testing what is the minimum time difference starting from which we can safely detect file modifications.
+
+[1] https://git.eclipse.org/r/#/c/146085/
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jonathan Nieder
+Date: 2019-08-01 00:33:20.000000000
+Message: 
+Patch Set 11:
+
+(1 comment)
+----------------------------------------------------------------------------------------------------------------------
+Author: Han-Wen NIenhuys
+Date: 2019-08-01 13:09:03.000000000
+Message: 
+Patch Set 11:
+
+(1 comment)
+Line:399, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/FileSnapshot.java -> The factor two comes from having two measurement, so a factor 2 seems enough.
+
+However, I think that the deeper problem is that the precise semantics of this class are not well defined.
+
+Here is one way to look at it:
+
+Under the following assumption:
+
+ * files are never modified, but only put in place after being written completely.
+ * a write system call sets the mtime after writing the data to current systemTime (t_sys) +/-  FS  granularity  +/- clock accuracy
+
+(note that the kernel's clock accuracy is much higher than ms, so it shouldn't really make a difference.)
+
+then, if you do 
+
+  write (kernel sets t_fs to t_sys1 +/- granularity),  rename-into place
+
+(wait)
+
+  open file
+  record t_sys2
+  check timestamp of opened file using fstat, retrieving t_fs
+  start read
+
+then, if t_sys2 > t_fs + granularity, you can conclude that t_sys2 > t_sys1, ie. the write happened before the read, and if the inode/dev numbers match, the file was unchanged. Since you retrieve t_sys2 before doign the read, you can be sure the read is after the write.
+
+However, I wonder if this class is really used in this way. In particular, you can only be sure about the timestamp of the file you just read if you do an fstat on the open file descriptor, while the class does a stat() on a path.
+
+Since the class records the file size, it can seemingly also be used on files that are mutated in place?  In that case, all bets are off: you could check a time stamp, but then after the check is done another processs can come along and change the file before you start the read. 
+
+There is also FileSnapshot#save, which asks you to supply a timestamp to put into the modified field, which doesn't match the above pattern at all, and I wonder how you can use that to conclude anything about the state of the file system.
+
+As discussed before, the test is dubious because the correct answer is a isModified = false (since the test doesn't modifify the file).
+
+Since we have seen real test failures in Gerrit that relate to the FS granularity work, I think there is a problem with the way how FileSnapshot is used for the RefDirectory RefDB.
+
+This is why I think that instead of reasoning about timestamps (which is really hard), it would be better if we concentrated on Reftable as a means of speeding up of JGit.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2019-08-03 13:12:05.000000000
+Message: 
+Patch Set 11:
+
+> The factor two comes from having two measurement, so a factor 2 seems enough.
+
+So far jgit used to consider anything less than 2.5 seconds (hard-coded) racily clean assuming the
+worst-case file system FAT which has a timestamp resolution of 2 seconds. This means we used
+a safety factor of 5/4. Maybe we can stick to 5/4 for coarse grained resolution >= 1 second
+and use 5/2 for higher resolutions ? In case of a stop-the-world JVM gc run this could maybe
+still be too low.
+
+> However, I think that the deeper problem is that the precise semantics of this class are not well defined.
+> 
+> Here is one way to look at it:
+> 
+> Under the following assumption:
+> 
+>  * files are never modified, but only put in place after being written completely.
+>  * a write system call sets the mtime after writing the data to current systemTime (t_sys) +/-  FS  granularity  +/- clock accuracy
+> 
+> (note that the kernel's clock accuracy is much higher than ms, so it shouldn't really make a difference.)
+> 
+> then, if you do 
+> 
+>   write (kernel sets t_fs to t_sys1 +/- granularity),  rename-into place
+> 
+> (wait)
+> 
+>  open file
+>   record t_sys2
+>   check timestamp of opened file using fstat, retrieving t_fs
+>   start read
+> 
+> then, if t_sys2 > t_fs + granularity, you can conclude that t_sys2 > t_sys1, ie. the write happened before the read, and if the inode/dev numbers 
+> match, the file was unchanged. Since you retrieve t_sys2 before doing the read, you can be sure the read is after the write.
+> 
+> However, I wonder if this class is really used in this way. 
+
+I checked usages of FileSnapshot in jgit:
+
+The following classes writing git-internal files 
+- DirCache (git index)
+- FileBasedConfig (git config files)
+- RefDirectoryUpdate (refs)
+- PackBatchRefUpdate (packed-refs)
+
+- are guarded by a file lock named "<filename>.lock" (LockFile)
+- new content is written to a temporary file using LockFile
+- FileSnapshot is used to track their stat information
+- in LockFile.commit() the temporary file is atomically renamed to the actual file
+
+ObjectDirectory and PackInserter
+- create keep file implemented by PackLock guarded by LockFile
+- write new pack to temporary file
+- and rename it atomically
+
+commands (e.g. CheckoutCommand) using DirCacheCheckout
+- first lock the DirCache (git index) using LockFile (e.g. in CheckoutCommand.call())
+- then DirCacheCheckout writes new file content to be checked out to a temporary file
+- and renames it atomically
+- then the command releases the DirCache lock
+
+the usages of FileSnapshot in
+- ObjectDirectory.scanPacksImpl uses FileSnapshot on pack directory
+- access to shallowfile in ObjectDirectory.getShallowCommits()
+could be racy
+
+> In particular, you can only be sure about the timestamp of the file you just read if you do 
+> an fstat on the open file descriptor, while the class does a stat() on a path.
+
+this is true, though AFAIK there is no fstat in Java, we may consider to use some jni implementation like jnr-posix [1] though that's licensed under EPL which is more copy-left than EDL (essentially Eclipse flavor of BSD)
+
+> Since the class records the file size, it can seemingly also be used on files that are mutated in place?  In that case, all bets are off: you could 
+> check a time stamp, but then after the check is done another processs can come along and change the file before you start the read. 
+
+I think it should be only used with the approach mutating files via write to a lock file or temporary file and subsequent atomic rename.
+We should improve the javadoc to clarify this.
+ 
+> There is also FileSnapshot#save, which asks you to supply a timestamp to put into the modified field, which doesn't match the above pattern at 
+> all, and I wonder how you can use that to conclude anything about the state of the file system.
+
+I have no idea what's the intention of this method which isn't used neither in JGit, EGit nor Gerrit.
+We could deprecate it and remove it in the next major release.
+
+> 
+> As discussed before, the test is dubious because the correct answer is a isModified = false (since the test doesn't modify the file).
+
+FileSnapshot.isModified(File) returns true if it detected the file was modified.
+It also returns true if it detected a racy read situation in order to signal the caller it needs
+to reread the content in order to find out if the file really changed.
+This test seems to try to test the second case (racily clean status)
+
+Maybe we should change this method to return a tri-state status (unmodified, modified, racily clean)
+instead of a boolean which is ambiguous in case of true.
+
+> 
+> Since we have seen real test failures in Gerrit that relate to the FS granularity work, I think there is a problem with the way how FileSnapshot is 
+> used for the RefDirectory RefDB.
+
+Did you try the current patch series on stable-5.1 if it fixes these failures ?
+I am back in the office next week and will then continue testing including running Gerrit tests using these patches.
+
+> This is why I think that instead of reasoning about timestamps (which is really hard), it would be better if we concentrated on Reftable as a means 
+> of speeding up of JGit.
+
+I agree we should work on Reftable implementation also for file based storage in order to improve performance of handling refs.
+I am happy that you started looking into this and will try to find time to help.
+
+Though the fix series you are fixing here (and my current patch series on stable-5.1) were started as an attempt to fix performance issues when loading pack files which were introduced by the fixes done by Luca earlier [2].
+
+[1] https://github.com/jnr/jnr-posix/blob/master/src/main/java/jnr/posix/POSIX.java#L55
+[2] https://bugs.eclipse.org/bugs/show_bug.cgi?id=546891
+----------------------------------------------------------------------------------------------------------------------
+Author: Han-Wen NIenhuys
+Date: 2019-08-05 15:08:14.000000000
+Message: 
+Patch Set 11:
+
+> Patch Set 11:
+> 
+> > The factor two comes from having two measurement, so a factor 2 seems enough.
+> 
+> So far jgit used to consider anything less than 2.5 seconds (hard-coded) racily clean assuming the
+> worst-case file system FAT which has a timestamp resolution of 2 seconds. This means we used
+> a safety factor of 5/4. Maybe we can stick to 5/4 for coarse grained resolution >= 1 second
+> and use 5/2 for higher resolutions ? In case of a stop-the-world JVM gc run this could maybe
+> still be too low.
+> 
+> > However, I think that the deeper problem is that the precise semantics of this class are not well defined.
+> > 
+> > Here is one way to look at it:
+> > 
+> > Under the following assumption:
+> > 
+> >  * files are never modified, but only put in place after being written completely.
+> >  * a write system call sets the mtime after writing the data to current systemTime (t_sys) +/-  FS  granularity  +/- clock accuracy
+> > 
+> > (note that the kernel's clock accuracy is much higher than ms, so it shouldn't really make a difference.)
+> > 
+> > then, if you do 
+> > 
+> >   write (kernel sets t_fs to t_sys1 +/- granularity),  rename-into place
+> > 
+> > (wait)
+> > 
+> >  open file
+> >   record t_sys2
+> >   check timestamp of opened file using fstat, retrieving t_fs
+> >   start read
+> > 
+> > then, if t_sys2 > t_fs + granularity, you can conclude that t_sys2 > t_sys1, ie. the write happened before the read, and if the inode/dev numbers 
+> > match, the file was unchanged. Since you retrieve t_sys2 before doing the read, you can be sure the read is after the write.
+> > 
+> > However, I wonder if this class is really used in this way. 
+> 
+> I checked usages of FileSnapshot in jgit:
+> 
+> The following classes writing git-internal files 
+> - DirCache (git index)
+> - FileBasedConfig (git config files)
+> - RefDirectoryUpdate (refs)
+> - PackBatchRefUpdate (packed-refs)
+
+This one looks a bit suspect. It does
+  
+	public void waitForStatChange() throws InterruptedException {
+		FileSnapshot o = FileSnapshot.save(ref);
+		FileSnapshot n = FileSnapshot.save(lck);
+		while (o.equals(n)) {
+			Thread.sleep(25 /* milliseconds */);
+			lck.setLastModified(System.currentTimeMillis());
+			n = FileSnapshot.save(lck);
+		}
+	}
+
+shouldn't this use a FS granularity-sized sleep, and then use the threshold rather than equals() to decide when the timestamp is new enough?
+
+It doesn't look like it can cause the problem I've been looking for, though, because that was on a FS with granularity of 1ms.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2019-08-05 16:08:32.000000000
+Message: 
+Patch Set 11:
+
+> > Patch Set 11:
+ > >
+ > > > The factor two comes from having two measurement, so a factor 2
+ > seems enough.
+ > >
+ > > So far jgit used to consider anything less than 2.5 seconds
+ > (hard-coded) racily clean assuming the
+ > > worst-case file system FAT which has a timestamp resolution of 2
+ > seconds. This means we used
+ > > a safety factor of 5/4. Maybe we can stick to 5/4 for coarse
+ > grained resolution >= 1 second
+ > > and use 5/2 for higher resolutions ? In case of a stop-the-world
+ > JVM gc run this could maybe
+ > > still be too low.
+ > >
+ > > > However, I think that the deeper problem is that the precise
+ > semantics of this class are not well defined.
+ > > >
+ > > > Here is one way to look at it:
+ > > >
+ > > > Under the following assumption:
+ > > >
+ > > >  * files are never modified, but only put in place after being
+ > written completely.
+ > > >  * a write system call sets the mtime after writing the data to
+ > current systemTime (t_sys) +/-  FS  granularity  +/- clock accuracy
+ > > >
+ > > > (note that the kernel's clock accuracy is much higher than ms,
+ > so it shouldn't really make a difference.)
+ > > >
+ > > > then, if you do
+ > > >
+ > > >   write (kernel sets t_fs to t_sys1 +/- granularity), 
+ > rename-into place
+ > > >
+ > > > (wait)
+ > > >
+ > > >  open file
+ > > >   record t_sys2
+ > > >   check timestamp of opened file using fstat, retrieving t_fs
+ > > >   start read
+ > > >
+ > > > then, if t_sys2 > t_fs + granularity, you can conclude that
+ > t_sys2 > t_sys1, ie. the write happened before the read, and if the
+ > inode/dev numbers
+ > > > match, the file was unchanged. Since you retrieve t_sys2 before
+ > doing the read, you can be sure the read is after the write.
+ > > >
+ > > > However, I wonder if this class is really used in this way.
+ > >
+ > > I checked usages of FileSnapshot in jgit:
+ > >
+ > > The following classes writing git-internal files
+ > > - DirCache (git index)
+ > > - FileBasedConfig (git config files)
+ > > - RefDirectoryUpdate (refs)
+ > > - PackBatchRefUpdate (packed-refs)
+ > 
+ > This one looks a bit suspect. It does
+ > 
+ > public void waitForStatChange() throws InterruptedException {
+ > FileSnapshot o = FileSnapshot.save(ref);
+ > FileSnapshot n = FileSnapshot.save(lck);
+ > while (o.equals(n)) {
+ > Thread.sleep(25 /* milliseconds */);
+ > lck.setLastModified(System.currentTimeMillis());
+ > n = FileSnapshot.save(lck);
+ > }
+ > }
+ > 
+ > shouldn't this use a FS granularity-sized sleep
+
+https://git.eclipse.org/r/#/c/147072/
+
+> and then use the threshold rather than equals() to decide when the timestamp is new
+ > enough?
+
+I think equals should be ok since it returns true until the two FileSnapshots really differ
+
+ > 
+ > It doesn't look like it can cause the problem I've been looking
+ > for, though, because that was on a FS with granularity of 1ms.
+----------------------------------------------------------------------------------------------------------------------
+Author: Han-Wen NIenhuys
+Date: 2019-08-05 17:56:59.000000000
+Message: 
+Patch Set 11:
+
+> I agree we should work on Reftable implementation also for file based storage in order to improve performance of handling refs.
+> I am happy that you started looking into this and will try to find time to help.
+
+btw, if you want to help, a good place to start is reviewing the base changes, some of which I've posted for review here.
+
+Getting the thing to work is still in WIP stage, but you can see 
+progress so far at https://github.com/hanwen/jgit (branch reftable).
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2019-08-07 10:08:22.000000000
+Message: 
+Patch Set 11:
+
+(1 comment)
+
+I cherry-picked this patch to stable-5.1 and will move this change there shortly
+Line:151, org.eclipse.jgit.test/tst/org/eclipse/jgit/internal/storage/file/FileSnapshotTest.java -> this test fails always, even on an idle system, if the file time resolution is smaller than the time needed to create a file and a FileSnapshot 
+
+Tried this on Mac using Java 11 with APFS and SSD disk: 
+* file timestamp resolution is 7µs (measured using [1])
+* min racy threshold is 0 (measured using [1])
+* time to create a file is 90 µs (measured using [2])
+* time to create a FileSnapshot is 6 µs (measured using [2])
+
+Hence I think we should skip this test if file time resolution is below some threshold e.g. 10ms
+
+[1] cherry-picked this fix on patch series https://git.eclipse.org/r/#/c/147072/ on stable-5.1
+[2] https://git.eclipse.org/r/#/c/147171/
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2019-08-07 10:10:01.000000000
+Message: 
+Change destination moved from master to stable-5.1
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2019-08-07 10:20:49.000000000
+Message: 
+Patch Set 11:
+
+(1 comment)
+Line:10, /COMMIT_MSG -> I don't understand how lastRead depends on filesystem time resolution since it's read from the system clock.
+
+I think it's ok to increase the safety factor to 5/2 if file time resolution is small, let's say below 100ms. For resolution 1s (ext3, Mac HFS and APFS on Java 8) or 2s (FAT) I think 5/4 should be sufficient since system clock resolution should be way below 1s.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2019-08-07 15:04:04.000000000
+MISMATCHED INLINE COMMENT
+Line:151, org.eclipse.jgit.test/tst/org/eclipse/jgit/internal/storage/file/FileSnapshotTest.java -> done, by using assume to skip test if resolution is below 10 ms
+----------------------------------------------------------------------------------------------------------------------

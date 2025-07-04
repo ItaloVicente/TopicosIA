@@ -1,0 +1,164 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-35297: Stop and cancel a RangeScan when disconnected during a scan
+
+Prior to this commit, if a client disconnects after a continue request
+the RangeScanContinueTask has no mechanism to break the scan, it could
+"spin" and progress the iterator for some time.
+
+This commit adds a disconnected detection path from the
+Cookie::sendResponse function which the scan loop is using to push
+data to the connection. If a disconnection is detected the policy
+is to cancel the RangeScan as the iterator may have been progressed
+forwards and the client has no way to correctly resume the scan.
+
+Change-Id: Id783a891a520100659c932954add83841d0d27f2
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jim Walker
+Date: 2022-10-24 09:22:02.000000000
+Message: 
+Uploaded patch set 6.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-10-24 09:42:11.000000000
+Message: 
+Patch Set 6: Verified-1
+
+Build Failed 
+
+https://cv.jenkins.couchbase.com/job/kv_engine-windows-master/50629/ : FAILURE
+
+Failure of GoogleTest "TransportProtocols/StatsTest.MB37147_TestEWBReturnFromStat/McbpSsl":
+
+<pre>
+[ RUN      ] TransportProtocols/StatsTest.MB37147_TestEWBReturnFromStat/McbpSsl
+C:/Jenkins/workspace/kv_engine-windows-master/kv_engine/tests/testapp/testapp_stats.cc(301): error: Value of: stats.empty()
+  Actual: true
+Expected: false
+[  FAILED  ] TransportProtocols/StatsTest.MB37147_TestEWBReturnFromStat/McbpSsl, where GetParam() = McbpSsl (7 ms)
+TransportProtocols/StatsTest.MB37147_TestEWBReturnFromStat/McbpSsl
+</pre>
+ ( https://cv.jenkins.couchbase.com/job/kv_engine-windows-master/50629/ )
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/20672/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/21410/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/42481/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/11141/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/23847/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/24681/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/22859/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/11233/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/31867/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/23443/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2022-10-24 09:57:08.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> Hey Jim, with reference to MB-54196 (for which this patch is probably the fix), I'm not sure that the approach here covers entirely what we need to cover.
+
+To recap, in MB-54196 we see the following:
+
+  1. Conn triggers a range-scan Create
+  2. <maybe same conn issues some range-scan Continue>
+  3. Conn is disconnected by peer - Note: We don't have this cleanup-at-disconnect feature yet in couchbase/master, so RangeScan not removed here
+  4. User issues Bucket Deletion
+  5. RangeScanTimeoutTask probably shuts down before it manages to cleanup the RangeScan
+  6. RangeScan dangles around forever and blocks bucket deletion
+
+Fixing (3) seems to fix MB-54196.
+
+Now, my understanding on this patch is that we need some activity on the RangeScan for triggering the cleanup.
+But what happens on a sequence of events like:
+
+  1. RangeScanCreate
+  2. Conn disconnects before issuing any RangeScanContinue
+  
+?
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2022-10-24 15:12:26.000000000
+MISMATCHED INLINE COMMENT
+File Comment: /PATCHSET_LEVEL -> > We still have the problem for when the _unregisterTaskable() is called with force=true, as the completeBeforeShutdown flag is ignored in that case.
+
+Update
+We seem to be able to simplify the overall thing in the end.
+BucketManagementCommandContext::remove() already defers the work to OneShotTask. Meaning, we never execute any EP subtask of bucket deletion on the frontend/conn thread.
+That said, we can simplify the RangeScan(s) cancellation at shutdown by always cleaning up range scans inline in the caller thread. Ie, no need to defer that step to the RangeScanContinueTask.
+That is all expected to work for both the force=false/true cases.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2022-10-26 07:50:35.000000000
+MISMATCHED INLINE COMMENT
+File Comment: /PATCHSET_LEVEL -> For reference, change at https://review.couchbase.org/c/kv_engine/+/181788.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2022-10-24 10:40:09.000000000
+MISMATCHED INLINE COMMENT
+File Comment: /PATCHSET_LEVEL -> Ok, so essentially by this there are a bunch of cases that are still expected to be handled by the RangeScanTimeoutTask.
+That timeout is set to 180s by default though, bucket deletion will suffer the same delay right?
+
+Note: If plan is to proceed with this patch, then some extra work needs to be done on MB-54196, as we need to ensure that all range-scans are cancelled when the RangeScanTimeoutTask is shut down.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-10-24 15:16:47.000000000
+MISMATCHED INLINE COMMENT
+File Comment: /PATCHSET_LEVEL -> Note in the force=true case, we should minimise any cleanup and shutdown the bucket ASAP. If we _have_ to cancel RangeScans to be able to delete the Bucket, then so be it, but ideally we should do the minimum amount of work possible if force=true.
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2022-10-25 10:49:00.000000000
+MISMATCHED INLINE COMMENT
+File Comment: /PATCHSET_LEVEL -> resolving:  this relates to an incoming/separate change
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-10-24 10:47:57.000000000
+MISMATCHED INLINE COMMENT
+File Comment: /PATCHSET_LEVEL -> Note that all Tasks with completeBeforeShutdown=true will be woken and executed once on Bucket shutdown - so as long as that flag is set you can do any necessary cleanup then.
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2022-10-24 14:44:59.000000000
+MISMATCHED INLINE COMMENT
+File Comment: /PATCHSET_LEVEL -> As per offline chat, some tweak on delaying the RangeScanContinueTask run when running the test_range_scan_no_cancel test make the problem visible, the test hangs.
+
+Also, setting RangeScanContinueTask::completeBeforeShutdown=true fixes the problem.
+
+We still have the problem for when the _unregisterTaskable() is called with force=true, as the completeBeforeShutdown flag is ignored in that case.
+
+*Note*
+In the previous comment there was some confusion on mixing RangeScanTimeoutTask and RangeScanContinueTask. That's why I've been referring to the impact of enforcing the 180s timeout at bucket shutdown.
+Actually a RangeScan is cancelled by a RangeScanContinueTask run, so the timeout doesn't have any relation with all that.
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2022-10-24 10:09:05.000000000
+MISMATCHED INLINE COMMENT
+File Comment: /PATCHSET_LEVEL -> In your example 
+
+1. RangeScanCreate success (RangeScan created and is Idle)
+2. Conn disconnects
+
+Note, the scan is not associated with a connection so a disconnect should have no affect on an idle scan.
+
+In this scenario all scans should be force cancelled by https://review.couchbase.org/c/kv_engine/+/181151
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2022-10-24 13:13:46.000000000
+MISMATCHED INLINE COMMENT
+File Comment: /PATCHSET_LEVEL -> I suspect that's the problem for the MB Paolo is looking at - the RangeScanContinueTask (which is responsible for moving the scan through it's "phases) has completeBeforeShutdown=false, so code added that sets all scans to cancel at shutdown and pokes that task may not result in the scan cancelling.
+
+A subsequent patch should be incoming for that
+----------------------------------------------------------------------------------------------------------------------

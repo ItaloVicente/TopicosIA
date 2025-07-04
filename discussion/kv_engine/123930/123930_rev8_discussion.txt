@@ -1,0 +1,99 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-38327: Interpret access logs written before mad-hatter correctly
+
+An issue was encountered during offline upgrade from 5.0.1 to 6.5.0.
+It was found to be while reading the access log for the first time
+after the upgrade.
+
+This process requires 6.5.0 to read a older version of the access log
+format (containing MutationLogEntryV2 rather than the current, V3).
+SerialisedDocKey was changed in 6.5.0 to treat the namespace prefix as
+part of the key, rather than as a separate byte.
+
+This required a compensatory change in MutationLogEntryV2 in 6.5.0,
+however there was a small bug in how this was done; the struct was
+padded by an additional byte, ensuring the key bytes started at the
+same offset in the LogEntry, but this _also_ shifted the offset of the
+length field.
+
+This lead to 6.5.0 expecting to find the key length field one byte
+later than it should - this caused it to read the docNamespace and
+treat it as the length. This was always 0 prior to mad-hatter, so the
+key was treated as zero length.
+
+However - when "upgrading" the V2 struct to V3 to use it, the code
+expected to strip a 1 byte prefix from the key (the docNamespace).
+i.e., start + 1, length - 1. This lead to an underflow, and the V3
+struct constructor copied the key and read/wrote past the end of
+allocated memory.
+
+Fixed by introducing a LegacySerialisedDocKey, which has the previous
+layout.
+
+Change-Id: I53e8491fd8afa7927d069904e19b3502ecbdd072
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: James H
+Date: 2020-03-20 15:07:54.000000000
+Message: 
+Uploaded patch set 8.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-03-20 15:08:03.000000000
+Message: 
+Patch Set 8: Well-Formed+1
+
+Permission granted to commit: 
+
+http://server.jenkins.couchbase.com/job/restricted-branch-check/173257/artifact/restricted.html : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-03-20 15:19:43.000000000
+Message: 
+Patch Set 8: Code-Review-1
+
+(1 comment)
+Line:102, engines/ep/src/mutation_log_entry.h -> This comment seems misleading. Pre 6.5.0 we didn't have the concept of collectionIDs, so I don't see why we would be writing them. 
+
+If this is in fact implicit or otherwise padding we are trying to represent here, then suggest naming as such and adding a comment explaining it.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-03-20 15:39:00.000000000
+Message: 
+Patch Set 8: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/mad-hatter/1098/ : ABORTED
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-madhatter/1083/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-mad-hatter/999/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/25367/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/mad-hatter/433/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/mad-hatter/1112/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/mad-hatter/891/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/mad-hatter/1105/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2020-03-20 15:39:02.000000000
+Message: 
+Patch Set 8:
+
+(1 comment)
+Line:102, engines/ep/src/mutation_log_entry.h -> I can flip it back to docNamespace. I'd suggest naming it padding would be omissive - when read from disk it _does_ represent something, it just happens to always be one value. It wasn't padding in the struct in spock, it was docNamespace.
+When reading, it is clear that docNamespace shouldn't, _for example_, be repurposed if a byte is needed, or made wider or removed to adjust around other things - it has the size it has for a reason.
+
+Whereas the member "pad" in MutationLogEntryV3 is genuinely padding, nothing seems to have been stored there at any point.
+
+----------------------------------------------------------------------------------------------------------------------

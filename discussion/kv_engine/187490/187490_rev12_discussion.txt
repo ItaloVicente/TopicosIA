@@ -1,0 +1,61 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-55672: Convert RangeScan to perform network IO on frontend
+
+Before this commit the "send" of the data read by a RangeScan was
+occurring on the IO task. With this commit now all data read by
+a RangeScan is "sent" by the frontend executor.
+
+RangeScan's are converted to follow the established notify IO complete
+pattern.
+
+* Front-end executor receives a client's range-scan-continue request
+* ep-engine schedules an IO task
+* IO task scans until something triggers the task to yield and passes
+  a engine_errc status via notifyIOComplete
+* Front-end executor now "sends" all data that was placed into a buffer
+  by the IO task.
+* range-scan-continue is now.
+  * Done: The continue reached a client requested limit.
+  * Done: The continue reached the end of the range.
+  * Done: The scan was cancelled, by error or by request.
+  * Continued: None of the above occurred and the scan is scheduled
+    for more scanning.
+
+With this change some of the RangeScan state management is simplified
+in that the RangeScanOwner does all of the state changes in response
+to the status of a continue - no longer does the IO task drive the
+state to be Cancelled/Complete.
+
+With this change the performance of a RangeScan (as measured by the
+rangescan tool) is reduced. Even though the internal scan buffer is
+still 8k in size, prior to this change between the send of each 8k
+there was no delay waiting for the IO task to be rescheduled. Now
+each time the buffer is full and requires sending there is a the cost
+of scheduling and waiting for the task to run again.
+
+Some numbers from the rangescan tool suggest that with this commit
+there is a ~7% reduction in rangescan throughput.
+
+Single node, 16 vbucket 420MB of data returned by the scan.
+
+Time to perform key scan (no limits), average of 5 runs.
+
+pre   | post
+------|------
+37.8s | 40.6s
+
+This difference can be removed by increasing the RangeScan buffer size
+and will be done in a later commit.
+
+Change-Id: I17566daa37700a4caaf1f85152a4185929b29cf0
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jim Walker
+Date: 2023-03-21 11:56:39.000000000
+Message: 
+Uploaded patch set 12.
+----------------------------------------------------------------------------------------------------------------------

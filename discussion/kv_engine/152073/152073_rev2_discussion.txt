@@ -1,0 +1,126 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-45378: Avoid crash with boost::fs global object
+
+On MSVC 2017 if platform is linked statically, we see a crash in
+~EpBucketImpl when removing the dbPath temp directory:
+
+ 	msvcp140.dll!_guard_dispatch_icall_nop() Line 55	Unknown
+ 	msvcp140.dll!std::codecvt<unsigned short,char,_Mbstatet>::in(_Mbstatet & _State, const char * _First1, const char * _Last1, const char * & _Mid1, unsigned short * _First2, unsigned short * _Last2, unsigned short * & _Mid2) Line 728	C++
+ 	memcached_testapp.exe!boost::filesystem::path_traits::convert(wchar_t const *,wchar_t const *,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > &,class std::codecvt<wchar_t,char,struct _Mbstatet> const &)	C++
+ 	memcached_testapp.exe!boost::filesystem::path_traits::convert(char const *,char const *,class std::basic_string<wchar_t,struct std::char_traits<wchar_t>,class std::allocator<wchar_t> > &,class std::codecvt<wchar_t,char,struct _Mbstatet> const &)	C++
+>	memcached_testapp.exe!boost::filesystem::path_traits::convert(const char * from, const char * from_end, std::basic_string<wchar_t,std::char_traits<wchar_t>,std::allocator<wchar_t> > & to) Line 1006	C++
+ 	memcached_testapp.exe!boost::filesystem::path_traits::dispatch<std::basic_string<wchar_t,std::char_traits<wchar_t>,std::allocator<wchar_t> > >(const std::basic_string<char,std::char_traits<char>,std::allocator<char> > & c, std::basic_string<wchar_t,std::char_traits<wchar_t>,std::allocator<wchar_t> > & to) Line 257	C++
+ 	memcached_testapp.exe!boost::filesystem::path::path<std::basic_string<char,std::char_traits<char>,std::allocator<char> > >(const std::basic_string<char,std::char_traits<char>,std::allocator<char> > & source, void * __formal) Line 168	C++
+ 	memcached_testapp.exe!cb::io::makeExtendedLengthPath(const std::basic_string<char,std::char_traits<char>,std::allocator<char> > & path) Line 46	C++
+ 	memcached_testapp.exe!cb::io::rmrf(const std::basic_string<char,std::char_traits<char>,std::allocator<char> > & path) Line 221	C++
+ 	memcached_testapp.exe!EpBucketImpl::~EpBucketImpl() Line 214	C++
+ 	[External Code]
+ 	memcached_testapp.exe!McdEnvironment::~McdEnvironment() Line 388	C++
+ 	[External Code]
+ 	memcached_testapp.exe!testing::internal::Delete<testing::Environment>(testing::Environment * x) Line 342	C++
+ 	[External Code]
+ 	memcached_testapp.exe!testing::internal::ForEach<std::vector<testing::Environment *,std::allocator<testing::Environment *> >,void (__cdecl*)(testing::Environment *)>(const std::vector<testing::Environment *,std::allocator<testing::Environment *> > & c, void(*)(testing::Environment *) functor) Line 295	C++
+ 	memcached_testapp.exe!testing::internal::UnitTestImpl::~UnitTestImpl() Line 5033	C++
+ 	[External Code]
+ 	memcached_testapp.exe!testing::UnitTest::~UnitTest() Line 4979	C++
+ 	[External Code]
+
+This appears to be a known issue[1] with boost::filesystem, due to it
+using a static global for locale conversion - making any calls to
+boost::filesystem::path to/from string after this locale object has been
+deleted can crash the program. This is happening inside cb::io::rmrf
+when it manipulates paths to delete all files under the given dbPath.
+
+Avoid this issue by changing dbPath to boost::fs::path - meaning
+we already have a object which has performed locale conversion at
+shutdown, then replacing the call to cb::io::rmrf with
+boost::fs::remove_all(), which doesn't perform any additional locale
+manipulation.
+
+[1]: https://www.boost.org/doc/libs/1_76_0/libs/log/doc/html/log/rationale/why_crash_on_term.html
+
+Change-Id: I1783e669392b9abedabfe59d0249e429a51fe826
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2021-04-27 09:35:01.000000000
+Message: 
+Patch Set 2: Patch Set 1 was rebased
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2021-04-27 10:05:02.000000000
+Message: 
+Patch Set 2: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/35287/ : FAILURE
+
+Failure of GoogleTest "MagmaKVStoreRollbackTest.Rollback":
+
+<pre>
+[ RUN      ] MagmaKVStoreRollbackTest.Rollback
+[       OK ] MagmaKVStoreRollbackTest.Rollback (78 ms)
+[ RUN      ] MagmaKVStoreRollbackTest.RollbackNoValidCheckpoint
+..\kv_engine\engines\ep\tests\module_tests\magma-kvstore_test.cc(126): error: Value of: rollbackResult.success
+  Actual: true
+Expected: false
+[  FAILED  ] MagmaKVStoreRollbackTest.RollbackNoValidCheckpoint (1066 ms)
+MagmaKVStoreRollbackTest.Rollback
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/35287/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/9130/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/9130/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/10203/ : FAILURE
+
+Failure of GoogleTest "MagmaKVStoreRollbackTest.Rollback":
+
+<pre>
+[ RUN      ] MagmaKVStoreRollbackTest.Rollback
+[2021-04-27T09:47:14.520Z] [       OK ] MagmaKVStoreRollbackTest.Rollback (503 ms)
+[2021-04-27T09:47:14.520Z] [ RUN      ] MagmaKVStoreRollbackTest.RollbackNoValidCheckpoint
+[2021-04-27T09:47:14.520Z] ../kv_engine/engines/ep/tests/module_tests/magma-kvstore_test.cc:126: Failure
+[2021-04-27T09:47:14.520Z] Value of: rollbackResult.success
+[2021-04-27T09:47:14.520Z]   Actual: true
+[2021-04-27T09:47:14.520Z] Expected: false
+[2021-04-27T09:47:14.520Z] [  FAILED  ] MagmaKVStoreRollbackTest.RollbackNoValidCheckpoint (3750 ms)
+MagmaKVStoreRollbackTest.Rollback
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/10203/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/10451/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/10451/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/18003/ : FAILURE
+
+Failure of GoogleTest "MagmaKVStoreRollbackTest.RollbackNoValidCheckpoint":
+
+<pre>
+[ RUN      ] MagmaKVStoreRollbackTest.RollbackNoValidCheckpoint
+[2021-04-27T09:44:10.483Z] ../kv_engine/engines/ep/tests/module_tests/magma-kvstore_test.cc:126: Failure
+[2021-04-27T09:44:10.483Z] Value of: rollbackResult.success
+[2021-04-27T09:44:10.483Z]   Actual: true
+[2021-04-27T09:44:10.483Z] Expected: false
+[2021-04-27T09:44:10.483Z] [  FAILED  ] MagmaKVStoreRollbackTest.RollbackNoValidCheckpoint (205 ms)
+MagmaKVStoreRollbackTest.RollbackNoValidCheckpoint
+</pre>
+ ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/18003/ )
+
+One of more core files found at the end of the build. Data for post-mortem saved to archived_core_dumps.tar.bz2 under "Build Artifacts". ( http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/18003/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/30186/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy/8531/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/7081/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/10060/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

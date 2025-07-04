@@ -1,0 +1,162 @@
+======================================================================================================================
+DESCRIPTION:
+
+Persist filesystem timestamp resolution and allow manual configuration
+
+To enable persisting filesystem timestamp resolution per FileStore add a
+new config section to the user global git configuration:
+
+- Config section is "filesystem"
+- Config subsection is concatenation of
+  - Java vendor (system property "java.vm.vendor")
+  - runtime version (system property "java.vm.version")
+  - FileStore's name
+  - separated by '|'
+  e.g.
+    "AdoptOpenJDK|1.8.0_212-b03|/dev/disk1s1"
+  The prefix is needed since some Java versions do not expose the full
+  timestamp resolution of the underlying filesystem. This may also
+  depend on the underlying operating system hence concrete key values
+  may not be portable.
+- Config key for timestamp resolution is "timestampResolution" as a time
+  value, supported time units are those supported by
+  DefaultTypedConfigGetter#getTimeUnit
+
+If timestamp resolution is already configured for a given FileStore
+the configured value is used instead of measuring the resolution.
+
+When timestamp resolution was measured it is persisted in the user
+global git configuration.
+
+Example:
+
+[filesystem "AdoptOpenJDK|1.8.0_212-b03|/dev/disk1s1"]
+	timestampResolution = 1 seconds
+
+If locking the git config file fails retry saving the resolution up to 5
+times in order to workaround races with another thread.
+
+In order to avoid stack overflow use the fallback filesystem timestamp
+resolution when loading FileBasedConfig which creates itself a
+FileSnapshot to help checking if the config changed.
+
+Note:
+- on some OSes Java 8,9 truncate to milliseconds or seconds, see
+https://bugs.openjdk.java.net/browse/JDK-8177809, fixed in Java 10
+- UnixFileAttributes up to Java 12 truncates timestamp resolution to
+microseconds when converting the internal representation to FileTime
+exposed in the API, see https://bugs.openjdk.java.net/browse/JDK-8181493
+- WindowsFileAttributes also provides only microsecond resolution up to
+Java 12
+
+Hence do not attempt to manually configure a higher timestamp resolution
+than supported by the Java version being used at runtime.
+
+Bug: 546891
+Bug: 548188
+Change-Id: Iff91b8f9e6e5e2295e1463f87c8e95edf4abbcf8
+Signed-off-by: Matthias Sohn <matthias.sohn@sap.com>
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Matthias Sohn
+Date: 2019-07-17 10:23:39.000000000
+Message: 
+Uploaded patch set 14: Patch Set 13 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2019-07-17 10:23:54.000000000
+Message: 
+Patch Set 14:
+
+Build Started https://ci-staging.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/315/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2019-07-17 10:32:01.000000000
+Message: 
+Patch Set 14: Verified+1
+
+Build Successful 
+
+https://ci-staging.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/315/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Halstrick
+Date: 2019-07-17 13:42:14.000000000
+Message: 
+Patch Set 14: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------
+Author: Christian Halstrick
+Date: 2019-07-17 13:42:20.000000000
+Message: 
+Change has been successfully merged by Christian Halstrick
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2019-08-12 09:29:01.000000000
+Message: 
+Patch Set 14:
+
+(4 comments)
+Line:397, org.eclipse.jgit/src/org/eclipse/jgit/util/FS.java -> We seem to get more and more such retries. On master, the HTTP cookie stuff also has something like this. Time to introduce (maybe only on master) a LockFile.waitForLock(timeout) method and use it in FileBasedConfig.save() and in the cookie file handling?
+
+Line:401, org.eclipse.jgit/src/org/eclipse/jgit/util/FS.java -> So this retry mechanism will help only if the other thread is done within max_retries * 20ms. (Plus some time for looping around, re-loading, etc.)
+
+Line:403, org.eclipse.jgit/src/org/eclipse/jgit/util/FS.java -> This clears the interrupted flag. But it is already cleared by catching InterruptedException. Did you intend to re-set the flag?
+
+  Thread.currentThread().interrupt();
+  break;
+
+Or did you really want to ignore interruptions here and keep retrying? Then it's just
+
+  // Ignore
+
+Line:414, org.eclipse.jgit/src/org/eclipse/jgit/util/FS.java -> Isn't this going to loop endlessly on IOException and ConfigInvalidException?
+
+How about
+
+  for (int retries = 0; retries < max_retries; retries++) {
+    try {
+      ...
+      userConfig.save();
+      break;
+    } catch (LockFaileException e) {
+      // Sleep a bit
+      try {
+        Thread.sleep(20);
+      } catch (InterruptedException e1) {
+        Thread.currentThread().interrupt();
+        break;
+      }
+    } catch (IOException e) {
+      LOG.error(...);
+    } catch (ConfigInvalidException e) {
+      LOG.error(...);
+    }
+  }
+
+Optionally break after the two LOG.error calls, too. Don't know if you want to re-try in these cases.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2019-08-12 09:33:16.000000000
+Message: 
+Patch Set 14:
+
+(1 comment)
+Line:414, org.eclipse.jgit/src/org/eclipse/jgit/util/FS.java -> Actually, on the last iteration we probably don't want to sleep anymore but log the LockFailedException.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2019-08-12 22:08:35.000000000
+Message: 
+Patch Set 14:
+
+(4 comments)
+Line:397, org.eclipse.jgit/src/org/eclipse/jgit/util/FS.java -> ack
+
+Line:401, org.eclipse.jgit/src/org/eclipse/jgit/util/FS.java -> done in https://git.eclipse.org/r/#/c/147573/
+
+Line:403, org.eclipse.jgit/src/org/eclipse/jgit/util/FS.java -> done in https://git.eclipse.org/r/#/c/147573/
+
+Line:414, org.eclipse.jgit/src/org/eclipse/jgit/util/FS.java -> done in https://git.eclipse.org/r/#/c/147573/
+
+----------------------------------------------------------------------------------------------------------------------

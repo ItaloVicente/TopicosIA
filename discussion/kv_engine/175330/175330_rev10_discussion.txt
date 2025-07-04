@@ -1,0 +1,199 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-35297: Cap the number of RangeScanContinueTasks
+
+Prior to this commit RangeScans create one new task for each
+continue or cancel request, allowing for RangeScans to utilise
+all available AUXIO threads.
+
+This commit caps the number of tasks that can exist by tracking
+how many are in existence. A task can only be created if there
+is capacity. The RangeScanContinueTask itself is adjusted so that
+it keeps rescheduling whilst there are RangeScan objects that need
+processing.
+
+By default this commit will ensure that one AUXIO thread would be
+free by only ever creating one less than the number of AUXIO threads
+that exist.
+
+Change-Id: I6e8e4d4bf9b6c608b233876749b9d7fb58b27908
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jim Walker
+Date: 2022-06-17 12:27:43.000000000
+Message: 
+Uploaded patch set 10: Patch Set 9 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-06-17 13:26:15.000000000
+Message: 
+Patch Set 10: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/7930/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/7930/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/17280/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/46891/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/18166/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/39400/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/7828/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/19236/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/20022/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/20370/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/21017/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/28406/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-06-17 13:56:26.000000000
+Message: 
+Patch Set 10: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/17280/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/46891/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/18166/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/39400/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/7828/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/19236/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/20022/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/20370/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/21017/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/28406/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/7933/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2022-06-21 10:31:05.000000000
+Message: 
+Patch Set 10: Code-Review+1
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2022-06-21 10:37:00.000000000
+Message: 
+Patch Set 10: -Code-Review
+
+(1 comment)
+Line:34, engines/ep/src/range_scans/range_scan_owner.cc -> Seems like the config _could_ change in between calls here?
+
+Also IIRC the config methods take a lock, so that'll be taken twice here (and two map lookups), but that might not be significant if this isn't particularly hot code.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-06-21 11:07:51.000000000
+Message: 
+Patch Set 10: Code-Review-1
+
+(2 comments)
+Line:34, engines/ep/src/range_scans/range_scan_owner.cc -> We could see up to ~1024 calls (1 per vBucket) just for a single bucket range scan.
+
+Profiling should confirm, but I think we would want to make this class cache the value from Configuration and register a listener to pickup changes.
+
+That class also handles the case where completing a task should pickup the next task immediately if there is capacity - do we handle that situation here?
+
+Line:59, engines/ep/src/range_scans/range_scan_owner.cc -> Could we make use of the LimitedConcurrencyTask helper class to handle the limiting functionality? That is already used for Compaction; where we previously had a bunch of issues with ensuring the concurrency was always maintained, and that now encapsulates that logic?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2022-06-23 14:57:48.000000000
+MISMATCHED INLINE COMMENT
+Line:34, engines/ep/src/range_scans/range_scan_owner.cc -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2022-06-22 12:41:33.000000000
+MISMATCHED INLINE COMMENT
+Line:59, engines/ep/src/range_scans/range_scan_owner.cc -> I had tried that approach, but the model is different with LimitedConcurrencyTask in that it is intended to help where we create n tasks, but wish to only "run" m (and n>m). And I say "run" because the tasks do actually run, they just quickly yield if the running task count exceeds m.
+
+In the range-scan case the model is different in that it just creates no more than m tasks, and those m tasks are working through all ready scans. If m changes, (interesting case is m reduces, which it can do in a future patch), there may not be an immediate drop in concurrency - but it should resolve to the new m as scans complete and tasks exit
+
+Note if "should resolve" needs to be "must resolve by some reasonable deadline" changes could be made then
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2022-06-22 15:55:12.000000000
+MISMATCHED INLINE COMMENT
+Line:59, engines/ep/src/range_scans/range_scan_owner.cc -> +1 on settling on one solution, but no strong opinions on what the favoured solution would be.
+
+We do seem to periodically re-invent "queue of work, N workers" (paging, expiry, compaction). If we have a nice way to implement that with work="someObject", workers="tasks" (i.e., the logic here for range scans) that we like we could genericise it and use it everywhere.
+
+On the other hand LimitedConcurrencyTask tries to reach the same goal without explicitly re-inventing the queuing part by making work="task", workers="threadpool threads", leaving folly to do the queuing and waking and so on. The concurrency limiting is then expressed as "this resource must be acquired before I'm allowed do work".
+
+A bonus of that is that tasks themselves can keep some agency - e.g., if we ever needed to timeout a piece of work, the task itself can request to run after N seconds, and if it reaches that time and runs, bail out. If we needed that while going down the other impl route it'd probably see us re-inventing "thread tracks earliest waketime of tasks" as a nested "task tracks earliest waketime of work in the explicit queue" to know when to wake to do some time-driven activity.
+
+We can even dream of a fancy C++20 future where we can could use coroutines in tasks, then we really could have it mirror "this thread of execution is blocked until this resource becomes available" in the style of a proper blocking std::mutex or std::counting_semaphore without blocking the thread - but that's a while away.
+
+</ramble>
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-06-23 14:25:23.000000000
+MISMATCHED INLINE COMMENT
+Line:59, engines/ep/src/range_scans/range_scan_owner.cc -> In terms of this MB, I'm ok to progress as-is if we think it's sufficiently different.
+
+re: Compaction, if you recall the issue was that we can change dynamically the compaction concurrency (due to changing AuxIO thread counts, etc) and we had a number of issues related to that. The LimitedConucrrentyTask James came up with took a few iterations to get right, so I'm actually of the opposite opinion and _don't_ really want to go back to a world where we dynamically created and destroyed Tasks as that seemed to be harder to get right 😊
+
+I *do* feel like we should be able to have a single abstraction which handles these kinds of requirements - they don't /seem/ that different, but perhaps I'm being overly naive...
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2022-06-23 14:57:27.000000000
+MISMATCHED INLINE COMMENT
+Line:59, engines/ep/src/range_scans/range_scan_owner.cc -> It's sufficiently different - but only because I've written it based on my own preferences of how we should manage tasks. One difference that was in mind when doing it this way (compared to compaction/LimitedConcurrency) is that if a task=work, we create task per scan, and that is then bounded by n_scans*n_vbuckets (which is a lot more than compactions bounding of n_vbuckets).
+
+In terms of auxio changing, there is some testing of concurrency changing (be it auxio or the range scan setting itself), it certainly seemed fairly simple in this model to match the desired concurrency, maybe that's naive and this is full of bugs...
+
+Earlier it was mentioned that we "have time" for refactoring, that was not my impression of current engineering direction.
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2022-06-23 14:18:09.000000000
+MISMATCHED INLINE COMMENT
+Line:59, engines/ep/src/range_scans/range_scan_owner.cc -> My thoughts are that a lot of our attempts at generic task stuff certainly don't quite reach the levels of generic we need, OneShot is another example which doesn't work well for a bucket task. 
+
+I also don't like the cases where create many tasks, even if they're cheap it can become difficult to decipher in cbcollect stats and I just don't get a good feel about having a task run then yield (because concurrency is exhausted) if we could be in a place where we just don't run at all (because the number of tasks can never exceed our concurrency).
+
+But now as in block this commit or now as in create an improvement MB and aim to schedule soon - overall my preference would be to move compaction more along the lines of this. If concurrency == n, only have n tasks in existence. If n changes, tasks abort or create more.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-06-22 15:22:46.000000000
+MISMATCHED INLINE COMMENT
+Line:59, engines/ep/src/range_scans/range_scan_owner.cc -> I think they are logically equivalent though - we _could_ create a RangeScanContinueTask for every VBucket, and use LimitedConcurrencyTask to run up to a given limit at once?
+
+My thinking here is it's historically been tricky to get limiting concurrency 100% correct (not running too many or too few, or not running as soon as we should in all circumstances), and if we could have just one abstrection / API for this that would be desirable.
+
+CC @jamesH any thoughts?
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2022-06-28 09:04:50.000000000
+MISMATCHED INLINE COMMENT
+Line:59, engines/ep/src/range_scans/range_scan_owner.cc -> For tracking overall improvements to sharing etc... https://issues.couchbase.com/browse/MB-52774
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-06-22 16:09:59.000000000
+MISMATCHED INLINE COMMENT
+Line:59, engines/ep/src/range_scans/range_scan_owner.cc -> Good point about the timeouts - similar to SyncWrites, I think we could have each per-vBucket RangeScanContinue task also track when the earliest range scan for that vBucket would time out, and set that as it's wake time. Whenever it wakes it would first check if any RangeScans need timing out (and if so cancel them), _then_ try to acquire the needed semaphore and do some "actual" work.
+
+I do think now is a reasonable time to try to clean up / unify concurrency management - we don't have a release imminent and there's some cycles to spare.
+
+Jim -  thoughts?
+----------------------------------------------------------------------------------------------------------------------

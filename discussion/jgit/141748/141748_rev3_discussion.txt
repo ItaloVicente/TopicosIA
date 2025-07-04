@@ -1,0 +1,116 @@
+======================================================================================================================
+DESCRIPTION:
+
+Include filekey file attribute when comparing FileSnapshots
+
+Due to finite filesystem timestamp resolution the last modified
+timestamp of files cannot detect file changes which happened in the
+immediate past (less than one filesystem timer tick ago).
+
+Some filesystems expose unique file identifiers, e.g. inodes in Posix
+filesystems which are named filekeys in Java's BasicFileAttributes. Use
+them as another means to detect file modifications based on stat
+information.
+
+Running git gc on a repository yields a new packfile with the same id as
+a packfile which existed before the gc if these packfiles contain the
+same set of objects. The content of the old and the new packfile might
+differ if a different PackConfig was used when writing the packfile.
+Considering filekeys in FileSnapshot may help to detect such packfile
+modifications.
+
+Bug: 546891
+Change-Id: I711a80328c55e1a31171d540880b8e80ec1fe095
+Signed-off-by: Matthias Sohn <matthias.sohn@sap.com>
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Matthias Sohn
+Date: 2019-05-08 01:11:56.000000000
+Message: 
+Uploaded patch set 3.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2019-05-08 01:15:27.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:139, org.eclipse.jgit.test/tst/org/eclipse/jgit/internal/storage/file/FileSnapshotTest.java -> let's see on which filesystems this fails, then we can exclude to run this test on those filesystems
+
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2019-05-08 01:41:48.000000000
+Message: 
+Patch Set 3:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit/16141/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2019-05-08 02:14:49.000000000
+Message: 
+Patch Set 3: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit/16141/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: David Pursehouse
+Date: 2019-05-08 03:33:49.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+Line:186, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/FileSnapshot.java -> The constructor below has the fileKey argument annotated as @NonNull.  Should this rather be {@code MISSING_FILEKEY} ?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Thomas Wolf
+Date: 2019-05-08 08:54:33.000000000
+Message: 
+Patch Set 3:
+
+(3 comments)
+Line:144, org.eclipse.jgit.test/tst/org/eclipse/jgit/internal/storage/file/FileSnapshotTest.java -> This is a different pattern than what happens for pack files. This sequence here may actually result in the fileKey being the same, even with inodes.
+
+For pack files, the sequence is
+
+  createFile("file"); // inode y
+  createFile("foo"); // Guarantees new inode x
+  delete("file")
+  move("foo", "file"); // Now "file" is inode x
+
+which will result in a different fileKey if inodes are used.
+
+Line:146, org.eclipse.jgit.test/tst/org/eclipse/jgit/internal/storage/file/FileSnapshotTest.java -> The raciness check (timestamp comparison) should always make this true, unless somehow there's a lot of elapsed time between lines 141 and 142, so that the System.currentTimeMillis() inside FileSnapshot.save(f) is sufficiently greater than "timestamp".
+
+So this test has a timing issue.
+
+Line:239, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/FileSnapshot.java -> Nice. My idea about using this fileKey was (specifically for pack files) even more specific: on filesystems where we know this to work, consider the file unchanged if the fileKey is unchanged.
+
+Yes, it's not a general solution, but for cases where we know it to work it sidesteps this whole raciness business with its performance effects (unnecessary re-loading). Of course, the system where the file system tick is largest is also the system where this won't work (AFAIK): FAT, possibly NTFS. And of course the problem would be knowing when one may rely on the fileKey alone and when not.
+
+The implementation here is fine and uses the fileKey in a safe way, still checking modification times if the fileKey is unchanged.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2019-05-08 17:24:37.000000000
+MISMATCHED INLINE COMMENT
+Line:144, org.eclipse.jgit.test/tst/org/eclipse/jgit/internal/storage/file/FileSnapshotTest.java -> added another test
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2019-05-08 17:24:37.000000000
+MISMATCHED INLINE COMMENT
+Line:146, org.eclipse.jgit.test/tst/org/eclipse/jgit/internal/storage/file/FileSnapshotTest.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2019-05-08 17:24:37.000000000
+MISMATCHED INLINE COMMENT
+Line:186, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/FileSnapshot.java -> we could do this though the only existing private constructor will reset it during construction to the passed parameter which it ensures to be non-null via the annotation
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2019-05-08 17:24:37.000000000
+MISMATCHED INLINE COMMENT
+Line:239, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/FileSnapshot.java -> I got this idea, but first wanted to add usage of filekey to the modification detection in a bullet proof way for general purpose use. This should also improve other usages of FileSnapshot.
+
+We can add this option suitable for immutable files in another change. Since the filesystem may not support filekeys or reuse them over time we need to implement additional probing in FileStoreAttributeCache for the specific filesystem's behavior so that we can safely decide if we can rely only on filekey for immutable files or not.
+----------------------------------------------------------------------------------------------------------------------

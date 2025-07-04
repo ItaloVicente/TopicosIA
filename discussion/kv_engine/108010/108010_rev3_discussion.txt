@@ -1,0 +1,77 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-33186 [SR]: Use bySeqno scan for warmup of Prepared SyncWrites
+
+Modify the algorithm used by Warmup::loadPreparedSyncWrites() to load
+any in-flight (not yet committed / or aborted) SyncWrites from disk.
+
++Background+
+
+Initially the approach chosen was to identify these prepared
+SyncWrites by performing a range scan on the byKey index, looking for
+all mutations in the DurabilityPrepare namespace. This however relies
+on deleting Prepared SyncWrites from disk whenever they are Committed
+or Aborted.
+
+This is undesirable as it requires an additional item to be flushed
+every time we perform a commit (the delete of the prepared item). As
+such we do not delete Prepared items when Committed (only when Aborted
+as that's necessary to mark they should no longer be considered
+outstanding).
+
+However, this means that Warmup cannot rely on the (not-deleted)
+Prepared Sync Writes found on disk still being in-flight - they could
+have already been Committed.
+
++Solution+
+
+Instead of performing a byKey scan, perform an in-order scan of the
+seqno index:
+
+a) For each Prepared item found, add to the Durability Monitor and
+   HashTable.
+
+b) For each Committed (via Mutation or Prepare) item, if a prepared
+   item exists in the HashTable (i.e. was added at step (a)) then mark
+   it as Committed in the DurabilityMonitor.
+
+At the end of the scan, all in-flight Prepared items (which did not
+have a Commit persisted to disk) will be registered with the Durability
+Monitor.
+
+Note: The above is functionally correct, however it it potentially
+      inefficient - we must scan the complete bySeqno tree to identify
+      all in-flight SyncWrites. A later patch will introduce an
+      optimzation where we can use the high_committed_seqno to
+      contrain the range of seqnos scanned to the end of the tree.
+
+Change-Id: I799eb3e6120716ddb979aba90e6cef3f82ada50e
+Reviewed-on: http://review.couchbase.org/108010
+Tested-by: Build Bot <build@couchbase.com>
+Reviewed-by: Paolo Cocchi <paolo.cocchi@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2019-04-23 13:37:22.000000000
+Message: 
+Change has been successfully cherry-picked as d72f776136c655c48553747f0076e3b4dbaca289 by Paolo Cocchi
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-04-23 13:41:25.000000000
+Message: 
+Patch Set 3:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/980/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-04-23 14:31:32.000000000
+Message: 
+Patch Set 3:
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-master-post-commit/980/ : SUCCESS'
+----------------------------------------------------------------------------------------------------------------------

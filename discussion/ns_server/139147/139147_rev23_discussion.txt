@@ -1,0 +1,174 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-41730 Prune prometheus stats
+
+As prometheus stats age they should be pruned in order to save storage.
+
+For low-cardinality stats we'll increase their coarseness as they
+get older.
+
+For high-cardinality stats we'll truncate any stats older than a
+specified age.
+
+Change-Id: I227399c94e754f143f5aecd3f31140c65f61ac10
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Steve Watanabe
+Date: 2020-12-08 19:51:04.000000000
+Message: 
+Uploaded patch set 23.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-12-08 19:51:15.000000000
+Message: 
+Patch Set 23:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-test/20565/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-12-08 19:55:53.000000000
+Message: 
+Patch Set 23: Well-Formed+1
+
+Permission granted to commit to restricted branch
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2020-12-08 20:45:35.000000000
+Message: 
+Patch Set 23: Verified+1
+
+make simple-test
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-12-08 20:45:42.000000000
+Message: 
+Patch Set 23:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-simple-test/1808/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-12-08 21:22:39.000000000
+Message: 
+Patch Set 23: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/ns-server-simple-test/1808/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2020-12-11 01:30:22.000000000
+Message: 
+Patch Set 23:
+
+(14 comments)
+
+What do we do if removing stats fails. Should we ignore it or maybe not update last_decimation_times in ns_config so the next time we start from the same place and retry? I don't know what is better to be honest.
+Line:56, src/prometheus_cfg.erl -> Doesn't seem to be used
+
+Line:1042, src/prometheus_cfg.erl -> I think it should be configured the same way as all other stats settings via stats_setting key in ns_config. See comment about PRUNING_INTERVAL.
+
+Line:1186, src/prometheus_cfg.erl -> There is lists:map/2 for this kind of transformation.
+
+Line:1227, src/prometheus_cfg.erl -> Would you mind moving the logic from this foldl (including logic from decimate_stats_level and other functions) to decimate_stats/3? So it's also tested by unit tests.
+The only things maybe_decimate_stats should do is:
+1) extract last_decimation_times from ns_config
+2) call decimate_stats (pure, no interaction with prometheus, ns_config, time, etc) 
+3) delete stats intervals returned by #2 (interaction with prometheus):
+   [ok = prometheus:delete("...", Start, Stop) || {Start, Stop} <- IntervalsToRemove]
+4) save new last_decimation_times returned by #2 in ns_config
+
+If all the logic sits in decimate_stats, we can easily write tests for it.
+
+Line:1264, src/prometheus_cfg.erl -> Makes sense to make it configurable. See comment about PRUNING_INTERVAL
+
+Line:1302, src/prometheus_cfg.erl -> This functions should probably return something sane in case of an error. Right now it returns whatever ?log_error returns which probably not what you want.
+Same for clean_tombstones
+
+Line:1659, src/prometheus_cfg.erl -> I think two test cases for this code is a bit too few, but I suggest we discuss and add more tests when other parts of the code are mostly complete.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2020-12-11 19:10:48.000000000
+Message: 
+Patch Set 23:
+
+(6 comments)
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2020-12-11 19:44:53.000000000
+Message: 
+Patch Set 23: -Verified
+
+(6 comments)
+Line:56, src/prometheus_cfg.erl -> Done
+
+Line:1042, src/prometheus_cfg.erl -> I'd like to move this as part of the changes when we determine the final decimation strategy.  I'll make a XXX note to do so.
+
+Line:1227, src/prometheus_cfg.erl -> I'm confused by this comment.  maybe_decimate_stats does the four things mentioned. In a prior change the functionality of decimate_stats was included too but was moved into a pure function.
+
+Are you asking that the high-lited code be moved into its own function? e.g. do_decimate_stats resulting in...
+
+   DecimationInfo = decimate_stats(Levels, LastDecimationTimes, Now),
+   NewTimes = do_decimate_stats(DecimationInfo),
+   case lists:sort(NewTimes =:= lasts:sort(LastDecimationTimes) of
+
+Line:1264, src/prometheus_cfg.erl -> Done
+
+Line:1302, src/prometheus_cfg.erl -> Done
+
+Line:1659, src/prometheus_cfg.erl -> Sounds reasonable.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2020-12-11 20:03:07.000000000
+Message: 
+Patch Set 23:
+
+(1 comment)
+Line:1186, src/prometheus_cfg.erl -> Done
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2020-12-11 20:51:09.000000000
+Message: 
+Patch Set 23:
+
+(2 comments)
+Line:1042, src/prometheus_cfg.erl -> What is the point in waiting with the move? I'm not asking you to set some particular value for it.
+
+Line:1227, src/prometheus_cfg.erl -> TLDR; I'm asking you put all the logic and calculations in a pure function
+
+In order to be able to write proper unit tests all the logic should sit in pure functions (it's not always easy to do, but in this particular case it's doable).
+In your case since you keep state in ns_config and prometheus the code should look like the following:
+1) Extract current state <- here you get data from ns_config
+2) Calculate changes to be done <- this is your pure function, the one that calculates what should be deleted (it will be tested by unit tests)
+3) Apply changes and save state <- here you delete stats and save things to ns_config
+
+Basically I'm asking you to write a function that will calculate stats for deletion by current values of LastDecimationTimes, Levels, and current time.
+In order to do that you can move the logic from foldl to decimate_stats
+
+decimate_stats will have the following spec then:
+
+decimate_stats(Levels, LastDecimationTimes, Now) -> {StatsToDelete :: [{StartTS, EndTS}], NewDecimationTimes}
+
+In this case unit tests for decimate_stats should be easier to understand and verify, because you look only at "input" (settings) and final "output" (what is deleted) and you can ignore all intermediate states and data structures.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2020-12-15 19:26:31.000000000
+MISMATCHED INLINE COMMENT
+Line:1042, src/prometheus_cfg.erl -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2020-12-19 03:13:38.000000000
+MISMATCHED INLINE COMMENT
+Line:1227, src/prometheus_cfg.erl -> thanks, that's exactly what I asked
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2020-12-15 19:26:31.000000000
+MISMATCHED INLINE COMMENT
+Line:1227, src/prometheus_cfg.erl -> Let me try...
+----------------------------------------------------------------------------------------------------------------------

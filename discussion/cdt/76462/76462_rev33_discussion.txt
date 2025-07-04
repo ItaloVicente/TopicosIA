@@ -1,0 +1,178 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 497166: Support the user using the 'run' command in the gdb console
+
+This commit introduces a PersistentPTY.  By using it, we now allow the
+user to restart the process from the GDB console (by pressing 'run').
+In this case, the I/O will continue using the PersistentPTY.
+
+Previously, the PTY would have been closed, and GDB would fail to
+restart the process because it would fail to use the closed PTY.
+
+Change-Id: I395b402e297a2043af8fce33df163eddef9e6c7a
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: CI Bot
+Date: 2016-10-31 20:04:21.000000000
+Message: 
+Patch Set 33:
+
+Build Started https://hudson.eclipse.org/cdt/job/cdt-verify/6473/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2016-10-31 22:36:21.000000000
+Message: 
+Patch Set 33: Verified+1
+
+Build Successful 
+
+https://hudson.eclipse.org/cdt/job/cdt-verify/6473/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc Dumais
+Date: 2016-11-03 17:04:20.000000000
+Message: 
+Patch Set 33: Code-Review+1 Verified+1
+
+(1 comment)
+
+Salut Marc,
+
+Very nice patch - I could find nothing wrong with the code. Here are a few things I noticed while testing:
+
+- If we terminate the debug session while the GDB console is synchronously executing a command, the console stays "stuck": it's no longer possible to type new commands, including "run". 
+
+- When restarting a debug session by typing "run" in the debugger console, the Debug View leaves the process node collapsed. I think this is because we are missing an event: "DataModelInitializedEvent". It's normally generated when we launch, in FinalLaunchSequence#stepDataModelInitializationComplete().
+
+- When we use "run" to restart a session, the preference / launch configuration setting "Stop on startup at: (main)" is neutered. It's because we do not re-set the temporary breakpoint. If the execution did stop, it would, as a side effect, expand the process and thread nodes in the DV (see previous comment)
+
+I think not directly related to this patch, but conceptually related a bit:
+- when in a remote debug session, when we terminate, 2 entried appear in the DV, under the launch node: "<terminated> inferior name" and "<terminated> exit value:". If we restart that session by typing "run" in the console, the first one disappears, but the second stays, at the same level as the process node (i.e. just on top of the GDB node).
+Line:119, dsf-gdb/org.eclipse.cdt.dsf.gdb/src/org/eclipse/cdt/dsf/mi/service/command/MIInferiorProcess.java -> typo: "if that the"
+ -> "whether the"
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc Khouzam
+Date: 2016-11-03 20:27:57.000000000
+Message: 
+Patch Set 33:
+
+> - If we terminate the debug session while the GDB console is synchronously executing a
+> command, the console stays "stuck": it's no longer possible to type new commands,
+> including "run".
+
+I assume you mean that we terminate just the inferior (while having the preference to
+keep GDB alive).  In that case, yes, I can reproduce the problem.
+Good find!  This looks like a GDB bug.  I'll report it.
+However, we can do something to improve the situation for 7.12 by first interrupting
+the inferior automatically before terminating it.  We do this in all-stop anyway, so
+for GDB 7.12 which uses thew new console, we can do it all the time.  I'll code that up.
+   
+> - When restarting a debug session by typing "run" in the debugger console, the Debug
+> View leaves the process node collapsed. I think this is because we are missing an
+> event: "DataModelInitializedEvent". It's normally generated when we launch,
+> in FinalLaunchSequence#stepDataModelInitializationComplete().
+
+I hadn't paid attention to that.  That is interesting.  I will look into it further.
+
+> - When we use "run" to restart a session, the preference / launch configuration
+> setting "Stop on startup at: (main)" is neutered. It's because we do not re-set
+> the temporary breakpoint. 
+
+This is on purpose.  When the user types 'run' in a normal GDB shell, GDB will
+just run the program; on the other hand the user can choose to type 'start'
+in a GDB shell, which would then stop at main.  I wanted to reproduce the same
+behaviour within CDT to keep same behaviour of the GDB shell.
+
+Note that we couldn't re-set the temporary breakpoint anyway, because by
+the time we find out that the user typed 'run', it is already too late.
+What we could do, if we did want to stop on main, would be to set a temporary
+breakpoint at main, so that it would always be there, in case the user typed 'run'.
+
+But I think being consistent with the GDB shell is probably desirable.
+
+What do you think?
+
+> If the execution did stop, it would, as a side effect,
+> expand the process and thread nodes in the DV (see previous comment)
+
+Hopefully there is a more generic solution for the expansion.
+
+> I think not directly related to this patch, but conceptually related a bit:
+> - when in a remote debug session, when we terminate, 2 entried appear in the DV,
+> under the launch node: "<terminated> inferior name" and "<terminated> exit value:".
+> If we restart that session by typing "run" in the console, the first one disappears,
+> but the second stays, at the same level as the process node (i.e. just on top of the GDB node).
+
+That is strange.  I'll look into it.  Is this an automatic remote, manual remote, or attach remote?
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc Khouzam
+Date: 2016-11-03 20:28:07.000000000
+Message: 
+Patch Set 34: Patch Set 33 was rebased
+----------------------------------------------------------------------------------------------------------------------
+Author: Marc Dumais
+Date: 2016-11-04 14:39:20.000000000
+Message: 
+Patch Set 33:
+
+> > - When we use "run" to restart a session, the preference / launch
+ > configuration
+ > > setting "Stop on startup at: (main)" is neutered. It's because we
+ > do not re-set
+ > > the temporary breakpoint.
+ > 
+ > This is on purpose.  When the user types 'run' in a normal GDB
+ > shell, GDB will
+ > just run the program; on the other hand the user can choose to type
+ > 'start'
+ > in a GDB shell, which would then stop at main.  I wanted to
+ > reproduce the same
+ > behaviour within CDT to keep same behaviour of the GDB shell.
+ > 
+ > Note that we couldn't re-set the temporary breakpoint anyway,
+ > because by
+ > the time we find out that the user typed 'run', it is already too
+ > late.
+ > What we could do, if we did want to stop on main, would be to set a
+ > temporary
+ > breakpoint at main, so that it would always be there, in case the
+ > user typed 'run'.
+ > 
+ > But I think being consistent with the GDB shell is probably
+ > desirable.
+ > 
+ > What do you think?
+ > 
+agreed.
+
+ > > If the execution did stop, it would, as a side effect,
+ > > expand the process and thread nodes in the DV (see previous
+ > comment)
+ > 
+ > Hopefully there is a more generic solution for the expansion.
+
+agreed.
+
+ > > I think not directly related to this patch, but conceptually
+ > related a bit:
+ > > - when in a remote debug session, when we terminate, 2 entried
+ > appear in the DV,
+ > > under the launch node: "<terminated> inferior name" and
+ > "<terminated> exit value:".
+ > > If we restart that session by typing "run" in the console, the
+ > first one disappears,
+ > > but the second stays, at the same level as the process node (i.e.
+ > just on top of the GDB node).
+ > 
+ > That is strange.  I'll look into it.  Is this an automatic remote,
+ > manual remote, or attach remote?
+
+It was an automatic remote
+----------------------------------------------------------------------------------------------------------------------
+Author: Gerrit Code Review
+Date: 2016-11-14 20:30:26.000000000
+Message: 
+Change has been successfully rebased as 39c781f81a1687260024c03dc30b8c92e19c327d by Marc Khouzam
+----------------------------------------------------------------------------------------------------------------------

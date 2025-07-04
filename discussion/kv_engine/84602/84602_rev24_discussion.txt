@@ -1,0 +1,89 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-24572: Stop Collection aware DCP from sending empty snapshots
+
+If a DCP stream is configured with filtering enabled and the filter
+results in 0 mutations, we still send snapshot markers to the client.
+
+"Hey here's 500 to 510" ... silence
+
+In a needle/haystack situation, the client looking for needles will
+get frequent snapshot markers triggered by the mutations made against
+the haystack, it is preferential that the needle client gets nothing
+until the needle collection is touched.
+
+To recap on snapshots - a DCP snapshot is "a series of commands that
+is guaranteed to contain a unique set of keys.", it isn't necessarily
+representative of a disk checkpoint (commit).
+
+Prior to this commit we may then do the following:
+
+checkpoint:  0   1   2   3   4
+            [a1, b1, a2, b2, b3]
+
+some example snapshot possibilities {start, end, commands}
+
+unfiltered:
+
+  {0, 0, a1}, {1, 1, b1}, {2, 2, a2}, {3, 3, b2}, {4, 4, b3}
+  {0, 1, a1,b1}, {2, 2, a2}, {3, 3, b2}, {4, 4, b3}
+  {0, 1, a1,b1}, {2, 2, a2}, {3, 4, b2,b3}
+
+filtered-a:
+
+  {0, 0, a1}, {1, 1, }, {2, 2, a2}, {3, 3, a3}, {4, 4, }
+  {0, 1, a1}, {2, 2, a2}, {3, 3, a3}, {4, 4, }
+  {0, 1, a1}, {2, 2, a2}, {3, 4, a3}
+
+As shown some of the possible filtered permutations DCP may send
+
+1. We send empty snapshots, a marker with no commands
+2. We send partial snapshots e.g. {3, 4, a3} tells the client about
+ an end of 4, but never sent command 4 (which unfiltered does). A
+ client may expect 4 to trigger something...
+
+With this change, filtering is moved earlier in the stream flow, now
+when we build the 'readyQueue' we apply filtering allowing the
+existing empty checkpoint/snapshot logic to prevent an empty snapshot
+being sent and ensures correct start/end seqnos.
+
+The examples now...
+
+filtered-a:
+
+  {0, 0, a1}, {2, 2, a2}, {3, 3, a3}
+  {0, 0, a1}, {2, 2, a2}, {3, 3, a3}
+  {0, 0, a1}, {2, 2, a2}, {3, 3, a3}
+
+The update shows no empty snapshots and correct start/end.
+
+Change-Id: I3379a9ea4ff11aed4f287f6cb688c8af0eecd8db
+Reviewed-on: http://review.couchbase.org/84602
+Reviewed-by: Dave Rigby <daver@couchbase.com>
+Tested-by: Build Bot <build@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2017-12-07 12:23:29.000000000
+Message: 
+Change has been successfully cherry-picked as 513d8e79c29fafe176f0f695bb02a9d77fcc1de5 by Dave Rigby
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2017-12-07 12:23:37.000000000
+Message: 
+Patch Set 24:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv-engine-master-post-commit/2869/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2017-12-07 12:53:57.000000000
+Message: 
+Patch Set 24:
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv-engine-master-post-commit/2869/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

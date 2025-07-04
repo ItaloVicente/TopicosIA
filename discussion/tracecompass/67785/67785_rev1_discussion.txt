@@ -1,0 +1,155 @@
+======================================================================================================================
+DESCRIPTION:
+
+tmf: add quickFilter to AbstractTmfStateProvider
+
+This patch adds a pre-filter to the buffered blocking queue entry
+on the TmfStateProvider. This allows events to be discarded before
+being enqueued.
+
+An example quick filter is provided by the KernelStateProvider.
+The performance gain with a null backend is 5-10% on the
+KernelAnalysisBenchmark. On faster hard drives, like ssds, this
+patch will incur more interresting performance gains.
+
+Change-Id: I800019e22d418ca4e959475da945a717c1b00b85
+Signed-off-by: Matthew Khouzam <matthew.khouzam@ericsson.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Matthew Khouzam
+Date: 2016-03-04 02:09:58.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2016-03-04 02:24:27.000000000
+Message: 
+Patch Set 1:
+
+Build Started https://hudson.eclipse.org/tracecompass/job/tracecompass-gerrit/6645/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2016-03-04 03:05:36.000000000
+Message: 
+Patch Set 1: Verified-1
+
+Build Failed 
+
+https://hudson.eclipse.org/tracecompass/job/tracecompass-gerrit/6645/ : FAILURE
+----------------------------------------------------------------------------------------------------------------------
+Author: Genevieve Bastien
+Date: 2016-03-07 19:06:57.000000000
+Message: 
+Patch Set 1: Code-Review-1
+
+Is it such a bottleneck to put all the events in the queue?
+
+The problem I foresee is this: soon, we'll want to add a getEndTime to the analysis to know up till what time information is available (bug 488757). And analysis.endTime != stateSystem.endTime because stateSystem.endTime = time of the last interval insertion. So no intervals, no end time update. 
+
+For the analysis, getEndTime means, is it safe to query up to time t. So we would update endTime after processing an event, even though the event does not participate in the state system (no event may participate in some cases!). This patch would prevent updating the end time in case of no frequent state system updates and may block unnecessarily other analyses.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthew Khouzam
+Date: 2016-03-07 21:13:22.000000000
+Message: 
+Patch Set 1:
+
+hrm, that's an interesting point, I'm not a super fan of this implementation, especially since statistics count will count everything.
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2016-03-08 01:08:43.000000000
+Message: 
+Patch Set 1:
+
+The events that would get quick-filtered (I would go for the term "early filter" personally) would be known to not change the state, so it should not influence whether intervals are created or not, so should not affect the SS end time.
+
+Sending events through a blocking queue does have some overhead, so doing some early filtering to avoid that overhead when we know for sure the event won't be needed, that could help. It should be benchmarked solidly to justify it though, because this is solely an optimization (events would get filtered by the standard handleEvent() method anyway).
+
+This could fit nicely with the concept of analysis requirements: if said event is not in the requirements, it can get early-filtered. It could be implemented in the base class and implementations wouldn't even have to worry about it. Now if only the requirements were not broken xD
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthew Khouzam
+Date: 2016-03-08 01:50:06.000000000
+Message: 
+Patch Set 1:
+
+So Genevieve said:
+we need analysis endtime.
+
+Alex said:
+These events don't affect the analysis.
+
+I am asking:
+What is analysis end time? is it trace.getCurrentEndTime? is it the last processed event? the last given event?
+----------------------------------------------------------------------------------------------------------------------
+Author: Genevieve Bastien
+Date: 2016-03-08 03:49:24.000000000
+Message: 
+Patch Set 1:
+
+Alex said:
+Those events do not affect state system end time
+
+Geneviève said:
+The analysis end time is not the state system end time. It is the last event that was processed (-1?), whether or not it changed the state because at that time, we know for sure whether we do or don't have the information requested.
+
+If this patch goes in, if there happens to be no event to be processed, then analysis end time will be start time. Other analysis expecting answer at time t will be blocked instead of receiving a null response.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthew Khouzam
+Date: 2016-03-08 14:53:35.000000000
+Message: 
+Patch Set 1:
+
+So to be clear.... 
+
+The analysis end time is the trace end time + whatever lag is incurred by the bbq?
+So the last even processed by the analysis which could be earlier than the trace end?
+----------------------------------------------------------------------------------------------------------------------
+Author: Alexandre Montplaisir
+Date: 2016-03-08 22:20:10.000000000
+Message: 
+Patch Set 1:
+
+State providers do not track their latest time, do they? If a particular one does need to, then it should not filter any events at the early-filter stage. The early-filter is just a way to bypass the event queue when it knows the event will be of no use.
+
+@Matthew, you should open a bug on bugzilla to track this, it's still at the stage of design discussions ;)
+----------------------------------------------------------------------------------------------------------------------
+Author: Genevieve Bastien
+Date: 2016-03-09 01:40:53.000000000
+Message: 
+Patch Set 1:
+
+I just thought of something. We could keep track of the last filtered event time (skipTime) and whenever we hit an empty queue, instead of just waiting forever, the thread could periodically update its end time to the last skipTime. This way the analysis would still progress and all events do not have to go through the queue. 
+
+But there would be more processing in case of empty queue. And that would have to be well synchronized to make sure we don't skip ahead in time if an event was enqueued while updating the end time to a later skipped event.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthew Khouzam
+Date: 2016-03-09 02:49:33.000000000
+Message: 
+Patch Set 1:
+
+@Genevieve, I already have a patch that does that, I didn't push it to not appear overly... special. ;)
+
+@Alex, yes. I will
+----------------------------------------------------------------------------------------------------------------------
+Author: Genevieve Bastien
+Date: 2016-03-09 03:00:12.000000000
+Message: 
+Patch Set 1:
+
+@Matthew what? So there's a patch for that? Now's the time to take the rabbit out
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthew Khouzam
+Date: 2016-03-09 03:06:55.000000000
+Message: 
+Patch Set 1:
+
+fyi : https://bugs.eclipse.org/bugs/show_bug.cgi?id=489255
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthew Khouzam
+Date: 2016-03-15 21:32:02.000000000
+Message: 
+Patch Set 1:
+
+This is a simple change that worked better than my complicated previous patch to keep the analysis end time correct.
+----------------------------------------------------------------------------------------------------------------------

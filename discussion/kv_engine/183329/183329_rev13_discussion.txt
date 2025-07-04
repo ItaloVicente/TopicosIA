@@ -1,0 +1,134 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-53053: Add QuotaSharingItemPager
+
+Added a new subclass of ItemPager which evicts items from a set of
+buckets and stops eviction when sum(mem_used) < sum(low_wat).
+
+The QuotaSharingItemPager's schedulePagingVisitors implementation uses
+the CrossBucketVisitorAdapter to schedule paging visitors for all
+buckets sharing HT quotas.
+
+The adapter round-robins which bucket's paging visitor gets to run.
+This is done to avoid evicting more items from buckets which have more
+items resident below the MFU eviction threshold (HTs more densely
+populated with such items, which would be faster to evict from if we
+were just running the visitors concurrently without syncronisation).
+
+The QuotaSharingItemPager instance will be moved to the
+QuotaSharingManager and shared between buckets with quota sharing
+enabled in a future patch. For now, just create one per engine, so we
+can test the implementation in the degenerate case where we only have
+one bucket running with quota-sharing.
+
+Change-Id: I5c285db14e438cf159cde181de91b838549b706a
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Vesko Karaganev
+Date: 2022-12-15 10:26:48.000000000
+Message: 
+Uploaded patch set 13.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-12-15 12:16:02.000000000
+Message: 
+Patch Set 13: Verified+1
+
+Build Successful 
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_format_9/21798/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_tidy-master/22204/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-windows-master/51514/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/43244/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.macos/job/master/23767/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux-debug/job/master/961/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.libFuzzer/job/master/11922/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux-CE/job/master/24245/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/25526/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.linux/job/master/24660/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/32664/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/kv_engine.aarch64-linux/job/master/12011/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-12-15 13:38:17.000000000
+Message: 
+Patch Set 13: Code-Review-1
+
+(6 comments)
+Line:20, /COMMIT_MSG -> synchronisation
+
+File Comment: /PATCHSET_LEVEL -> Only partially reviewed (up to quota_sharing_item_pager.h)
+Line:7052, engines/ep/src/ep_engine.cc -> configuration.json? Might want a new value for cross-Bucket concurrent pagers.
+
+Line:7063, engines/ep/src/ep_engine.cc -> We shouldn't need to cancel before run - just set an initialSleep time of INT_MAX.
+
+(Note cancel means it's not listed in the set of tasks the ExecutorPool is tracking).
+
+Line:115, engines/ep/src/item_pager.h -> Somewhat orthogonal to this change, but we should look at getting rid of periodic sleeping for Item Pagers - I think we _should_ be able to make it entirely event-driven.
+
+Line:40, engines/ep/src/quota_sharing_item_pager.h -> You probably don't need an explicit constructor for a 5-arg ctor and there's no other constructors...
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Vesko Karaganev
+Date: 2022-12-16 10:13:55.000000000
+MISMATCHED INLINE COMMENT
+Line:20, /COMMIT_MSG -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Vesko Karaganev
+Date: 2022-12-16 11:43:15.000000000
+MISMATCHED INLINE COMMENT
+Line:7052, engines/ep/src/ep_engine.cc -> Could we possibly have these in memcached.json?
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-12-16 13:11:22.000000000
+MISMATCHED INLINE COMMENT
+Line:7052, engines/ep/src/ep_engine.cc -> Not sure mem_used would be an input. 
+
+We probably want to put it the "memcached" settings - while it's not directly a setting for memcached / all engines, that does give us a single location where if the value changes multiple buckets can listen and pick up the difference - for example how num_storage_threads works.
+----------------------------------------------------------------------------------------------------------------------
+Author: Vesko Karaganev
+Date: 2022-12-16 10:13:55.000000000
+MISMATCHED INLINE COMMENT
+Line:7052, engines/ep/src/ep_engine.cc -> I thought that is per-engine configuration? 
+
+(I was thinking what would make sense once we have all of the CBMS work done (paging + memory condition triggers + bg fetching) is to benchmark what makes sense in configurations more similar to what we expect in production. It might make sense to have a num_pagers_per_bucket or similar, or maybe a formula to compute that from mem_used?)
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-12-16 13:11:22.000000000
+MISMATCHED INLINE COMMENT
+Line:7063, engines/ep/src/ep_engine.cc -> A future patch is fine.
+----------------------------------------------------------------------------------------------------------------------
+Author: Vesko Karaganev
+Date: 2022-12-16 10:13:55.000000000
+MISMATCHED INLINE COMMENT
+Line:7063, engines/ep/src/ep_engine.cc -> Agreed. This is what the existing implementation does, I've just moved that into this factory method. I think changing it in a future patch might be cleaner as the initialSleep is a hard-coded value of 10s inside the ItemPager base class?
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2022-12-16 13:11:22.000000000
+MISMATCHED INLINE COMMENT
+Line:115, engines/ep/src/item_pager.h -> Yes.
+----------------------------------------------------------------------------------------------------------------------
+Author: Vesko Karaganev
+Date: 2022-12-16 10:13:55.000000000
+MISMATCHED INLINE COMMENT
+Line:115, engines/ep/src/item_pager.h -> Ack. Would we also be removing the pager_sleep_time_ms config?
+----------------------------------------------------------------------------------------------------------------------
+Author: Vesko Karaganev
+Date: 2022-12-16 10:13:55.000000000
+MISMATCHED INLINE COMMENT
+Line:40, engines/ep/src/quota_sharing_item_pager.h -> Done
+----------------------------------------------------------------------------------------------------------------------

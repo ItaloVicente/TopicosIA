@@ -1,0 +1,154 @@
+======================================================================================================================
+DESCRIPTION:
+
+PackBitmapIndexV1: support parallel loading of revidx
+
+Optionally allow loading a reverse index in parallel to reading
+bitmap index from storage to improve overall PackBitmapIndexV1
+create latency. Since reverse index is constructed from pack
+index, loading of pack index (if not in cache) could also
+happen in parallel in a separate thread. Thus latency of
+PackBitmapIndexV1 creation could be max(time_to_read_bitmap,
+time_to_load_reverse_index).
+
+Add new option to DfsReaderOptions to control parallel reverse index
+loading. Static cached thread pool is added to PackBitmapIndexV1 for
+reverse index loading, and when not in use consumes minimal resources.
+
+A unit test is added.
+
+Signed-off-by: Alina Djamankulova <adjama@google.com>
+Change-Id: Ia37a1d739631d053e8bddb925ac8b0b81d22379e
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Alina Djamankulova
+Date: 2021-11-29 19:12:34.000000000
+Message: 
+Patch Set 3: Patch Set 2 was rebased
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2021-11-29 19:12:42.000000000
+Message: 
+Patch Set 3:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline.java11/503/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2021-11-29 19:22:15.000000000
+Message: 
+Patch Set 3: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline.java11/503/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Alina Djamankulova
+Date: 2021-11-29 19:24:04.000000000
+Message: 
+Patch Set 3:
+
+Friendly ping.
+----------------------------------------------------------------------------------------------------------------------
+Author: Ivan Frade
+Date: 2021-11-29 22:44:10.000000000
+Message: 
+Patch Set 3:
+
+(9 comments)
+
+Many comments, but all minor.
+
+The only remaining "big" question is if we want to expose the option in DfsReaderOptions (or assume true).
+Line:11, /COMMIT_MSG -> This is the solution you are proposing, could you move it to a second paragraph? Maybe add afterwards the "This reduces the latency from (x + y) to max(x, y)".
+
+Line:13, /COMMIT_MSG -> Do you mean something else? Based on previous sentence, pack index should be ready to build the reverse index (?!).
+
+Line:17, /COMMIT_MSG -> Do we need to expose this option? Could we just assume true (for DFS) and false when not explicitely mentioned (i.e. using the older constructor).
+
+Thinking that a new option is a path to maintain/test, and if we expose it we won't get rid of it easily.
+
+Line:21, /COMMIT_MSG -> Thanks for the test! I think you don't need to mention it in the commit message.
+
+Line:44, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/dfs/DfsReaderOptions.java -> You don't need to invoke this here (the boolean will be false by default).
+
+Line:123, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/dfs/DfsReaderOptions.java -> Optional: Could we shorten this name? Does it need the "for bitmap"? maybe e.g. loadRevIndexInParallel? (not sure this is an improvement, but has less characters).
+
+Line:127, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/dfs/DfsReaderOptions.java -> with?
+
+Line:130, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/dfs/DfsReaderOptions.java -> typo
+
+Line:95, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/PackBitmapIndexV1.java -> Optional: for the case of "no parallel loading", would it be clearer implementing a Future that wraps a function and invokes it in the Future::get? 
+
+Here it would do: 
+Future<PackReverseIndex> reverseIndexFuture = loadParallelRevIndex ? executor... : asFuture(reverseIndexSupplier::get);
+
+and below: this.reverseIndex = reverseIndexFuture.get();
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Alina Djamankulova
+Date: 2021-12-03 19:08:51.000000000
+MISMATCHED INLINE COMMENT
+Line:11, /COMMIT_MSG -> I re-worded. I made paragraph 2 clear about why the change is needed and moved implementation details in the third paragraph.
+----------------------------------------------------------------------------------------------------------------------
+Author: Alina Djamankulova
+Date: 2021-12-03 19:08:51.000000000
+MISMATCHED INLINE COMMENT
+Line:13, /COMMIT_MSG -> Well, the way I worded it might not be the best. I am just going to remove that sentence.
+
+True, idx should be ready, but it may not be, so it'll be loaded first. Here are two cases to demonstrate the changes.
+
+case 1 - index is NOT in cache, revIdx is not NOT in cache
+threadRevIdx - 1. load index from storage, t(idx) 2. compute revIdx, t(revIdx)
+threadMain - 1. load bitmap from storage, t(bitmap)
+Time: max(t(idx) + t(revIdx), t(bitmap))
+Without parallel: t(bitmap) + t(idx) + t(revIdx)
+
+case 2 - index is in cache, revIdx is not NOT in cache
+threadRevIdx - 1. compute revIdx, t(revIdx)
+threadMain - 1. load bitmap from storage, t(bitmap)
+Time: max(t(revIdx), t(bitmap))
+Without parallel: t(bitmap) + t(revIdx)
+
+That's why I added just one extra parallel call to load revIdx and not both, because idx will be loaded for revIdx anyways.
+----------------------------------------------------------------------------------------------------------------------
+Author: Alina Djamankulova
+Date: 2021-12-03 19:08:51.000000000
+MISMATCHED INLINE COMMENT
+Line:17, /COMMIT_MSG -> I added this as an option on purpose because I want to be extra careful not to break/change default behavior, be able to easily fallback and allow experimenting with the new option.
+
+I plan to leave it as an option in DfsReadOptions and not remove later. We at Google will set this value to true explictly.
+----------------------------------------------------------------------------------------------------------------------
+Author: Alina Djamankulova
+Date: 2021-12-03 19:08:51.000000000
+MISMATCHED INLINE COMMENT
+Line:21, /COMMIT_MSG -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Alina Djamankulova
+Date: 2021-12-03 19:08:51.000000000
+MISMATCHED INLINE COMMENT
+Line:44, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/dfs/DfsReaderOptions.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Alina Djamankulova
+Date: 2021-12-03 19:08:51.000000000
+MISMATCHED INLINE COMMENT
+Line:123, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/dfs/DfsReaderOptions.java -> Thanks for the suggestion.
+----------------------------------------------------------------------------------------------------------------------
+Author: Alina Djamankulova
+Date: 2021-12-03 19:08:51.000000000
+MISMATCHED INLINE COMMENT
+Line:127, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/dfs/DfsReaderOptions.java -> Remove bitmap since name was changed
+----------------------------------------------------------------------------------------------------------------------
+Author: Alina Djamankulova
+Date: 2021-12-03 19:08:51.000000000
+MISMATCHED INLINE COMMENT
+Line:130, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/dfs/DfsReaderOptions.java -> Yes :), this was removed.
+----------------------------------------------------------------------------------------------------------------------
+Author: Alina Djamankulova
+Date: 2021-12-03 19:08:51.000000000
+MISMATCHED INLINE COMMENT
+Line:95, org.eclipse.jgit/src/org/eclipse/jgit/internal/storage/file/PackBitmapIndexV1.java -> I did not wrap supplier with future because it's not a basic supplier, but one that throws IOException. So to wrap it up I'd need to catch it and re-throw. It gets uglier.
+
+I'll leave it as is.
+----------------------------------------------------------------------------------------------------------------------

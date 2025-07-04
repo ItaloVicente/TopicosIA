@@ -1,0 +1,123 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-25427 [1/n] Move GET_META to memcached - Add new `get_meta()` into engines.
+
+GET_META command is currently implemented in engines (ep, default,
+ ewouldblock) under `unknown_command()`. Memcached does not know
+about GET_META, thus the MCBP request/response decoding/encoding
+are delegated to the engines.
+With this change we want to move all MCBP processing to memcached
+and make the engines to peform only the bucket operations (i.e.,
+retrieving the item metadata from memory or disk).
+This first patch adds the new `get_meta()` functions into engines
+and updates the engine testsuites to use the new API.
+For now we do not switch the execution to the new implementation,
+we will switch in a following patch.
+
+Change-Id: Idda5e377d35a257287f39ef66e7915eb0ff22ef0
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Paolo Cocchi
+Date: 2017-08-23 17:02:40.000000000
+Message: 
+Patch Set 18: Patch Set 17 was rebased
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2017-08-23 17:40:22.000000000
+Message: 
+Patch Set 18: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/2160/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master/2078/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/2126/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/2129/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/1935/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/665/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Oliver Downard
+Date: 2017-08-23 20:04:20.000000000
+Message: 
+Patch Set 18: Code-Review-1
+
+(2 comments)
+
+Looking good! 2 minor nits
+Line:7, /COMMIT_MSG -> Long line
+
+Line:569, engines/default_engine/default_engine.cc -> nit: braced initialization may be easier to read here
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2017-08-24 07:56:02.000000000
+Message: 
+Patch Set 18: Code-Review-1
+
+(1 comment)
+Line:1486, engines/ep/tests/ep_testsuite_xdcr.cc -> In this scenario, if I assign to `meta` the same Cas value that I use for calling `set_with_meta()` below, then `set_with_meta()` returns PROTOCOL_BINARY_RESPONSE_KEY_EEXISTS. Investigating on this.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2017-08-24 08:02:13.000000000
+Message: 
+Patch Set 18: Code-Review-1
+
+(12 comments)
+
+Functionality looks good. Few suggestions mostly in the test code to simplify things.
+Line:4131, engines/ep/src/ep_engine.cc -> This is potentially error-prone - say we add a new member to metadata (or itemMeta) - by manually copying each field you'll fail to copy any new ones.
+
+Better to add a conversion function to ItemMetaData - to_item_info() or similar which encapaltes the conversion - this both helps to make the code here more succinct, and also means that the conversion "lives with" the class itself so if we did change ItemMetaData we are much more likely to see the need to update the conversion.
+
+Line:264, engines/ep/src/ep_engine.h -> Given you're creating a new method for this; prefer to make `metadata` be a return value - for example similar to cb::EngineErrorCasPair.
+
+Line:590, engines/ep/tests/ep_test_apis.cc -> Style - helpful to comment the name of this as it's not obvious from the call site what the '0' is for. For example:
+
+ out = h1->get_meta(h, cookie, docKey, /*vb*/0);
+
+Line:837, engines/ep/tests/ep_testsuite.cc -> Style: `errorMetaPair` is a relatively long name, and moreover we /know/ it's type from the type name. Suggest just simply `meta` or `itemMeta` in future. 
+
+(No need to change now).
+
+Line:840, engines/ep/tests/ep_testsuite.cc -> Style: When comparing bools; is simpler to use the check() macro:
+
+ check(get_meta(h, h1, ...));
+
+Line:4166, engines/ep/tests/ep_testsuite.cc -> You can remove the static_cast<> by comparing to the constant of the correct type: `cb::engine_errc::success`
+
+Line:4184, engines/ep/tests/ep_testsuite.cc -> Style: Prefer to construct the object directly. Similar to previous comment, this is more robust and future proof - if we changed ItemMetaData to add/remove a member, the code would fail to compile if you missed out an element in the constructor call. 
+
+It's also shorter / simpler code.
+
+Line:4450, engines/ep/tests/ep_testsuite.cc -> Thinking about these kinds of check more; I think they are unnecessary - if get_meta() returns true, then errorMetaPair.first *must* be success, given that's what the implementation always does.
+
+If you wanted to be particularly paranoid you could add a check like this to ep_test_apis::get_meta(), just before the return; but I think there's no need to perform it every time in each test.
+
+(Obviously if a particular test is checking for non-success then you'll still need to check that).
+
+Line:1021, engines/ep/tests/ep_testsuite_basic.cc -> This is arguably overly-verbose/complex - you could simply keep the initial value of errorMetaPair, and use a second EngineErrorMetadataPair variable for the get_meta() call at line 1028. Then you can just compare firstMeta.cas, exptime etc to secondMeta.cas, ...
+
+Line:224, engines/ep/tests/ep_testsuite_xdcr.cc -> Style: You don't need this variable until line 235 - try to minimise variable scope. See http://isocpp.github.io/CppCoreGuidelines/CppCoreGuidelines#es21-dont-introduce-a-variable-or-constant-before-you-need-to-use-it
+
+Line:1411, engines/ep/tests/ep_testsuite_xdcr.cc -> As previous, use ItemMetaData constructor.
+
+Line:349, include/memcached/engine.h -> Remove - the function doesn't take this param
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Paolo Cocchi
+Date: 2017-08-24 08:13:27.000000000
+Message: 
+Patch Set 18:
+
+Within the update of ep_testsuites (ep_testsuite.cc, ep_testsuite_basic.cc and ep_testsuite_xdcr.cc) to use the new `get_meta()`, there is an attempt to not use the global variables formerly used by the old `get_meta()`. This increases this size of this change considerably (in particular because of ep_testsuite_xdcr.cc). 
+Maybe we prefer to go here with the former way and move this part as an improvement in a future change?
+----------------------------------------------------------------------------------------------------------------------

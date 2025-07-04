@@ -1,0 +1,70 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-25822: Create separate mutex for pending_io
+
+The LIBEVENT_THREAD::mutex currently guards the whole state of the
+worker thread - as such it is acquired by the worker thread when it
+starts processing event(s) for a connection, and only unlocked when it
+finishes with that connection.
+
+The state guarded includes the pending_io set; which is (primarily):
+
+a) Read at the start of the event loop (to re-register connections in
+   libevent).
+
+b) Written by notify_io_complete when background threads want to
+   wakeup frontend threads.
+
+Profiling of the LIBEVENT_THREAD::mutex wait/lock times shows that
+callers of notify_io_complete (notably ConnManager and DCP
+ConnNotifier task) can end up waiting for long periods (~100ms in
+local testing) to simply add a connection to the pending set.
+
+To improve this, add a separate mutex which is only used for the
+pending_io set. This also requires a change to the data structure for
+the pending_io - we need to additionally record the pending status
+code against each connection.
+
+This is because previously this status (aiostat) was updated with
+LIBEVENT_THREAD::mutex held; therefore no worker thread could possibly
+be running. With the separate mutex this is no longer the case and we
+cannot simply write to aiostat as it may be being accessed by the
+worker. We obviously don't want to have to acquire
+LIBEVENT_THREAD::mutex to update it as that introduces the same
+problem. Instead we record the pending status with the connection in
+pending_io; and when we come to process pending_io in the worker
+thread (which already holds LIBEVENT_THREAD::mutex) we update aiostat
+with the pending status before running it's event loop).
+
+Change-Id: I89104af841c9e9c002315a5be954150b8867c3bd
+Reviewed-on: http://review.couchbase.org/94053
+Reviewed-by: Tim Bradgate <tim.bradgate@couchbase.com>
+Reviewed-by: Daniel Owen <owend@couchbase.com>
+Reviewed-by: Trond Norbye <trond.norbye@gmail.com>
+Tested-by: Build Bot <build@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Trond Norbye
+Date: 2018-05-14 08:50:09.000000000
+Message: 
+Change has been successfully cherry-picked as 0800742b84fbee52fb89ae1e81381bfa03295d95 by Trond Norbye
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-05-14 08:50:15.000000000
+Message: 
+Patch Set 3:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv-engine-vulcan-post-commit/111/
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-05-14 09:38:48.000000000
+Message: 
+Patch Set 3:
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv-engine-vulcan-post-commit/111/ : SUCCESS'
+----------------------------------------------------------------------------------------------------------------------

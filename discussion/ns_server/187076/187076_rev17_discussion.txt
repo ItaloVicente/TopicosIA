@@ -1,0 +1,167 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-55464: Add global_tasks for sample bucket statuses
+
+Adds a "taskId" parameter to the /pools/default/tasks endpoint, to
+fetch one or more tasks from global_tasks, for example:
+"?taskId=id_1&taskId=id_2"
+
+The json response will be a list of tasks with following keys:
+- task_id: unique identifier for the task requested
+- type: category for the task
+- status: last state the task reached
+- timestamp: time when the status was last updated
+- (optional) bucket: name of the bucket associated with the task
+- (optional) bucket_uuid: UUID of the associated bucket
+- extras: optional extra properties included in the last status update
+
+Example:
+
+[
+  {
+    "task_id": "c0935ed6-e390-4a8d-ba36-694f6e7e93d1",
+    "type": "loadingSampleBucket",
+    "status": "completed",
+    "timestamp": 1677065038,
+    "bucket": "beer-sample",
+    "bucket_uuid": "3757baf65b3e14ea9a16f0a394a860cf",
+    "extras": {}
+  }
+]
+
+To allow easy use of this endpoint, an additional "statusURI" field
+is added to the /sampleBuckets/install response, providing the URI for
+fetching the status of the requested sample bucket load task.
+
+To confirm that the tasks hash behaves the same, tasks_test.py was
+added, which also confirms that tasks can be added and fetched.
+
+Change-Id: I832c075c451a62da743ef1ae6c6b4e3a92ec90fe
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Peter Searby
+Date: 2023-03-03 16:55:25.000000000
+Message: 
+Uploaded patch set 17.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2023-03-03 16:55:36.000000000
+Message: 
+Patch Set 17:
+
+Build Started https://cv.jenkins.couchbase.com/job/ns-server-test/34930/ (1/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2023-03-03 16:55:40.000000000
+Message: 
+Patch Set 17:
+
+Build Started https://cv.jenkins.couchbase.com/job/ns-server-ns-test/2304/ (2/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2023-03-03 17:15:08.000000000
+Message: 
+Patch Set 17: Well-Formed-1
+
+Build Failed 
+
+https://cv.jenkins.couchbase.com/job/ns-server-ns-test/2304/ : FAILURE
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( https://cv.jenkins.couchbase.com/job/ns-server-ns-test/2304/ )
+
+https://cv.jenkins.couchbase.com/job/ns-server-test/34930/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2023-03-03 23:04:15.000000000
+Message: 
+Patch Set 17:
+
+(6 comments)
+Line:148, src/global_tasks.erl -> If you don't mind could you please rename 'refresh' to 'cleanup' - it would reflect the intent more accurately.
+
+Line:176, src/global_tasks.erl -> Could directly invoke exit(Error) here since this process is going to die anyways because of this error.
+
+Line:188, src/global_tasks.erl -> For my understanding, what does the parent_node prop signify?
+
+Line:204, src/global_tasks.erl -> I feel this can be simplified. Something along these lines: 
+
+format_task(Task) ->
+    BaseProps =
+        [task_id, ...],
+    BucketProps =
+        case bucket(Task) of
+            undefined ->
+                [];
+            _Bucket ->
+                [bucket, bucket_id]
+        end,
+
+    lists:foldr(
+      fun (Property, Acc) ->
+              [Acc | proplists:get_value(Property, Task)]
+      end, [] , BaseProps ++ BucketProps).
+
+Line:262, src/global_tasks.erl -> I don't think we should kill the global_tasks process if the chronicle transaction fails; because restarting this process wouldn't really help with the chronicle transactions succeeding. 
+
+Maybe what we could do is bubble up this error and in handle_info(refresh, _State) retry a cleanup sooner than the usual ?REFRESH_INTERVAL. What do you think?
+
+Line:346, src/global_tasks.erl -> Minor nit: would suggest now_secs/0.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2023-03-03 23:41:56.000000000
+Message: 
+Patch Set 17:
+
+(1 comment)
+Line:176, src/global_tasks.erl -> 'throw' is usually used for control flow, not for crashing.
+You can read about it here https://learnyousomeerlang.com/errors-and-exceptions.
+In this case error or exit fit better.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Peter Searby
+Date: 2023-03-06 16:07:11.000000000
+MISMATCHED INLINE COMMENT
+Line:148, src/global_tasks.erl -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Peter Searby
+Date: 2023-03-06 16:07:11.000000000
+MISMATCHED INLINE COMMENT
+Line:176, src/global_tasks.erl -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Peter Searby
+Date: 2023-03-07 14:41:21.000000000
+MISMATCHED INLINE COMMENT
+Line:188, src/global_tasks.erl -> Renamed it to source_node
+Still not too happy with this name, so I'd appreciate any better ideas
+----------------------------------------------------------------------------------------------------------------------
+Author: Peter Searby
+Date: 2023-03-06 16:07:11.000000000
+MISMATCHED INLINE COMMENT
+Line:188, src/global_tasks.erl -> It is meant to be the node that added the status, so the node which was handling the task. I don't like the name parent_node, just not sure what to call it.
+----------------------------------------------------------------------------------------------------------------------
+Author: Peter Searby
+Date: 2023-03-06 16:07:11.000000000
+MISMATCHED INLINE COMMENT
+Line:204, src/global_tasks.erl -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Peter Searby
+Date: 2023-03-06 16:07:11.000000000
+MISMATCHED INLINE COMMENT
+Line:262, src/global_tasks.erl -> Looking at the transaction code, the only error I could see that might occur is the not_found error when the tasks key is missing. Since we call cleanup only after initialise_tasks, and we exit in initialise_tasks when we get an error, I think we can assume something has gone quite wrong if we get an error here.
+
+Considering the possible behaviour:
+1. If we exit here, we'll restart global_tasks, and call initialise_tasks again, possibly recreating the tasks key in chronicle, or we fail repeatedly until chronicle is able to retrieve/set the tasks key.
+2. If instead we log a warning and carry on as normal, then we will attempt to cleanup every 60s and eventually it might start succeeding again.
+3. If we retry sooner then we are in the same situation as above but with more attempts to cleanup. I'm not sure if there is any value in attempting cleanup more often when there's an issue, since that might just make a problem worse
+
+For now I've gone with (2) but I'm open to considering other options
+----------------------------------------------------------------------------------------------------------------------
+Author: Peter Searby
+Date: 2023-03-06 16:07:11.000000000
+MISMATCHED INLINE COMMENT
+Line:346, src/global_tasks.erl -> Done
+----------------------------------------------------------------------------------------------------------------------

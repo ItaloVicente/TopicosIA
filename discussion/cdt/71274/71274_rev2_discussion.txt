@@ -1,0 +1,102 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 492230 - Replace buffer.append(a+b) calls
+
+When using a `StringBuilder` or `StringBuffer` to create a string message,
+using implicit string concatenation inside an `.append()` call will
+create a nested StringBuilder for the purposes of creating the arguments,
+which will subsequently be converted to a String and then passed to
+the outer StringBuilder.
+
+Skip the creation of the intermediate object and String by simply
+replacing such calls with `buffer.append(a).append(b)`.
+
+Change-Id: I4126aefb2272f06b08332e004d7ea76b6f02cdba
+Signed-off-by: Alex Blewitt <alex.blewitt@gmail.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Alex Blewitt
+Date: 2016-04-23 13:34:27.000000000
+Message: 
+Uploaded patch set 2: Patch Set 1 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2016-04-23 13:34:33.000000000
+Message: 
+Patch Set 2:
+
+Build Started https://hudson.eclipse.org/cdt/job/cdt-verify/5061/
+----------------------------------------------------------------------------------------------------------------------
+Author: CI Bot
+Date: 2016-04-23 14:19:59.000000000
+Message: 
+Patch Set 2: Verified+1
+
+Build Successful 
+
+https://hudson.eclipse.org/cdt/job/cdt-verify/5061/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Alex Blewitt
+Date: 2016-04-23 16:00:06.000000000
+Message: 
+Patch Set 2: Code-Review+1
+
+(10 comments)
+Line:48, build/org.eclipse.cdt.autotools.ui/src/org/eclipse/cdt/autotools/ui/editors/AutoconfPartitioner.java -> The StringBuilder was being used to concatenate something and then print it out afterwards. However this would occur for each partition; so for a resulting partition string of X, Y and Z bytes, the resulting buffer would be X+Y+Z long, followed by printing it out.
+
+If we instead print out each partition separately, with three (implicit) StringBuilder instances, we can have a single X, Y and Z sized StringBuffer. This means it's more likely to fit in the young generation and not be promoted. We can use the implicit StringBuilder generated from String concatenation as part of a System.out.println argument instead.
+
+Line:309, build/org.eclipse.cdt.autotools.ui/src/org/eclipse/cdt/internal/autotools/ui/text/hover/AutoconfTextHover.java -> Although I could have used an .append().append() format here, the line was pretty long as it was - and given that the first half of the if block had {} on it, I figured the second would benefit to have them as well.
+
+Line:37, build/org.eclipse.cdt.managedbuilder.core.tests/tests/org/eclipse/cdt/managedbuilder/core/tests/CustomOptionCommandGenerator.java -> This comes from the option.getCommand() at the front of the return statement, prior to running the sb.toString. Instead, prepend it to the front of the StringBuilder.
+
+Line:105, build/org.eclipse.cdt.managedbuilder.core.tests/tests/org/eclipse/cdt/managedbuilder/core/tests/Test30_2_CommandLineGenerator.java -> Technically this is less performant, because in the former case things like VAR_FIRST_CHAR are constants and thus can be compile time concatenated, as opposed to here where they are (in effect) two separate method calls. The alternative would be to find .append(CONST).append(OTHERCONST) and then replace those with the (equivalent) literal value. Frankly I'm not sure I think there's a benefit to having a VAR_FIRST_CHAR constant anyway and would recommend manual in-lining to e.g. "${" in this case.
+
+Or to put it another way, I'd recommend changing this line to: 
+
+sb.append("${").append(varName).append('}')
+
+Line:120, build/org.eclipse.cdt.managedbuilder.core/src/org/eclipse/cdt/managedbuilder/internal/core/ManagedCommandLineGenerator.java -> The +WHITESPACE.trim() is effectively a no-op that requires copying the string again. So potentially avoid this by not adding the whitespace at the end. The .trim is still necessary since the last array value might end in whitespace of course but there's no reason to want to do that.
+
+Line:99, build/org.eclipse.cdt.managedbuilder.core/src/org/eclipse/cdt/managedbuilder/makegen/gnu/DefaultGCCDependencyCalculator.java -> This is another place where excessive constants don't help. For example:
+
+.append(ECHO).append(WHITESPACE).append("-n").append(WHITESPACE)
+
+can be replaced with
+
+.append("echo -n ")
+
+In effect this is what happens at the moment in the Java compiler; but with the suggested fix this doesn't happen because I don't think .append(CONST).append(CONST) are squashed by javac.
+
+Line:295, build/org.eclipse.cdt.managedbuilder.core/src/org/eclipse/cdt/managedbuilder/makegen/gnu/DefaultGCCDependencyCalculator.java -> c.f. 
+
+sb.append(buildCmd).append(" >> ").append(depRule)
+
+Line:1224, build/org.eclipse.cdt.managedbuilder.core/src/org/eclipse/cdt/managedbuilder/makegen/gnu/GnuMakefileGenerator.java -> I think this would be a constant if we left it as is (although it would show up in an anti-pattern report)
+
+Line:46, core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/index/composite/cpp/CompositeCPPFunctionSpecialization.java -> Since we're using a single character here we can use the ' ' instead of the " " form - and thus we don't need the NON-NLS tag.
+
+Line:59, core/org.eclipse.cdt.ui/src/org/eclipse/cdt/internal/ui/text/CStringAutoIndentStrategy.java -> This NON-NLS is superfluous here; if we revisit it can be removed.
+
+Using '"' and '\"' appear to be equivalent; any preferences as to which is better?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Sergey Prigogin
+Date: 2016-04-24 04:03:19.000000000
+Message: 
+Patch Set 2:
+
+(2 comments)
+Line:59, core/org.eclipse.cdt.ui/src/org/eclipse/cdt/internal/ui/text/CStringAutoIndentStrategy.java -> '"' is fine
+
+Line:366, dsf/org.eclipse.cdt.dsf.ui/src/org/eclipse/cdt/dsf/debug/internal/ui/viewmodel/numberformat/detail/NumberFormatDetailPane.java -> Indentation is off.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Gerrit Code Review
+Date: 2016-04-25 20:50:37.000000000
+Message: 
+Change has been successfully merged into the git repository by Sergey Prigogin
+----------------------------------------------------------------------------------------------------------------------

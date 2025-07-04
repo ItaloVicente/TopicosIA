@@ -1,0 +1,111 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-26455: Allow correct processing of 'old' keys and separator changes
+
+A separator change event was only allowed when there are 0 active
+collections, however a change is allowed whilst logically deleted
+collections (and their keys) exist. Each separator change resulted
+in a single system event operating against a single system key. Thus
+a VB could have the following sequence of keys.
+
+    1  fruit::1
+    2  fruit::2
+    <fruit was deleted here>
+    <separator was changed here>
+    <fruit was recreated here>
+    6  fruit-1
+    7  fruit-2
+    <fruit was deleted here>
+    9  $collections::separator (value contains the new separator)
+    10 $collections::fruit (fruit recreated)
+    11 fruit#1
+    12 fruit#2
+
+The sequence hides some changes because we use unique keys, between
+seqno 2 ... 6 the separator must of changed from :: to -.
+
+The core issue is that when we process the old keys, e.g. whilst
+backfilling for DCP or performing collection deletion within
+compaction, seqno 1 and 2 will be incorrectly processed as the VB
+manifest has a separator of '#', we cannot correctly process fruit::
+or fruit- keys.
+
+The chosen solution is to ensure that each separator change generates
+a unique key, and we will embed the new separator in the key so we
+don't have to fetch values on code paths that are just doing
+key-scans. Thus our example sequence now looks as follows.
+
+    1  fruit::1
+    2  fruit::2
+    <fruit was deleted here>
+    4  $collections_separator::3::-
+    <fruit was recreated here>
+    6  fruit-1
+    7  fruit-2
+    <fruit was deleted here>
+    9  $collections_separator-8-#
+    10 $collections::fruit (fruit recreated)
+    11 fruit#1
+    12 fruit#2
+
+Now using these unique separator change keys, any code scanning the
+keys will encounter separator change events at the correct point in
+time, they can then break the key apart and move to the new separator
+before processing the subsequent keys. The collections eraser and
+KVStore scanning code now include a collections context which has
+data and code for doing this tracking.
+
+A final piece of the commit is the garbage collection of these unique
+keys. Whilst the eraser runs it tracks all historical separator change
+keys, because a separator change can only happen when 0 collections
+exist, it can assume that all but the latest separator change key are
+redundant once the compaction/erase has completed. This list of keys
+are simply deleted in the normal way by pushing a deleted Item into
+the checkpoint once compaction is complete.
+
+Change-Id: I4b38b04ed72d6b39ceded4a860c15260fd394118
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jim Walker
+Date: 2017-11-17 11:36:46.000000000
+Message: 
+Uploaded patch set 6: Patch Set 5 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2017-11-17 12:24:36.000000000
+Message: 
+Patch Set 6: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/4231/ : FAILURE
+
+Failure of a GoogleTest  ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/4231/ )
+
+Failure of a CTest test  21/111 Test  #16: ep-engine_ep_unit_tests ........................ ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/4231/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/4179/ : FAILURE
+
+Failure of a GoogleTest  ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/4179/ )
+
+Failure of a CTest test  23/107 Test  #19: ep-engine_ep_unit_tests .......................... ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/4179/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master/4032/ : FAILURE
+
+Failure of a GoogleTest  ( http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master/4032/ )
+
+Failure of a CTest test  21/106 Test  #18: ep-engine_ep_unit_tests .......................... ( http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master/4032/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/4391/ : FAILURE
+
+Failure of a GoogleTest  ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/4391/ )
+
+Failure of a CTest test  23/126 Test  #19: ep-engine_ep_unit_tests .......................... ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/4391/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/2730/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/3843/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------

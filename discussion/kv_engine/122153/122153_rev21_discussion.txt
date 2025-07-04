@@ -1,0 +1,120 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-38095: Refactor wrapper code to use WriteDocs API
+
+WriteDocs changes how local documents need to be handled. Instead of
+being able to write directly into magma's write cache, we have to use
+something similar to pendingReqs where we create a vector of local
+document requests to be inserted.
+
+Change-Id: I364ec8edbf2a8dbd3c2f44a0f31bb4d6a421f985
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Scott Lashley
+Date: 2020-03-26 00:04:10.000000000
+Message: 
+Uploaded patch set 21.
+----------------------------------------------------------------------------------------------------------------------
+Author: Scott Lashley
+Date: 2020-03-27 15:04:29.000000000
+Message: 
+Patch Set 21:
+
+(1 comment)
+Line:118, engines/ep/src/magma-kvstore/magma-kvstore.h -> I'm confused.
+The MagmaLocalReq is suppose to copy the object into the req to preserve the object. If we don't make a copy of the object, how can the object live past the scope?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-03-27 15:10:59.000000000
+Message: 
+Patch Set 21:
+
+(1 comment)
+Line:118, engines/ep/src/magma-kvstore/magma-kvstore.h -> By moving, as per the link. Currently you'll _always_ create a copy of (two) std::strings when performing the construction at line 118, as the arguments are passed by const ref.
+
+If you instead pass by value, then std::move into the class member variables, then if the call-site had an rvalue or similar then you avoid an unnecessary copy.
+
+It's probably not a big deal here given there's probably only 1 local doc per commit batch, but it's generally good style (as per the link).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Scott Lashley
+Date: 2020-03-27 15:41:14.000000000
+Message: 
+Patch Set 21:
+
+(1 comment)
+Line:221, engines/ep/src/magma-kvstore/magma-kvstore.cc -> At this point, magma::Slices don't take std::string_view. 
+We would have to add 3 extra functions so that we could take either string or string view to localReqAdd and localReqDelete.
+All the logger calls would need to convert the keys to strings to null terminate them so they print correctly.
+This seems to be a case where saving a few bytes of heap allocation that's done once is not worth the added complexity.
+What say you?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-03-27 15:43:59.000000000
+Message: 
+Patch Set 21:
+
+(1 comment)
+Line:221, engines/ep/src/magma-kvstore/magma-kvstore.cc -> Well, given a Slice is non-owning sequence of chars, you could just make it a type alias to std::string_view given that's identical. 
+
+You could also make it take std::string_view instead of std::string given std::string is implicitly conferable to std::string_view.
+
+Or you can leave it as-is if you wish, I'm only making recommendations to best / most efficient practice.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Scott Lashley
+Date: 2020-03-27 19:58:58.000000000
+Message: 
+Patch Set 21:
+
+(5 comments)
+Line:118, engines/ep/src/magma-kvstore/magma-kvstore.h -> Done
+
+Line:120, engines/ep/src/magma-kvstore/magma-kvstore.h -> Done
+
+Line:127, engines/ep/src/magma-kvstore/magma-kvstore.h -> Done
+
+Line:655, engines/ep/src/magma-kvstore/magma-kvstore.h -> Done
+
+Line:682, engines/ep/src/magma-kvstore/magma-kvstore.h -> Done
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-03-27 10:49:33.000000000
+MISMATCHED INLINE COMMENT
+Line:221, engines/ep/src/magma-kvstore/magma-kvstore.cc -> std::string_view is preferred given that doesn't require any heap allocation (and can be created as a constexpr at compile-time).
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-03-27 10:49:33.000000000
+MISMATCHED INLINE COMMENT
+Line:118, engines/ep/src/magma-kvstore/magma-kvstore.h -> Perf: You're performing unnecessary copies here - you're essentially forcing the constructor to perform a copy of the input parameter, irrespective of if it is a rvalue (i.e. could just be "consumed" and moved from).
+
+See https://clang.llvm.org/extra/clang-tidy/checks/modernize-pass-by-value.html
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-03-27 10:49:33.000000000
+MISMATCHED INLINE COMMENT
+Line:120, engines/ep/src/magma-kvstore/magma-kvstore.h -> Ditto
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-03-27 10:49:33.000000000
+MISMATCHED INLINE COMMENT
+Line:127, engines/ep/src/magma-kvstore/magma-kvstore.h -> I assume the reason for the unique_ptr indirection is because you are pre-calculating the magma::Slice objects as you add items to LocalDbReqs. This adds extra heap allocations (for every MagmaLocalReq instead of allocating within the vector), and is arguably more complicated.
+
+If you simply just accumulate MagmaLocalReqs into a std::vector (which could result in std::string moves as it resizes), but then just build all the Slices at the end (just before you actually commit the batch) then you can simplify and avoid this indirection.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-03-27 10:49:33.000000000
+MISMATCHED INLINE COMMENT
+Line:655, engines/ep/src/magma-kvstore/magma-kvstore.h -> This still seems a bit over-complex. Why not just add to LocalDbReqs, then at the point you assemble the Magma commit batch, iterate on localDBReqs and add every element to the commit batch?
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2020-03-27 10:49:33.000000000
+MISMATCHED INLINE COMMENT
+Line:682, engines/ep/src/magma-kvstore/magma-kvstore.h -> This doesn't really need to be a member function - given it's just a convenience (to convert a DetachedBuffer to a string before calling localReqAdd it can just be a static function. See http://isocpp.github.io/CppCoreGuidelines/CppCoreGuidelines#S-class
+----------------------------------------------------------------------------------------------------------------------

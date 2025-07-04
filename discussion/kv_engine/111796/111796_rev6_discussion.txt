@@ -1,0 +1,143 @@
+======================================================================================================================
+DESCRIPTION:
+
+EPStats: Disable memory tracking when destructing object
+
+When running ep_engine_benchmarks in Debug build, a crash is seen when
+destructing the EPStats object associated with the engine due to a
+recursive call to memory tracking exhausting the stack
+
+    ... repeats ...
+    frame #261987: 0x0000000100ca57db libmemcached_logger.1.0.0.dylib` operator new(count=<unavailable>)  + 11 at global_new_replacement.cc:71
+    frame #261988: 0x00007fff73e38922 libc++.1.dylib` std::logic_error::logic_error(char const*)  + 52
+    frame #261989: 0x00007fff73e2a7cd libc++.1.dylib` std::__1::__vector_base_common<true>::__throw_out_of_range() const  + 35
+    frame #261990: 0x0000000100032e52 ep_engine_benchmarks` std::__1::vector<folly::CachelinePadded<CoreLocalStats>, std::__1::allocator<folly::CachelinePadded<CoreLocalStats> > >::at(this=<unavailable>, __n=<unavailable>)  + 50 at vector:1521
+    frame #261991: 0x0000000100138b2c ep_engine_benchmarks` EPStats::memAllocated(this=0x000000010984b218, sz=32)  + 44 at stats.cc:164
+    frame #261992: 0x0000000100173f22 ep_engine_benchmarks` ObjectRegistry::memoryAllocated(mem=32)  + 82 at objectregistry.cc:198
+    frame #261993: 0x0000000100201e6f ep_engine_benchmarks` BenchmarkMemoryTracker::NewHook(ptr=<unavailable>, (null)=<unavailable>)  + 63 at benchmark_memory_tracker.cc:92
+    frame #261994: 0x00000001018127ad libplatform_so.0.1.0.dylib` ::cb_malloc(size=31)  + 29 at cb_malloc.cc:51
+    frame #261995: 0x0000000100ca57db libmemcached_logger.1.0.0.dylib` operator new(count=<unavailable>)  + 11 at global_new_replacement.cc:71
+    ... thrown logic error results in a memory allocation, which triggers memory tracking again ...
+    frame #261996: 0x00007fff73e38922 libc++.1.dylib` std::logic_error::logic_error(char const*)  + 52
+    frame #261997: 0x00007fff73e2a7cd libc++.1.dylib` std::__1::__vector_base_common<true>::__throw_out_of_range() const  + 35
+    frame #261998: 0x0000000100032e52 ep_engine_benchmarks` std::__1::vector<folly::CachelinePadded<CoreLocalStats>, std::__1::allocator<folly::CachelinePadded<CoreLocalStats> > >::at(this=<unavailable>, __n=<unavailable>)  + 50 at vector:1521
+    frame #261999: 0x0000000100138c0b ep_engine_benchmarks` EPStats::memDeallocated(this=0x000000010984b218, sz=5120)  + 43 at stats.cc:182
+    frame #262000: 0x0000000100173f92 ep_engine_benchmarks` ObjectRegistry::memoryDeallocated(mem=5120)  + 82 at objectregistry.cc:211
+    frame #262001: 0x0000000100201ea3 ep_engine_benchmarks` BenchmarkMemoryTracker::DeleteHook(ptr=<unavailable>)  + 35 at benchmark_memory_tracker.cc:101
+    frame #262002: 0x000000010181289e libplatform_so.0.1.0.dylib` ::cb_free(ptr=0x00000001098fa800)  + 14 at cb_malloc.cc:69
+    frame #262003: 0x00000001000d2e90 ep_engine_benchmarks` EventuallyPersistentEngine::~EventuallyPersistentEngine(this=0x000000010984b200)  + 288 at ep_engine.cc:6096
+    frame #262004: 0x000000010020fd6e ep_engine_benchmarks` SynchronousEPEngine::~SynchronousEPEngine(this=0x000000010984b200)  + 14 at mock_synchronous_ep_engine.h:46
+    frame #262005: 0x000000010020fd21 ep_engine_benchmarks` SynchronousEPEngineDeleter::operator(this=<unavailable>, engine=0x000000010984b200)(SynchronousEPEngine*)  + 33 at mock_synchronous_ep_engine.cc:94
+    frame #262006: 0x0000000100204710 ep_engine_benchmarks` EngineFixture::TearDown(benchmark::State const&) [inlined] std::__1::unique_ptr<SynchronousEPEngine, SynchronousEPEngineDeleter>::reset(this=<unavailable>)  + 112 at memory:2598
+    frame #262007: 0x00000001002046ea ep_engine_benchmarks` EngineFixture::TearDown(this=<unavailable>, state=<unavailable>)  + 74 at engine_fixture.cc:56
+
+The issue is that at the end of the destruction of the EPStats object
+(frame 262003), memory used by the CoreLocalStats sub-object of
+EPStats is freed, ultimately calling EPStats::memoryDeallocated (frame
+262000). This attempts to access the (now-deleted) CoreLocalStats
+object, which throws an out_of_range_error from std::vector. That in
+turn attempts to allocate memory via `operator new`, which calls
+EPStats::memoryAllocated (frame 261992) and we enter a loop...
+
+This only appears to happen in Debug builds; I assume the exact memory
+deallocation order is different in RelWithDebInfo and this somehow
+avoided.
+
+Fix by hoisting the deregistering of the current thread from
+EventuallyPersistentEngine::operator delete, to EPStats's dtor,
+given the EPStats object's own allocations will be freed in ~EPStats
+which is called from ~EventuallyPersistentEngine. We cannot do this in
+~EventuallyPersistentEngine because we MUST have a valid thread local
+engine ptr if we have to deallocate an Item as part of destruction of
+the CheckpointManager.
+
+This requires us to not have static EPStats lying around or we will
+destroy our ThreadLocals before the EPStats and fail to set them to
+a nullptr.
+
+Change-Id: Ifb130ec769c8fc0a307d15f9784ade2e18792249
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Ben Huddleston
+Date: 2019-10-23 13:28:18.000000000
+Message: 
+Uploaded patch set 6.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-10-23 13:36:07.000000000
+Message: 
+Patch Set 6: Code-Review-1
+
+(2 comments)
+Line:55, /COMMIT_MSG -> Not sure if it's particularly clean to move the onThreadSwitch to EPStats - that class in general doesn't care about the current thread (that's a property / managed by EPEngine).
+
+In terms of CheckpointManager ordering, isn't that destroyed as part of kvBucket being destroyed - which happens _before_ EPStats?
+
+Line:244, engines/ep/tests/module_tests/basic_ll_test.cc -> Not sure this sentence is particulary helpful going forward - certainly it explains why you're making the change, but you've already covered that in the commit message. 
+
+Comments in the code should ideally describe the _current_ state of the code.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2019-10-23 13:38:10.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+Line:55, /COMMIT_MSG -> Yeah, CheckpointManager is destructed before EPStats as part of destructing the KVBucket which is done when destructing the EventuallyPersistentEngine
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2019-10-23 13:39:26.000000000
+Message: 
+Patch Set 6:
+
+(1 comment)
+Line:55, /COMMIT_MSG -> Right, so you could just explicitly reset kvbucket(), then onThreadSwitch(nullptr) inside EPEngine dtor.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2019-10-23 13:47:54.000000000
+Message: 
+Patch Set 6: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/24327/ : ABORTED
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/24327/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/15261/ : ABORTED
+
+No problems were identified. If you know why this problem occurred, please add a suitable Cause for it. ( http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/15261/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/23255/ : ABORTED
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/23255/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/20730/ : ABORTED
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/20730/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/53/ : ABORTED
+
+Build which was aborted due to a newer patch set being uploaded for the given review. ( http://cv.jenkins.couchbase.com/job/kv_engine.threadsanitizer/job/master/53/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine.ASan-UBSan/job/master/7915/ : ABORTED
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master-CE/4901/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/21950/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2019-10-23 13:48:12.000000000
+MISMATCHED INLINE COMMENT
+Line:55, /COMMIT_MSG -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Ben Huddleston
+Date: 2019-10-23 13:48:12.000000000
+MISMATCHED INLINE COMMENT
+Line:244, engines/ep/tests/module_tests/basic_ll_test.cc -> Done
+----------------------------------------------------------------------------------------------------------------------

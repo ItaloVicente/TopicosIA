@@ -1,0 +1,102 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-25822: notifyStreamReady: Only notify conn on first added stream
+
+DcpProducer::notifyStreamReady(vbid) is called when there is new data
+available for the given vBucket. Currently this function schedules a
+wake up for the underlying connection if ready.pushUnique() returns
+true - i.e if that stream (vbucket) wasn't already ready to be
+processed.
+
+However, analysis of phosphor traces shows that we end up flagging a
+connection for wakeup multiple times - one per outstanding
+vBucket. While this is functionally safe (all but the first wakeup is
+ultimatly ignored), it has a non-zero performance cost:
+
+1. Each call to BufferLog::unpauseIfSpaceAvailable() (currently per
+   vBucket) calls ConnMap::notifyPausedConnection(schedule=true);
+   which adds an element to ConnMap::pendingNotifications.
+
+2. The DcpConnNotifier (NonIO) task calls notifyIOComplete() for each
+   element in ConnMap::pendingNotifications, which requires acquiring
+   pending_io.mutex for each element. However, these are added to a
+   map (keyed on Connection), so all but the first is essentially
+   ignored.
+
+Local testing showed up to 183 items being added to
+ConnMap::pendingNotifications; when there was only a single DCP
+connection. That is a non-negligible number of duplicates; each of
+which requires a mutex to be required.
+
+Given we only actually process the first wakeup for a given
+connection; change DcpReadyQueue::pushUnique() to only return true if
+the queue was previously empty. This means that we only call
+BufferLog::unpauseIfSpaceAvailable() once per connection.
+
+Change-Id: I44925ba2897f7b468426493e008b22f203d88419
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2018-05-14 11:22:36.000000000
+Message: 
+Uploaded patch set 1.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-05-14 12:04:25.000000000
+Message: 
+Patch Set 1: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-vulcan/291/ : FAILURE
+
+Failure of a GoogleTest  ( http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-vulcan/291/ )
+
+Failure of a CTest test  26/140 Test  #24: ep-engine_ep_unit_tests ...................................................... ( http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-vulcan/291/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/7957/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-vulcan/280/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-vulcan/382/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-vulcan/322/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-vulcan/370/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-undefinedsanitizer-vulcan/323/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-05-15 10:25:02.000000000
+Message: 
+Patch Set 1: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/7957/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-vulcan/280/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-vulcan/382/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-vulcan/322/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-vulcan/370/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-undefinedsanitizer-vulcan/323/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-vulcan/309/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2018-05-15 10:29:09.000000000
+Message: 
+Patch Set 1: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2018-05-16 11:28:53.000000000
+Message: 
+Patch Set 1: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------

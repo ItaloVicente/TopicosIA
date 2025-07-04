@@ -1,0 +1,181 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 576740 - Add a LRU resource cache for images
+
+Can be disable with system property:
+ "org.eclipse.jface.resource.cacheSize=0"
+Default cacheSize=300.
+
+Removes all hotspots from org.eclipse.jface.resource.ResourceManager
+
+Does not only affect ResourceManager but allows also repeated calls of
+setImage() to check for same Image instance and avoid that NO-OP.
+
+Especially from loading images for toolbar:
+The problem was that the former reference counting did destroy the
+images just before reloading them again.
+
+Caches all Images loaded from filesystem/url during startup of
+org.eclipse.sdk.ide. Only the light weight RGBColorDescriptor is
+destroyed during startup of org.eclipse.sdk.ide.
+
+Change-Id: I5bfd38dce66ebcc062e140098316fda826e7bf5e
+Signed-off-by: Joerg Kubitz <jkubitz-eclipse@gmx.de>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Jörg Kubitz
+Date: 2021-10-29 09:58:31.000000000
+Message: 
+Patch Set 11: Patch Set 10 was rebased
+----------------------------------------------------------------------------------------------------------------------
+Author: Platform Bot
+Date: 2021-10-29 10:00:49.000000000
+Message: 
+Patch Set 11:
+
+Build started https://ci.eclipse.org/platform/job/eclipse.platform.ui/job/86%252F186086%252F11/1/
+----------------------------------------------------------------------------------------------------------------------
+Author: Platform Bot
+Date: 2021-10-29 10:27:48.000000000
+Message: 
+Patch Set 11: Verified+1
+
+Build Succcess https://ci.eclipse.org/platform/job/eclipse.platform.ui/job/86%252F186086%252F11/1/
+----------------------------------------------------------------------------------------------------------------------
+Author: Jörg Kubitz
+Date: 2021-10-29 10:45:56.000000000
+Message: 
+Patch Set 11: Code-Review+1
+
+@Sebastian Zarnekow: mind to take a second look?
+----------------------------------------------------------------------------------------------------------------------
+Author: Jörg Kubitz
+Date: 2021-10-29 10:45:57.000000000
+Message: 
+Removed reviewer Sebastian Ratz.
+----------------------------------------------------------------------------------------------------------------------
+Author: Sebastian Zarnekow
+Date: 2021-10-29 17:15:51.000000000
+Message: 
+Patch Set 11:
+
+(6 comments)
+
+I certainly like that it is now enabled by default.
+I'm not terribly sure about the #shouldBeCached() - maybe this one should be protected instead of public.
+Line:56, bundles/org.eclipse.jface/src/org/eclipse/jface/resource/DeviceResourceDescriptor.java -> Since we are adding API here:
+Can you please describe what `cached` means in this context?
+Questions I'd like to answered by the API doc:
+- Where will it be cached?
+- Who is responsible for discarding the cache entry?
+- What happens if a client calls `destroyResource` with some cached instance?
+- What if false is returned for a costly resource?
+
+Line:58, bundles/org.eclipse.jface/src/org/eclipse/jface/resource/LazyResourceManager.java -> Assuming the descriptor is not yet in the map:
+We ask the parent to give us an object -> might be null -> I suspect there is no need to call leastRecentlyUsed.get(..) in that case, but only if the parent does return a non-null instance on find(..), right?
+I think leastRecentlyUsed.get(..) can be done from within the .get(..).
+It wouldn't make much of a difference though, except for saving the map lookup on the first get(..)
+
+Line:71, bundles/org.eclipse.jface/src/org/eclipse/jface/resource/LazyResourceManager.java -> I don't quite understand the `destroyed` comment here
+
+Line:79, bundles/org.eclipse.jface/src/org/eclipse/jface/resource/LazyResourceManager.java -> Nit: Typo `base on` -> `based on`
+
+Line:62, tests/org.eclipse.jface.tests/src/org/eclipse/jface/tests/images/LazyResourceManagerTest.java -> The tests is a little hard to understand at first. It might be useful to describe in a few words what these two maps are supposed to do and which invariant they ensure. Especially now that the destroy(..) impl of the TestResourceManager became more involving.
+
+Line:158, tests/org.eclipse.jface.tests/src/org/eclipse/jface/tests/images/LazyResourceManagerTest.java -> instead of the //cached 
+line comments, an assertCached(expected, mgr, descriptor) might be useful.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Sebastian Zarnekow
+Date: 2021-10-29 17:20:32.000000000
+Message: 
+Patch Set 11:
+
+(1 comment)
+Line:58, bundles/org.eclipse.jface/src/org/eclipse/jface/resource/LazyResourceManager.java -> Another thing: Should `get(..) and find(..)` even be attempted if the descriptor is not supposed to be cached? For uncached descriptors, the refcount of the parent will remain 1 and it will be immediately destroyed on the first destroy. Is that intentional?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Sebastian Zarnekow
+Date: 2021-10-29 17:50:20.000000000
+Message: 
+Patch Set 11:
+
+(1 comment)
+
+Joerg, I put a few more thoughts into the comment. I might have missed some crucial part of the logic, but to my understanding, the LazyResourceManager has the potential to destroy resources that are still in use.
+Line:63, bundles/org.eclipse.jface/src/org/eclipse/jface/resource/LazyResourceManager.java -> After thinking about the flow here a little more, I have another question.
+The comment made me wonder whether the following flow would destroy a resource that is still being used. Assuming we have a cache size of 1 to simplify the scenario.
+
+RD1 and RD2 are two DeviceResourceDescriptors.
+
+The following calls are happening.
+
+Object rd1_1 = myLazyResourceManager.create(RD1);
+Object rd2_1 = myLazyResourceManager.create(RD2);
+
+At this point, the parent has a refcount of 1 for both resource descriptors RD1, RD2. The LruMap is still empty.
+
+Two more calls:
+
+Object rd1_2 = myLazyResourceManager.create(RD1);
+Object rd2_2 = myLazyResourceManager.create(RD2);
+assertSame(rd1_1, rd1_2);
+assertSame(rd2_1, rd2_1);
+
+The LruMap is still empty, the parent has still a refcount of 1.
+Now:
+
+rd1_2 = null;
+myLazyResourceManager.destroy(RD1);
+
+The LruMap has a single entry now for RD1, the parent has still a refcount of 1.
+rd_1_1 is still in use.
+
+rd2_2 = null;
+myLazyResourceManager.destroy(RD2);
+
+A put happens on the LruMap for (RD2, parent). It would exceed its configured size and trigger a parent.destroy(RD1).
+
+At this point, the reference rd1_1 which was still valid, is corrupted.
+
+---
+
+I think the LazyResourceManager needs to maintain a refcount similar to what is done in the parent. Destroy would decrease the refCount and only when it reaches 0, the entry would be moved to the LruMap to eventually do the parent.destroy.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jörg Kubitz
+Date: 2021-10-29 17:58:25.000000000
+Message: 
+Patch Set 11: -Code-Review
+
+Sebastian, i am glad i asked you. I will look into it.
+Thanks for careful review.
+----------------------------------------------------------------------------------------------------------------------
+Author: Jörg Kubitz
+Date: 2021-10-29 22:27:52.000000000
+MISMATCHED INLINE COMMENT
+Line:58, bundles/org.eclipse.jface/src/org/eclipse/jface/resource/LazyResourceManager.java -> it's a harmless NO OP if leastRecentlyUsed.get(descriptor) is called if !leastRecentlyUsed.constains(descriptor)
+----------------------------------------------------------------------------------------------------------------------
+Author: Jörg Kubitz
+Date: 2021-10-29 22:27:52.000000000
+MISMATCHED INLINE COMMENT
+Line:58, bundles/org.eclipse.jface/src/org/eclipse/jface/resource/LazyResourceManager.java -> Ack
+----------------------------------------------------------------------------------------------------------------------
+Author: Jörg Kubitz
+Date: 2021-10-29 22:27:52.000000000
+MISMATCHED INLINE COMMENT
+Line:63, bundles/org.eclipse.jface/src/org/eclipse/jface/resource/LazyResourceManager.java -> Added test
+----------------------------------------------------------------------------------------------------------------------
+Author: Jörg Kubitz
+Date: 2021-10-29 22:27:52.000000000
+MISMATCHED INLINE COMMENT
+Line:71, bundles/org.eclipse.jface/src/org/eclipse/jface/resource/LazyResourceManager.java -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Jörg Kubitz
+Date: 2021-10-29 22:27:52.000000000
+MISMATCHED INLINE COMMENT
+Line:79, bundles/org.eclipse.jface/src/org/eclipse/jface/resource/LazyResourceManager.java -> Ack
+----------------------------------------------------------------------------------------------------------------------

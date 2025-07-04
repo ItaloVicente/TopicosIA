@@ -1,0 +1,185 @@
+======================================================================================================================
+DESCRIPTION:
+
+Bug 399829 - Wrong context for name lookup in dependent expression
+
+Change-Id: I96208fa437c0415bf0fc1fd7ec9f216e251eff83
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Sergey Prigogin
+Date: 2013-02-12 18:15:56.000000000
+Message: 
+Patch Set 1:
+
+I'm not convinced that the point of definition has to be supplied to ICPPEvaluation methods from outside. Do you have an example where the point of definition cannot be obtained by the evaluation code without external help?
+----------------------------------------------------------------------------------------------------------------------
+Author: Nathan Ridge
+Date: 2013-02-12 18:29:36.000000000
+Message: 
+Patch Set 1:
+
+What is the alternative to supplying the point of definition from the outside?
+----------------------------------------------------------------------------------------------------------------------
+Author: Sergey Prigogin
+Date: 2013-02-12 18:35:43.000000000
+Message: 
+Patch Set 1:
+
+Deriving it from the information already available to the evaluation. Since I'm not sure if it's always possible, I'm looking for an example proving the opposite.
+----------------------------------------------------------------------------------------------------------------------
+Author: Nathan Ridge
+Date: 2013-02-12 18:39:22.000000000
+Message: 
+Patch Set 1:
+
+Can you give me one example where it's possible? For example, consider an EvalUnary representing a call to operator++ on a sub-evaluation. What is the definition?
+----------------------------------------------------------------------------------------------------------------------
+Author: Sergey Prigogin
+Date: 2013-02-12 21:46:54.000000000
+Message: 
+Patch Set 1:
+
+If EvalUnary wraps EvalBinding, EvalBinding can probably determine the scope in which the binding is defined. It can then expose a method returning that scope. EvalUnary can obtain the scope by calling this method on its argument evaluation.
+----------------------------------------------------------------------------------------------------------------------
+Author: Nathan Ridge
+Date: 2013-02-12 22:17:11.000000000
+Message: 
+Patch Set 1:
+
+I don't think that the binding in an EvalBinding is the right thing to derive the scope from. The "point of definition" we are looking for is the point of definition of the template containing the dependent expression, not of a binding that the dependent expression might mention.
+
+Consider the following example:
+
+
+template <typename T>
+struct A
+{
+    static T x;
+};
+
+struct S{};
+
+namespace N
+{
+    S operator++(S);
+
+    template <class T>
+    struct impl
+    {
+        typedef decltype(++(A<T>::x)) type;
+    };
+}
+
+void test()
+{
+    typedef N::impl<S>::type type;
+}
+
+
+Here, the EvalBinding being wrapped wrapped by the EvalUnary is A<T>::x. The scope that we derive from that, the class scope of A<T>, is the wrong scope to look up the operator++. We want the scope of the binding impl<T>::type, which is what contains the dependent expression. Since this scope is external to the dependent expression, I don't think it can be derived from the contents of the dependent expression.
+----------------------------------------------------------------------------------------------------------------------
+Author: Sergey Prigogin
+Date: 2013-02-12 23:13:30.000000000
+Message: 
+Patch Set 1:
+
+Maybe the template definition should be passed to the constructor of the evaluation at creation time and stored inside the evaluation as a binding. What do you think of this approach?
+----------------------------------------------------------------------------------------------------------------------
+Author: Nathan Ridge
+Date: 2013-02-12 23:35:31.000000000
+Message: 
+Patch Set 1:
+
+That should be possible. Evaluations are typically created by IASTExpression.getEvaluation(). We can walk the AST up from the IASTExpression to see if we encounter an ICPPASTTemplateDeclaration. If so, we can get the declaration's name and resolve it to get the binding for the template. If we don't see an ICPPASTTemplateDeclaration, we can pass null for the binding (similar to how in this patch, null is passed as the point of definition if we're not in a template context).
+
+Does that seem reasonable? I can give it a try.
+
+Evaluations would have to persist the binding in the PDOM. I guess that's not a problem, other than that it makes the index larger?
+----------------------------------------------------------------------------------------------------------------------
+Author: Sergey Prigogin
+Date: 2013-02-13 00:30:39.000000000
+Message: 
+Patch Set 1:
+
+Adding a binding to every evaluation will increase its index size by 6 bytes, which is probably not a big deal since the number of evaluations in the index is not very large.
+----------------------------------------------------------------------------------------------------------------------
+Author: Nathan Ridge
+Date: 2013-02-13 04:52:55.000000000
+Message: 
+Patch Set 1:
+
+I am trying to implement your suggestion, but I am running into the following recursion:
+
+ - createBinding() is called on a template-id
+ - the template-id has a non-type template argument
+ - an evaluation needs to be created for the non-type template argument, and it needs a point-of-definition binding
+ - I search the AST upward from the non-type template argument to find an enclosing template decaration
+ - I get the template declaration's name ==> it's the same template-id
+ - I call resolveBinding() on the name
+ - createBinding() is called on the template-id...
+
+Any ideas on how to resolve this?
+----------------------------------------------------------------------------------------------------------------------
+Author: Markus Schorn
+Date: 2013-02-13 08:45:31.000000000
+Message: 
+Patch Set 1:
+
+Hi Nate!
+In general your idea looks good, however the logics when a LookupContext is created is not correct. At least in the following places I challenge the creation of the LookupContext object:
+
+CPPSemantics.costForFunctionCall(...): 
+   get it from LookupData?
+CPPSemantics.resolveFunctionDeclaration(...):
+   should be moved into CPPTemplates.instantiateFor...
+FunctionCost.performUDC(...):
+   must be passed into this method.
+CPPTemplates.instantiateBinding(...):
+   must be passed into this method.
+----------------------------------------------------------------------------------------------------------------------
+Author: Nathan Ridge
+Date: 2013-02-13 08:48:41.000000000
+Message: 
+Patch Set 1:
+
+Hi Markus,
+
+Sergey has proposed an alternative approach for fixing this bug (passing in the definition to evaluations when they are created). I have been working on that one.
+
+Which approach do you think is better?
+
+Thanks,
+Nate
+----------------------------------------------------------------------------------------------------------------------
+Author: Markus Schorn
+Date: 2013-02-13 08:57:49.000000000
+Message: 
+Patch Set 1:
+
+I agree with Sergey that the code is easier to understand if we store the point of definition with the dependent names, i.e. in the Evaluation objects.
+
+The recursion could be overcome be determining the point of definition lazy, i.e. when the evaluation object needs to be serialized, or when it is instantiated.
+----------------------------------------------------------------------------------------------------------------------
+Author: Nathan Ridge
+Date: 2013-02-13 09:38:30.000000000
+Message: 
+Patch Set 1:
+
+I have posted the alternative implementation at https://git.eclipse.org/r/#/c/10333/. I will keep this review around until we are sure we're using the new one.
+----------------------------------------------------------------------------------------------------------------------
+Author: Sergey Prigogin
+Date: 2013-02-20 04:18:53.000000000
+Message: 
+Patch Set 1: Do not submit
+
+Please abandon this change now.
+----------------------------------------------------------------------------------------------------------------------
+Author: Nathan Ridge
+Date: 2013-02-20 16:20:51.000000000
+Message: 
+Patch Set 1: Abandoned
+
+Abandoning in favour of the alternative approach at https://git.eclipse.org/r/#/c/10333/
+----------------------------------------------------------------------------------------------------------------------

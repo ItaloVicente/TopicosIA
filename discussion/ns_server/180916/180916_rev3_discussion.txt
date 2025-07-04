@@ -1,0 +1,179 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-54016 Add new TCP related tunables
+
+* tcp_keepalive_idle - number of seconds before first probe sent
+* tcp_keepalive_interval - number of seconds between each probe
+* tcp_keepalive_probes - number of probes missing before marked as dead
+
+Change-Id: Ieef76a80e23a2f8adaef5fc999353329e1c6dcd8
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Peter Searby
+Date: 2022-10-11 10:22:21.000000000
+Message: 
+Uploaded patch set 3.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-10-11 10:22:29.000000000
+Message: 
+Patch Set 3:
+
+Build Started https://cv.jenkins.couchbase.com/job/ns-server-test/31877/
+----------------------------------------------------------------------------------------------------------------------
+Author: Peter Searby
+Date: 2022-10-11 10:25:50.000000000
+Message: 
+Patch Set 3: Verified+1
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> Removed the tcp_user_timeout tuneable as the change for kv doesn't look like it will be merged soon. Will make a separate change for that so that this one can be merged sooner.
+----------------------------------------------------------------------------------------------------------------------
+Author: Restriction Checker
+Date: 2022-10-11 10:26:01.000000000
+Message: 
+Patch Set 3: Well-Formed+1
+
+Permission granted to commit: 
+
+https://server.jenkins.couchbase.com/job/restricted-branch-check/319253/artifact/restricted.html : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-10-11 10:42:33.000000000
+Message: 
+Patch Set 3: Well-Formed+1
+
+Build Successful 
+
+https://cv.jenkins.couchbase.com/job/ns-server-test/31877/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Neelima Premsankar
+Date: 2022-10-13 17:07:16.000000000
+Message: 
+Patch Set 3: Code-Review+2
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Finlay
+Date: 2022-10-13 17:26:02.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> Hi Peter:
+
+what happens in a mixed cluster (i.e. 7.1 and master) if on  user posts:
+
+POST host:8091/pools/default/settings/memcached/global -d tcp_keepalive_idle=120
+
+Obviously this will fail on a down-version node, but will succeed on an up-version node and the config will get updated and replicated. Will there be a problem on the down-version nodes?
+
+I think it would be useful for you to think about this theoretically - and also to test it. :-) Would be useful to check out the neo branch and build and create a mixed version cluster and see what happens. Hope you don't mind me giving you tese action items. :-)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Neelima Premsankar
+Date: 2022-10-13 17:45:20.000000000
+Message: 
+Patch Set 3: -Code-Review
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> Resetting in light of comment about testing mixed cluster.
+----------------------------------------------------------------------------------------------------------------------
+Author: Peter Searby
+Date: 2022-10-14 13:24:05.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> The post requests behaved as expected, with memcached.json only populated with the tcp_keepalive tunables on the up-version node.
+
+From the up-version perspective, tcp_keepalive seemed to work correctly still, with its socket options set as expected.
+
+I initially tested with the down-version node running on a mac which meant that I was unable to check its socket options. I was unable to get neo building on linux so I repeated the test with the down-version build on master prior to the kv and ns_server changes, and the up-version build on master after those changes.
+In this subsequent test, from the down-version perspective, there appears to be no problem and unsurprisingly the socket options are set to the prior default, unaffected by this change.
+
+I hope that is sufficient testing of the mixed cluster case for you.
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-10-14 16:16:52.000000000
+Message: 
+Patch Set 3:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> Hey Peter, I think there may have been a slight issue in your test setup because it would be impossible for ns_server to only set these options on the "up-version" node(s). It would be replicated to every node, regardless of compatibility version. The thing that saves you is that the types must be whitelisted before they end up in memcached.json.. but the larger issue is that this code will allow setting these values on the newer nodes, regardless if the compatibility version was set to the newest. I don't -think- this is likely what we want in this case (correct me if I am wrong!). 
+
+Generally, you don't want to enable new settings until all nodes are at X compat verison but even if you are OK with being able to set it on some nodes and not others, it still shouldn't be available until the compat version hits X on that local node, at the very least.
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Finlay
+Date: 2022-10-15 01:31:31.000000000
+Message: 
+Patch Set 3:
+
+(2 comments)
+File Comment: /PATCHSET_LEVEL -> Hey Bryan, Peter:
+
+If you look at the history of the updates to the supported supported_setting_names/0 you'll see that we've never added cluster compat mode protection when new keys are added. Generally the reason is that:
+
+(1) these APIs are very rarely invoked and 
+(2) it's safe to allow up-version nodes to update parameters to memcached, because the keys that get written to memcached.json are always filtered through the per-node memcached_config (i.e. white-listed as Bryan put it)
+
+Since it's safe, it's easier to not bother with cluster compat protection and keep this code simpler even it if's dubious to allow "config from future versions" to be replicated to "nodes running older versions". 
+
+I can go either way on what we decide to do in this case. (I guess I come down on the side of not bothering with the cluster compat protection.) However, if we decide to do the shortcut and retain the habit of the past of not bothering with cluster compat mode protection, then everyone needs to understand that we are taking a shortcut here and understand why the shortcut works in this case (and in general doesn't work.)
+
+I should add that I'm pretty sure that we've added memcached settings in maintenance releases in the past where there is no ability to add cluster compat mode protection (since there's no compat mode change on a maintenance release upgrade.) I wouldn't be surprised if we end up doing this again. So, even if we add cluster compat mode protection in this patch we may do the opposite in the future.
+
+Separately, there is an actual problem with this patch which prevents it getting merged right now, which I'll point out in a separate comment.
+Line:201, src/ns_config_default.erl -> We need to add an upgrade to memcached_defaults when upgrading to Elixir compat mode. If you look at do_upgrade_config_from_7_1_to_elixir/2, you'll see that we upgrade the per-node memcached_config key but don't upgrade the per-node memcached_defaults key.
+
+What this means is that nodes that are offline upgraded (i.e. shutdown and then upgraded with rpm -U or whatever the package manager is) will get the upgrades to memached_config but won't get the upgrades to memcached_defaults and this node will then fail to start because the memcached.json file won't be able to be created. 
+
+This upgrade was actually missed when this patch was +2'ed: https://review.couchbase.org/c/ns_server/+/168184. 
+
+To make sure that we understand everything and haven't introduced any issues, I think we need to carefully test this. Peter - can I ask you to run the following tests? (Please get help from others in the team to work through issues you hit trying to get the tests run -- Abhi - can you make sure that Peter has the help he needs?
+
+(1) Online upgrade test. 
+* Create a single node 7.1 cluster. Add an Elixir node (not running in serverless mode). Verify that you see the expected results when getting and setting memcached global settings on both the down version and up-version nodes. 
+* Then remove the 7.1 node and verify that reading and writing the memcached settings behave as expected.
+* Repeat this test for 6.6.5 -> Elixir.
+
+(2) Offline upgrade test.
+* Create a single node 7.1. cluster before we have fixed the memcached_defaults issue. Shutdown the node and perform an offline upgrade. Verify that the server fails to start. 
+* Fix the memcached_defaults issue. Verify that the server starts.
+* Repeat this test with 6.6.5 -> Elixir.
+
+The second of these tests is difficult to do. It can be done with cluster_run, but it's tricky and messy. Easiest might be to get a toy build and do the upgrade using vagrants or on AWS. 
+
+However, given the complexity here, I absolutely think we have to run all these tests and satisfy ourselves that the system is behaving correctly before we merge.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Peter Searby
+Date: 2022-10-18 12:56:47.000000000
+MISMATCHED INLINE COMMENT
+Line:201, src/ns_config_default.erl -> (1) Online upgrade test behaved exactly as expected
+(2) Offline upgrade test  had inconsistent results
+With a toy build used to upgrade on Linux, 7.1 -> Elixir was successful without any fix.
+However, 6.6 -> Elixir had the expected error with or without the fix.
+
+Abhi showed me that we can simply use cluster_run to test offline upgrades so I repeated my testing on my local dev environment instead of using toy builds.
+I added upgrade_key(memcached_defaults, DefaultConfig) to do_upgrade_config_from_7_1_to_elixir and updated get_current_version from 7.1 to elixir.
+The upgrade (from both madhatter and neo) still encounters the same error seen in https://issues.couchbase.com/browse/MB-50405:
+```
+exception error: no match of right hand side value false
+      in function  memcached_config_mgr:expand_memcached_config/2
+```
+
+
+Adding these fixes directly to master also breaks offline upgrades, with the same memcached_config_mgr:expand_memcached_config error. This was because the error was caused by configuration_profile (https://review.couchbase.org/c/ns_server/+/175957) not being found, rather than the tcp_keepalive changes.
+I don’t fully understand what is happening, but it seems that we are expanding deployment_model to configuration_profile but giving deployment_model a default value, without giving configuration_profile a default value in memcached_defaults.
+
+To test this idea, I added {configuration_profile, ?DEFAULT_PROFILE_STR}, after {deployment_model, ?DEFAULT_PROFILE_BIN}, in memcached_defaults and this appears to completely work. This was tested with upgrading from both madhatter and neo locally. I am now building a toy build and will test on Linux to ensure the tcp_keepalive tunables work after an offline upgrade.
+
+Bryan, as it was your change which added the parameter, does my addition of {configuration_profile, ?DEFAULT_PROFILE_STR} make sense as the fix, or will might this cause other problems?
+----------------------------------------------------------------------------------------------------------------------
+Author: Peter Searby
+Date: 2022-10-18 15:10:34.000000000
+MISMATCHED INLINE COMMENT
+Line:201, src/ns_config_default.erl -> Tested with a toy build and both upgrades work with no issues
+----------------------------------------------------------------------------------------------------------------------

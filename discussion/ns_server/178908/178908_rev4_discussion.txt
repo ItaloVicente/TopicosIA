@@ -1,0 +1,180 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-52349: Add exit_on_first_error flag for wait_many/3.
+
+- async:wait_many/1 doesn't abort all the asyncs when one of the
+  async fails because async:call_many/3 processes the results from the
+  child asyncs, serially.
+
+  Consider the following example:
+  - Spawn 2 childs asyncs Child1 and Child2.
+  - Child2 exits immediately, but Child1 is chugging along.
+  - wait_many([Child1, Child2]) will not process Child2's exit until
+    Child1 returns a result.
+
+When the newly introduced 'exit_on_first_error' flag is passed, we sits
+in a receive loop constantly checking the results/'DOWN' messages from all
+the Child asyncs and returns when:
+
+1. All the asyncs have completed or
+2. When one of the asyncs fails and all the other child asyncs have been
+   aborted.
+
+Change-Id: Icf3c14762b6e461d9afef1430070d78c34450f36
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Hareen Kancharla
+Date: 2022-08-25 19:40:16.000000000
+Message: 
+Uploaded patch set 4.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-08-25 19:40:27.000000000
+Message: 
+Patch Set 4:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-test/31312/
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2022-08-25 19:42:10.000000000
+Message: 
+Patch Set 4: Verified+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-08-25 19:46:34.000000000
+Message: 
+Patch Set 4: Well-Formed+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/ns-server-test/31312/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2022-08-25 19:50:48.000000000
+Message: 
+Patch Set 4:
+
+(2 comments)
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2022-08-31 23:29:08.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:452, src/async.erl -> I would suggest to keep the same promise as in regular recv_many - return the results in the same order as Pid's passed in. This way we'll be able to easily use this flag in map if we'll ever need it.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2022-08-31 23:53:12.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+Line:458, src/async.erl -> Do I understand correctly that this function can change the order of absolutely unrelated massages in this process's mailbox (by resending it)?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2022-09-01 22:42:54.000000000
+MISMATCHED INLINE COMMENT
+Line:452, src/async.erl -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2022-09-06 18:47:46.000000000
+MISMATCHED INLINE COMMENT
+Line:458, src/async.erl -> ^Ack. Thanks for pointing it out, Timofey. I guess the limitations are:
+1. We can never peek at a message in the mailbox without popping it. 
+2. We can't perform atomic operations on the mailbox; i.e avoid adding new message to the mailbox before we can add back the existing messages.
+
+I have tried solving this by spawn_link-ing a child process for each of the asyncs we try to retrieve a result from. I am also appending a special tag ('$async_result') which would help with pattern matching exactly those messages in the parent mailbox.
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2022-09-01 22:54:03.000000000
+MISMATCHED INLINE COMMENT
+Line:458, src/async.erl -> Well, there are actually three types of messages here (correct me if I'm wrong):
+1) Relevant messages
+2) Irrelevant message that look like relevant
+3) Other irrelevant messages
+
+We can do what ever we want with messages that we are triggering here (these are "relevant messages") while the order of #2 and #3 we should keep I think.
+What it looks like from the code we currently can:
+a) put #2 behind #3
+b) rearrange some #2 if we receive some of them during the process of "resending"
+
+For example:
+
+Say some process has the following messages in its mailbox before we call this function:
+
+[{DOWN, 1, 0, 0, 0},
+ {DOWN, 2, 0, 0, 0},
+ message1,
+ message2]
+ 
+and during the call the process receives {DOWN, 3, 0, 0, 0}
+then after the async call we might have something like the following:
+
+[{DOWN, 3, 0, 0, 0},
+ message1,
+ message2,
+ {DOWN, 1, 0, 0, 0},
+ {DOWN, 2, 0, 0, 0}]
+
+Do you think this is correct?
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2022-09-01 22:42:54.000000000
+MISMATCHED INLINE COMMENT
+Line:458, src/async.erl -> It changes the global order of processing the message, but does maintain the relative order amongst the "relevant messages" and "irrelevant messages". 
+
+If the set of related messages were [{a,1}, {b,2}] and unrelated messages were [{c, 3}, {d, 4}] and then if the initial mailbox was:
+
+HEAD -> [{a,1}, {d, 4}, {b, 2}, {c, 3}] -> TAIL.
+
+After processing the "relevant message" and resending the "irrelevant messages" the mail will look as:
+
+HEAD -> [{d, 4}, {c, 3}] -> TAIL.
+
+When we re-send we reverse the list of PendingMsgs in recv_any_loop_resend_pending/3. Therefore any future 'receive' will see the "irrelevant messages" in the order they were received.
+
+I think Alexi was just being cautious to not drop on the floor any "irrelevant message" that shared the same type as the "relevant message". {Ref, R} in this case.
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2022-09-02 00:00:18.000000000
+MISMATCHED INLINE COMMENT
+Line:458, src/async.erl -> oo I see what you are saying! This code is incorrect - it messes with the order amongst #2 and #3 messages. I have some other crude ideas on how to fix it - let me think about them for a bit longer. Thanks for pointing this out Timofey.
+
+Separately, I think we are ok in the baseline since with_any/3 isn't used anywhere else.
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2022-09-02 01:06:39.000000000
+MISMATCHED INLINE COMMENT
+Line:458, src/async.erl -> I am now adding #3 messages to the PendingMsgs list as well, Timofey. So effectively both #2 and #3 messages will be in the PendingMsg list and when we now resend messages via recv_any_loop_resend_pending/3 the order amongst those messages should be maintained too.
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2022-09-02 01:52:11.000000000
+MISMATCHED INLINE COMMENT
+Line:458, src/async.erl -> To be honest I'm not sure it is possible to fix this.
+There still will be a race:
+
+(loop)
+Message1 -> mailbox
+Read Message1 -> PendingMsgs
+Message2 -> mailbox
+Read Message2 -> PendingMsgs
+(exit loop)
+Message3 -> mailbox
+(resend PendingMsgs)
+Message1 -> mailbox
+Message2 -> mailbox
+
+in the end we have:
+
+[Message3, Message1, Message2]
+
+while it should be
+
+[Message1, Message2, Message3]
+----------------------------------------------------------------------------------------------------------------------

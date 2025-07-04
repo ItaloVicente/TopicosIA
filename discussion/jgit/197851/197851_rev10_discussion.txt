@@ -1,0 +1,232 @@
+======================================================================================================================
+DESCRIPTION:
+
+PackWriterBitmapPreparer: do not include annotated tags in bitmap
+
+The annotated tags should be excluded from the bitmap associated
+with the heads-only packfile. However, this was not happening
+because of the check of exclusion of the peeled object instead
+of the objectId to be excluded from the bitmap.
+
+Sample use-case:
+
+refs/heads/main
+  ^
+  |
+ commit1 <-- commit2 <- annotated-tag1 <- tag1
+  ^
+  |
+ commit0
+
+When creating a bitmap for the above commit graph, before this
+change all the commits are included (3 bitmaps), which is
+incorrect, because all commits reachable from annotated tags
+should not be included.
+
+The heads-only bitmap should include only commit0 and commit1
+but because PackWriterBitPreparer was checking for the peeled
+pointer of tag1 to be excluded (commit2) which was not found in
+the list of tags to exclude (annotated-tag1), the commit2 was
+included, even if it wasn't reachable only from the head.
+
+Add an additional check for exclusion of the original objectId
+for allowing the exclusion of annotated tags and their pointed
+commits. Add one specific test associated with an annotated tag
+for making sure that this use-case is covered also.
+
+Bug: 581267
+Signed-off-by: Luca Milanesio <luca.milanesio@gmail.com>
+Change-Id: Iff2bfc6587153001837220189a120ead9ac649dc
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Matthias Sohn
+Date: 2023-01-19 00:42:27.000000000
+Message: 
+Uploaded patch set 10: Patch Set 9 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2023-01-19 00:42:40.000000000
+Message: 
+Patch Set 10:
+
+Build Started https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/5936/
+----------------------------------------------------------------------------------------------------------------------
+Author: JGit Bot
+Date: 2023-01-19 00:51:29.000000000
+Message: 
+Patch Set 10: Verified+1
+
+Build Successful 
+
+https://ci.eclipse.org/jgit/job/stable/job/jgit.gerrit-pipeline/5936/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2023-01-20 20:45:28.000000000
+Message: 
+Patch Set 10:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> @Ivan @David @Matthias any further feedback?
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2023-01-31 15:25:27.000000000
+MISMATCHED INLINE COMMENT
+File Comment: /PATCHSET_LEVEL -> ok, now I understand why timing given in my last comment looked so upside down.
+Running gc itself also benefits from an existing bitmap index and its content.
+
+I did another round of tests where I first deleted the bitmap index, then run gc and run gc again where it benefits from the bitmap index created in the first run.
+I did that with and without this patch and here are the results:
+
+Without this patch:
+
+1. run, no bitmap index available for jgit gc
+
+ $ time java_args="-Xmx32g -XX:+UseParallelGC" jgit gc
+ Pack refs:              100% (2005665/2005665) [0.051s]
+ Counting objects:       8743892 [55.709s]
+ Finding sources:        100% (8743892/8743892) [30.235s]
+ Getting sizes:          100% (1777531/1777531) [2.938s]
+ Writing objects:        100% (8743892/8743892) [1:27.686m]
+ Selecting commits:      616301 [4.630s]
+ Selecting commits:      100% (616301/616301) [15.633s]
+ Building bitmaps:       100% (8908/8908) [5:03.022m]
+ Counting objects:       26983761 [13:21.511m]
+ Finding sources:        100% (26983761/26983761) [49.113s]
+ Getting sizes:          100% (2255625/2255625) [2.849s]
+ Writing objects:        100% (26983761/26983761) [2:48.035m]
+ Prune loose objects also found in pack files: 100% (3/3) [0.000s]
+ Prune loose, unreferenced objects: 100% (3/3) [0.000s]
+
+ real	26m32.767s
+ user	25m15.270s
+ sys	2m53.616s
+
+2. run, using bitmap index from previous run
+
+ $ time java_args="-Xmx32g -XX:+UseParallelGC" jgit gc
+ Pack refs:              100% (2005665/2005665) [0.049s]
+ Counting objects:       8743892 [55.334s]
+ Finding sources:        100% (8743892/8743892) [31.467s]
+ Getting sizes:          100% (1777531/1777531) [2.906s]
+ Writing objects:        100% (8743892/8743892) [1:29.360m]
+ Selecting commits:      50130 [1.193s]
+ Selecting commits:      100% (50130/50130) [1.520s]
+ Building bitmaps:       100% (8897/8897) [33:46.534m]
+ Counting objects:       26983761 [13:13.325m]
+ Finding sources:        100% (26983761/26983761) [49.583s]
+ Getting sizes:          100% (2255625/2255625) [2.730s]
+ Writing objects:        100% (26983761/26983761) [2:57.012m]
+ Prune loose objects also found in pack files: 100% (3/3) [0.000s]
+ Prune loose, unreferenced objects: 100% (3/3) [0.000s]
+
+ real	55m2.050s
+ user	54m14.827s
+ sys	3m3.969s
+
+Interestingly the bitmap index created without your patch slows down running another gc by more than a factor of 2
+
+With this patch:
+
+1. run, no bitmap index available for jgit gc
+
+ $ time java_args="-Xmx32g -XX:+UseParallelGC" jgit gc
+ Pack refs:              100% (2005665/2005665) [0.049s]
+ Counting objects:       8743892 [54.129s]
+ Finding sources:        100% (8743892/8743892) [32.999s]
+ Getting sizes:          100% (1777531/1777531) [2.032s]
+ Writing objects:        100% (8743892/8743892) [1:30.843m]
+ Selecting commits:      616269 [4.176s]
+ Selecting commits:      100% (616269/616269) [16.106s]
+ Building bitmaps:       100% (1987/1987) [3:04.195m]
+ Counting objects:       26983761 [20:01.611m]
+ Finding sources:        100% (26983761/26983761) [53.714s]
+ Getting sizes:          100% (2255625/2255625) [3.426s]
+ Writing objects:        100% (26983761/26983761) [2:54.481m]
+ Prune loose objects also found in pack files: 100% (3/3) [0.000s]
+ Prune loose, unreferenced objects: 100% (3/3) [0.000s]
+
+ real	31m28.703s
+ user	29m1.518s
+ sys	3m3.728s
+
+The first gc was a bit slower than without your patch. Computing the bitmap index is faster since it has to traverse less of the overall version graph. Counting objects reachable from non-heads is slower, not sure why.
+
+2. run, using bitmap index from previous run
+
+ $ time java_args="-Xmx32g -XX:+UseParallelGC" jgit gc
+ Pack refs:              100% (2005665/2005665) [0.047s]
+ Counting objects:       8743892 [56.365s]
+ Finding sources:        100% (8743892/8743892) [29.802s]
+ Getting sizes:          100% (1777531/1777531) [2.938s]
+ Writing objects:        100% (8743892/8743892) [1:31.495m]
+ Selecting commits:      50098 [0.842s]
+ Selecting commits:      100% (50098/50098) [1.241s]
+ Building bitmaps:       100% (1976/1976) [1:26.572m]
+ Counting objects:       26983761 [11:04.738m]
+ Finding sources:        100% (26983761/26983761) [50.086s]
+ Getting sizes:          100% (2255625/2255625) [2.675s]
+ Writing objects:        100% (26983761/26983761) [2:48.654m]
+ Prune loose objects also found in pack files: 100% (3/3) [0.000s]
+ Prune loose, unreferenced objects: 100% (3/3) [0.000s]
+
+ real	20m26.318s
+ user	19m3.091s
+ sys	2m50.885s
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2023-01-30 09:56:53.000000000
+MISMATCHED INLINE COMMENT
+File Comment: /PATCHSET_LEVEL -> in the repository I tested with only 3 are lightweight tags, the other 1216 are annotated tags
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2023-01-23 16:09:27.000000000
+MISMATCHED INLINE COMMENT
+File Comment: /PATCHSET_LEVEL -> Do you have measurements for some repositories (preferably public so I can try to reproduce) showing performance improvements ? What are the stats of these repos ?
+
+I tried with a mirror clone of a huge internal repository having 20m commits, 2.3m refs, 1k branches and 1.2k tags and couldn't find a significant difference in performance of both running jgit gc (around 78min) and cloning from that repo after the gc. I cloned (`--bare` but not `--mirror`) on the same machine via file:// protocol, clones took around 3min.
+Size of the bitmap index with this change for this repo is 167MB, with the predecessor change 176MB.
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2023-01-30 10:26:02.000000000
+MISMATCHED INLINE COMMENT
+File Comment: /PATCHSET_LEVEL -> I believe the bitmap can still keep up with 1216 additional annotated tags, but not in my case with 88k annotated tags.
+----------------------------------------------------------------------------------------------------------------------
+Author: Matthias Sohn
+Date: 2023-01-30 17:23:23.000000000
+MISMATCHED INLINE COMMENT
+File Comment: /PATCHSET_LEVEL -> I tested again with another huge repository, it has 20m refs, 27m objects, 8k annotated tags.
+
+When using this patch creating the bitmap index took 1:23min, without this patch 4:24min. Though total time for jgit gc was 31:15min with this patch and 23:07min without this patch.
+
+I added timing information to the progress monitor and it turned out that the difference is in counting phase for non-heads objects which took 21:55min with this patch and 10:39min without this patch.
+
+Here the configuration I used for these tests:
+
+Java options passed to jgit cli via environment variable `java_args`:
+ $ time java_args="-Xmx32g -XX:+UseParallelGC" jgit gc
+
+git config set in ~/.gitconfig:
+
+increasing jgit cache helped quite a bit
+ core.packedGitLimit = 1g
+
+also increasing these packing options helped:
+ pack.deltaCacheLimit = 65535
+ pack.deltaCacheSize = 1g
+
+Which Java and git configuration did you use in your tests ?
+----------------------------------------------------------------------------------------------------------------------
+Author: Luca Milanesio
+Date: 2023-01-29 23:44:34.000000000
+MISMATCHED INLINE COMMENT
+File Comment: /PATCHSET_LEVEL -> > Do you have measurements for some repositories (preferably public so I can try to reproduce) showing performance improvements ? What are the stats of these repos ?
+> 
+> I tried with a mirror clone of a huge internal repository having 20m commits, 2.3m refs, 1k branches and 1.2k tags and couldn't find a significant difference in performance of both running jgit gc (around 78min) and cloning from that repo after the gc. I cloned (`--bare` but not `--mirror`) on the same machine via file:// protocol, clones took around 3min.
+> Size of the bitmap index with this change for this repo is 167MB, with the predecessor change 176MB.
+
+How many of the 1.2k tags were annotated?
+
+I've added some metrics to the commit message of the performance improvement I've measured with and without this change.
+----------------------------------------------------------------------------------------------------------------------

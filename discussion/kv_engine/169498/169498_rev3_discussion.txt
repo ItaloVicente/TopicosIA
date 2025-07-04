@@ -1,0 +1,75 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-50609: Avoid lost wakeup of CompactTask when multiple running concurrently
+
+While investigating MB-50389, when concurrent compaction tasks were
+set to 2 in ep-engine, it was observed that 2 tasks were not always
+running concurrently, even though there were sufficient outstanding
+tasks.
+
+Examining the wakeup phase at the end of Compaction (by adding some
+additional trace spans), it was observed that the two Compact tasks
+both finished around the same time, and attempted to wake up the same
+Compact task (for vb:2). The next (single) CompactTask to run was
+indeed vb:2. Instead of each finishing CompactTask waking up a new,
+different task; they both wake up the same, so we end up only starting
+one new task - and the concurrency drops.
+
+The issue is in EPBucket::updateCompactionTasks() which is called at
+the end of CompactTask::run(). When searching for a Compact task to
+wake, it looks for a task in state TASK_SNOOZED and when found wakes
+it. However, it uses the async ExecutorPool::wait() method, which does
+not actually immediately wake the task, but just sends a message to
+the ExecutorPool to handle at a later time. This is problematic as the
+task's state is not updated from SNOOZED to RUNNING until this message
+is processed - potentially after compactionTasks is unlocked. As such,
+a second (or third...) CompactTask finishing could execute
+updateCompactionTasks(), find the same "snoozed" task and attempt to
+wake the same one.
+
+The primary fix is to use the synchronous wakeAndWait() method which
+as the name suggests blocks until the task has actually been
+woken. However, that highlights a bug in
+FollyExecutorPool::wakeAndWait(); which does not change a task from
+SNOOZED to RUNNING, unlike CB3ExecutorPool. This _that_ bug and all
+works correctly.
+
+Change-Id: Ibd62726fe1ddfb8448f1a71f1bd41d0a98eda8a9
+Reviewed-on: https://review.couchbase.org/c/kv_engine/+/169498
+Reviewed-by: Trond Norbye <trond.norbye@couchbase.com>
+Tested-by: Dave Rigby <daver@couchbase.com>
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Dave Rigby
+Date: 2022-01-27 17:05:58.000000000
+Message: 
+Change has been successfully cherry-picked as 8164baa569999d1829956bb9a862eea9d0e9f44d by Dave Rigby
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-01-27 17:08:39.000000000
+Message: 
+Patch Set 3:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-TSan-master/6706/ (1/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-01-27 17:12:49.000000000
+Message: 
+Patch Set 3:
+
+Build Started http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-master/10154/ (2/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-01-27 17:52:37.000000000
+Message: 
+Patch Set 3:
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-TSan-master/6706/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-post-commit-master/10154/ : SUCCESS'
+----------------------------------------------------------------------------------------------------------------------

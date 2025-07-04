@@ -1,0 +1,196 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-22010: [2/N] Implement Tagged Pointer for unique_ptr to StoredValue
+
+To improve our hash table eviction algorithm we need to hold more state
+regarding when and how often documents in the cache are accessed.
+
+However we do not want to increase the memory usage, especially as the
+increase will be multiplied by every entry held in the hash table.
+
+Given we maintain a 64-bit pointer to a StoredValue for each entry in
+the hash table, on x86-64 architectures we can use the top 16-bits for
+our own use.  This is because x86-64 only use the bottom 48 bits for
+addressing.
+
+This patch introduces a tagged unique_ptr class, which has the ability
+to act as a pointer, as well as hold 16-bit of user data.  This class
+is used for the chain_next_or_replacement pointer in a StoredValue.
+
+Change-Id: I15370f8348a192f3d4504908b5d718ecf9d8bcbe
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Daniel Owen
+Date: 2017-11-29 10:04:56.000000000
+Message: 
+Uploaded patch set 39.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2017-11-29 10:31:33.000000000
+Message: 
+Patch Set 39: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/4745/ : FAILURE
+
+Valgrind detected one or more issues ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/4745/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/3060/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/4118/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master/4312/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/4519/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/4471/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2017-11-29 13:13:45.000000000
+Message: 
+Patch Set 39:
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/4755/ : FAILURE
+
+Valgrind detected one or more issues ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/4755/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/3060/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/4118/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master/4312/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/4519/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/4471/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2017-11-29 13:39:43.000000000
+Message: 
+Patch Set 39: Code-Review-1
+
+(9 comments)
+Line:411, engines/ep/src/hash_table.cc -> please can you keep the * (so auto* v) https://github.com/couchbase/kv_engine/blob/master/docs/CodingStandards.rst#beware-unnecessary-copies-with-auto
+
+Line:720, engines/ep/src/hash_table.cc -> please use auto*
+
+Line:812, engines/ep/src/hash_table.cc -> auto*
+
+Line:732, engines/ep/src/hash_table.h -> this line is getting (argh even i'm at it) quite long :S can anything be done to avoid this chain of get get get
+
+Line:48, engines/ep/src/tagged_ptr.h -> can you add an empty line above (between 47/48)
+
+Line:53, engines/ep/src/tagged_ptr.h -> if you define != can you also define == (simply by calling ! a != b )
+
+Line:86, engines/ep/src/tagged_ptr.h -> In my mind getObj "get object" would return the managed object (via value or at least a reference), not a pointer to it, can this naming be changed?
+
+unique_ptr goes with get() and that's what i'd expect from a pointer class like this
+
+http://en.cppreference.com/w/cpp/memory/unique_ptr/get
+
+Line:126, engines/ep/src/tagged_ptr.h -> Is it possible to create the UniqueTaggedPtr differently so that we can remove a load of the .get().getObj/.get().setTag calls? I had a quick experiment (incomplete) and replaced line 125/126 with our own class, this doesn't full compile as everywhere we have get().getObj() it fails.. but this class allows us to write at the call points
+
+     // Gets the top 16-bits of the chain_next_or_replacement pointer and
+     // convert to a uint16 value.
+     uint16_t getChainTag() const {
+-        return chain_next_or_replacement.get().getTag();
++        return chain_next_or_replacement.getTag();
+     }
+
+     void referenced();
+@@ -783,7 +784,7 @@ public:
+             return nullptr;
+         }
+
+-        return chain_next_or_replacement.get().getObj();
++        return chain_next_or_replacement.get();
+
+
+template <typename T, typename S>
+class UniqueTaggedPtr {
+public:
+    void reset(T* b) {
+        up.reset(b);
+    }
+
+    T* release() {
+        return up.release().getObj();
+    }
+
+    T& get() const {
+        return *up.get().getObj();
+    }
+
+    void setTag(uint16_t tag) {
+        up.get().setTag(tag);
+    }
+
+    uint16_t getTag() const {
+        return up.get().getTag();//setTag(tag);
+    }
+
+private:
+    std::unique_ptr<TaggedPtr<T>, TaggedPtrDeleter<T, S>> up;
+};
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Daniel Owen
+Date: 2017-11-30 12:30:36.000000000
+Message: 
+Patch Set 39:
+
+(6 comments)
+Line:411, engines/ep/src/hash_table.cc -> Jim: With your suggested of creating a UniquePtr Class - I know longer need to make any changes to hash_table.cc :)
+
+Line:720, engines/ep/src/hash_table.cc -> Jim: With your suggested of creating a UniquePtr Class - I know longer need to make any changes to hash_table.cc :)
+
+Line:812, engines/ep/src/hash_table.cc -> Jim: With your suggested of creating a UniquePtr Class - I know longer need to make any changes to hash_table.cc :)
+
+Line:732, engines/ep/src/hash_table.h -> Jim: With your suggested of creating a UniquePtr Class - I know longer need to make any changes to hash_table.h :)
+
+Line:86, engines/ep/src/tagged_ptr.h -> Done
+
+Line:126, engines/ep/src/tagged_ptr.h -> Good idea - thanks :) - has meant very small changes to other classes.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dan Owen
+Date: 2017-11-29 17:24:31.000000000
+MISMATCHED INLINE COMMENT
+Line:411, engines/ep/src/hash_table.cc -> Unfortunately, cannot do, as get following error 
+
+error: variable 'v' with type 'auto *' has incompatible initializer of type 'pointer' (aka 'TaggedPtr<StoredValue>')
+----------------------------------------------------------------------------------------------------------------------
+Author: Dan Owen
+Date: 2017-11-29 17:24:31.000000000
+MISMATCHED INLINE COMMENT
+Line:720, engines/ep/src/hash_table.cc -> Can't do - see above
+----------------------------------------------------------------------------------------------------------------------
+Author: Dan Owen
+Date: 2017-11-29 17:24:31.000000000
+MISMATCHED INLINE COMMENT
+Line:812, engines/ep/src/hash_table.cc -> Can't do - see above
+----------------------------------------------------------------------------------------------------------------------
+Author: Dan Owen
+Date: 2017-11-29 17:24:31.000000000
+MISMATCHED INLINE COMMENT
+Line:732, engines/ep/src/hash_table.h -> Made simpler by creating a getNextStoredValue method in stored_value.h
+----------------------------------------------------------------------------------------------------------------------
+Author: Dan Owen
+Date: 2017-11-29 17:24:31.000000000
+MISMATCHED INLINE COMMENT
+Line:48, engines/ep/src/tagged_ptr.h -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Dan Owen
+Date: 2017-11-29 17:24:31.000000000
+MISMATCHED INLINE COMMENT
+Line:53, engines/ep/src/tagged_ptr.h -> Have added:
+bool operator==(T* other) const {
+        return !operator!=(other);
+    }
+----------------------------------------------------------------------------------------------------------------------

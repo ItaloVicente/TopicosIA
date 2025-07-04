@@ -1,0 +1,150 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-52682: Derive initial MFU of new values from MFU histograms
+
+Historically, all new items start with a frequency counter of 4. As the
+MFU of existing items may have increased through accesses (e.g.,
+everything could be >100), new items would be more likely to be
+evicted straight away, before potential accesses are able to increase
+the frequency counter.
+
+To counter this, "young" items (age determined from the HLC cas) were
+made ineligible (config params item_eviction_age_percentage,
+item_eviction_freq_counter_age_threshold).
+
+Each vbucket currently tracks a histogram of the frequency counter of
+all stored values which are eligible for eviction.
+
+This patch uses these histograms select an appropriate starting
+frequency counter, prepping new items to be at some configured
+percentile of MFU values.
+
+This is a step towards frequency counters being comparable across
+vbuckets.
+
+This patch does _not_ address the frequency counter of items bgfetched
+from disk; currently they will have their freq counter set to the
+initial freq count (Item::initialFreqCount, currently 4).
+
+A consequence of that is that bgfetched items will start at a very low
+MFU value, leading to sub-optimal eviction. This will be addressed in a
+following patch, by setting them to the initial counter value discussed
+above.
+
+Change-Id: Ifa107501d9e7b7e42d40f9d552781c7e6f626252
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Vesko Karaganev
+Date: 2023-01-19 15:59:12.000000000
+Message: 
+Uploaded patch set 20: Commit message was updated.
+----------------------------------------------------------------------------------------------------------------------
+Author: Vesko Karaganev
+Date: 2023-01-20 08:51:50.000000000
+Message: 
+Patch Set 20:
+
+(1 comment)
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2023-01-24 20:00:17.000000000
+Message: 
+Patch Set 20: Code-Review-1
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> There's a lot of literature on things like access patterns of items in cache-like structures, but IIRC newly-created items typically exhibit a bimodal pattern - either they are accessed soon again (possibly multiple times), or they are never accessed again (or not for a significant amount of time). I forget the typical breakdown of these two groups (and it will of course vary by workload), but the "only once" set from memory can be significant.
+
+This was the rationale for the previous CAS-based "young generation" - we *temporarily* protect items which have just been created, granting them some (limited)  time to either get hot enough in their own, or to stay with the initial,  low counter if they are not accessed again.
+
+In the latter case, if they have been "alive" for long enough but not accessed again, then they are early candidates for eviction.
+
+While I understand the high-level rationale of this change, I'm concerned that this simplification will mean we keep these "only once" items around in-memory for longer than we used to, and ultimately regress our cache hit rate.
+
+Have we considered alternative approaches which can keep the "young generation" functionality, while still having something which works cross-bucket?
+
+(Related to this, what benchmarks do we plan to use to test out the performance of the MFU after this sequence of changes?)
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2023-01-25 12:56:56.000000000
+Message: 
+Patch Set 20:
+
+(1 comment)
+File Comment: /PATCHSET_LEVEL -> Just to add what I recall here:
+
+<brain-dump>
+
+Going down the same route as the cross bucket mfu and maintaining and aggregating histograms of ages seemed impractical (requiring some periodic manipulation/regeneration), but could be flipped to histograms of "birth date"/creation time. IIRC that led down a tradeoff of memory usage vs granularity; there's potentially a wide range of values to record but bucketing them down too far could lead to situations like "all items fall in the 0-10h bucket".
+
+Age _could_ be kept non-cross-bucket - re-adding the learned, per-vb age histos would be reasonably easy but might be a bit less predictable in its impact under cross bucket mem.
+
+For a compare and contrast:
+
+A: per vb age histogram
+One hot neighbour can force paging across all the buckets, a colder bucket would evict everything (by MFU) but is limited by the protected age/nursery, so only evicts oldest 70%. Paging runs again, histogram is learned again, cold bucket evicts oldest 70% of whatever it had left, rinse/repeat, everything is evicted anyway. Age _has_ factored in, and has at least given some items one pager-visit worth of grace.
+
+
+
+B: initial MFU
+One hot neighbour can force paging across all the buckets. The amount of data "to be removed" has an upper bound (bound = quota - low watermark). Lets say 25% of the data across all the buckets needs to be removed; 25%ile MFU is picked.
+An entirely idle vbucket will have had MFUs decremented over time, and hasn't added new items; it may be the case that everything it has is <25%ile, and can be evicted - that seems good from the overall goal of "minimise disk hits _overall_", cold data is wasting memory.
+
+A somewhat active vbucket will have older docs with MFUs which have been decremented/were picked some time ago, and they will be eligile for eviction. However, anything "recent" has been assigned a "recent" initial MFU. Assuming "percent to remove < initial mfu target percent", new items in this vb are not selected by MFU in this pager run, their MFU is too high.
+Memory pressure continues, the pager runs again, same target percentile, but all the histograms are up to date so the _value_ of the 25%ile MFU threshold used for eviction is now higher as a lot of low-mfu items were just removed.
+Items stored _before_ the previous pager run might have been given an MFU such that they _could_ be paged now; Items stored _after_ the previous pager run should have been given a higher initialMFU because the histograms changed, so as before won't be eligible yet (until mfu decayed or the pager runs again to remove even warmer items).
+
+
+The initial MFU has given some items at least one pager visit before they were evicted.
+
+
+Both methods have given values "time" before they became eligible (where the unit of time is "pager runs" rather than "seconds").
+
+
+There's also the _other_ side of the age protection - we've already seen in the current world that we can end up evicting fewer items than expected in a pager pass because of the age protection, slowing down eviction, limiting throughput when under memory pressure etc. etc.
+
+The age distribution also (perhaps ironically) _doesn't_ change over time if there's no operations. The youngest 30% will be the youngest 30% a year later if nothing is written or evicted, but probably aren't deserving of being protected. So to re-frame what age protection provides: they're not being protected until they're over some age, they're being protected until more items are written or items are paged. The initial MFU may provide roughly the same thing.
+
+
+
+An alternative that was considered was finding one or two spare bits to use like the defragmenter age - _explicitly_ giving items a small number of pager passes before they are eligible. The downside here is that until memory pressure happens, the pager has no need to visit so the first pass when we _need_ to recover memory decides to evict nothing, as everything is "young" by this bit counter.
+
+That specific scenario can be mitigated by looping back round to tracking histograms to determine thresholds - just now with "age" defined as this proposed "visit counter". That has a fixed range, and would be relatively cheap (memory, cpu) to record and update (and is updated off the hot path, by the pager, maybe also MFU decayer?). With a histogram at least the pager can say "if I need to remove N%ile of items, I know that looking at items with age='oldest' is insufficient, I also need to evict some items where age='oldest-1'" - an age threshold re-appears.
+That does indeed sound like re-inventing the age, just driven by a visit counter...
+I don't recall testing this or if it was discounted for other reasons, unfortunately - it might have more flaws I've forgotten.
+
+
+On the benchmark front, IIRC Ben did a range of testing some time ago which could be re-evaluated; the daily YCSB D perf runs have been mentioned.
+
+</brain-dump>
+----------------------------------------------------------------------------------------------------------------------
+Author: James H
+Date: 2023-04-05 14:34:11.000000000
+MISMATCHED INLINE COMMENT
+File Comment: /PATCHSET_LEVEL -> +1, I agree with the reasoning 👍
+----------------------------------------------------------------------------------------------------------------------
+Author: Vesko Karaganev
+Date: 2023-04-05 14:19:37.000000000
+MISMATCHED INLINE COMMENT
+File Comment: /PATCHSET_LEVEL -> I've been running a series of YCSB A and D tests with various initial_mfu_percentile values (0, 30, 50, 80) and residency ratios (1%, 5%, 45%) and failed to notice a statistically significant difference in throughput or number of BG fetches between these runs.
+
+---
+
+As of build couchbase-server-7.5.0-3228 (10 Nov 2022), we've been running all our perf tests with upfront_mfu_only eviction by default (age is ignored), and a constant initial MFU of items set to 4. 
+
+That suggests to me that the age and initial MFU don't matter in the perf tests we rely to measure throughput. 
+
+However, my understanding is that, at least historically, the age component did matter for eviction, and one could certainly construct a test which would benefit from it. Trying to reason about the possible values we could use for initial_mfu_percentile instead:
+
+Inserting new items at anything other than the median, mean would result in the median value changing. I'm worried this result in pathological cases especially in bulk load scenarios, where inserted items might have every increasing/decreasing MFUs.
+
+For example, if we insert at 30%ile, and we have a bulk load of X items, the earliest of those X items will have higher MFU than the last inserted item.
+
+If we insert at 80%ile, the opposite would be true -- the last items inserted would have the higher MFU.
+
+New items being inserted with higher MFU seems desirable, as it would give them some temporary protection from being evicted, but again, we would be moving the initial MFU value as we insert items. 
+
+This could be hard to reason about and so I'd argue that we should be inserting items at 50%ile MFU -- as it gives items some protection from being evicted immediately and is more predictable.
+----------------------------------------------------------------------------------------------------------------------

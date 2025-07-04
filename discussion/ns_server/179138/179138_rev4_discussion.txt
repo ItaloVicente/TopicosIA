@@ -1,0 +1,250 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-53478: Stop saving anonymous functions to disk
+
+Instead of saving a callback to disk and reloading it, we encode the
+meaning into an atom and replace it with the callback at the point
+where they are going to be consumed (where the continuation was being
+called). In this case, we encode async for asnyc audit requests, and
+{sync, Pid} for synchronous requests. The pid is still somewhat
+problematic, as if that Pid no longer exists, we could run into
+problems. There's not really an alternative, in this case, so it was
+left as is and those requests will just have to fail.
+
+Change-Id: If42c622317c7c93ad59d2a9a931e639869e43db0
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Bryan McCoid
+Date: 2022-08-24 23:48:49.000000000
+Message: 
+Uploaded patch set 4.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-08-24 23:49:00.000000000
+Message: 
+Patch Set 4:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-test/31305/
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-08-24 23:49:27.000000000
+Message: 
+Patch Set 4: Verified+1
+
+(2 comments)
+File Comment: /PATCHSET_LEVEL -> make simple-test
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-08-24 23:49:34.000000000
+Message: 
+Patch Set 4:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-simple-test/3795/
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-08-24 23:49:44.000000000
+Message: 
+Patch Set 4:
+
+(1 comment)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-08-24 23:54:02.000000000
+Message: 
+Patch Set 4: Well-Formed+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/ns-server-test/31305/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2022-08-25 00:45:07.000000000
+Message: 
+Patch Set 4: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/ns-server-simple-test/3795/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2022-08-25 16:52:51.000000000
+Message: 
+Patch Set 4:
+
+(3 comments)
+Line:12, /COMMIT_MSG -> nit: async
+
+Line:837, src/ns_audit.erl -> Is there a case where this will ever work? If not, just drop it (as the message already says).
+
+Line:936, src/ns_audit.erl -> What is the "tagg" used for?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-08-25 17:11:20.000000000
+Message: 
+Patch Set 4: Verified+1
+
+(3 comments)
+Line:12, /COMMIT_MSG -> Ack
+
+Line:837, src/ns_audit.erl -> It might be possible under some upgrade scenarios where we don't change the modules function table hash.. Thought that's only a theoretical concern since I've never recreated that exact situation. (Not even sure how, exactly..). Maybe if Timofey agrees I can just get rid of it.
+
+Line:936, src/ns_audit.erl -> https://www.erlang.org/doc/man/gen_server.html#type-from
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2022-08-25 18:02:59.000000000
+MISMATCHED INLINE COMMENT
+Line:488, src/ns_audit.erl -> Seems like this line
+
+" %% TODO: this can be removed when support for 7.1.2 is dropped."
+
+needs to be moved to
+
+maybe_reply(Continuation, Resp) when is_function(Continuation) ->
+
+Because this is the code that can be removed.
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-08-25 19:40:15.000000000
+MISMATCHED INLINE COMMENT
+Line:488, src/ns_audit.erl -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2022-08-25 18:00:56.000000000
+MISMATCHED INLINE COMMENT
+Line:829, src/ns_audit.erl -> I think doing it for Froms from other incarnations of a node can be dangerous, no?
+At least if nodename has changed I think the pid in From will become a wrong pid.
+I'm not 100% sure though. There are also refs in Froms, but maybe they are most likely fine.
+Anyway I would feel safer if we wrap it in a try catch here (and log warning in case of any catch), because this pid comes from we don't know where and we don't want it to loop here in case if we missed something.
+
+BTW it is also possible that we are sending reply to absolutely random process here (if everything has restarted). If we are unlucky we can cause an unpredicted behavior (if that process does not expect it). But it seems like it is hard to fix this.
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2022-08-25 22:42:05.000000000
+MISMATCHED INLINE COMMENT
+Line:829, src/ns_audit.erl -> I am guessing, when all the audits in the queue are asyncs and/or when we transform any {sync, From} item to async item, when we read the audit queue from disk.
+
+The pid which made the sync call is gone - the best we can do is queue the audit log towards memcached and skip sending anything for the pid that made the sync call.
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2022-08-25 20:41:25.000000000
+MISMATCHED INLINE COMMENT
+Line:829, src/ns_audit.erl -> Isn't it always the case that if we do a gen_server:reply(From, Res) for entries on the queue after ns_audit has crashed you'll end up sending Res to a random process if the process exists? 
+
+Here's the code I see for gen_server:call/2 - the caller process monitors the gen_server to which the call is made and exits if the gen_server crashes.
+
+https://github.com/erlang/otp/blob/bdd6b699ab41af2d8f644bfa427f1a2b6f71db59/lib/stdlib/src/gen.erl#L238
+
+So if Pid1 does a gen_server:call to gen_server (Pid2) and if the gen_server crashed - then Pid1 will crash too.
+
+Wouldn't the correct thing to do here is to convert {sync, From} to async when you read stuff from the disk? That way the audit is added but you wouldn't leave a stale {Tag, Reply} message in the mailbox for a random process.
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2022-08-26 00:10:34.000000000
+MISMATCHED INLINE COMMENT
+Line:829, src/ns_audit.erl -> I like this idea. I think it means this change can be replaced with something simpler...
+
+restore_backup(Binary) ->
+    try binary_to_term(Binary, [safe]) of
+        Queue ->
+            case queue:is_queue(Queue) of
+                true ->
+>>                  %% Iterate through the Queue and change each entry to
+>>                  %% [{code, encodedbody, fun (_) -> ok end}]
+>>                  code_to_do_above(),
+                    ?log_info("Audit queue was restored from the backup"),
+----------------------------------------------------------------------------------------------------------------------
+Author: Hareen Kancharla
+Date: 2022-08-25 23:56:02.000000000
+MISMATCHED INLINE COMMENT
+Line:829, src/ns_audit.erl -> >> Question is do we need to prevent that? We can hypothetically by spawning the
+>> call and handling that error, but I'm not sure we need to.
+
+Agree - I don't think it is needed. The process calling gen_server:call just crashes and I guess that should be fine.
+
+>> Probably we can just ignore this: don't put any from info to the disk.
+
+Yup, I think we should ignore the 'From' either when we writing to the disk or  when we are reading from the disk.
+
+>> Hareen, to be honest I don't fully understand the idea behind using asyncs
+>> here.
+
+oh no, what I meant was if we write the following queue to disk (using the new convention Bryan introduced in this patch):
+[{Code1, EncodedBody1, {sync, From1}}, {Code2, EncodedBody2, async}, {Code3, EncodedBody3, {sync, From3}}]
+
+Then when we read from disk we could convert the queue to: 
+
+[{Code1, EncodedBody1, async}, {Code2, EncodedBody2, async}, {Code3, EncodedBody3, async}]
+
+That way when we process the queue in handle_info(send, ...) we'll send all the 3 audits to memcached, but wouldn't send any reply to From1 and From3 (Because they have already exited).
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2022-08-25 21:41:32.000000000
+MISMATCHED INLINE COMMENT
+Line:829, src/ns_audit.erl -> Interesting point. What is the use case where the backup/restore of the audit queue will work successfully?
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2022-08-25 22:57:02.000000000
+MISMATCHED INLINE COMMENT
+Line:829, src/ns_audit.erl -> Good catch Hareen!
+So if the process crashes it doesn't make any sense to reply after that (at least in the current implementation). Because the caller has already received an error. Question is do we need to prevent that? We can hypothetically by spawning the call and handling that error, but I'm not sure we need to.
+Probably we can just ignore this: don't put any from info to the disk.
+
+Hareen, to be honest I don't fully understand the idea behind using asyncs here.
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-08-26 20:05:04.000000000
+MISMATCHED INLINE COMMENT
+Line:829, src/ns_audit.erl -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-08-25 19:39:11.000000000
+MISMATCHED INLINE COMMENT
+Line:829, src/ns_audit.erl -> This is definitely the trickiest part that still remains.. and may remain (to some extent) forever. I am just gonna do as you suggest and wrap with a try/catch.
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2022-08-25 18:02:59.000000000
+MISMATCHED INLINE COMMENT
+Line:837, src/ns_audit.erl -> I wouldn't remove it.
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-08-25 19:39:11.000000000
+MISMATCHED INLINE COMMENT
+Line:837, src/ns_audit.erl -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2022-08-25 18:11:47.000000000
+MISMATCHED INLINE COMMENT
+Line:936, src/ns_audit.erl -> Putting random stuff in process's mailbox is not a good practice. I suggest either clean it, or do it in a separate process so it's cleaned automatically.
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-08-26 20:05:04.000000000
+MISMATCHED INLINE COMMENT
+Line:936, src/ns_audit.erl -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2022-08-25 20:02:05.000000000
+MISMATCHED INLINE COMMENT
+Line:936, src/ns_audit.erl -> Well, this way you're not testing anything, right? :) it may crash and you will never see it. Usage of ?assertEqual + spawn_link instead of spawn should help you. Please test that this test actually fails if the maybe_reply function fails.
+
+It also makes sense to use proper ?assertEqual macros for other maybe_reply tests.
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-08-25 19:39:11.000000000
+MISMATCHED INLINE COMMENT
+Line:936, src/ns_audit.erl -> Done
+----------------------------------------------------------------------------------------------------------------------
+Author: Steve Watanabe
+Date: 2022-08-25 17:17:44.000000000
+MISMATCHED INLINE COMMENT
+Line:936, src/ns_audit.erl -> TIL! Hadn't seen it before AFAICR.
+----------------------------------------------------------------------------------------------------------------------
+Author: Bryan McCoid
+Date: 2022-08-25 17:19:41.000000000
+MISMATCHED INLINE COMMENT
+Line:936, src/ns_audit.erl -> weird huh? I always thought it was just a plain old pid.
+----------------------------------------------------------------------------------------------------------------------

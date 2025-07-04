@@ -1,0 +1,112 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-52988 Janitor pausing/resuming support for cleanup of failed OPs
+
+Change-Id: Ib0f91dcf76785ea5f6b5b3564da8742cb6b2983c
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Navdeep S Boparai
+Date: 2023-01-12 22:31:07.000000000
+Message: 
+Uploaded patch set 32: Patch Set 31 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2023-01-12 22:31:24.000000000
+Message: 
+Patch Set 32: -Well-Formed
+
+Build Started https://cv.jenkins.couchbase.com/job/ns-server-test/33411/ (1/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Navdeep S Boparai
+Date: 2023-01-12 22:31:40.000000000
+Message: 
+Patch Set 32: Verified+1
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2023-01-12 23:14:33.000000000
+Message: 
+Patch Set 32:
+
+Build Started https://cv.jenkins.couchbase.com/job/ns-server-ns-test/1231/ (2/2)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2023-01-12 23:29:06.000000000
+Message: 
+Patch Set 32: Well-Formed+1
+
+Build Successful 
+
+https://cv.jenkins.couchbase.com/job/ns-server-test/33411/ : SUCCESS
+
+https://cv.jenkins.couchbase.com/job/ns-server-ns-test/1231/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2023-01-13 01:51:53.000000000
+Message: 
+Patch Set 32:
+
+(2 comments)
+Line:371, src/failover.erl -> Let's say failover happens during the actual pausing of the bucket in memcached. We stop all out processes before we come to this point but memcached's on nodes are still busy pausing. What will happen if the unpause request is sent to memcached while pausing is still unfinished?
+
+Another concern is that this can slow down autofailover. If it possible to unpause the bucket on the remaining nodes not before the failover, but after?
+
+Line:131, src/hibernation_utils.erl -> when BucketNodes =/= []
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Navdeep S Boparai
+Date: 2023-01-16 22:03:02.000000000
+MISMATCHED INLINE COMMENT
+Line:371, src/failover.erl -> First point: "There are other potential race conditions here. Unpause can be requested even if pause was never requested." 
+
+A: That should be fine, memcached handles that already, the unpause will return "key_exists" in that case, which we handle accordingly. 
+
+
+Second point: "And the tiny one (and nasty one too): since we are using different sockets to send pause and unpause, the unpause can reach memcached when pause is still on the wire. In this case, I guess, the bucket will end up paused."
+
+A: That is a good point. We have to use different sockets because of the requirement to cancel pause at any point. But I do see your point, there is no way to avoid that very tiny race in this scenario since we need to use different sockets for pause and unpuase. Nevertheless, if we do ever hit it, it is a bad scenario. 
+
+Here is what I propose should be done to address this corner case(only way I can see to address it): Make sending the "unpause" command for each bucket an initial step in janitoring of the bucket, regardless of if ns_server thinks it is in a paused state or not for the bucket. The unpause command acts as a query and is "no-op" to memcached if it receives it and it is already in an unpaused state. In such a case, memcached immediately just responds with "key_exists" So it doesn't seem terrible to just always issue an unpause whenever we janitor the bucket. If memcached is ever in a state due to this corner case where it is stuck in "paused" state, the janitoring will ensure it fixes itself and things proceed as normal. What do you think of that?
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2023-01-16 22:26:02.000000000
+MISMATCHED INLINE COMMENT
+Line:371, src/failover.erl -> I think memcached does allow to batch multiple commands on one socket. So we don't have to use different sockets, though it might slightly complicate the code that is waiting for the commands replies.
+
+As for unpausing during janitoring: do I understand correctly that failover will still fail?
+
+I think we can submit this commit without this race being fixed, but we need to address it eventually.
+----------------------------------------------------------------------------------------------------------------------
+Author: Artem Stemkovski
+Date: 2023-01-16 19:26:07.000000000
+MISMATCHED INLINE COMMENT
+Line:371, src/failover.erl -> There are other potential race conditions here. Unpause can be requested even if pause was never requested. I hope memcached will handle this correctly as well. And the tiny one (and nasty one too): since we are using different sockets to send pause and unpause, the unpause can reach memcached when pause is still on the wire. In this case, I guess, the bucket will end up paused.
+----------------------------------------------------------------------------------------------------------------------
+Author: Navdeep S Boparai
+Date: 2023-01-16 18:52:43.000000000
+MISMATCHED INLINE COMMENT
+Line:371, src/failover.erl -> For the first question:
+In this case, the unpause will go out to memcached. Memcached will process the unpause, and for the ongoing/unfinished pause, it will return a failure.
+
+For the second question:
+Having the same concern, I had asked Rigby about how heavy the unpuase call is. This was his response: "No, resume should be fast (milliseconds) - it basically just clears various flags internally to allow normal operation to commence." - The "resume" is kv termenology for unpause, so looks like it should be a quick call. It is not possible to unpause after failover because failover will fill if the bucket is paused since kv doesn't respond to most queries when in a paused state, and so all the queries that deal with asking for vbucket state will fail etc. We have to explicitly unpuase before we proceed with failover
+----------------------------------------------------------------------------------------------------------------------
+Author: Navdeep S Boparai
+Date: 2023-01-19 21:29:37.000000000
+MISMATCHED INLINE COMMENT
+Line:371, src/failover.erl -> For: "As for unpausing during janitoring: do I understand correctly that failover will still fail?"
+
+Yea for failover unpausing is required before failover, otherwise failover will fail.
+
+For: "I think we can submit this commit without this race being fixed, but we need to address it eventually."
+
+I have filed: https://issues.couchbase.com/browse/MB-55177
+to track this.
+----------------------------------------------------------------------------------------------------------------------
+Author: Navdeep S Boparai
+Date: 2023-01-16 18:52:43.000000000
+MISMATCHED INLINE COMMENT
+Line:131, src/hibernation_utils.erl -> Done
+----------------------------------------------------------------------------------------------------------------------

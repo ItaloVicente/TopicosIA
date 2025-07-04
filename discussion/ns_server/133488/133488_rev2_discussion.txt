@@ -1,0 +1,168 @@
+======================================================================================================================
+DESCRIPTION:
+
+MB-40641 time offset "in sync state" could repeatedly toggle
+
+The time offset detection code monitors the time difference between
+a non-master node and the master node.  If that difference is above
+a fixed threshold, we consider the node's time to be out of sync.
+If the time difference is very close to that threshold, a node could
+cycle between "in sync" and "out of sync" state due to jitter in
+observed time deltas.
+
+This problem is fixed by introducing hysteresis: the "out of sync"
+state is made a little stickier than the "in sync" state.  This is
+implemented by ensuring that the time difference above which a
+node is considered to be out of sync is greater than the time
+difference below which a node is considered to be in sync.
+
+Change-Id: Ib48d6bcfac23124ec615a690c30358077283e0be
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Sam Cramer
+Date: 2020-07-30 20:39:09.000000000
+Message: 
+Uploaded patch set 2.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-07-30 20:39:19.000000000
+Message: 
+Patch Set 2:
+
+Build Started http://cv.jenkins.couchbase.com/job/ns-server-test/18131/
+----------------------------------------------------------------------------------------------------------------------
+Author: Sam Cramer
+Date: 2020-07-30 20:40:17.000000000
+Message: 
+Patch Set 2: Verified+1
+
+(1 comment)
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2020-07-30 20:44:03.000000000
+Message: 
+Patch Set 2: Well-Formed+1
+
+Permission granted to commit to restricted branch
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2020-07-30 20:59:34.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:251, src/ns_tick_agent.erl -> It looks a little bit upside down this way to me. But maybe I'm wrong. Probably we should do it the other way around:
+in_sync_threshold = time_offset_config_value(threshold)
+out_of_sync_threshold = time_offset_config_value(threshold) * 1.2
+
+Why:
+Because it's easier to explain it this way. We can say "If time difference is greater than 1 sec, node is considered out of sync" (it's will not be true when time difference is actually 1.1 second, but I believe users don't really care about false negatives in this case). What is important that when user sees the alert they need to fix time so that time difference is less than 1s. It's not that simple with current implementation.
+
+What do you think?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Sam Cramer
+Date: 2020-07-30 21:41:37.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:251, src/ns_tick_agent.erl -> That's an interesting point.  However, I'm currently carefully avoiding any mention of the actual time difference or the threshold in the UI or in the logs; I just say that the node isn't in sync.  The motivation for putting the threshold value in the config was to provide a hidden "knob" that can be turned with the assistance of support if the default value causes problems.
+
+So, at this point, ease of explanation isn't super-important. (Of course, my not mentioning the threshold in the UI or logs might be a mistake, in which case ease of explanation becomes more important when we decide that stuff should be communicated).
+
+I agree that the current behavior is a little counter-intuitive, but I think it might also seem strange to customers who know the threshold value that a node wasn't considered "out of sync" when the time delta reached that threshold.
+
+If you feel strongly about this, we can chat some more so you can convince me :-).  Otherwise, I'd prefer to leave it as is unless other folks also think it should be changed.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2020-07-30 22:15:29.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:251, src/ns_tick_agent.erl -> I believe we will need to explain it in docs at least: https://docs.couchbase.com/server/6.5/manage/manage-settings/configure-alerts.html#available-alerts
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2020-07-30 22:23:23.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:251, src/ns_tick_agent.erl -> Regarding this:
+> I agree that the current behavior is a little counter-intuitive,
+> but I think it might also seem strange to customers who know the
+> threshold value that a node wasn't considered "out of sync" when
+> the time delta reached that threshold.
+
+As I said users will not worry about false negatives. Reaction "Time difference is 1.009s, why don't I see the alert?" looks almost impossible to me and not critical if it happens.
+But they will definitely worry about false positives. Reaction "Time difference is less the 1s but alert is not going away, what the heck?" - looks possible and pretty annoying.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Sam Cramer
+Date: 2020-07-30 23:34:07.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+
+> Patch Set 2:
+> 
+> (1 comment)
+Line:251, src/ns_tick_agent.erl -> Re: the docs.  Fair point.
+
+Re: "time difference > threshold, why don't I see the alert" vs. "time difference < threshold, why didn't the alert go away?"  Here's how I look at it:
+
+In a bunch of different places, we recommend that NTP be used to keep time in sync:
+
+https://docs.couchbase.com/server/current/install/install-production-deployment.html
+
+  Keeping accurate time is essential to a properly-functioning database. Ensure that you follow 
+  the guidelines for synchronizing each Couchbase node using Network Time Protocol (NTP).
+
+https://docs.couchbase.com/server/current/install/synchronize-clocks-using-ntp.html
+
+  Correct time synchronisation is important in Couchbase Server for Expiry behavior and to 
+  maintain accurate Time Synchronization in timestamp-based conflict resolution.
+ 
+https://docs.couchbase.com/server/current/n1ql/n1ql-language-reference/datefun.html
+
+  Important: 
+  Many date functions use the local system clock value and timezone of the query node to 
+  generate results. Therefore, if all nodes running the query service do not have their time 
+  appropriately synchronized then you may experience inconsistent behavior. It is recommended 
+  that all Couchbase Server nodes have their time synchronized via NTP.
+
+From what I've read, correctly configured NTP clients should be well synchronized; a difference of (by default) more than 128ms is a big deal from the point of ntpd, triggering a special procedure to see if the time difference persists (https://kb.meinbergglobal.com/kb/time_sync/ntp/ntp_basics).
+
+So, I believe that time being in sync should be the norm. If it is not and the admin is notified and takes action to correct the situation, the time offset should be *much* less than 80% of the threshold.  Thus, I doubt that in practice we're going to have the annoying situation you describe: time was off by more than 1 second, the admin took action to fix that, and yet time was still off by more than ~48 seconds and the admin is annoyed by seeing messages that the time isn't in sync.
+
+My "operator says _what the heck_" scenario is: "hey, you said that you'd tell me if the time was out of sync by more than a second -- which is already a lot -- but we were constantly out of sync by a second and you didn't let me know." Pick your poison, I guess.
+
+Also, we plan add the ability to turn off UI notifications for time being out of sync and to add something to the system which cuts back on the amount of noise in the system logs resulting from time being out of sync, so the annoyance associated with unwanted alerts should go down.
+
+If I'm missing something or if you feel very strongly about this I'll make the change you suggest, but I don't think it is necessary.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Timofey Barmin
+Date: 2020-07-31 00:01:48.000000000
+Message: 
+Patch Set 2:
+
+(1 comment)
+Line:251, src/ns_tick_agent.erl -> AFAIR ntp doesn't change time instantly. It usually changes time slowly. For monitoring person it rather looks like time starts to run a bit slower or a bit faster depending on the particular case. So this situation when you start ntp and then check the time difference and see that it's less than 1s but you still see the alert is less impossible than you think I believe. But I agree it's not a big deal. I would not change this thing if it were already merged, but since we haven't merged it yet I suggest we modify it.
+
+Alert disabling has nothing to do with the discussed case IMO.
+
+Also I believe we should be able to say very clearly what needs to be done for alert to be gone (assuming the user doesn't want to disable the alert, they want to fix the problem) - in my case it will be "make the time difference < 1s". In your case that will be "make the time difference < 0.8s". It's also ok, but it just looks weird (why 0.8s?).
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Sam Cramer
+Date: 2020-07-31 05:30:48.000000000
+MISMATCHED INLINE COMMENT
+Line:251, src/ns_tick_agent.erl -> Done
+----------------------------------------------------------------------------------------------------------------------

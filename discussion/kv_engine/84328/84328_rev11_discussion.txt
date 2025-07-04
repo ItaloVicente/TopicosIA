@@ -1,0 +1,177 @@
+======================================================================================================================
+DESCRIPTION:
+
+[MB-26220]: Add support for request tracing
+
+Adds support for tracing/timing different block of code in a
+specific request. Currently does not use phospor.
+
+Change-Id: I3ce23b91e62648b5ab223a3f1f47bb575eb5a81f
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Premkumar
+Date: 2017-11-16 23:19:12.000000000
+Message: 
+Uploaded patch set 11.
+----------------------------------------------------------------------------------------------------------------------
+Author: Premkumar
+Date: 2017-11-16 23:23:25.000000000
+Message: 
+Patch Set 11:
+
+@Trond, regarding using Cookie as the base class, the definition is being built in memcached_daemon. It does not seem right to link this library to ep_engine & tests. The only way to avoid this is implement a server api for tracing and pass in a void* from everywhere. Let me know if this is want you want me to do .. 
+
+I've now moved the tracing code to a separate library..
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2017-11-16 23:45:12.000000000
+Message: 
+Patch Set 11: Verified-1
+
+Build Failed 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/4366/ : FAILURE
+
+Valgrind detected one or more issues ( http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/4366/ )
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/2699/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/4205/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/4154/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/3817/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-addresssanitizer-master/4007/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2017-11-17 10:49:27.000000000
+Message: 
+Patch Set 11: Code-Review-1
+
+(19 comments)
+
+Generally looks good - few comments on some issues.
+
+Note this patch is pretty large - both in terms of lines and scope). I would suggest breaking it into a number of smaller patches - for example one patch to clean up the visibility.h header (see comments below), another to add the new tracer library, and then one to make use of the tracing across the codebase?
+Line:221, daemon/CMakeLists.txt -> We don't use tabs in any of our code - it should all be spaces (see https://github.com/couchbase/memcached/blob/master/docs/CodingStandards.rst#use-spaces-instead-of-tabs)
+
+Line:31, daemon/connection_mcbp.cc -> I don't see why you need this header  file here, given there are no other changes to this file. What is using it?
+
+Line:32, engines/ep/CMakeLists.txt -> Tabs (in a few places below).
+
+Line:224, engines/ep/src/ep_engine.cc -> Style: You are implicitly using the `cookie` variable here. This feels quite opaque, and brittle - it's not clear to the user that they need a variable named `cookie` in scope, and it could lead to odd behaviour if you didn't have a cookie variable locally but there was somehow one in global scope.
+
+I think it would be clearer if you made cookie an explicit parameter of the macro.
+
+Line:947, engines/ep/src/kv_bucket.cc -> Whitespace-only change - please revert (to minimise the scope of this patch).
+
+Line:965, engines/ep/src/kv_bucket.cc -> Same here - whitespace-only change.
+
+Line:1191, engines/ep/src/kv_bucket.cc -> "store.read" feels a little generic / vague to me as a name - it wasn't immediately obvious what it did.
+
+How about something like "bgfetch.get_value" ?
+
+Line:1255, engines/ep/src/kv_bucket.cc -> I might be wrong, but I suspect there's not a lot of value in reporting this trace point - this is an inner function called by pretty much all the get-related API functions, and hence probably doesn't tell the user very much.
+
+Line:58, include/mcbp/protocol/feature.h -> Please document this new feature enum value.
+
+Line:9, include/memcached/visibility.h -> Interesting find!
+
+So note this is a pretty old file, it existed before we used a version of CMake which supported generating export headers for us (see https://cmake.org/cmake/help/v3.4/module/GenerateExportHeader.html).
+
+We /do/ use that module (and associated macro) for newer headers (e.g. https://github.com/couchbase/kv_engine/blob/master/cbcrypto/CMakeLists.txt#L17) - and I believe that CMake already handles this - for example from my Windows build of include/cbcrypto/visibility.h:
+
+ #  ifndef CBCRYPTO_PUBLIC_API
+ #    ifdef cbcrypto_EXPORTS
+         /* We are building this library */
+ #      define CBCRYPTO_PUBLIC_API __declspec(dllexport)
+ #    else
+         /* We are using this library */
+ #      define CBCRYPTO_PUBLIC_API __declspec(dllimport)
+ #    endif
+ #  endif
+
+Therefore I suggest removing this manually created visisibilty file and moving to generate_export_header(). Probably worth doing that as a separate patch.
+
+Line:21, programs/engine_testapp/mock_server.cc -> Note: "mock_server.h" should be the first header to ensure that the interface of this file is pulled in before anything else. See https://github.com/couchbase/memcached/blob/master/docs/CodingStandards.rst#include-style
+
+Line:82, programs/engine_testapp/mock_server.cc -> Please remove this before commit - or if you want to keep it around, output using the LOG() macros so it only shows up when debug level (or similar) is enabled .
+
+Line:8, programs/engine_testapp/mock_server.h -> Again, not clear why this header is needed here.
+
+Line:17, tracing/trace_helpers.h -> Please add a description of what this header is for - see https://github.com/couchbase/memcached/blob/master/docs/CodingStandards.rst#file-headers
+
+Line:28, tracing/trace_helpers.h -> Prefer (inline) functions to macros where possible - for example here there's no reason this needs to be a macro.
+
+Line:39, tracing/tracer.cc -> uncomment or delete.
+
+Line:94, tracing/tracer.cc -> leftover debug?
+
+Line:54, tracing/tracer.h -> I'm a little concerned about the cost of creating / destroying std::strings multiple times for every operation (we try to minimise memory allocations as much as possible, particular on the GET path). 
+
+Does this need to be dynamic - it looks like it's always a static string. Any reason we can't use a (non-owning) char* to string literal?
+
+Line:71, tracing/tracer.h -> Please document these functions.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2017-11-17 14:22:43.000000000
+Message: 
+Patch Set 11:
+
+(2 comments)
+Line:21, daemon/base_cookie.h -> this doesn't look like an interface.. there is no virtual functions, and everything is defined...
+
+Line:24, daemon/base_cookie.h -> I don't understand the purpose of this class, and why it can't be fields in the standard cookie class.... 
+
+Why does the tracing flags deserve to be in the base class, but not the actual command context?
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Premkumar
+Date: 2017-11-17 19:39:42.000000000
+Message: 
+Patch Set 11:
+
+(9 comments)
+Line:221, daemon/CMakeLists.txt -> Done
+
+Line:21, daemon/base_cookie.h -> Done
+
+Line:24, daemon/base_cookie.h -> I agree on moving this to the Cookie class, but regarding using Cookie as the base class, the definition is being built in memcached_daemon. It does not seem right to link this library to ep_engine & tests. The only way to avoid this is implement a server api for tracing and pass in a void* from everywhere. Let me know if this is want you want me to do.
+
+Line:31, daemon/connection_mcbp.cc -> Done
+
+Line:224, engines/ep/src/ep_engine.cc -> I've added *_CK macros that will take cookie as argument.And this is just a wrapper for that. Across the code, we have consistently used variable "cookie" only for one purpose. I'm quite sure if in future if anyone declares cookie as a global variable, it won't clear the code review :)
+
+Line:58, include/mcbp/protocol/feature.h -> Done
+
+Line:21, programs/engine_testapp/mock_server.cc -> Done
+
+Line:82, programs/engine_testapp/mock_server.cc -> I'll remove all //DEBUGCODE before commit.
+
+Line:54, tracing/tracer.h -> All these are very small strings & we are doing only 1 or 2 spans for now. Should not be an issue. If Pavels feels that this affects perf, then we should change it to enum based spans with enum->string mappings. This is just the first cut of the project.
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2017-11-20 09:56:37.000000000
+Message: 
+Patch Set 11:
+
+(2 comments)
+Line:224, engines/ep/src/ep_engine.cc -> Sure, it's more that macros which take "hidden" arguments are less readable than ones which don't :) Unless you're familiar with the macro definition, you have no idea how it might work / what resources it uses. In short it breaks "the principle of least surprise" :)
+
+I'm fine to keep the name as-is; suggest you just change it to:
+
+ TRACE_SCOPE(cookie, "ep.itemdelete");
+
+or similar.
+
+Line:54, tracing/tracer.h -> If they don't need to be dynamic I'd suggest changing to a non-dynamic string now. 
+Note that while newer compilers /do/ support the small-string optimisation (so if the string is less than ~20 chars it's stored inline within the std::string object); many of the older compilers (e.g. CentOS6; possibly Ubuntu 14.04) do not support it and hence even a 1-character sting will require a heap allocation.
+
+As you saw in your changes to memory tracking; the cost of allocating / freeing memory on the heap is non-trivial!
+
+----------------------------------------------------------------------------------------------------------------------

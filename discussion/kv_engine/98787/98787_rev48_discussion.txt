@@ -1,0 +1,141 @@
+======================================================================================================================
+DESCRIPTION:
+
+RBAC: Add initial support for external authentication
+
+This is a proof of concept implementation of supporting
+external authentication from memcached.
+
+There is no timeout of authentication requests. Once sent
+to the external auth server we'll wait "forever" until the
+reply is received, or the connection to the authentication
+provider is disconnected. If the latter is true ETMPFAIL is
+returned to the client (the authentication request is _not_
+automatically redistributed to another authentication
+provider).
+
+The design in the prototype is pretty complex to avoid possible
+deadlocks between the various threads, but it works the following
+way.
+
+A connection receives SASL_AUTH, and creates a task to be scheduled
+on the executor threads and sets the connection in a suspended state
+to allow other connections to use the frontend worker thread.
+
+Some time later the executor thread picks up this task and schedule
+it to run on one of the executor thrads. It starts performing the
+SASL Authentication, and if it fails with "no user" AND the
+mechanism is PLAIN it adds itself to the the external auth manager
+and suspend itself.
+
+Some time later the auth manager picks up the list of sasl tasks
+and looks up the the active providers. If none exists it notifies
+all of the tasks with a failure indicating that there isn't an
+external provider available. If one exits, the worker thread
+it belongs to is locked, before we incject an authentication
+request for all of the pending authentication tasks.
+
+Some time later the connection where we just injected all of these
+tasks is scheduled to run, and it'll send all of these requests
+to the external provider, and pick up the responses and go
+the same route back.
+
+Change-Id: I94545e118cb020bfd0496ea6e99599018a2aee43
+
+======================================================================================================================
+COMMENTS
+======================================================================================================================
+Author: Trond Norbye
+Date: 2018-09-18 10:36:13.000000000
+Message: 
+Uploaded patch set 48: Patch Set 47 was rebased.
+----------------------------------------------------------------------------------------------------------------------
+Author: Build Bot
+Date: 2018-09-18 12:10:54.000000000
+Message: 
+Patch Set 48: Verified+1
+
+Build Successful 
+
+http://cv.jenkins.couchbase.com/job/kv_engine-threadsanitizer-master/3732/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_analyzer-master/10617/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-ASan-UBSan-master/1553/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-windows-master/12124/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-linux-master/11842/ : SUCCESS
+
+http://cv.jenkins.couchbase.com/job/kv_engine-clang_format/10895/ : SUCCESS
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-09-19 10:33:27.000000000
+Message: 
+Patch Set 48: Code-Review-1
+
+(7 comments)
+Line:37, daemon/external_auth_manager.cc -> Given this is unconditionally dereferenced (lines 40 & 41) and hence assumed to not be null; can this be a reference?
+
+Line:79, daemon/external_auth_manager.cc -> As above.
+
+Line:89, daemon/external_auth_manager.cc -> Style: slightly simpler to use std::find().
+
+Line:100, daemon/external_auth_manager.cc -> Any reason not to use a reference here? it's not like we change the value of request to point to a different object.
+
+Line:43, daemon/external_auth_manager.h -> Might be worth putting "thread" in the name of this to make it explicit it's its own thread (and not say a task sharing a thread).
+
+Line:45, daemon/external_auth_manager.h -> ext_auth or similar?
+
+Line:122, daemon/start_sasl_auth_task.cc -> Simpler with a switch statement (remove repetition of `response.first ==`)
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Jim Walker
+Date: 2018-09-19 10:43:47.000000000
+Message: 
+Patch Set 48: Code-Review-1
+
+(3 comments)
+Line:106, daemon/external_auth_manager.cc -> I can't see this being used?
+
+Line:169, daemon/external_auth_manager.h -> nit: incomingResponse
+
+Line:30, tests/testapp/auth_provider.h -> Good practice to add virtual destructor
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Trond Norbye
+Date: 2018-09-19 11:05:06.000000000
+Message: 
+Patch Set 48:
+
+(10 comments)
+Line:37, daemon/external_auth_manager.cc -> Done
+
+Line:79, daemon/external_auth_manager.cc -> Done
+
+Line:89, daemon/external_auth_manager.cc -> Done
+
+Line:100, daemon/external_auth_manager.cc -> Done
+
+Line:106, daemon/external_auth_manager.cc -> Done
+
+Line:43, daemon/external_auth_manager.h -> Done
+
+Line:45, daemon/external_auth_manager.h -> Done
+
+Line:169, daemon/external_auth_manager.h -> Done
+
+Line:122, daemon/start_sasl_auth_task.cc -> ehh.. if I switch on the status code I would get an entry for all of the valid return codes we've defined in the binary protocol... I only want to map a _few_ of them into a corresponding SASL error code..
+
+Line:30, tests/testapp/auth_provider.h -> Done
+
+----------------------------------------------------------------------------------------------------------------------
+Author: Dave Rigby
+Date: 2018-09-19 11:49:08.000000000
+Message: 
+Patch Set 48:
+
+(1 comment)
+Line:122, daemon/start_sasl_auth_task.cc -> Sure, just add a default case.
+
+----------------------------------------------------------------------------------------------------------------------
