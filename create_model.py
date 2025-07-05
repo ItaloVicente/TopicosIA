@@ -22,11 +22,8 @@ for training in L:
     df = pd.read_csv(training)
     df["classe"] = df["classe"].astype(int)
 
-    # Remove classe "Outros" (13)
-    df = df[df["classe"] != 13]
-
-    # Filtra apenas classes relevantes para duplicação de código
-    classes_relevantes = [1, 4, 8, 10]
+    # Filtra apenas classes relevantes para duplicação de código (na realidade, a classe 13 nao eh, estou apenas colocando para termos a classe "Outros")
+    classes_relevantes = [13, 4, 8, 10]
     df = df[df["classe"].isin(classes_relevantes)]
 
     # Imprime a quantidade de exemplos por classe relevante
@@ -84,7 +81,7 @@ for training in L:
     pca = PCA(n_components=0.99)
     X_train_pca = pca.fit_transform(X_train_resampled)
     X_test_pca = pca.transform(X_test)
-    print(f"\n🔍 Reduzido de {X.shape[1]} para {X_train_pca.shape[1]} dimensões com PCA.")
+    print(f"\n Reduzido de {X.shape[1]} para {X_train_pca.shape[1]} dimensões com PCA.")
 
     # Atualiza dados para treino/teste com PCA
     X_train, X_test, y_train, y_test = X_train_pca, X_test_pca, y_train_resampled, y_test
@@ -105,7 +102,7 @@ for training in L:
         except:
             auc = "N/A"
 
-        print(f"\n🔬 Modelo: {name}")
+        print(f"\n Modelo: {name}")
         print(f"Acurácia : {acc:.4f}")
         print(f"F1-score : {f1:.4f}")
         print(f"Precisão : {prec:.4f}")
@@ -147,4 +144,4 @@ for training in L:
         model.fit(X_train, y_train)
         evaluate_model(f"XGBoost(max_depth={depth})", model)
 
-# A partir disso, vimos que o melhor modelo que se sobresaiu foi o MLP(layers=(100, 50)) com acurácia próxima de 77%, AUC = 0.88 e F1-score = 0.75
+# A partir disso, vimos que o melhor modelo que se sobresaiu foi o SVM(linear, C = 1) com acurácia próxima de 73%, AUC = 0.86 e F1-score = 0.73

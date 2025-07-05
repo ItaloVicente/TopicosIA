@@ -5,16 +5,16 @@ from sklearn.model_selection import train_test_split
 from imblearn.over_sampling import SMOTE
 from sklearn.decomposition import PCA
 from sklearn.neural_network import MLPClassifier
+from sklearn.svm import SVC
 
 # Treinamento do modelo MLP
 
 training_file = "training_embeddings_tfidf.csv"
-classes_relevantes = [1, 4, 8, 10]
+classes_relevantes = [13, 4, 8, 10]
 class_to_idx = {cls: idx for idx, cls in enumerate(classes_relevantes)}
 idx_to_class = {idx: cls for cls, idx in class_to_idx.items()}
 
 df_train = pd.read_csv(training_file)
-df_train = df_train[df_train["classe"] != 13]
 df_train = df_train[df_train["classe"].isin(classes_relevantes)]
 df_train["classe_mapped"] = df_train["classe"].map(class_to_idx)
 df_train["embedding"] = df_train["embedding"].apply(json.loads)
@@ -46,11 +46,11 @@ X_train_pca = pca.fit_transform(X_train_resampled)
 X_test_pca = pca.transform(X_test)
 
 # MLP
-mlp = MLPClassifier(hidden_layer_sizes=(100, 50), max_iter=5000, random_state=42)
-mlp.fit(X_train_pca, y_train_resampled)
+model = SVC(kernel='linear', C=1, probability=True)
+model.fit(X_train_pca, y_train_resampled)
 
 # Avaliação rápida (Apenas para checar se o modelo treinado tem as mesmas acaracterísticas do achado anteriormente)
-acc = mlp.score(X_test_pca, y_test)
+acc = model.score(X_test_pca, y_test)
 print(f"Acurácia no teste: {acc:.4f}")
 
 # Classificação em batches (mais leve) para meu computador conseguir processar
@@ -73,7 +73,7 @@ for start in range(0, len(to_classify_idx), batch_size):
     embeddings = df_classify.loc[batch_idx, "embedding"].apply(json.loads).tolist()
     X_batch = np.array(embeddings)
     X_batch_pca = pca.transform(X_batch)
-    y_pred = mlp.predict(X_batch_pca)
+    y_pred = model.predict(X_batch_pca)
     y_pred_orig = [idx_to_class[p] for p in y_pred]
 
     df_classify.loc[batch_idx, "classe"] = y_pred_orig

@@ -6,7 +6,7 @@ csv_path = "embeddings_classification.csv"
 
 # Mapeamento das classes para nomes legíveis (ajuste conforme necessário)
 classe_labels = {
-    1: "Readability/Others",
+    13: "Others",
     4: "Error",
     8: "Code Organization/ Refactoring",
     10: "High Level Method Semantics & Design"
@@ -32,12 +32,12 @@ print("\n RELATÓRIO DE CLASSIFICAÇÕES POR PROJETO\n")
 
 for projeto in sorted(project_counts):
     total = sum(project_counts[projeto].values())
-    print(f"🔹 Projeto: {projeto}")
+    print(f" Projeto: {projeto}")
     for classe in sorted(project_counts[projeto]):
         nome = classe_labels.get(classe, f"Classe {classe}")
         qtd = project_counts[projeto][classe]
         print(f"   - {nome:15}: {qtd}")
-    print(f"   ➕ Total de mensagens classificadas: {total}")
+    print(f"   Total de mensagens classificadas: {total}")
     print("-" * 40)
 
 # Visão geral
