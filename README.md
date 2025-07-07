@@ -99,3 +99,6 @@ O script `create_model.py` avalia diversos algoritmos. Para este projeto, o melh
 ## Saída Final
 
 Ao final da execução de todos os scripts, o `count_classifications.py` exibirá no console um relatório detalhado mostrando a contagem de cada categoria de comentário para cada projeto analisado, permitindo uma análise aprofundada dos tipos de discussões que ocorrem em revisões de código com clones.
+`embeddings_classification.zip` possui as discussões classificadas. Você pode fazer o processo do zero ou descompactar esse arquivo e executar o `count_classifications.py`.
+
+Obs: Talvez algumas a intalação de algumas libs extras sejam necessárias.
