@@ -41,12 +41,15 @@ def scan_type_clones_tfidf(clones_dir="type_clones/"):
     projects = ["platform.ui", "egit", "jgit", "couchbase-jvm-core", "couchbase-java-client", "spymemcached"]
     processed_pairs = set()
 
+    # Para cada projeto, salvaremos total de arquivos e quantos têm discussão relevante
+    project_stats = {p: {"total": 0, "relevantes": 0} for p in projects}
+
     data_for_vectorization = []
     data_raw = []  # tuplas (project, review, revision, mensagem_original, mensagem_limpa)
 
     for project in projects:
         csv_path = os.path.join(clones_dir, f"{project}.csv")
-        print(f"\nProcessando projeto: {project}", flush=True)
+        print(f"\n🔍 Processando projeto: {project}", flush=True)
         with open(csv_path, newline='', encoding='utf-8', errors='ignore') as csvfile:
             reader = csv.reader(csvfile)
             for row in tqdm(reader):
@@ -61,6 +64,9 @@ def scan_type_clones_tfidf(clones_dir="type_clones/"):
                 discussion_path = os.path.join(f"discussion/{project}/{review}/{review}_rev{revision}_discussion.txt")
                 if not os.path.exists(discussion_path):
                     continue
+
+                project_stats[project]["total"] += 1
+                added_any = False
 
                 with open(discussion_path, 'r', encoding='utf-8', errors='ignore') as f:
                     content = f.read()
@@ -80,6 +86,10 @@ def scan_type_clones_tfidf(clones_dir="type_clones/"):
                             if clean:
                                 data_for_vectorization.append(clean)
                                 data_raw.append((project, review, revision, message_content, clean))
+                                added_any = True
+
+                if added_any:
+                    project_stats[project]["relevantes"] += 1
 
     # Carrega pipeline TF-IDF já treinado
     print("\nCarregando pipeline TF-IDF salvo...")
@@ -99,6 +109,18 @@ def scan_type_clones_tfidf(clones_dir="type_clones/"):
             embedding = tfidf_matrix[i].toarray().flatten().tolist()
             write_embedding_row(writer, project, review, revision, mensagem_original, mensagem_limpa, embedding, -1)
 
+    # RESUMO FINAL
+    print("\nRESUMO DE ARQUIVOS ANALISADOS POR PROJETO:")
+    total_geral = 0
+    relevantes_geral = 0
+    for project in projects:
+        total = project_stats[project]["total"]
+        relevantes = project_stats[project]["relevantes"]
+        total_geral += total
+        relevantes_geral += relevantes
+        print(f"   - {project:<25}: {total} analisados | {relevantes} com discussão relevante")
+
+    print(f"\nTOTAL GERAL: {total_geral} analisados | {relevantes_geral} com discussão relevante")
     print(f"\nVetores TF-IDF salvos em: {CSV_PATH}")
 
 # Executa a função principal
